@@ -137,7 +137,7 @@ PORTS                          \ List all port bindings
   BIOS index control, demand-fill/update-existing publication, and validated
   atomic rollback through `DICT-ROLLBACK`
 - **Non-blocking input**: KEY? (non-blocking key check for interactive TUI)
-- **AES-256-GCM engine**: AES-KEY!, AES-IV!, AES-AAD-LEN!, AES-DATA-LEN!, AES-CMD!, AES-STATUS@, AES-DIN!, AES-DOUT@, AES-TAG@, AES-TAG!
+- **AES-256/128 engine, GCM and CBC**: AES-KEY!, AES-IV!, AES-AAD-LEN!, AES-DATA-LEN!, AES-CMD!, AES-STATUS@, AES-KEY-MODE!, AES-DIN!, AES-DOUT@, AES-TAG@, AES-TAG!, AES-MODE!, AES-CBC-IV!
 - **Checked SHA-3 / SHAKE / raw Keccak**: SHA3-BEGIN, SHA3-UPDATE,
   SHA3-FINAL, SHAKE-FINAL, SHAKE-READ, SHA3-CLEAR, KECCAK-F1600, plus the
   diagnostic SHA3-STATUS@ and SHA3-MODE@ reads. The removed transaction and
@@ -635,8 +635,9 @@ The BIOS provides:
 * **FSLOAD**: Load and EVALUATE files from MP64FS disk
 * **Multicore**: COREID, NCORES, IPI-SEND, IPI-STATUS, IPI-ACK, MBOX!, MBOX@,
   SPIN@, SPIN!, WAKE-CORE, CORE-STATUS
-* **AES-256-GCM**: AES-KEY!, AES-IV!, AES-AAD-LEN!, AES-DATA-LEN!, AES-CMD!,
-  AES-STATUS@, AES-DIN!, AES-DOUT@, AES-TAG@, AES-TAG!
+* **AES-256/128, GCM and CBC**: AES-KEY!, AES-IV!, AES-AAD-LEN!,
+  AES-DATA-LEN!, AES-CMD!, AES-STATUS@, AES-KEY-MODE!, AES-DIN!, AES-DOUT@,
+  AES-TAG@, AES-TAG!, AES-MODE!, AES-CBC-IV!
 * **Checked SHA-3 / SHAKE / raw Keccak**: SHA3-BEGIN, SHA3-UPDATE,
   SHA3-FINAL, SHAKE-FINAL, SHAKE-READ, SHA3-CLEAR, KECCAK-F1600, with
   diagnostic SHA3-STATUS@ and SHA3-MODE@ reads.

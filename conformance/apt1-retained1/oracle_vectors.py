@@ -83,7 +83,7 @@ def _soft_reset_replay_path() -> list[dict[str, Any]]:
         ("c", "OWNER_OPEN", 104, 84, 1),
         ("t", "RET_RESULT", 88, 21, 1),
         ("t", "CREDIT", 48, 22, 1),
-        ("c", "RESOURCE_BEGIN", 120, 85, 1),
+        ("c", "RESOURCE_BEGIN", 88, 85, 1),
         ("t", "RET_RESULT", 88, 23, 1),
         ("t", "CREDIT", 48, 24, 1),
         ("c", "RESOURCE_CHUNK", 76, 86, 1),
@@ -171,7 +171,7 @@ FRAME_PATHS = {
     "reset_wrong_tuple_upload_abort": _path(
         "ctttcttctc",
         "RESOURCE_BEGIN,RET_RESULT,CREDIT,SOFT_RESET_REQUEST,RESOURCE_CHUNK,RET_RESULT,CREDIT,RESOURCE_ABORT,RET_RESULT,SOFT_RESET_ACK",
-        [120,88,48,56,76,88,48,72,88,48],
+        [88,88,48,56,76,88,48,72,88,48],
         [190,190,191,192,191,193,194,192,195,193],
         [0,0,0,0,0,0,0,0,0,1],
     ),
@@ -195,16 +195,19 @@ FRAME_PATHS = {
     "resource_lifecycle": _path(
         "cttcttcttctctcccttctt",
         "RESOURCE_DROP,RET_RESULT,CREDIT,RESOURCE_BEGIN,RET_RESULT,CREDIT,RESOURCE_COMMIT,RET_RESULT,CREDIT,RESOURCE_ABORT,RET_RESULT,RESOURCE_ABORT,RET_RESULT,PRESENT_BEGIN,OBJECT_DROP,PRESENT_COMMIT,TX_RESULT,CREDIT,RESOURCE_DROP,RET_RESULT,CREDIT",
-        [64,88,48,120,88,48,64,88,48,72,88,72,88,104,64,56,60,48,64,88,48],
+        [64,88,48,88,88,48,64,88,48,72,88,72,88,104,64,56,60,48,64,88,48],
         [90,90,91,91,92,93,92,94,95,93,96,94,97,95,96,97,98,99,98,100,101], [0] * 21,
     ),
     "resource_chunk_overrun": _path(
         "cttctt", "RESOURCE_BEGIN,RET_RESULT,CREDIT,RESOURCE_CHUNK,RET_RESULT,CREDIT",
-        [120,88,48,77,88,48], [70,70,71,71,72,73], [0] * 6,
+        [88,88,48,77,88,48], [70,70,71,71,72,73], [0] * 6,
     ),
-    "resource_digest_failure": _path(
-        "cttctctt", "RESOURCE_BEGIN,RET_RESULT,CREDIT,RESOURCE_CHUNK,CREDIT,RESOURCE_COMMIT,RET_RESULT,CREDIT",
-        [120,88,48,76,48,64,88,48], [80,80,81,81,82,82,83,84], [0] * 8,
+    "resource_file_decoding": _path(
+        "cttctctt" * 3,
+        ",".join(["RESOURCE_BEGIN,RET_RESULT,CREDIT,RESOURCE_CHUNK,CREDIT,RESOURCE_COMMIT,RET_RESULT,CREDIT"] * 3),
+        [88,88,48,85,48,64,88,48, 88,88,48,104,48,64,88,48, 88,88,48,104,48,64,88,48],
+        [80,80,81,81,82,82,83,84, 83,85,86,84,87,85,88,89, 86,90,91,87,92,88,93,94],
+        [0] * 24,
     ),
 }
 
@@ -292,7 +295,7 @@ def _refresh_oracle_ledgers(state: dict[str, Any]) -> None:
             },
         )
         usage["upload_count"] = 1
-        usage["upload_bytes"] = upload["declared_bytes"]
+        usage["upload_bytes"] = upload["width"] * upload["height"] * 4
         usage["upload_accepted_bytes"] = upload["accepted_bytes"]
     state["owner_wide_resource_usage"] = [resources[key] for key in sorted(resources)]
 
@@ -458,7 +461,7 @@ C2T_GRANT_BEFORE = {
     "aggregate_quota_exhaustion": 101_000,
     "resource_lifecycle": 125_000,
     "resource_chunk_overrun": 110_000,
-    "resource_digest_failure": 120_000,
+    "resource_file_decoding": 120_000,
 }
 
 
@@ -596,12 +599,16 @@ def initial_state(name: str) -> dict[str, Any]:
         resources[resource_key(OWNER_ID,OWNER_GENERATION,1)] = {
             "owner_id":OWNER_ID,"generation":OWNER_GENERATION,"resource_id":1,"format":1,
             "width":1,"height":1,"flags":0,"byte_length":4,
-            "sha3_256":"af2a3c69c685db3180e1b36ed08a8569f4438e3c72ac283411376f296fca9f30",
         }
         retained_visible = True
-    elif name in {"resource_chunk_overrun", "resource_digest_failure"}:
+    elif name == "resource_chunk_overrun":
         revision = highwater = 3
         owners[owner_key(OWNER_ID,OWNER_GENERATION)] = owner_record(regions=0,resources=1,objects=0,series=0,resource_bytes=4,utf8_bytes=0,sample_slots=0)
+        retained_visible = True
+    elif name == "resource_file_decoding":
+        # Eight bytes hold the 2x1 picture decoded but not its 32-byte file.
+        revision = highwater = 3
+        owners[owner_key(OWNER_ID,OWNER_GENERATION)] = owner_record(regions=0,resources=1,objects=0,series=0,resource_bytes=8,utf8_bytes=0,sample_slots=0)
         retained_visible = True
 
     return {
@@ -678,7 +685,11 @@ RESULTS = {
     "aggregate_quota_exhaustion": {1:("RET",8194,3,OWNER_ID+1,1,0,4,0)},
     "resource_lifecycle": {1:("RET",4099,5,OWNER_ID,7,1,2,0),4:("RET",4096,0,OWNER_ID,7,2,2,0),7:("RET",4098,1,OWNER_ID,7,3,2,0),10:("RET",12,1,OWNER_ID,7,2,2,0),12:("RET",12,7,OWNER_ID,7,2,2,0),16:("TX",3,0,3),19:("RET",4099,0,OWNER_ID,7,1,3,0)},
     "resource_chunk_overrun": {1:("RET",4096,0,OWNER_ID,7,1,3,0),4:("RET",4097,1,OWNER_ID,7,1,3,0)},
-    "resource_digest_failure": {1:("RET",4096,0,OWNER_ID,7,1,3,0),6:("RET",4098,6,OWNER_ID,7,1,3,0)},
+    "resource_file_decoding": {
+        1:("RET",4096,0,OWNER_ID,7,1,3,0),6:("RET",4098,6,OWNER_ID,7,1,3,0),
+        9:("RET",4096,0,OWNER_ID,7,2,3,0),14:("RET",4098,6,OWNER_ID,7,2,3,0),
+        17:("RET",4096,0,OWNER_ID,7,3,3,0),22:("RET",4098,0,OWNER_ID,7,3,3,32),
+    },
 }
 
 
@@ -715,11 +726,13 @@ def _open_owner(state: dict[str, Any], record: dict[str, Any], accepted: bool) -
         state["owners"][owner_key(record["owner_id"],record["generation"])] = copy.deepcopy(record)
 
 
-def _open_upload(state: dict[str, Any], *, resource_id: int, declared_bytes: int, digest: str) -> None:
+def _open_upload(
+    state: dict[str, Any], *, resource_id: int, width: int, declared_bytes: int, format: int = 1,
+) -> None:
     state["upload"] = {
         "owner_id":OWNER_ID,"generation":OWNER_GENERATION,"resource_id":resource_id,
-        "format":1,"width":1 if declared_bytes == 4 else 2,"height":1,"flags":0,
-        "declared_bytes":declared_bytes,"sha3_256":digest,"accepted_bytes":0,
+        "format":format,"width":width,"height":1,"flags":0,
+        "declared_bytes":declared_bytes,"accepted_bytes":0,
     }
     state["open_lifecycle_request"] = {
         "request":"RESOURCE_BEGIN","owner_id":OWNER_ID,"generation":OWNER_GENERATION,
@@ -877,7 +890,7 @@ def _apply_expected_effect(name: str, index: int, state: dict[str, Any]) -> None
 
     elif name == "reset_wrong_tuple_upload_abort":
         if index == 0:
-            _open_upload(state,resource_id=2,declared_bytes=4,digest="230f97596c358e8038cbff9e2c1f9d090e9a41597d56d1a3dad717d2189f30a7")
+            _open_upload(state,resource_id=2,width=1,declared_bytes=4)
         elif index == 3:
             state["pending_reset"] = {"requested_epoch":1,"last_revision":3}
         elif index == 4:
@@ -909,10 +922,7 @@ def _apply_expected_effect(name: str, index: int, state: dict[str, Any]) -> None
                 True,
             )
         elif index == 39:
-            _open_upload(
-                state,resource_id=1,declared_bytes=8,
-                digest="2c32110f19fe66aebb4d28fee9392c8a55808d19a2daf5cc7164b4c1eee82f40",
-            )
+            _open_upload(state,resource_id=1,width=2,declared_bytes=8)
         elif index == 42:
             state["upload"]["accepted_bytes"] = 4
             state["open_lifecycle_request"] = {
@@ -926,11 +936,9 @@ def _apply_expected_effect(name: str, index: int, state: dict[str, Any]) -> None
                 "resource_id":1,"phase":"awaiting_credit",
             }
         elif index == 46:
-            upload = state["upload"]
             state["resources"][resource_key(OWNER_ID,7,1)] = {
                 "owner_id":OWNER_ID,"generation":7,"resource_id":1,"format":1,
                 "width":2,"height":1,"flags":0,"byte_length":8,
-                "sha3_256":upload["sha3_256"],
             }
             state["upload"] = None
             state["open_lifecycle_request"] = {
@@ -1029,10 +1037,7 @@ def _apply_expected_effect(name: str, index: int, state: dict[str, Any]) -> None
                 "resource_id":1,"phase":"awaiting_result",
             }
         elif index == 3:
-            _open_upload(
-                state,resource_id=2,declared_bytes=4,
-                digest="03aa4563a820892273a5575ac15e45d28240f2f68c1a4c2f78ca8d9fc76c938b",
-            )
+            _open_upload(state,resource_id=2,width=1,declared_bytes=4)
         elif index == 6:
             state["open_lifecycle_request"] = {
                 "request":"RESOURCE_COMMIT","owner_id":OWNER_ID,"generation":7,
@@ -1061,10 +1066,7 @@ def _apply_expected_effect(name: str, index: int, state: dict[str, Any]) -> None
 
     elif name == "resource_chunk_overrun":
         if index == 0:
-            _open_upload(
-                state,resource_id=1,declared_bytes=4,
-                digest="af2a3c69c685db3180e1b36ed08a8569f4438e3c72ac283411376f296fca9f30",
-            )
+            _open_upload(state,resource_id=1,width=1,declared_bytes=4)
         elif index == 3:
             state["open_lifecycle_request"] = {
                 "request":"RESOURCE_CHUNK","owner_id":OWNER_ID,"generation":7,
@@ -1072,21 +1074,33 @@ def _apply_expected_effect(name: str, index: int, state: dict[str, Any]) -> None
             }
             state["upload"] = None
 
-    elif name == "resource_digest_failure":
-        if index == 0:
-            _open_upload(state,resource_id=1,declared_bytes=4,digest="ae2a3c69c685db3180e1b36ed08a8569f4438e3c72ac283411376f296fca9f30")
-        elif index == 3:
-            state["upload"]["accepted_bytes"] = 4
+    elif name == "resource_file_decoding":
+        # Three QOI uploads of eight frames each: bytes that do not decode,
+        # a 2x1 file declared 1x1, then the same file at its own size.
+        upload, step = divmod(index, 8)
+        resource_id = upload + 1
+        if step == 0:
+            _open_upload(
+                state,resource_id=resource_id,width=2 if upload == 2 else 1,
+                declared_bytes=13 if upload == 0 else 32,format=2,
+            )
+        elif step == 3:
+            state["upload"]["accepted_bytes"] = state["upload"]["declared_bytes"]
             state["open_lifecycle_request"] = {
                 "request":"RESOURCE_CHUNK","owner_id":OWNER_ID,"generation":7,
-                "resource_id":1,"phase":"awaiting_credit",
+                "resource_id":resource_id,"phase":"awaiting_credit",
             }
-        elif index == 5:
+        elif step == 5:
             state["open_lifecycle_request"] = {
                 "request":"RESOURCE_COMMIT","owner_id":OWNER_ID,"generation":7,
-                "resource_id":1,"phase":"awaiting_result",
+                "resource_id":resource_id,"phase":"awaiting_result",
             }
             state["upload"] = None
+            if upload == 2:
+                state["resources"][resource_key(OWNER_ID,7,3)] = {
+                    "owner_id":OWNER_ID,"generation":7,"resource_id":3,"format":1,
+                    "width":2,"height":1,"flags":0,"byte_length":8,
+                }
 
 
 def build_oracle(name: str) -> tuple[dict[str, Any], dict[str, Any]]:

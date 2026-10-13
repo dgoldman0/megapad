@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import re
 import threading
 import time
@@ -33,6 +32,7 @@ from rich_terminal.retained_model import (
 )
 from rich_terminal.retained_resources import RGBAResource, ResourceDeclaration
 from rich_terminal.retained_scene import (
+    ImageClip,
     ImageFit,
     ObjectBounds,
     RGBA,
@@ -125,7 +125,7 @@ def _retained_policy() -> RetainedPolicy:
         max_resource_chunk_bytes=0,
         max_retained_transaction_bytes=512,
         total_resource_bytes=0,
-        image_format=0,
+        image_formats=0,
         max_image_width=0,
         max_image_height=0,
         max_path_points=0,
@@ -154,7 +154,7 @@ def _image_policy(*, max_resource_chunk_bytes: int = 3) -> RetainedPolicy:
         max_resource_chunk_bytes=max_resource_chunk_bytes,
         max_retained_transaction_bytes=512,
         total_resource_bytes=8,
-        image_format=int(ResourceFormat.RGBA8),
+        image_formats=int(ResourceFormat.RGBA8),
         max_image_width=2,
         max_image_height=1,
         max_path_points=0,
@@ -241,7 +241,6 @@ def _bind_image_resource_offer(
         owner_id=19,
         owner_generation=23,
     )
-    digest = hashlib.sha3_256(pixels).digest()
     resource = RGBAResource(
         owner,
         ResourceDeclaration(
@@ -250,7 +249,6 @@ def _bind_image_resource_offer(
             width=2,
             height=1,
             byte_length=len(pixels),
-            digest=digest,
         ),
         pixels,
     )
@@ -262,7 +260,6 @@ def _bind_image_resource_offer(
         width=resource.width,
         height=resource.height,
         byte_length=resource.byte_length,
-        sha3_256=resource.digest,
     )
     image = ImageDraw(
         object_id=31,
@@ -826,7 +823,6 @@ def test_display_offer_wire_round_trip_is_lossless_and_bounded():
         attributes=0x40,
         text="visible",
     )
-    image_digest = hashlib.sha3_256(b"pixel-wire-metadata").digest()
     image = ImageDraw(
         object_id=31,
         z_order=-1,
@@ -844,7 +840,6 @@ def test_display_offer_wire_round_trip_is_lossless_and_bounded():
         width=2,
         height=1,
         byte_length=8,
-        sha3_256=image_digest,
     )
     plane = RetainedDrawPlane(
         retained_initialized=True,
@@ -913,6 +908,8 @@ def test_display_offer_wire_round_trip_is_lossless_and_bounded():
         "resource_id": 37,
         "fit": int(ImageFit.COVER),
         "opacity": 211,
+        "backdrop": False,
+        "clip": None,
     }
     assert wire["retained"]["resources"] == [
         {
@@ -923,7 +920,6 @@ def test_display_offer_wire_round_trip_is_lossless_and_bounded():
             "width": 2,
             "height": 1,
             "byte_length": 8,
-            "sha3_256": image_digest.hex(),
         }
     ]
     assert "data" not in repr(wire["retained"])
@@ -934,15 +930,78 @@ def test_display_offer_wire_round_trip_is_lossless_and_bounded():
     with pytest.raises(ValueError, match="unsupported GLYPH_RUN bits"):
         retained_draw_plane_from_wire(unsupported)
 
-    noncanonical_digest = retained_draw_plane_to_wire(plane)
-    noncanonical_digest["resources"][0]["sha3_256"] = image_digest.hex().upper()
-    with pytest.raises(ValueError, match="lowercase hexadecimal"):
-        retained_draw_plane_from_wire(noncanonical_digest)
-
     leaked_pixels = retained_draw_plane_to_wire(plane)
     leaked_pixels["resources"][0]["data_base64"] = "AA=="
     with pytest.raises(ValueError, match="fields are not exact"):
         retained_draw_plane_from_wire(leaked_pixels)
+
+
+def test_display_wire_carries_signed_object_offsets():
+    """CELL_RECT32 offsets are signed: a picture scrolled partly above and
+    left of its region, through a parent placed the same way, and a glyph
+    run starting left of its region cross the wire as they are, and only a
+    dimension must be positive."""
+
+    glyphs = GlyphRunDraw(
+        object_id=17,
+        z_order=0,
+        bounds=ObjectBounds(-2, 0, 4, 1),
+        foreground=RGBA(5, 6, 7, 255),
+        background=RGBA(9, 10, 11, 255),
+        attributes=0,
+        text="edge",
+    )
+    image = ImageDraw(
+        object_id=31,
+        z_order=0,
+        bounds=ObjectBounds(-1, -3, 6, 5),
+        resource_id=37,
+        fit=ImageFit.CONTAIN,
+        opacity=255,
+        backdrop=True,
+        parent_bounds=(ObjectBounds(0, -1, 9, 9),),
+        clip=ImageClip(1, 4, 5, 1),
+    )
+    plane = RetainedDrawPlane(
+        retained_initialized=True,
+        retained_visible=True,
+        regions=(
+            RetainedRegionDraw(
+                owner_id=19,
+                owner_generation=23,
+                region_id=29,
+                logical_x=0,
+                logical_y=0,
+                logical_cols=8,
+                logical_rows=4,
+                clip_x=0,
+                clip_y=0,
+                clip_cols=0,
+                clip_rows=0,
+                z_order=0,
+                clipped=True,
+                draws=(glyphs, image),
+            ),
+        ),
+        resources=(
+            ImageResourceManifest(
+                owner_id=19,
+                owner_generation=23,
+                resource_id=37,
+                format=ResourceFormat.RGBA8,
+                width=2,
+                height=1,
+                byte_length=8,
+            ),
+        ),
+    )
+    wire = retained_draw_plane_to_wire(plane)
+    assert wire["regions"][0]["draws"][1]["bounds"] == [-1, -3, 6, 5]
+    assert retained_draw_plane_from_wire(wire) == plane
+    empty = retained_draw_plane_to_wire(plane)
+    empty["regions"][0]["draws"][1]["bounds"][3] = 0
+    with pytest.raises(ValueError, match=r"bounds\[3\] must be between 1"):
+        retained_draw_plane_from_wire(empty)
 
 
 def test_display_wire_rejects_bool_in_integer_fields():
@@ -1117,7 +1176,6 @@ def test_display_resource_chunk_is_exact_offer_bounded_and_data_free_on_refusal(
             "owner_id": resource.owner.owner_id,
             "owner_generation": resource.owner.owner_generation,
             "resource_id": resource.resource_id,
-            "sha3_256": resource.digest.hex(),
             "offset": 2,
             "max_bytes": 99,
         }
@@ -1158,7 +1216,6 @@ def test_display_resource_chunk_is_exact_offer_bounded_and_data_free_on_refusal(
             "owner_id": resource.owner.owner_id,
             "owner_generation": resource.owner.owner_generation,
             "resource_id": resource.resource_id,
-            "sha3_256": resource.digest.hex(),
             "offset": 2,
             "next_offset": 5,
             "byte_length": len(pixels),
@@ -1178,7 +1235,6 @@ def test_display_resource_chunk_is_exact_offer_bounded_and_data_free_on_refusal(
         for wrong in (
             {"owner_generation": resource.owner.owner_generation + 1},
             {"resource_id": resource.resource_id + 1},
-            {"sha3_256": "00" * 32},
             {"offset": len(pixels) + 1},
         ):
             assert server.dispatch(
@@ -1240,7 +1296,6 @@ def test_display_resource_chunk_encodes_base64_outside_machine_lock(monkeypatch)
                         resource.owner.owner_id,
                         resource.owner.owner_generation,
                         resource.resource_id,
-                        resource.digest,
                         0,
                         3,
                         generation=0,

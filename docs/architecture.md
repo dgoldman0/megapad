@@ -53,7 +53,7 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
     │   0x0400     │  NIC                 │ │
     │   0x0500     │  Mailbox (IPI)       │ │
     │   0x0600     │  Spinlock            │ │
-    │   0x0700     │  AES-256/128-GCM     │ │
+    │   0x0700     │  AES GCM and CBC     │ │
     │   0x0780     │  SHA-3/SHAKE/Keccak  │ │
     │   0x07E0     │  Reserved            │ │
     │   0x0800     │  TRNG                │ │
@@ -147,7 +147,7 @@ device occupies a small range:
 | **NIC** | `+0x0400` | 128 bytes | Network interface controller |
 | **Mailbox** | `+0x0500` | 16 bytes | Inter-core IPI (data + send + status + ack) |
 | **Spinlock** | `+0x0600` | 64 bytes | 16 hardware locks, 4 bytes each; lock 8 is reserved by the checked MMIO crypto guard |
-| **AES-256/128-GCM** | `+0x0700` | 112 bytes | Authenticated encryption accelerator (AES-256 and AES-128); executable key-mode byte at `+0x073A` |
+| **AES-256/128, GCM and CBC** | `+0x0700` | 112 bytes | Encryption accelerator (AES-256 and AES-128) in GCM, which authenticates, and CBC; executable key-mode byte at `+0x073A` and block-mode byte at `+0x073B` |
 | **SHA-3/SHAKE/raw Keccak** | `+0x0780` | 96 bytes | Checked hash/XOF streaming plus indexed caller-owned Keccak-f[1600] state |
 | **Reserved** | `+0x07E0` | 16 bytes | No integrated QoS MMIO device; accesses fault |
 | **TRNG** | `+0x0800` | 32 bytes | Checked hardware entropy source |
@@ -946,8 +946,9 @@ micro-cluster, `sha.final` retains ownership through digest extraction and
 scrubbing; bare `sha.release` is the sole handoff.
 
 **BIOS words:** `SHA256-INIT`, `SHA256-UPDATE`, `SHA256-FINAL`,
-`SHA256-CLEAR`; and `SHA512-INIT`, `SHA512-UPDATE`, `SHA512-FINAL`,
-`SHA512-CLEAR`. `SHA2-SPAN-STATUS` provides a pure pre-`INIT` physical-span
+`SHA256-CLEAR`; `SHA512-INIT`, `SHA512-UPDATE`, `SHA512-FINAL`,
+`SHA512-CLEAR`; and `SHA384-INIT` and `SHA384-FINAL`, which share the
+SHA-512 context, UPDATE and CLEAR. `SHA2-SPAN-STATUS` provides a pure pre-`INIT` physical-span
 and shared context-arena check. Both streaming layers use private per-core
 contexts, validate complete caller spans against the union of both SHA-2 arenas,
 stage output until after engine release, wipe on every terminal path, and

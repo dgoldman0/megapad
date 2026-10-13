@@ -14,7 +14,7 @@ import pytest
 from simulator.runtime import MegaForthRuntime
 from tests.simulator.test_kdos_exceptions import _load_exceptions
 from tests.test_rich_terminal_dual_backend import (
-    ONE_CORE_UART_LOCK_SHIMS,
+    KDOS_SHIMS,
     RICH_TERMINAL_SOURCE,
     SIMULATOR_SOURCE_MAX_STEPS,
     _rich_terminal_module_source,
@@ -37,8 +37,8 @@ class Session:
     def __init__(self, backend: str) -> None:
         self.runtime = _load_exceptions(MegaForthRuntime(execution_backend=backend))
         self.runtime.evaluate(
-            ONE_CORE_UART_LOCK_SHIMS + _rich_terminal_module_source(),
-            source_name="one-core-uart-lock-shims+rich-terminal.f:complete",
+            KDOS_SHIMS + _rich_terminal_module_source(),
+            source_name="kdos-shims+rich-terminal.f:complete",
             step_budget=SIMULATOR_SOURCE_MAX_STEPS,
         )
         self.serial = 0

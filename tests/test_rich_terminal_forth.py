@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import struct
+from dataclasses import replace
 from pathlib import Path
 
 from tests.test_system import (
@@ -81,7 +82,7 @@ def _core_retained_policy() -> RetainedPolicy:
         max_resource_chunk_bytes=0,
         max_retained_transaction_bytes=512,
         total_resource_bytes=0,
-        image_format=0,
+        image_formats=0,
         max_image_width=0,
         max_image_height=0,
         max_path_points=0,
@@ -94,6 +95,21 @@ def _core_retained_policy() -> RetainedPolicy:
         client_to_terminal_max_payload=256,
         terminal_to_client_max_payload=64,
         base_max_transaction_bytes=512,
+    )
+
+
+def _image_retained_policy() -> RetainedPolicy:
+    """CORE plus RGBA_IMAGE, so the guest may ask the PIXELS question."""
+    return replace(
+        _core_retained_policy(),
+        features=RetainedFeature.CORE | RetainedFeature.RGBA_IMAGE,
+        max_resources=2,
+        max_objects=2,
+        max_resource_chunk_bytes=16,
+        total_resource_bytes=64,
+        image_formats=1,
+        max_image_width=2,
+        max_image_height=2,
     )
 
 
@@ -557,6 +573,206 @@ class TestRichTerminalForth(_KDOSTestBase):
         self.assertEqual(status.group(1), b"0 4 3 0 3 0 ")
         self.assertEqual(raw[begin:end], expected)
 
+    def test_document_and_clipped_image_writers_emit_exact_target_forth_bytes(
+        self,
+    ) -> None:
+        """Pack one minimum DOC1 document, which needs RET_CONTROL_DOCUMENTS and
+        at least the 32-byte body, and one IMAGE with a CLIP rectangle, which
+        must lie inside the object and carries 16 more bytes."""
+        memory, ext_memory, cpu_state = self._snapshot_data()
+        system = make_system(
+            ram_kib=1024,
+            ext_mem_mib=KDOS_TEST_EXT_MEM_MIB,
+        )
+        uart = capture_uart(system)
+        system.cpu.mem[: len(memory)] = memory
+        system._ext_mem[: len(ext_memory)] = ext_memory
+        self._restore_cpu_state(system.cpu, cpu_state)
+        system.uart._tx_ring_base = system.cpu.regs[19]
+
+        lines = ["ENTER-USERLAND", *_source_lines(MODULE_PATH)]
+        lines.extend(
+            [
+                "CREATE PT-DOC-RX 8192 ALLOT",
+                "CREATE PT-DOC-TX 8192 ALLOT",
+                "CREATE PT-DOC-EVENT PT-EVENT-SIZE ALLOT",
+                "CREATE PT-DOC-SESSION-STORAGE PT-SESSION-SIZE 7 + ALLOT",
+                ": PT-DOC-SESSION PT-DOC-SESSION-STORAGE 7 + -8 AND ;",
+                "CREATE PT-DOC-CONTENT 32 ALLOT",
+                "CREATE PT-DOC-STATUSES 16 8 * ALLOT",
+                "VARIABLE PT-DOC-I",
+                ": PT-DOC-STATUS!  ( status -- )",
+                "  PT-DOC-STATUSES PT-DOC-I @ 8 * + ! 1 PT-DOC-I +! ;",
+                ": PT-DOC-CONTENT!",
+                "  PT-DOC-CONTENT 32 0 FILL",
+                "  0x31434F44 PT-DOC-CONTENT L!",
+                "  1 PT-DOC-CONTENT 4 + W!",
+                "  1 PT-DOC-CONTENT 8 + _PT-U64! ;",
+                ": PT-DOC-FEATURES!  ( features -- )",
+                "  PT-DOC-SESSION _PT.S.RET-CAPS 8 + _PT-U64! ;",
+                ": PT-DOC-PRIME",
+                "  PT-DOC-CONTENT!  PT-DOC-I OFF",
+                "  PT-DOC-RX 8192 PT-DOC-TX 8192",
+                "    PT-DOC-EVENT PT-EVENT-SIZE PT-DOC-SESSION",
+                "    PT-INIT PT-DOC-STATUS!",
+                "  PT-ST-ACTIVE PT-DOC-SESSION _PT.S.STATE !",
+                "  152 PT-DOC-SESSION _PT.S.PEER-MAX-PAY !",
+                "  4096 PT-DOC-SESSION _PT.S.PEER-MAX-TX !",
+                "  8192 PT-DOC-SESSION _PT.S.PEER-GRANT !",
+                "  8192 PT-DOC-SESSION _PT.S.PEER-INITIAL !",
+                "  0 PT-DOC-SESSION _PT.S.PEER-SENT !",
+                "  0 PT-DOC-SESSION _PT.S.TX-SEQ !",
+                "  0x4142434445464748 PT-DOC-SESSION _PT.S.SESSION-ID !",
+                "  9 PT-DOC-SESSION _PT.S.EPOCH !",
+                "  -1 PT-DOC-SESSION _PT.S.RET-ENABLED? !",
+                "  _PT-RD-AVAILABLE PT-DOC-SESSION _PT.S.RET-STATE !",
+                "  0x10305 PT-DOC-FEATURES!",
+                "  -1 PT-DOC-SESSION _PT.S.TX-OPEN? !",
+                "  _PT-TX-PRESENT PT-DOC-SESSION _PT.S.TX-KIND !",
+                "  PT-CELL-NONE PT-DOC-SESSION _PT.S.TX-CELL-MODE !",
+                "  PT-RET-DELTA PT-DOC-SESSION _PT.S.TX-RET-MODE !",
+                "  2 PT-DOC-SESSION _PT.S.TX-RET-OPS !",
+                "  288 PT-DOC-SESSION _PT.S.TX-RET-BYTES ! ;",
+                ": PT-DOC-WRITE  ( content-a content-u -- status )",
+                "  >R >R",
+                "  0x0102030405060708 0x1112131415161718",
+                "  0x2122232425262728 PT-CONTROL-DOCUMENT",
+                "  PT-CONTROL-F-VISIBLE PT-CONTROL-F-ENABLED OR",
+                "  -7 0x3132333435363738 0 0",
+                "  0x01020304 0x11121314 0xA1A2A3A4 0xB1B2B3B4",
+                "  0 0 0 0 R> R> PT-DOC-SESSION",
+                "  PT-CONTROL-DEFINE ;",
+                ": PT-DOC-IMAGE  ( flags clip-x clip-y clip-cols clip-rows -- status )",
+                "  >R >R >R >R >R",
+                "  0x0102030405060708 0x1112131415161718",
+                "  0x5152535455565758 0x3132333435363738 0",
+                "  2 3 10 4 5 PT-OBJECT-VISIBLE",
+                "  0x696A6B6C6D6E6F70 PT-IMAGE-FIT-CONTAIN 255",
+                "  R> R> R> R> R> PT-DOC-SESSION PT-IMAGE-DEFINE ;",
+                ": PT-DOC-MARK  ( c -- )  80 EMIT 68 EMIT EMIT 33 EMIT ;",
+                ": PT-DOC-RUN",
+                "  PT-DOC-PRIME",
+                "  0x305 PT-DOC-FEATURES!",
+                "  PT-DOC-CONTENT 32 PT-DOC-WRITE PT-DOC-STATUS!",
+                "  0x10305 PT-DOC-FEATURES!",
+                "  PT-DOC-CONTENT 31 PT-DOC-WRITE PT-DOC-STATUS!",
+                "  PT-IMAGE-CLIP 0 3 10 2 PT-DOC-IMAGE PT-DOC-STATUS!",
+                "  PT-IMAGE-CLIP 0 0 0 4 PT-DOC-IMAGE PT-DOC-STATUS!",
+                "  PT-IMAGE-BACKDROP 0 1 10 3 PT-DOC-IMAGE PT-DOC-STATUS!",
+                "  4 0 0 0 0 PT-DOC-IMAGE PT-DOC-STATUS!",
+                "  66 PT-DOC-MARK TX-FLUSH",
+                "  PT-DOC-CONTENT 32 PT-DOC-WRITE PT-DOC-STATUS!",
+                "  PT-IMAGE-BACKDROP PT-IMAGE-CLIP OR 0 1 10 3",
+                "    PT-DOC-IMAGE PT-DOC-STATUS!",
+                "  TX-FLUSH 69 PT-DOC-MARK TX-FLUSH",
+                "  DEPTH PT-DOC-STATUS!",
+                "  83 PT-DOC-MARK PT-DOC-STATUSES PT-DOC-I @ 8 * TYPE",
+                "  70 PT-DOC-MARK TX-FLUSH ;",
+                "PT-DOC-RUN BYE",
+            ]
+        )
+        program = ("\n".join(lines) + "\n").encode()
+        position = 0
+        steps = 0
+
+        while steps < SOURCE_LOAD_MAX_STEPS:
+            if system.cpu.halted:
+                break
+            if system.cpu.idle and not system.uart.has_rx_data:
+                if position >= len(program):
+                    break
+                chunk = _next_line_chunk(program, position)
+                system.uart.inject_input(chunk)
+                position += len(chunk)
+                continue
+            executed = system.run_batch(
+                min(RUN_BATCH_STEPS, SOURCE_LOAD_MAX_STEPS - steps)
+            )
+            steps += max(executed, 1)
+
+        raw = bytes(uart)
+        text = raw.decode("utf-8", errors="replace")
+        self.assertEqual(position, len(program), "test source was not fully fed")
+        self.assertTrue(
+            system.cpu.halted,
+            "document and clipped image byte oracle exceeded its "
+            f"{SOURCE_LOAD_MAX_STEPS:,}-step watchdog",
+        )
+        self.assertNotIn(" ? (not found)", text)
+        for diagnostic in (
+            "Dictionary full",
+            "dictionary overflow",
+            "Stack underflow",
+            "Stack overflow",
+            "Return stack overflow",
+            "*** BUS FAULT",
+            "*** PRIVILEGE FAULT",
+        ):
+            self.assertNotIn(diagnostic, text)
+
+        content = struct.pack("<IHHQHHIII", 0x31434F44, 1, 0, 1, 0, 0, 0, 0, 0)
+        control = struct.pack(
+            "<QQQHHiQQIiiIIIII",
+            0x0102030405060708,
+            0x1112131415161718,
+            0x2122232425262728,
+            14,
+            0x03,
+            -7,
+            0x3132333435363738,
+            0,
+            0,
+            0x01020304,
+            0x11121314,
+            0xA1A2A3A4,
+            0xB1B2B3B4,
+            0,
+            0,
+            len(content),
+        ) + content
+        image = struct.pack(
+            "<QQQHHiQQiiII",
+            0x0102030405060708,
+            0x1112131415161718,
+            0x5152535455565758,
+            3,
+            1,
+            5,
+            0x3132333435363738,
+            0,
+            2,
+            3,
+            10,
+            4,
+        ) + struct.pack("<QIBB2xIIII", 0x696A6B6C6D6E6F70, 1, 255, 3, 0, 1, 10, 3)
+        self.assertEqual(len(image), 96)
+        expected = b"".join(
+            encode_frame(
+                Frame(message_type, 0x4142434445464748, sequence, 9, payload),
+                max_payload=152,
+            )
+            for sequence, (message_type, payload) in enumerate(
+                (
+                    (RetainedMessageType.CONTROL_DEFINE, control),
+                    (RetainedMessageType.OBJECT_DEFINE, image),
+                )
+            )
+        )
+        self.assertEqual(len(expected), 288)
+        begin = raw.index(b"PDB!") + len(b"PDB!")
+        end = raw.index(b"PDE!", begin)
+        self.assertEqual(raw[begin:end], expected)
+        statuses_begin = raw.index(b"PDS!", end) + len(b"PDS!")
+        statuses_end = raw.index(b"PDF!", statuses_begin)
+        # PT-INIT; no documents; a short body; a clip below the object; empty
+        # clip extents; clip fields without CLIP; a reserved flag; the two
+        # writes; and an empty stack.
+        expected_statuses = (0, 4, 3, 3, 3, 3, 3, 0, 0, 0)
+        self.assertEqual(
+            raw[statuses_begin:statuses_end],
+            struct.pack(f"<{len(expected_statuses)}q", *expected_statuses),
+        )
+
     def test_resource_lifecycle_bytes_completions_credit_and_reset_gate(self) -> None:
         """Exercise the complete immutable-resource guest lifecycle boundary."""
         memory, ext_memory, cpu_state = self._snapshot_data()
@@ -578,7 +794,6 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "CREATE PT-RES-EVENT PT-EVENT-SIZE ALLOT",
                 "CREATE PT-RES-SESSION-STORAGE PT-SESSION-SIZE 7 + ALLOT",
                 ": PT-RES-SESSION PT-RES-SESSION-STORAGE 7 + -8 AND ;",
-                "CREATE PT-RES-SHA3 32 ALLOT",
                 "CREATE PT-RES-PIXEL 4 ALLOT",
                 "CREATE PT-RES-RESULT 48 ALLOT",
                 "CREATE PT-RES-CREDIT 8 ALLOT",
@@ -609,12 +824,7 @@ class TestRichTerminalForth(_KDOSTestBase):
                 ": PT-RES-MARK  ( u -- )",
                 "  PT-RES-MARK-BUFFER _PT-U64!",
                 "  PT-RES-MARK-BUFFER 8 TYPE TX-FLUSH ;",
-                ": PT-RES-SHA3!",
-                "  0x0706050403020100 PT-RES-SHA3 _PT-U64!",
-                "  0x1716151413121110 PT-RES-SHA3 8 + _PT-U64!",
-                "  0x2726252423222120 PT-RES-SHA3 16 + _PT-U64!",
-                "  0x3736353433323130 PT-RES-SHA3 24 + _PT-U64!",
-                "  0xDDCCBBAA PT-RES-PIXEL L! ;",
+                ": PT-RES-PIXEL!  0xDDCCBBAA PT-RES-PIXEL L! ;",
                 ": PT-RES-PRIME",
                 "  PT-RES-COMPLETIONS PT-COMPLETION-SIZE 10 * 0 FILL",
                 "  PT-RES-SCRATCH PT-COMPLETION-SIZE 0 FILL",
@@ -623,7 +833,7 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "  PT-RES-COMP-I OFF PT-RES-POLL-FAIL OFF",
                 "  PT-RES-STATUS-I OFF PT-RES-FACT-I OFF",
                 "  PT-RES-NONE-S OFF PT-RES-NONE-HAS OFF",
-                "  PT-RES-SHA3!",
+                "  PT-RES-PIXEL!",
                 "  PT-RES-RX 8192 PT-RES-TX 8192",
                 "    PT-RES-EVENT PT-EVENT-SIZE PT-RES-SESSION",
                 "    PT-INIT PT-RES-STATUS!",
@@ -652,8 +862,10 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "  0x0102030405060708 0x1112131415161718 ROT",
                 "  PT-RESOURCE-RGBA8 1 1 0 4 ;",
                 ": PT-RES-BEGIN  ( resource -- status )",
-                "  PT-RES-BEGIN-ARGS PT-RES-SHA3 32 PT-RES-SESSION",
-                "  PT-RESOURCE-BEGIN ;",
+                "  PT-RES-BEGIN-ARGS PT-RES-SESSION PT-RESOURCE-BEGIN ;",
+                ": PT-RES-FILE-BEGIN  ( resource -- status )",
+                "  0x0102030405060708 0x1112131415161718 ROT",
+                "  PT-RESOURCE-QOI 1 1 0 22 PT-RES-SESSION PT-RESOURCE-BEGIN ;",
                 ": PT-RES-ITEM-ARGS  ( resource -- owner generation resource )",
                 "  0x0102030405060708 0x1112131415161718 ROT ;",
                 ": PT-RES-SAVE-COMPLETION",
@@ -695,14 +907,14 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "  48 _PT-RX-LEN ! 0 _PT-RX-SEQNO !",
                 "  PT-RES-SESSION _PT-DISPATCH-RET-RESULT ;",
                 ": PT-RES-CREDIT-ONE-SHORT",
-                "  2243 PT-RES-CREDIT _PT-U64!",
+                "  2211 PT-RES-CREDIT _PT-U64!",
                 "  PT-RES-SESSION _PT-RX-S !",
                 "  PT-RES-CREDIT _PT-RX-P !",
                 "  _PT-M-CREDIT _PT-RX-TYPE !",
                 "  8 _PT-RX-LEN ! 0 _PT-RX-SEQNO !",
                 "  PT-RES-SESSION _PT-DISPATCH-CREDIT ;",
                 ": PT-RES-CREDIT-COVER",
-                "  2244 PT-RES-CREDIT _PT-U64!",
+                "  2212 PT-RES-CREDIT _PT-U64!",
                 "  PT-RES-SESSION _PT-RX-S !",
                 "  PT-RES-CREDIT _PT-RX-P !",
                 "  _PT-M-CREDIT _PT-RX-TYPE !",
@@ -720,12 +932,9 @@ class TestRichTerminalForth(_KDOSTestBase):
                 ": PT-RES-RUN",
                 "  PT-RES-PRIME",
                 "  0x3130303047454252 PT-RES-MARK",
-                "  0x2122232425262728 PT-RES-BEGIN-ARGS",
-                "    PT-RES-SHA3 31 PT-RES-SESSION PT-RESOURCE-BEGIN",
-                "    PT-RES-STATUS!",
-                "  0x2122232425262728 PT-RES-BEGIN-ARGS",
-                "    PT-RES-SESSION _PT.S.TX-A @ 32 PT-RES-SESSION",
-                "    PT-RESOURCE-BEGIN PT-RES-STATUS!",
+                "  0x2122232425262728 PT-RES-FILE-BEGIN PT-RES-STATUS!",
+                "  0x2122232425262728 PT-RES-BEGIN-ARGS 1+",
+                "    PT-RES-SESSION PT-RESOURCE-BEGIN PT-RES-STATUS!",
                 "  0x1 PT-RES-SESSION _PT.S.RET-CAPS 8 + _PT-U64!",
                 "  0x2122232425262728 PT-RES-BEGIN PT-RES-STATUS!",
                 "  0x5 PT-RES-SESSION _PT.S.RET-CAPS 8 + _PT-U64!",
@@ -786,9 +995,11 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "    PT-RES-STATUS!",
                 "  PT-REQUEST-RESOURCE-CHUNK PT-RET-INVALID",
                 "    0x3132333435363738 0 PT-RES-RET-RESULT PT-RES-STATUS!",
-                "  0x393A3B3C3D3E3F40 PT-RES-BEGIN PT-RES-STATUS!",
+                "  PT-RESOURCE-RGBA8 PT-RESOURCE-QOI OR",
+                "    PT-RES-SESSION _PT.S.RET-FORMATS 8 + L!",
+                "  0x393A3B3C3D3E3F40 PT-RES-FILE-BEGIN PT-RES-STATUS!",
                 "  PT-RES-SAVE-COMPLETION",
-                "  0x393A3B3C3D3E3F40 PT-RES-BEGIN PT-RES-STATUS!",
+                "  0x393A3B3C3D3E3F40 PT-RES-FILE-BEGIN PT-RES-STATUS!",
                 "  PT-REQUEST-RESOURCE-BEGIN PT-RET-OK",
                 "    0x393A3B3C3D3E3F40 0 PT-RES-RET-RESULT PT-RES-STATUS!",
                 "  PT-RES-SAVE-COMPLETION",
@@ -876,26 +1087,17 @@ class TestRichTerminalForth(_KDOSTestBase):
         resource2 = 0x292A2B2C2D2E2F30
         resource3 = 0x3132333435363738
         resource4 = 0x393A3B3C3D3E3F40
-        digest = struct.pack(
-            "<QQQQ",
-            0x0706050403020100,
-            0x1716151413121110,
-            0x2726252423222120,
-            0x3736353433323130,
-        )
-
-        def resource_begin(resource: int) -> bytes:
+        def resource_begin(resource: int, format=1, length=4) -> bytes:
             return struct.pack(
-                "<QQQIIIIQ32s",
+                "<QQQIIIIQ",
                 owner,
                 generation,
                 resource,
-                1,
+                format,
                 1,
                 1,
                 0,
-                4,
-                digest,
+                length,
             )
 
         def resource_item(resource: int) -> bytes:
@@ -924,7 +1126,11 @@ class TestRichTerminalForth(_KDOSTestBase):
                 + bytes.fromhex("aabbccdd"),
                 9,
             ),
-            (RetainedMessageType.RESOURCE_BEGIN, resource_begin(resource4), 9),
+            (
+                RetainedMessageType.RESOURCE_BEGIN,
+                resource_begin(resource4, format=2, length=22),
+                9,
+            ),
             (
                 RetainedMessageType.RESOURCE_ABORT,
                 struct.pack("<QQQH6x", owner, generation, resource4, 1),
@@ -1488,7 +1694,7 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "  PT-POLYLINE-CLOSED PT-OBJ-POINTS 32 PT-OBJ-SESSION ;",
                 ": PT-OBJ-IMAGE  ( object -- image-args )",
                 "  PT-OBJ-COMMON 0x696A6B6C6D6E6F70",
-                "  PT-IMAGE-FIT-COVER 200 PT-OBJ-SESSION ;",
+                "  PT-IMAGE-FIT-COVER 200 PT-IMAGE-BACKDROP 0 0 0 0 PT-OBJ-SESSION ;",
                 ": PT-OBJ-READOUT  ( object -- readout-args )",
                 "  PT-OBJ-COMMON 1 2 3 4 5 6 7 8",
                 "  PT-READOUT-FIXED 2 -123 100",
@@ -1574,11 +1780,6 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "  0x1B PT-OBJ-FEATURES!",
                 "  0x3132333435363738 PT-OBJ-IMAGE",
                 "    PT-IMAGE-DEFINE PT-OBJ-STATUS!",
-                "  0x1F PT-OBJ-FEATURES!",
-                "  0 PT-OBJ-IMAGE-FORMAT!",
-                "  0x3132333435363738 PT-OBJ-IMAGE",
-                "    PT-IMAGE-DEFINE PT-OBJ-STATUS!",
-                "  PT-RESOURCE-RGBA8 PT-OBJ-IMAGE-FORMAT!",
                 "  0x17 PT-OBJ-FEATURES!",
                 "  PT-OBJ-OWNER 0x393A3B3C3D3E3F40 -456 PT-OBJ-SESSION",
                 "    PT-OBJECT-SET-VALUE PT-OBJ-STATUS!",
@@ -1766,7 +1967,7 @@ class TestRichTerminalForth(_KDOSTestBase):
                 struct.pack("<II4BI", 2, 0x01000000, 1, 2, 3, 255, 1)
                 + point_bytes,
             ),
-            (image, 3, struct.pack("<QIB3x", resource, 2, 200)),
+            (image, 3, struct.pack("<QIBB2x", resource, 2, 200, 1)),
             (
                 readout,
                 5,
@@ -1924,7 +2125,7 @@ class TestRichTerminalForth(_KDOSTestBase):
         self.assertEqual(raw[begin:end_at], expected)
 
         expected_statuses = (
-            (0,) + (4,) * 5 + (3,) * 7 + (0,) * 19 + (3, 0)
+            (0,) + (4,) * 4 + (3,) * 7 + (0,) * 19 + (3, 0)
         )
         status_begin = raw.index(status_marker, end) + len(status_marker)
         status_end = raw.index(status_end_marker, status_begin)
@@ -1933,7 +2134,7 @@ class TestRichTerminalForth(_KDOSTestBase):
             struct.pack(f"<{len(expected_statuses)}q", *expected_statuses),
         )
 
-        expected_facts = (0, 0, 0, 0, 19, 2390, 19, 2390, 34)
+        expected_facts = (0, 0, 0, 0, 19, 2390, 19, 2390, 33)
         facts_begin = raw.index(facts_marker, status_end) + len(facts_marker)
         facts_end = raw.index(facts_end_marker, facts_begin)
         self.assertEqual(
@@ -2503,6 +2704,191 @@ class TestRichTerminalForth(_KDOSTestBase):
             tuple(range(ord("A"), ord("A") + 32)),
         )
         self.assertIn(expected, terminal_ansi)
+
+    def test_real_core_answers_one_pixel_question_at_a_time(self) -> None:
+        """PT-PIXELS-QUERY asks a real terminal core and keeps its exact answer."""
+        memory, ext_memory, cpu_state = self._snapshot_data()
+        system = make_system(
+            ram_kib=1024,
+            ext_mem_mib=KDOS_TEST_EXT_MEM_MIB,
+        )
+        uart = capture_uart(system)
+        system.cpu.mem[: len(memory)] = memory
+        system._ext_mem[: len(ext_memory)] = ext_memory
+        self._restore_cpu_state(system.cpu, cpu_state)
+        system.uart._tx_ring_base = system.cpu.regs[19]
+
+        lines = ["ENTER-USERLAND", *_source_lines(MODULE_PATH)]
+        lines.extend(
+            [
+                "CREATE PX-RX 8192 ALLOT",
+                "CREATE PX-TX 8192 ALLOT",
+                "CREATE PX-IN PT-EVENT-SIZE ALLOT",
+                "CREATE PX-STORAGE PT-SESSION-SIZE 7 + ALLOT",
+                ": PX-SESSION PX-STORAGE 7 + -8 AND ;",
+                "VARIABLE PX-ERROR",
+                "VARIABLE PX-SECOND",
+                ": PX-STATUS+ PX-ERROR @ OR PX-ERROR ! ;",
+                ": PX-WAIT-ACTIVE",
+                "  BEGIN",
+                "    PX-SESSION PT-SERVICE DUP PT-S-OK <> IF EXIT THEN DROP",
+                "    PX-SESSION PT-ACTIVE? IF PT-S-OK EXIT THEN YIELD",
+                "  AGAIN ;",
+                ": PX-WAIT-SNAPSHOT",
+                "  BEGIN",
+                "    PX-SESSION PT-SERVICE DUP PT-S-OK <> IF EXIT THEN DROP",
+                "    PX-SESSION PT-SNAPSHOT-NEEDED? 0= IF PT-S-OK EXIT THEN",
+                "    YIELD",
+                "  AGAIN ;",
+                ": PX-WAIT-RETAINED",
+                "  BEGIN",
+                "    PX-SESSION PT-SERVICE DUP PT-S-OK <> IF EXIT THEN DROP",
+                "    PX-SESSION PT-RETAINED-STATE@ DUP",
+                "    PT-RET-ST-AVAILABLE = IF DROP PT-S-OK EXIT THEN",
+                "    PT-RET-ST-CELL-ONLY = IF PT-S-UNSUPPORTED EXIT THEN",
+                "    YIELD",
+                "  AGAIN ;",
+                ": PX-WAIT-ANSWER",
+                "  BEGIN",
+                "    PX-SESSION PT-SERVICE DUP PT-S-OK <> IF EXIT THEN DROP",
+                "    PX-SESSION PT-PIXELS-STATE@ PT-PIXELS-ANSWERED = IF",
+                "      PT-S-OK EXIT",
+                "    THEN YIELD",
+                "  AGAIN ;",
+                ": PX-WAIT-ANSI",
+                "  BEGIN",
+                "    PX-SESSION PT-SERVICE DUP PT-S-OK <> IF EXIT THEN DROP",
+                "    PX-SESSION PT-STATE@ PT-ST-ANSI = IF PT-S-OK EXIT THEN",
+                "    YIELD",
+                "  AGAIN ;",
+                ": PX-SNAPSHOT",
+                "  2 2 2 4 0 PX-SESSION PT-SNAPSHOT-BEGIN PX-STATUS+",
+                "  0 0 2 0 PX-SESSION PT-SPAN-BEGIN PX-STATUS+",
+                "  65 7 0 0 PX-SESSION PT-CELL PX-STATUS+",
+                "  66 7 0 0 PX-SESSION PT-CELL PX-STATUS+",
+                "  1 0 2 0 PX-SESSION PT-SPAN-BEGIN PX-STATUS+",
+                "  67 7 0 0 PX-SESSION PT-CELL PX-STATUS+",
+                "  68 7 0 0 PX-SESSION PT-CELL PX-STATUS+",
+                "  0 0 0 PX-SESSION PT-CURSOR PX-STATUS+",
+                "  PX-SESSION PT-TX-COMMIT PX-STATUS+ ;",
+                ": PX-BEGIN-MARK",
+                "  80 EMIT 88 EMIT 33 EMIT TX-FLUSH ;",
+                "CREATE PX-ANSWER 40 ALLOT",
+                "VARIABLE PX-STATE",
+                "VARIABLE PX-ANSWER-U",
+                ": PX-KEEP  ( -- )",
+                "  PX-SESSION PT-PIXELS-STATE@ PX-STATE !",
+                "  PX-SESSION PT-PIXELS-ANSWER@ DUP PX-ANSWER-U !",
+                "  PX-ANSWER SWAP MOVE ;",
+                ": PX-REPORT  ( -- )",
+                "  80 EMIT 88 EMIT 82 EMIT 32 EMIT",
+                "  PX-ERROR @ . PX-SECOND @ . PX-STATE @ . PX-ANSWER-U @ .",
+                "  PX-ANSWER @ . PX-ANSWER 16 + L@ . PX-ANSWER 20 + L@ .",
+                "  PX-ANSWER 24 + L@ . PX-ANSWER 28 + L@ .",
+                "  PX-ANSWER 32 + L@ . PX-ANSWER 36 + L@ . TX-FLUSH ;",
+                ": PX-RUN",
+                "  0 PX-ERROR !",
+                "  PX-RX 8192 PX-TX 8192 PX-IN PT-EVENT-SIZE PX-SESSION",
+                "    PT-INIT PX-STATUS+",
+                "  PX-SESSION PT-RETAINED-DISCOVER PX-STATUS+",
+                "  PX-BEGIN-MARK",
+                "  PX-SESSION PT-START PX-STATUS+",
+                "  PX-WAIT-ACTIVE PX-STATUS+",
+                "  PX-SNAPSHOT PX-WAIT-SNAPSHOT PX-STATUS+",
+                "  PX-WAIT-RETAINED PX-STATUS+",
+                "  7 -1 2 3 2 PX-SESSION PT-PIXELS-QUERY PX-STATUS+",
+                "  8 0 0 1 1 PX-SESSION PT-PIXELS-QUERY PX-SECOND !",
+                "  PX-WAIT-ANSWER PX-STATUS+ PX-KEEP",
+                "  0 PX-SESSION PT-CLOSE PX-STATUS+",
+                "  PX-WAIT-ANSI PX-STATUS+ PX-REPORT ;",
+                "PX-RUN BYE",
+            ]
+        )
+        payload = ("\n".join(lines) + "\n").encode()
+        position = 0
+        steps = 0
+        terminal_cursor: int | None = None
+        begin_marker = b"PX!"
+        core = RichTerminalCore(
+            TerminalConfig(
+                max_payload=256,
+                max_transaction_bytes=512,
+                terminal_receive_credit=4_096,
+                max_cells=4,
+                max_feed_bytes=4_096,
+                max_cols=2,
+                max_rows=2,
+                cols=2,
+                rows=2,
+            ),
+            attachment_epoch=1,
+            retained_policy=_image_retained_policy(),
+            session_id_factory=lambda: 0x0123456789ABCDEF,
+        )
+        core.select_sink_cell_pixels((11, 21))
+
+        def pump_terminal() -> None:
+            nonlocal terminal_cursor
+            current = bytes(uart)
+            if terminal_cursor is None:
+                marker_at = current.find(begin_marker)
+                if marker_at < 0:
+                    return
+                terminal_cursor = marker_at + len(begin_marker)
+            while terminal_cursor < len(current):
+                end = min(terminal_cursor + 4_096, len(current))
+                result = core.feed_machine(current[terminal_cursor:end])
+                terminal_cursor = end
+                for outbound in result.outbound:
+                    system.uart.inject_input(outbound.payload)
+                    if outbound.result_transaction_id is not None:
+                        core.settle_result_delivery(outbound.result_transaction_id)
+                    if outbound.lifecycle_result is not None:
+                        core.settle_lifecycle_result_delivery(
+                            outbound.lifecycle_result
+                        )
+
+        while steps < SOURCE_LOAD_MAX_STEPS:
+            pump_terminal()
+            if system.cpu.halted:
+                break
+            if system.cpu.idle and not system.uart.has_rx_data and position < len(payload):
+                chunk = _next_line_chunk(payload, position)
+                system.uart.inject_input(chunk)
+                position += len(chunk)
+            batch_limit = 10_000 if terminal_cursor is not None else RUN_BATCH_STEPS
+            executed = system.run_batch(
+                min(batch_limit, SOURCE_LOAD_MAX_STEPS - steps)
+            )
+            steps += executed if executed else batch_limit
+        pump_terminal()
+
+        raw = bytes(uart)
+        text = raw.decode("utf-8", errors="replace")
+        self.assertEqual(position, len(payload), "test source was not fully fed")
+        self.assertTrue(
+            system.cpu.halted,
+            "pixel question test exceeded its "
+            f"{SOURCE_LOAD_MAX_STEPS:,}-step watchdog "
+            f"(core={core.state.value}, tail={raw[-160:].hex()})",
+        )
+        self.assertNotIn(" ? (not found)", text)
+        for diagnostic in (
+            "Dictionary full",
+            "Stack underflow",
+            "Stack overflow",
+            "*** BUS FAULT",
+        ):
+            self.assertNotIn(diagnostic, text)
+        # No error; the second question waited (PT-S-WOULD-BLOCK); the state
+        # is PT-PIXELS-ANSWERED; then the exact 40-byte answer: query 7 at
+        # x -1 (as u32), y 2, three by two cells, eleven by twenty-one pixels
+        # per cell.
+        self.assertIn(
+            b"PXR 0 1 2 40 7 4294967295 2 3 2 33 42 ",
+            raw,
+        )
+        self.assertEqual(core.state, TerminalState.ANSI)
 
     def test_real_core_owner_region_present_and_legacy_cell_interleave(self) -> None:
         """Drive the production guest writers through one CORE-only terminal."""

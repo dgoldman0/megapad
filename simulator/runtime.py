@@ -93,7 +93,14 @@ from simulator.source import (
     SourceCursor,
     SourceLocation,
 )
-from simulator.stacks import DataStack, FaultAbort, MachineReturn, ReturnEntry, ReturnStack
+from simulator.stacks import (
+    Continuation,
+    DataStack,
+    FaultAbort,
+    MachineReturn,
+    ReturnEntry,
+    ReturnStack,
+)
 from simulator.timer import HostedTimerService
 from simulator.terminal_geometry import HostedTerminalGeometryState
 
@@ -2722,6 +2729,29 @@ class MegaForthRuntime:
             raise ExecutionError("wake receipt is stale, foreign, or already consumed")
         self._idle_deadline_ms = None
         return self._continue_suspension_locked(blocked)
+
+    def suspended_call_chain(self) -> tuple[int, ...]:
+        """Where the suspended dispatch stands, for host diagnosis.
+
+        The execution token of the word it stopped in, then that of each
+        colon word that called it, innermost first; empty when nothing is
+        suspended.  Reading it changes nothing.
+        """
+
+        with self._session_owner_lock:
+            suspended = self._suspended_execution
+            if suspended is None:
+                return ()
+            chain = []
+            if isinstance(suspended.cursor, _DispatchCursor):
+                chain.append(suspended.cursor.xt)
+            # A root continuation marks where a dispatch began, not a caller.
+            chain.extend(
+                entry.xt
+                for entry in reversed(suspended.blocked_return_snapshot)
+                if isinstance(entry, Continuation) and not entry.root
+            )
+            return tuple(chain)
 
     def resume_yielded(self, suspension: ExecutionSuspension) -> RunResult:
         """Continue one exact host quantum without inventing an IDL wake."""

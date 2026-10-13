@@ -820,9 +820,12 @@ fail closed in integer formats. `FAULT-XT!` follows at the frontier.
 The admitted AES service is one per-runtime transaction engine behind the
 virtual-MMIO router at `+0x700..+0x76F`; hosted BIOS words perform their normal
 byte/word accesses against that same object. It implements AES-128/256 block
-values, GHASH, partial final data, commands 0/1, statuses 0/1/2/3, uint32
-length registers, native configuration/fault transitions, and incremental
-BIOS buffer-transfer mutation. Guest contexts share it and guest control
+values, GCM with GHASH and partial final data, CBC with its 16-byte IV and the
+inverse cipher, the block mode at `+0x73B`, commands 0/1, statuses 0/1/2/3,
+uint32 length registers, native configuration/fault transitions, and
+incremental BIOS buffer-transfer mutation. `AES-MODE!` and `AES-CBC-IV!` are
+appended at the end of the hosted core vocabulary, as the BIOS appends them
+at the end of its chain. Guest contexts share it and guest control
 unwinding does not reset it. A separate focused vector compares its public
 windows directly with the native architectural device. The portable value
 model is not constant-time host cryptography, and synchronous completion makes
@@ -858,15 +861,19 @@ lock-MMIO/SHA interference, and multicore guard interoperation remain outside
 the current claim and must be unified before those paths are admitted.
 
 The admitted SHA-2 service is runtime-local and keyed by architectural core,
-not task. It implements the checked `SHA256-*` and `SHA512-*` BIOS words plus
-pure `SHA2-SPAN-STATUS`; it is not an MMIO service and does not consume a
+not task. It implements the checked `SHA256-*`, `SHA512-*` and `SHA384-*`
+BIOS words plus pure `SHA2-SPAN-STATUS`; SHA-384 transactions run in the
+SHA-512 context with active marker 2, as the BIOS's do; it is not an MMIO service and does not consume a
 `CRYPTO_CAPS` bit. `INIT` always replaces that core's selected context,
 `CLEAR` is idempotent, and continuations use statuses 0 OK, 1 STATE, 2 RANGE,
 3 CONTEXT-ALIAS, and 4 LENGTH-OVERFLOW. SHA-256 tracks a checked 64-bit bit
 length and SHA-512 a checked 128-bit bit length. Active marker, high-word where
 applicable, partial-offset bound, byte alignment, and length/offset agreement
 are validated before an empty update may succeed. Every nonzero continuation
-result aborts and logically wipes the selected context.
+result aborts and logically wipes the selected context. `SHA384-INIT` and
+`SHA384-FINAL` are appended at the end of the hosted core vocabulary, and the
+BIOS's `2ROT` after them, since Akashic's checked SHA-2 one-shots of three
+spans use it; a hosted `2ROT` refuses an underflow without moving a cell.
 
 SHA-2 physical-span qualification is deliberately broader than
 `CALLER-SPAN-STATUS`. Empty spans ignore their address. A nonempty span may
@@ -903,7 +910,7 @@ Current RTL instruction glue is not equivalent:
 | `SHA.DOUT Rd,Rs` | Selects 32-bit `H[R[Rs] & 7]`, allowing the BIOS value-indexed loop | Selects a 64-bit accumulator qword from the encoded register field |
 | `SHA.DIN` | Feeds one byte through the documented block-buffer path | Writes a whole qword into an accumulator slot |
 | ROUND memory load | Reconstructs addressed bytes and parses big-endian SHA words | Splits little-endian memory qwords into W words without the required byte swap |
-| SHA-512 | Native mode 2 backs the checked BIOS stream | The RTL SHA leaf identifies SHA-384/512 as future work |
+| SHA-512, SHA-384 | Native mode 2 backs the checked BIOS stream; SHA-384 takes its initial value from mode 1 | The RTL SHA leaf identifies SHA-384/512 as future work |
 
 Native checked tests cover standard digests and padding/split boundaries; the
 present RTL tests exercise an already padded/endian-correct compression leaf

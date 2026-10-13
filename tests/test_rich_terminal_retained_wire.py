@@ -14,6 +14,7 @@ from rich_terminal.retained_model import OwnerQuotas, RetainedFeature
 from rich_terminal.retained_scene import (
     ExplicitSamples,
     GroupBody,
+    ImageClip,
     GlyphRunBody,
     ObjectBounds,
     ObjectKind,
@@ -27,6 +28,8 @@ from rich_terminal.retained_scene import (
     UniformSamples,
 )
 from rich_terminal.retained_wire import (
+    IMAGE_FLAG_BACKDROP,
+    IMAGE_FLAG_CLIP,
     CellMode,
     ImageBody,
     ImageFit,
@@ -320,7 +323,6 @@ def test_owner_lifecycle_scalars_and_result_semantics_are_exact():
 
 
 def test_resource_wire_values_match_the_exact_normative_payloads():
-    digest = bytes(range(32))
     begin = ResourceBegin(
         0x0102030405060708,
         0x1112131415161718,
@@ -330,10 +332,9 @@ def test_resource_wire_values_match_the_exact_normative_payloads():
         1,
         0,
         8,
-        digest,
     )
     begin_payload = struct.pack(
-        "<QQQIIIIQ32s",
+        "<QQQIIIIQ",
         begin.owner_id,
         begin.owner_generation,
         begin.resource_id,
@@ -342,11 +343,9 @@ def test_resource_wire_values_match_the_exact_normative_payloads():
         1,
         0,
         8,
-        digest,
     )
     assert encode_resource_begin(begin) == begin_payload
     assert decode_resource_begin(begin_payload) == begin
-    assert begin.digest == digest
 
     source = bytearray(b"\x01\x02\x03\x04")
     chunk = ResourceChunk(begin.owner_id, begin.owner_generation, begin.resource_id, 4, source)
@@ -420,7 +419,7 @@ def test_resource_abort_oracles_preserve_reasons_for_lifecycle_status_selection(
 
 
 def test_resource_codecs_reject_noncanonical_lengths_padding_and_scalars():
-    begin = ResourceBegin(1, 1, 1, ResourceFormat.RGBA8, 1, 1, 0, 4, bytes(32))
+    begin = ResourceBegin(1, 1, 1, ResourceFormat.RGBA8, 1, 1, 0, 4)
     begin_payload = bytearray(encode_resource_begin(begin))
 
     for malformed in (begin_payload[:-1], begin_payload + b"\0"):
@@ -433,7 +432,10 @@ def test_resource_codecs_reject_noncanonical_lengths_padding_and_scalars():
 
     begin_payload[36:40] = bytes(4)
     begin_payload[24:28] = (2).to_bytes(4, "little")
-    assert decode_resource_begin(begin_payload).format == 2
+    assert decode_resource_begin(begin_payload).format is ResourceFormat.QOI
+    # An undefined format stays a number, for status selection to refuse.
+    begin_payload[24:28] = (99).to_bytes(4, "little")
+    assert decode_resource_begin(begin_payload).format == 99
 
     empty_chunk = struct.pack("<QQQQ", 1, 1, 1, 0)
     assert decode_resource_chunk(empty_chunk).data == b""
@@ -475,7 +477,6 @@ def test_resource_codecs_preserve_semantic_errors_for_authority_precedence():
         0,
         UINT32_MAX,
         0,
-        bytes(32),
     )
     assert decode_resource_begin(encode_resource_begin(begin)) == begin
 
@@ -932,12 +933,18 @@ def test_image_body_rejects_bad_fit_padding_resource_and_length():
     assert fit.value.code is RetainedWireErrorCode.ENUM
 
     payload[72:76] = (1).to_bytes(4, "little")
-    payload[77] = 1
+    payload[77] = 4
+    with pytest.raises(RetainedWireError) as flags:
+        decode_object_definition(payload)
+    assert flags.value.code is RetainedWireErrorCode.RESERVED
+
+    payload[77] = 0
+    payload[78] = 1
     with pytest.raises(RetainedWireError) as padding:
         decode_object_definition(payload)
     assert padding.value.code is RetainedWireErrorCode.RESERVED
 
-    payload[77] = 0
+    payload[78] = 0
     payload[64:72] = bytes(8)
     with pytest.raises(RetainedWireError) as resource:
         decode_object_definition(payload)
@@ -947,6 +954,52 @@ def test_image_body_rejects_bad_fit_padding_resource_and_length():
     with pytest.raises(RetainedWireError) as trailing:
         decode_object_definition(payload + b"\0")
     assert trailing.value.code is RetainedWireErrorCode.PAYLOAD
+
+
+def test_image_clip_names_part_of_the_object_rectangle():
+    """RETAINED-1 Section 11.3: CLIP adds a clip rectangle within the
+    object's, and the body is exactly 32 bytes with it and 16 without."""
+
+    clipped = ObjectWireDefinition(
+        1,
+        1,
+        1,
+        1,
+        0,
+        ObjectBounds(-3, 4, 20, 10),
+        0,
+        True,
+        ImageBody(1, ImageFit.CONTAIN, 255, backdrop=True, clip=ImageClip(0, 3, 20, 7)),
+    )
+    payload = encode_object_definition(clipped)
+    assert len(payload) == 64 + 32
+    assert payload[77] == IMAGE_FLAG_BACKDROP | IMAGE_FLAG_CLIP
+    assert struct.unpack_from("<IIII", payload, 80) == (0, 3, 20, 7)
+    assert decode_object_definition(payload) == clipped
+
+    # The flag without the clip, and the clip without the flag.
+    short = bytearray(payload[:80])
+    with pytest.raises(RetainedWireError) as missing:
+        decode_object_definition(short)
+    assert missing.value.code is RetainedWireErrorCode.PAYLOAD
+    unflagged = bytearray(payload)
+    unflagged[77] = IMAGE_FLAG_BACKDROP
+    with pytest.raises(RetainedWireError) as extra:
+        decode_object_definition(unflagged)
+    assert extra.value.code is RetainedWireErrorCode.PAYLOAD
+
+    # Empty extents, and a clip past the object's rectangle.
+    empty = bytearray(payload)
+    empty[88:92] = bytes(4)
+    with pytest.raises(RetainedWireError) as zero:
+        decode_object_definition(empty)
+    assert zero.value.code is RetainedWireErrorCode.SCALAR
+    outside = bytearray(payload)
+    outside[84:88] = (4).to_bytes(4, "little")
+    with pytest.raises(RetainedWireError):
+        decode_object_definition(outside)
+    with pytest.raises(ValueError, match="outside the object"):
+        replace(clipped, body=ImageBody(1, ImageFit.CONTAIN, 255, clip=ImageClip(1, 0, 20, 1)))
 
 
 @pytest.mark.parametrize(

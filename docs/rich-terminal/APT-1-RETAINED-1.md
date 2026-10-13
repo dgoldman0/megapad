@@ -24,8 +24,9 @@ semantics. `RET_CONTROLS` therefore carries renderer-neutral control identity,
 hierarchy, state, ordering, optional bounds, labels, shortcuts, and
 revision-bound activation while leaving representation to the selected
 renderer. `RET_CONTROL_COLLECTIONS` adds text-area, logical-grid, and tab
-semantics, and `RET_CONTROL_ITEMS` adds item views, through that same
-namespace rather than an applet or renderer API.
+semantics, `RET_CONTROL_ITEMS` adds item views, and `RET_CONTROL_DOCUMENTS`
+adds documents, through that same namespace rather than an applet or
+renderer API.
 Another trusted system renderer may use the same engine without creating
 another protocol or session. No applet is a direct protocol consumer or
 determines this profile's semantics or limits.
@@ -94,7 +95,7 @@ use the APT-1 control reserve under Section 17.
 | `000b` | `OWNER_DROP` | C -> T | reserve | 32 bytes |
 | `000c` | `RESOURCE_ABORT` | C -> T | reserve | 32 bytes |
 | `0205` | `CONTROL_EVENT` | T -> C | ordinary | 40, 48, 56, or 64 bytes by kind |
-| `1000` | `RESOURCE_BEGIN` | C -> T | ordinary | 80 bytes |
+| `1000` | `RESOURCE_BEGIN` | C -> T | ordinary | 48 bytes |
 | `1001` | `RESOURCE_CHUNK` | C -> T | ordinary | 32-byte prefix + bytes |
 | `1002` | `RESOURCE_COMMIT` | C -> T | ordinary | 24 bytes |
 | `1003` | `RESOURCE_DROP` | C -> T | ordinary | 24 bytes |
@@ -120,10 +121,12 @@ use the APT-1 control reserve under Section 17.
 | `8000` | `RET_QUERY` | C -> T | ordinary optional | 8 bytes |
 | `8001` | `RET_CAPS` | T -> C | ordinary optional | 64 bytes |
 | `8002` | `RET_FORMATS` | T -> C | ordinary optional | 64 bytes |
+| `8003` | `PIXELS_QUERY` | C -> T | ordinary optional | 24 bytes |
+| `8004` | `PIXELS` | T -> C | ordinary optional | 40 bytes |
 
 The message IDs not listed here remain reserved by APT-1. In particular,
-`0206..0fff`, `1004..1fff`, `2003..200f`, `2013..201f`, `2025..2fff`,
-`3004..3fff`, `4003..7fff`, and `8003..ffff` have no meaning under this
+`0206..0fff`, `1004..1fff`, `2004..200f`, `2013..201f`, `2025..2fff`,
+`3004..3fff`, `4003..7fff`, and `8005..ffff` have no meaning under this
 contract. A sender must not emit them; a receiver still applies the base bit-15
 optional-skip rule to the latter range.
 
@@ -223,7 +226,7 @@ Feature bits are:
 |---:|---|---|
 | 0 | `RET_CORE` | owners, regions, `GLYPH_RUN`, global transactions, hidden rebuild/reveal |
 | 1 | `RET_VECTOR` | `GROUP` and `POLYLINE` objects |
-| 2 | `RET_RGBA_IMAGE` | immutable raw RGBA8 resources and `IMAGE` objects |
+| 2 | `RET_RGBA_IMAGE` | immutable picture resources and `IMAGE` objects |
 | 3 | `RET_INSTRUMENT` | `READOUT`, `METER`, and `STATUS` objects |
 | 4 | `RET_SERIES` | bounded i64 series, `PLOT`, and `WAVEFORM` objects |
 | 5 | `RET_CADENCE` | bounded display cadence and physical coalescing |
@@ -237,8 +240,9 @@ Feature bits are:
 | 13 | `RET_TASKBARS` | fixed-slot taskbar, task, and launcher CONTROL kinds |
 | 14 | `RET_FIELDS` | typed FIELD controls with explicit label/value slots |
 | 15 | `RET_GRID_CELLS` | typed NUMBER, FORMULA, and ERROR roles in TEXT_GRID |
+| 16 | `RET_CONTROL_DOCUMENTS` | the document CONTROL kind and its input |
 
-Bits 16 through 63 are zero. `RET_CORE` is mandatory for every supporting
+Bits 17 through 63 are zero. `RET_CORE` is mandatory for every supporting
 terminal. Every other advertised feature depends on `RET_CORE`. `RET_SERIES`
 also requires `RET_INSTRUMENT`, because its visible consumers are `PLOT` and
 `WAVEFORM`. `RET_CADENCE` may be advertised independently of SERIES.
@@ -247,7 +251,7 @@ also requires `RET_INSTRUMENT`, because its visible consumers are `PLOT` and
 in Sections 5, 6, and 9.1. `RET_CONTROL_COLLECTIONS` requires `RET_CONTROLS` and
 uses the same limits; it adds no item-count or content-byte policy maximum.
 `RET_CONTROL_ITEMS` requires `RET_CONTROL_COLLECTIONS` and likewise adds no
-maximum of its own.
+maximum of its own, and so does `RET_CONTROL_DOCUMENTS`.
 `RET_TASKBARS` requires `RET_CONTROLS`, independently of the collection and
 item-view features. It adds no capacity field: roots and entries consume the
 existing object and UTF-8 reservations. Its minimum inbound payload is the
@@ -288,14 +292,15 @@ maximum. The general checked floor is
 `200 + maximum_retained_operation_payload`. Exact family floors are 264 for
 CORE with no objects, `280 + max_glyph_run_bytes` when glyph runs are enabled,
 `280 + 8 * max_path_points` for VECTOR,
-`max(304 + max_glyph_run_bytes, 312)` for INSTRUMENT, 280 for RGBA_IMAGE, and
+`max(304 + max_glyph_run_bytes, 312)` for INSTRUMENT, 296 for RGBA_IMAGE, and
 `max(240 + 16 * max_samples_per_append, 312)` for SERIES. CONTROLS adds no
 item-size maximum; it instead requires the negotiated inbound payload and
 retained transaction maxima to admit at least one canonical MENU_BAR root,
 whose minimum complete transaction is 280 bytes. `RET_CONTROL_COLLECTIONS`
 raises that floor to 352 bytes for one CONTROL prefix plus the 72-byte
 zero-item STX1 body, which also covers the 56-byte smallest ITM1 body of
-`RET_CONTROL_ITEMS`. These are complete frame bytes, not payload bytes.
+`RET_CONTROL_ITEMS` and the 32-byte smallest DOC1 body of
+`RET_CONTROL_DOCUMENTS`. These are complete frame bytes, not payload bytes.
 `RET_PANES` depends only on CORE and requires positive object and aggregate
 UTF-8 capacity and at least two regions for distinct chrome and content. Its
 operation-count minimum remains one: those regions can be staged in earlier
@@ -332,7 +337,7 @@ now-forbidden legacy snapshot path.
 |---:|---|---|
 | 0 | `bounds_format` = 2 (`CELL_RECT32`) | u32 |
 | 4 | `color_format` = 1 (`RGBA8`) | u32 |
-| 8 | `image_format` | u32 |
+| 8 | `image_formats` | u32 |
 | 12 | `max_image_width` | u32 |
 | 16 | `max_image_height` | u32 |
 | 20 | `max_path_points` | u32 |
@@ -344,9 +349,13 @@ now-forbidden legacy snapshot path.
 | 48 | `total_utf8_bytes` | u64 |
 | 56 | `reserved` = 0 | u64 |
 
-`image_format` is 1 for raw row-major sRGB straight-alpha RGBA8 and zero when
-`RET_RGBA_IMAGE` is absent. Image width and height are positive exactly when
-that feature is set. `max_path_points` is positive exactly when VECTOR is set.
+`image_formats` is the set of picture formats the terminal takes, one bit
+each: bit 0 raw row-major sRGB straight-alpha RGBA8, bit 1 QOI, bit 2 PNG and
+bit 3 JPEG files (Section 8); other bits are zero. It is zero when
+`RET_RGBA_IMAGE` is absent. When that feature is set, bit 0 is set, since every
+terminal that shows pictures takes raw pixels. Image width and height are
+positive exactly when that feature is set, and they bound the decoded picture
+in every format. `max_path_points` is positive exactly when VECTOR is set.
 `max_glyph_run_bytes` is positive exactly when glyph-run objects are enabled;
 that requires positive `max_objects` and sufficient aggregate UTF-8 capacity.
 INSTRUMENT also requires that text capacity because READOUT formatting shares
@@ -375,8 +384,8 @@ assumption that some unrelated owner will use less.
 
 Capabilities must also be consistent with both negotiated base payload maxima.
 RET_CORE requires a client-to-terminal payload maximum of at least 64 and a
-terminal-to-client maximum of at least 64. IMAGE requires at least 80 inbound
-bytes and `32 + max_resource_chunk_bytes` must fit. VECTOR requires
+terminal-to-client maximum of at least 64. IMAGE requires at least 96 inbound
+bytes, for an IMAGE with `CLIP`, and `32 + max_resource_chunk_bytes` must fit. VECTOR requires
 `80 + 8 * max_path_points` to fit. `80 + max_glyph_run_bytes` must fit when
 glyph runs are enabled. INSTRUMENT also requires
 `104 + max_glyph_run_bytes` to fit and at least 112 bytes
@@ -389,7 +398,9 @@ the fixed prefix, at least 40 terminal-to-client payload bytes for
 CONTROL prefix and the smallest STX1 body fit, at least 64 terminal-to-client
 payload bytes for a positioned `CONTROL_EVENT`, and a retained transaction
 maximum of at least 352 bytes. `RET_CONTROL_ITEMS` needs no more: its
-smallest body and its 64-byte item events fit those minima. `RET_FIELDS`
+smallest body and its 64-byte item events fit those minima. Nor does
+`RET_CONTROL_DOCUMENTS`, whose smallest body is 32 bytes and whose events are
+`SCROLL` and `FOLLOW`. `RET_FIELDS`
 requires at least 176 inbound payload bytes for CONTROL plus FDC1, 376 complete
 transaction bytes, and 56 outbound payload bytes for ADJUST. The existing CORE
 outbound minimum of 64 remains in force and already covers that event. A client must
@@ -406,7 +417,9 @@ model revision within the `presentation_epoch`.
 
 A transaction ID used by either family must be greater than every previously
 started transaction ID in that epoch. A sender must not begin either family
-while the other is open or while the preceding `TX_RESULT` is outstanding.
+while the other is open or while the preceding `TX_RESULT` is outstanding. An
+open resource upload does not hold this slot: complete transactions may run
+between the upload's frames (Section 8).
 Every successful CELL `TX_COMMIT`, `SNAPSHOT_COMMIT`, or `PRESENT_COMMIT`
 increments the same revision by exactly one. An abort or rejected transaction
 does not increment it. Existing `TX_RESULT` reports the resulting global
@@ -627,7 +640,8 @@ individual count quota must not exceed its corresponding advertised maximum,
 and the sum of region, resource, object, and series count quotas respectively
 across all live owners must not exceed `max_regions`, `max_resources`,
 `max_objects`, and `max_series`. `object_quota` is one shared reservation for
-the target's combined OBJECT records, CONTROL records, and STX1 and ITM1 items;
+the target's combined OBJECT records, CONTROL records, STX1 and ITM1 items,
+and DOC1 blocks;
 it is not multiplied when CONTROLS is advertised. Resource-byte, UTF-8-byte, and
 sample-slot reservations across all live owners likewise must not exceed their
 advertised totals. Checked addition precedes mutation. An individually valid
@@ -660,15 +674,22 @@ to a tombstone, or a different generation for a live ID, is stale authority.
 `OWNER_OPEN` is serialized outside transactions and resource upload. One
 `RET_RESULT` completes it before another lifecycle request.
 
-`OWNER_RESIZE` asks the terminal to grow a live owner's reservation. It has
+`OWNER_RESIZE` asks the terminal to change a live owner's reservation. It has
 the `OWNER_OPEN` layout and carries the owner's complete new quota set. Every
-field must be at least the owner's current quota and at most its advertised
-maximum. The terminal checks the new aggregate sums exactly as for an open,
-with the owner's old reservation replaced by the new one, and installs the new
-reservation atomically before RET_OK. A request equal to the current quotas
-succeeds and changes nothing. A request that would exceed any aggregate total
-returns RET_NO_CAPACITY and leaves every reservation unchanged. A reservation
-never shrinks within an owner generation; a smaller field is RET_INVALID.
+field must be at most its advertised maximum. Every field except
+`resource_quota` and `resource_byte_quota` must also be at least the owner's
+current quota: those reservations bound each scene target, which active and
+hidden usage must each fit, so they never shrink within an owner generation.
+The two resource fields may be lower than the current quota, down to the
+owner's current owner-wide resource usage, so an owner can give back resource
+space it no longer uses. No upload may be open during the request, so that
+usage is exactly the owner's committed resources. The terminal checks the new
+aggregate sums exactly as for an open, with the owner's old reservation
+replaced by the new one, and installs the new reservation atomically before
+RET_OK. A request equal to the current quotas succeeds and changes nothing. A
+request that would exceed any aggregate total returns RET_NO_CAPACITY and
+leaves every reservation unchanged; a request that only lowers resource
+fields always fits. A field below what this paragraph allows is RET_INVALID.
 `OWNER_RESIZE` follows the same serialization and reset-crossing rules as
 `OWNER_OPEN`. The terminal keeps a count of refused reservations and the last
 refusal (owner, requested quotas, quotas still held) for host status and logs;
@@ -755,7 +776,7 @@ Status values are:
 | 3 | `RET_NO_CAPACITY` | declared quota/storage cannot be reserved |
 | 4 | `RET_DUPLICATE_ID` | ID violates monotonic/duplicate definition rule |
 | 5 | `RET_IN_USE` | resource/owner lifecycle conflicts with live references |
-| 6 | `RET_BAD_CONTENT` | uploaded resource bytes fail digest/content validation |
+| 6 | `RET_BAD_CONTENT` | an uploaded file does not decode to its declared picture |
 | 7 | `RET_ABORTED` | upload was explicitly or semantically aborted |
 
 Exactly one RET_RESULT is sent for OWNER_OPEN, OWNER_RESIZE, RESOURCE_BEGIN, RESOURCE_COMMIT,
@@ -776,9 +797,9 @@ Lifecycle status selection is deterministic:
 | OWNER_OPEN stale/different generation | RET_STALE_OWNER | unchanged |
 | OWNER_OPEN scalar, feature, or quota-above-advertised error | RET_INVALID | unchanged |
 | OWNER_OPEN valid reservation cannot fit record/global totals | RET_NO_CAPACITY | unchanged |
-| OWNER_RESIZE larger or equal quotas that fit the global totals | RET_OK | reservation replaced by the request |
+| OWNER_RESIZE allowed quotas that fit the global totals | RET_OK | reservation replaced by the request |
 | OWNER_RESIZE absent, dropped, or different-generation owner | RET_STALE_OWNER | unchanged |
-| OWNER_RESIZE scalar, feature, smaller-than-current, or quota-above-advertised error | RET_INVALID | unchanged |
+| OWNER_RESIZE scalar, feature, disallowed-shrink, or quota-above-advertised error | RET_INVALID | unchanged |
 | OWNER_RESIZE valid growth cannot fit global totals | RET_NO_CAPACITY | unchanged |
 | RESOURCE_BEGIN stale owner | RET_STALE_OWNER | no upload opened |
 | RESOURCE_BEGIN ID at/below namespace high-water | RET_DUPLICATE_ID | no upload opened |
@@ -790,7 +811,7 @@ Lifecycle status selection is deterministic:
 | RESOURCE_COMMIT owner ID/generation differs from the open upload tuple | RET_STALE_OWNER | actual upload and usage unchanged |
 | RESOURCE_COMMIT exact live owner but absent/wrong resource tuple | RET_INVALID | actual upload and usage unchanged |
 | RESOURCE_COMMIT exact-upload incomplete data | RET_INVALID | exact upload destroyed; usage/staging released |
-| RESOURCE_COMMIT exact-upload digest mismatch | RET_BAD_CONTENT | exact upload destroyed; usage/staging released |
+| RESOURCE_COMMIT exact-upload file that does not decode to its declared size | RET_BAD_CONTENT | exact upload destroyed; usage/staging released |
 | RESOURCE_DROP absent/wrong tuple | RET_INVALID or RET_STALE_OWNER | unchanged |
 | RESOURCE_DROP referenced by active or hidden model | RET_IN_USE | unchanged |
 | RESOURCE_ABORT exact upload and valid reason | RET_ABORTED | upload destroyed |
@@ -802,15 +823,39 @@ selects status from local exception text.
 
 ## 8. Immutable RGBA resources
 
-Resources are immutable content-address-verified byte objects. RETAINED-1
-defines one resource format: raw row-major sRGB straight-alpha RGBA8, with no
-row padding. Resource IDs are owner-local, nonzero, and strictly increasing
-within an owner generation. The content digest is SHA3-256 over the exact raw
-bytes. Equal digests do not merge authority or identifiers.
+Resources are immutable pictures. A client uploads each in one of the formats
+the terminal advertises in `RET_FORMATS`:
 
-Only one resource upload may exist session-wide. No transaction, owner
-lifecycle request, or second upload may overlap it. OWNER_OPEN has already
-reserved the owner's count and byte quota. Before acknowledging BEGIN, the
+| Format | Bytes sent |
+|---:|---|
+| 1 | raw row-major sRGB straight-alpha RGBA8, with no row padding |
+| 2 | a QOI file |
+| 3 | a PNG file |
+| 4 | a JPEG file |
+
+Format `n` is advertised by bit `n - 1` of `image_formats`. The terminal
+decodes a file into sRGB straight-alpha RGBA8 pixels, and those pixels are the
+resource it holds and draws, whatever format they came in. It takes a file's
+colour values as sRGB, ignoring any embedded colour profile or gamma. A JPEG
+decodes opaque. An animated file is its default image. The client sends a
+file's bytes as they are, so it need not decode or scale a picture the
+terminal decodes.
+
+Resource IDs are owner-local, nonzero, and strictly increasing within an owner
+generation. The terminal knows a resource only by owner, generation and ID; it
+compares no content.
+
+Only one resource upload may exist session-wide. No owner lifecycle request,
+RESOURCE_DROP, PIXELS_QUERY, or second upload may overlap it. Transactions
+may: between the upload's frames, that is after BEGIN's successful RET_RESULT,
+after the CREDIT covering each chunk, and before COMMIT or ABORT, the client
+may run complete CELL and PRESENT transactions, so an upload never holds up the
+screen. RESOURCE_CHUNK, RESOURCE_COMMIT, and RESOURCE_ABORT go only outside a
+transaction and while no TX_RESULT is outstanding, and no transaction begins
+while a chunk awaits its covering CREDIT, so an upload's frames never
+interleave with a transaction's. A transaction can reference only committed
+resources, so it never names the resource being uploaded. OWNER_OPEN has
+already reserved the owner's count and byte quota. Before acknowledging BEGIN, the
 terminal must atomically charge the declared resource count and bytes to that
 owner's remaining owner-wide resource usage and acquire its bounded physical
 upload staging. Neither action changes any owner's quota reservation or the
@@ -818,8 +863,8 @@ aggregate live-owner reservation sums.
 
 The open upload is identified by the exact tuple `(owner_id, owner_generation,
 resource_id)`. After base framing/state validation, RESOURCE_CHUNK and
-RESOURCE_COMMIT compare that tuple before offset, length, completeness, digest,
-or other destructive validation. If an upload is open and owner ID or generation
+RESOURCE_COMMIT compare that tuple before offset, length, completeness,
+decoding, or other destructive validation. If an upload is open and owner ID or generation
 differs—even when the frame names another independently live owner—the result is
 RET_STALE_OWNER. If the owner tuple matches but the resource differs, the result
 is RET_INVALID. With no open upload, a stale owner tuple is RET_STALE_OWNER and
@@ -834,18 +879,20 @@ staging unchanged. It cannot destroy or abort another owner's upload.
 u64 owner_id
 u64 owner_generation
 u64 resource_id
-u32 format              = 1 (raw RGBA8)
+u32 format              (1 raw RGBA8, 2 QOI, 3 PNG, 4 JPEG)
 u32 width
 u32 height
 u32 flags               = 0
 u64 byte_length
-u8  sha3_256[32]
 ```
 
-Width and height are positive and within RET_FORMATS. `byte_length` must equal
-checked `width * height * 4`; one resource-count slot and `byte_length` bytes
-must fit the opening owner's remaining reserved usage and be representable by
-the implementation's negotiated physical staging policy. A successful
+The format is one the terminal advertises. Width and height are the decoded
+picture's, positive and within RET_FORMATS. `byte_length` counts the bytes
+sent: for raw pixels it must equal checked `width * height * 4`, and for a file
+it is the file's length, which is positive. One resource-count slot and the
+decoded size, checked `width * height * 4`, must fit the opening owner's
+remaining reserved usage, whatever the format, and `byte_length` must be
+representable by the implementation's negotiated physical staging policy. A successful
 RET_RESULT opens the upload; chunks sent before it are state errors. Another
 owner's idle usage does not admit this resource and an upload does not alter
 aggregate owner reservations.
@@ -864,7 +911,11 @@ Data is nonempty and no longer than `max_resource_chunk_bytes`. Offset must
 equal the number of bytes already accepted; chunks are contiguous, ordered,
 and non-overlapping. The client must observe CREDIT covering one complete chunk
 before sending the next, so bounded receiver storage never depends on an
-unbounded run of chunks. A well-framed chunk with stale authority returns
+unbounded run of chunks. Because transactions run between chunks, a
+transaction waits behind at most one chunk. The terminal, which knows its own
+link, therefore advertises a `max_resource_chunk_bytes` that the link carries
+in about one frame's time, and the client sends chunks of that size, the last
+carrying what remains. A well-framed chunk with stale authority returns
 RET_STALE_OWNER and a same-owner wrong resource returns RET_INVALID without
 touching the actual upload, as specified above. Only after the full upload tuple
 matches do bad offset, empty data, excessive chunk length, checked end-offset
@@ -880,9 +931,10 @@ for the exact open upload tuple and after exactly `byte_length` bytes. A wrong
 owner/generation returns RET_STALE_OWNER and a same-owner absent/wrong resource
 returns RET_INVALID; neither changes the actual upload. For an exact tuple,
 incomplete data returns RET_INVALID and destroys the upload. Otherwise the
-terminal validates SHA3-256 before publishing the immutable resource and
-returning RET_OK. A digest mismatch returns RET_BAD_CONTENT and destroys the
-exact upload without creating the ID. Each exact-upload rejection releases its
+terminal decodes a file before publishing the immutable resource and returning
+RET_OK; raw pixels need no decoding. A file that does not decode, or decodes
+to another width or height than declared, returns RET_BAD_CONTENT and
+destroys the exact upload without creating the ID. Each exact-upload rejection releases its
 uncommitted owner-wide resource-usage charge and physical staging but no owner
 quota reservation. No exact-upload COMMIT error leaves a commit-uncertain
 upload open. The acknowledged resource ID high-water remains consumed.
@@ -896,8 +948,77 @@ matching open upload and returns RET_ABORTED. It never publishes a resource.
 outside a transaction/upload and when the resource has no reference in either
 the active model or a committed hidden rebuild. It releases that resource's
 owner-wide count and byte usage and returns RET_OK. It does not shrink the
-owner reservation or aggregate live-owner reservation sums. Dropping an
-absent ID is RET_INVALID; IDs are not reused.
+owner reservation or aggregate live-owner reservation sums; an owner gives
+that space back with OWNER_RESIZE. Dropping an absent ID is RET_INVALID; IDs
+are not reused.
+
+### 8.1 Pixel size of a picture area
+
+Before it makes an image resource, a client can ask how many pixels a cell
+rectangle covers on the selected surface, so that it never decodes, holds,
+or sends more pixels than the screen can show. The answer is advice only. The
+terminal still scales every resource to its IMAGE object's rectangle by the
+object's fit, whatever size the resource has.
+
+`PIXELS_QUERY` has exact layout `<QiiII>`:
+
+```text
+u64 query_id
+i32 cell_x
+i32 cell_y
+u32 cols
+u32 rows
+```
+
+The rectangle is a `CELL_RECT32` in the selected surface's cell grid.
+`query_id` is a nonzero value that the client chooses and the answer echoes.
+The client may send a query only while RETAINED-1 is enabled with
+`RET_RGBA_IMAGE`, the session is ACTIVE, and no CELL or PRESENT transaction,
+resource upload, or RET_RESULT is outstanding. At most one query may be
+unanswered: the client sends another only after it has received the answer to
+the last. A query with a zero ID or a zero extent, or one that breaks any of
+these rules, is a fatal protocol error under the base contract. A terminal
+without `RET_RGBA_IMAGE` skips and recredits the query under the APT-1
+unknown-optional rule and sends no answer.
+
+The terminal answers each query with exactly one `PIXELS` frame of exact
+layout `<QQiiIIII>`:
+
+```text
+u64 query_id
+u64 geometry_generation
+i32 cell_x
+i32 cell_y
+u32 cols
+u32 rows
+u32 pixel_width
+u32 pixel_height
+```
+
+It echoes the query's ID and rectangle and names the geometry generation, as
+RESIZE carries it, for which it computed the answer. `pixel_width` and
+`pixel_height` count the physical pixels the whole rectangle would cover at
+the selected sink's current cell scale, including any part outside the
+surface; a count larger than u32 can hold is answered as the u32 maximum.
+Where parts of the surface differ in pixel density, the terminal
+answers for the densest part the rectangle covers. Both are zero when no sink
+is selected or the selected sink has no pixel raster; one is never zero
+without the other.
+
+The answer is ordinary terminal-to-client traffic, sent in stream order after
+the terminal consumes the query. Input the terminal sent in the meantime may
+have used the client's grant, so the client needs no spare grant to ask. If
+the grant has no room for the 80-byte answer frame when the terminal consumes
+the query, the terminal owes the answer: it sends no other ordinary frame
+until a CREDIT makes room and the answer has gone. The query frame is
+recredited as any ordinary frame is.
+
+An answer stays useful while its geometry generation is current, and the
+terminal never sends an answer nobody asked for. After a RESIZE with a newer
+generation or a soft reset, the client asks again if it needs to. The
+selected sink can also change without either, so a client may ask again at
+any time. A soft reset or epoch end cancels an unanswered query, which then
+gets no answer.
 
 ## 9. Regions
 
@@ -961,11 +1082,12 @@ renderer-neutral semantic extension rather than pixel inference.
 A region barrier point that no control surface covers shows CELL or residual
 content, so a pointer gesture may start there and reach the client as raw
 `POINTER` at that cell (APT-1 Section 12). The visible root bounds of every
-`MENU_BAR`, `TABSET`, `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW`, `TASKBAR`, and `FIELD`, and every
-open menu popup, are control surfaces laid out by the renderer: a point on
-one never starts a raw gesture. It resolves to an activatable target, to a
-`TEXT_AREA`/`TEXT_GRID` position or an `ITEM_VIEW` item under
-SEMANTIC-CONTENT-1, or to nothing.
+`MENU_BAR`, `TABSET`, `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW`, `DOCUMENT`,
+`TASKBAR`, and `FIELD`, and every open menu popup, are control surfaces laid
+out by the renderer: a point on one never starts a raw gesture. It resolves
+to an activatable target, to a `TEXT_AREA`/`TEXT_GRID` position, an
+`ITEM_VIEW` item, or a `DOCUMENT` link under SEMANTIC-CONTENT-1, or to
+nothing.
 
 Regions are stamped with PRESENT_BEGIN `geometry_generation`. A resize makes
 the active retained plane hidden and layout-rebuild-required. A layout reveal
@@ -974,9 +1096,9 @@ is invalid until every surviving region is stamped with the new generation.
 ### 9.1 Semantic controls
 
 `RET_CONTROLS` defines the independent CONTROL identity namespace and its menu
-kinds; `RET_CONTROL_COLLECTIONS` adds text, grid, and tab kinds, and
+kinds; `RET_CONTROL_COLLECTIONS` adds text, grid, and tab kinds,
 `RET_CONTROL_ITEMS` the item view, `RET_TASKBARS` taskbar roots and entries,
-and `RET_FIELDS` typed fields,
+`RET_FIELDS` typed fields, and `RET_CONTROL_DOCUMENTS` the document,
 in that same namespace. `CONTROL_DEFINE` and `CONTROL_REPLACE` have the exact
 80-byte prefix `<QQQHHiQQIiiIIIII>`, followed immediately by `label_bytes`
 bytes, `shortcut_bytes` bytes, and `content_bytes` bytes with no padding:
@@ -1026,11 +1148,13 @@ Control kinds are:
 | 11 | `TASK` (requires `RET_TASKBARS`) |
 | 12 | `LAUNCHER` (requires `RET_TASKBARS`) |
 | 13 | `FIELD` (requires `RET_FIELDS`) |
+| 14 | `DOCUMENT` (requires `RET_CONTROL_DOCUMENTS`) |
 
 Menu controls, `TABSET`, `TAB`, `TASKBAR`, `TASK`, and `LAUNCHER` require
 `content_bytes = 0`. `TEXT_AREA`
-and `TEXT_GRID` require one canonical STX1 text collection, and `ITEM_VIEW`
-one canonical ITM1 item collection. Their exact header, item, graph, state,
+and `TEXT_GRID` require one canonical STX1 text collection, `ITEM_VIEW`
+one canonical ITM1 item collection, and `DOCUMENT` one canonical DOC1
+document. Their exact header, item, block, graph, state,
 replacement, and quota rules are specified in the MegaPad-owned
 `docs/rich-terminal/SEMANTIC-CONTENT-1.md` contract. Menu and collection
 roots use the same CELL_RECT32 geometry contract. TEXT_GRID content carrying NUMBER, FORMULA,
@@ -1127,7 +1251,7 @@ equal numeric IDs in the two namespaces are distinct. `CONTROL_REPLACE`
 requires an existing exact-target control and resends its complete wire record.
 Menu, TABSET, and TASKBAR records remain state-only replacements; TAB, TASK,
 and LAUNCHER may replace state, label, and shortcut; TEXT_AREA, TEXT_GRID,
-ITEM_VIEW, and FIELD may replace state and their complete content. Changed
+ITEM_VIEW, DOCUMENT, and FIELD may replace state and their complete content. Changed
 content requires a strictly newer content revision; state-only changes preserve
 the current content revision. FIELD labels remain fixed for their identity. Every identity, kind,
 authority, hierarchy, order, bounds, and geometry field remains exact. The
@@ -1143,7 +1267,8 @@ generation.
 
 Each committed control consumes one slot from the target's existing
 `object_quota`. Each STX1 or ITM1 item carried by a text, grid, or item-view
-control consumes one additional slot because it is a separately retained,
+control, and each DOC1 block carried by a document, consumes one additional
+slot because it is a separately retained,
 stable-keyed value that a selected renderer may need to
 materialize. Each FDC1 choice consumes one additional slot, including choices
 that are not the current value. OBJECTs, controls, and semantic items are summed before the
@@ -1181,8 +1306,8 @@ resulting authoritative state in a later transaction.
 | 1 | `ACTIVATE` | 40 bytes | `MENU`, `MENU_ITEM`, `TAB`, `TASK`, `LAUNCHER`, `FIELD` | 8; `TAB` also 9; task entries also 13; FIELD also 14 |
 | 2 | `PLACE` | 64 bytes | `TEXT_AREA`, `TEXT_GRID` | 8 and 9 |
 | 3 | `EXTEND` | 64 bytes | `TEXT_AREA` | 8 and 9 |
-| 4 | `SCROLL` | 48 bytes | `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW` | 8 and 9; `ITEM_VIEW` also 10 |
-| 5 | `FOLLOW` | 64 bytes | `TEXT_AREA` | 8 and 9 |
+| 4 | `SCROLL` | 48 bytes | `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW`, `DOCUMENT` | 8 and 9; `ITEM_VIEW` also 10; `DOCUMENT` also 16 |
+| 5 | `FOLLOW` | 64 bytes | `TEXT_AREA`, `DOCUMENT` | 8 and 9; `DOCUMENT` also 16 |
 | 6 | `SELECT` | 64 bytes | `ITEM_VIEW` | 8, 9, and 10 |
 | 7 | `OPEN` | 64 bytes | `ITEM_VIEW` | 8, 9, and 10 |
 | 8 | `EXPAND` | 64 bytes | `ITEM_VIEW` | 8, 9, and 10 |
@@ -1204,8 +1329,8 @@ boundary behavior and publishes the resulting value; the host never changes
 the retained field value in response to this intent. All other kind values,
 lengths, and nonzero reserved fields are
 invalid. Modifier bits are the APT-1 KEY modifier bits and all other bits are
-zero. SEMANTIC-CONTENT-1 defines how a position names STX1 content and an
-item names ITM1 content.
+zero. SEMANTIC-CONTENT-1 defines how a position names STX1 or DOC1 content
+and an item names ITM1 content.
 
 The terminal may emit an event only for the exact active owner generation and
 control ID of a target kind listed for it, when the complete current control
@@ -1373,8 +1498,10 @@ the generic OBJECT pointer behavior. The APT-1 base
 contract reserves `4000` through `4FFF` for semantic controls; this profile now
 defines `CONTROL_DEFINE`, `CONTROL_REPLACE`, and `CONTROL_DROP` at `4000`
 through `4002` under `RET_CONTROLS`; feature bit 9 adds text, grid, and tab
-kinds, and feature bit 10 the item view, to those same messages. Controls remain outside the OBJECT namespace
-even though OBJECTs, CONTROL records, and STX1 and ITM1 items share the owner
+kinds, feature bit 10 the item view, and feature bit 16 the document, to
+those same messages. Controls remain outside the OBJECT namespace
+even though OBJECTs, CONTROL records, STX1 and ITM1 items, and DOC1 blocks
+share the owner
 object-count and aggregate UTF-8 quotas. A complete GLYPH_RUN screen still cannot, by
 itself, satisfy the semantic-control vertical.
 
@@ -1404,9 +1531,29 @@ closed path adds the last-to-first segment; it does not imply fill.
 
 ### 11.3 IMAGE
 
-The body is exact `<QIB3x>` (16 bytes): resource ID, fit mode, and opacity.
-Fit 0 stretches, 1 contains, and 2 covers. Opacity is 0..255 and multiplies
-resource alpha. The resource must be the same owner generation and format 1.
+The body begins with exact `<QIBB2x>` (16 bytes): resource ID, fit mode,
+opacity, and flags. Fit 0 stretches, 1 contains, and 2 covers. Opacity is
+0..255 and multiplies resource alpha. The resource must be the same owner
+generation, in any format. The renderer resamples the picture to its fitted
+size with a filter of its choosing.
+
+Flags bit 0 is `BACKDROP`. With it set, the renderer first paints its own
+opaque background over the object's whole rectangle, within its clip, and
+then the picture. Letterbox bars, transparent pixels, and pixels faded by
+opacity then show that background, never the CELL plane or any other content
+beneath the object. Opacity does not apply to the backdrop, and its colour is
+the renderer's choice. BACKDROP changes only paint; pointer behavior stays
+the generic OBJECT rule.
+
+Flags bit 1 is `CLIP`. With it set, the body continues with exact `<IIII>`
+(16 bytes): x, y, cols, and rows of a clip rectangle in cells, relative to
+the object's origin. Both extents are positive and the rectangle lies within
+the object's. The renderer fits and places the picture against the object's
+whole rectangle, as without `CLIP`, and paints the picture and any backdrop
+only inside the clip rectangle. A client uses it to show the part of a
+picture that a scrolled view shows, such as a figure partly scrolled out of
+a `DOCUMENT`. Without `CLIP` the body is exactly 16 bytes, and with it
+exactly 32. Other flag bits are zero.
 
 ### 11.4 GLYPH_RUN
 
@@ -1805,7 +1952,8 @@ until ACK retires the old epoch. The broker consumes status 1 and proceeds to
 ACK without retrying that drop in the old epoch.
 
 The same hold applies when an emitted RESOURCE_CHUNK has no definitive outcome
-yet. The terminal consumes that complete old-epoch chunk and resolves it in
+yet; no transaction can then be open, because none begins while a chunk awaits
+its covering CREDIT. The terminal consumes that complete old-epoch chunk and resolves it in
 exactly one of two ways before reset may advance: an accepted chunk is followed
 by a CREDIT whose cumulative watermark covers all client ordinary bytes through
 that complete chunk, while a rejected chunk is followed by its RESOURCE_CHUNK
@@ -1826,10 +1974,13 @@ after the applicable path completes; no chunk outcome, required abort, or
 RET_RESULT may cross the ACK.
 
 Apart from the pending-chunk case above, if a resource upload is open when
-SOFT_RESET_REQUEST arrives, the client first sends RESOURCE_ABORT in the old
-epoch and waits for its old-epoch RET_RESULT. It then follows the base
-transaction-abort rule, if applicable, and sends SOFT_RESET_ACK in the new
-epoch. No upload byte or result crosses the ACK.
+SOFT_RESET_REQUEST arrives, the client first settles any transaction under the
+base rule: it sends TX_ABORT for one genuinely open, or waits for the
+outstanding TX_RESULT of one whose COMMIT it already emitted. Resource frames
+never go inside a transaction or past an outstanding TX_RESULT, so only then
+does the client send RESOURCE_ABORT in the old epoch and wait for its old-epoch
+RET_RESULT. It then sends SOFT_RESET_ACK in the new epoch. No upload byte or
+result crosses the ACK.
 
 The first client data message after reset remains the mandatory CELL-1
 `SNAPSHOT_BEGIN`; its successful commit establishes revision one. Only after
@@ -2013,8 +2164,9 @@ The journey must exercise ordinary-credit backpressure, the 4096-byte control
 reserve, a rejected over-quota lifecycle request, transaction bytes retained
 through commit/abort processing plus the separate post-COMMIT TX_RESULT gate,
 and one hidden multi-transaction rebuild.
-Image upload/digest qualification is required before advertising RGBA_IMAGE but
-is not a prerequisite when that optional bit is clear.
+Image upload in each advertised format, PIXELS answers, BACKDROP painting, and giving
+resource space back with OWNER_RESIZE must be qualified before advertising
+RGBA_IMAGE; none is a prerequisite when that optional bit is clear.
 
 ## 17. Control reserve lifecycle
 
@@ -2052,8 +2204,13 @@ Implementations must share byte-exact vectors for:
   RET_LAYOUT_START/RET_LAYOUT_CONTINUE journeys using numeric modes 2/3 and 4/5;
 - owner quota reservation, an aggregate RET_NO_CAPACITY from individually valid
   requests, tombstone, stale generation, and idempotent drop;
-- good and bad SHA3-256 upload, ordered chunks, exact-upload abort/destruction,
-  wrong-tuple CHUNK/COMMIT preservation, and in-use drop;
+- an upload in each advertised format, a file that does not decode and one
+  that decodes to another size, the decoded-size charge, ordered chunks,
+  exact-upload abort/destruction, wrong-tuple CHUNK/COMMIT preservation, and
+  in-use drop;
+- CELL and PRESENT transactions between an upload's chunks, a chunk refused
+  inside a transaction, and a soft reset that settles an open transaction
+  before aborting the open upload;
 - object graph/reference validation and exact typed-body lengths;
 - byte-exact CONTROL DEFINE/REPLACE/DROP and EVENT payloads, canonical menu
   hierarchy/kind/state/bounds/string rejection, independent CONTROL high-water,

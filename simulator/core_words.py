@@ -16,6 +16,7 @@ from simulator.aes import (
     AES_IV,
     AES_KEY,
     AES_KEY_MODE,
+    AES_MODE,
     AES_STATUS,
     AES_TAG,
 )
@@ -36,7 +37,7 @@ from simulator.ir import (
     Return,
     UartReadAttempt,
 )
-from simulator.memory import MMIO_BASE, SparseAddressSpace
+from simulator.memory import MMIO_BASE, MemoryAccessError, SparseAddressSpace
 from simulator.mp64fs import validate_attached_mp64fs
 from simulator.platform import (
     SYSINFO_CRYPTO_CAPS,
@@ -151,6 +152,16 @@ def _two_swap(context: ExecutionContext) -> None:
     context.data.push(top)
     context.data.push(bottom)
     context.data.push(second)
+
+
+def _two_rot(context: ExecutionContext) -> None:
+    """2ROT ( a b c d e f -- c d e f a b ), refusing an underflow whole."""
+
+    context.data.peek(5)
+    cells = [context.data.pop() for _ in range(6)]
+    f, e, d, c, b, a = cells
+    for value in (c, d, e, f, a, b):
+        context.data.push(value)
 
 
 def _question_dup(context: ExecutionContext) -> None:
@@ -929,6 +940,18 @@ def _emit(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
 def _type(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     length = context.data.pop()
     address = context.data.pop()
+    if not length:
+        return
+    try:
+        # A span of ordinary memory goes out whole, in one write.
+        payload = runtime.memory.read_bytes(address, length)
+    except MemoryAccessError:
+        # The span starts in a device register, leaves its region, or
+        # wraps: each byte is then its own access, as on the machine.
+        payload = None
+    if payload is not None:
+        runtime.write_uart_bytes(payload)
+        return
     for _ in range(length):
         runtime.write_uart_bytes(bytes((runtime.memory.read8(address),)))
         address = u64(address + 1)
@@ -1670,6 +1693,19 @@ def _sha512_final(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
 def _sha512_clear(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     core_id, _task_id = runtime.guest_identity(context)
     context.data.push(runtime.sha2.sha512_clear(core_id))
+
+
+def _sha384_init(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    core_id, _task_id = runtime.guest_identity(context)
+    context.data.push(runtime.sha2.sha384_init(core_id))
+
+
+def _sha384_final(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    destination = context.data.pop()
+    core_id, _task_id = runtime.guest_identity(context)
+    context.data.push(
+        runtime.sha2.sha384_final(core_id, destination, runtime.memory)
+    )
 
 
 def _sha3_begin(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
@@ -2992,6 +3028,40 @@ def install_core(runtime: MegaForthRuntime) -> None:
         b"EPOCH-VALID?",
         lambda context: _epoch_valid_query(runtime, context),
     )
+
+    # AES's block mode and CBC's 16-byte IV follow.
+    runtime.define_primitive(
+        b"AES-MODE!",
+        lambda context: _aes_scalar_store(
+            runtime,
+            context,
+            mmio_offset=AES_MODE,
+            width=1,
+        ),
+    )
+    runtime.define_primitive(
+        b"AES-CBC-IV!",
+        lambda context: _aes_to_device(
+            runtime,
+            context,
+            mmio_offset=AES_IV,
+            length=16,
+        ),
+    )
+
+    # SHA384-INIT and SHA384-FINAL follow.  SHA-384 shares the SHA-512
+    # context, whose UPDATE and CLEAR serve it.
+    runtime.define_primitive(
+        b"SHA384-INIT",
+        lambda context: _sha384_init(runtime, context),
+    )
+    runtime.define_primitive(
+        b"SHA384-FINAL",
+        lambda context: _sha384_final(runtime, context),
+    )
+
+    # 2ROT follows: the checked SHA-2 one-shots of three spans use it.
+    runtime.define_primitive(b"2ROT", _two_rot)
 
 
 def _scalar_float_word(service, shape: str, op: int | None):

@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
-import hashlib
 import operator
 import sys
 import time
@@ -24,6 +23,7 @@ from rich_terminal.pygame_view import (
     ControlHitTarget,
     ControlIdentity,
     ControlSurface,
+    DocumentHitTarget,
     FieldHitTarget,
     HIT_MAP_ENTRY_TYPES,
     HitMapEntry,
@@ -48,6 +48,7 @@ from rich_terminal.retained_scene import ControlKind
 from rich_terminal.retained_wire import ControlEventKind
 from rich_terminal.retained_view import (
     DisplayScope,
+    DocumentDraw,
     ImageResourceManifest,
     ItemViewDraw,
     MenuBarDraw,
@@ -139,7 +140,6 @@ class _DisplayResourceKey:
     width: int
     height: int
     byte_length: int
-    sha3_256: bytes
 
     @classmethod
     def from_manifest(
@@ -162,7 +162,6 @@ class _DisplayResourceKey:
             manifest.width,
             manifest.height,
             manifest.byte_length,
-            manifest.sha3_256,
         )
 
     @property
@@ -175,7 +174,6 @@ class _DisplayResourceKey:
             self.width,
             self.height,
             self.byte_length,
-            self.sha3_256,
         )
 
 
@@ -183,7 +181,6 @@ class _DisplayResourceKey:
 class _DisplayResourceDownload:
     manifest: ImageResourceManifest
     data: bytearray = field(default_factory=bytearray)
-    digest: object = field(default_factory=hashlib.sha3_256)
 
     @property
     def offset(self) -> int:
@@ -203,7 +200,7 @@ class _DisplayResourceCache:
 
     Fetching is deliberately incremental: the main viewer asks for one exact
     chunk between event-pump passes and does not draw or flip the pending frame
-    until every dependency has passed its length and SHA3 checks.
+    until every dependency has arrived at exactly its declared length.
     """
 
     _REJECTION_STATUSES = {
@@ -345,7 +342,6 @@ class _DisplayResourceCache:
             "owner_id",
             "owner_generation",
             "resource_id",
-            "sha3_256",
             "offset",
             "next_offset",
             "byte_length",
@@ -369,12 +365,6 @@ class _DisplayResourceCache:
                 raise RuntimeError(
                     f"resource chunk {field_name} does not match its manifest"
                 )
-        digest_text = response.get("sha3_256")
-        if (
-            not isinstance(digest_text, str)
-            or digest_text != manifest.sha3_256.hex()
-        ):
-            raise RuntimeError("resource chunk digest does not match its manifest")
         offset = _nonnegative_wire_integer(
             response.get("offset"), "resource chunk offset"
         )
@@ -436,7 +426,6 @@ class _DisplayResourceCache:
             owner_id=manifest.owner_id,
             owner_generation=manifest.owner_generation,
             resource_id=manifest.resource_id,
-            sha3_256=manifest.sha3_256.hex(),
             offset=download.offset,
             max_bytes=remaining,
         )
@@ -452,11 +441,8 @@ class _DisplayResourceCache:
 
         chunk = self._decoded_chunk(response, download)
         download.data.extend(chunk)
-        download.digest.update(chunk)
         if download.offset < manifest.byte_length:
             return "progress"
-        if download.digest.digest() != manifest.sha3_256:
-            raise RuntimeError("completed display resource failed SHA3 verification")
         try:
             surface = pygame_module.image.frombuffer(
                 download.data,
@@ -573,8 +559,8 @@ class _RetainedDisplayState:
         if any(not isinstance(entry, HIT_MAP_ENTRY_TYPES) for entry in entries):
             raise TypeError(
                 "hit_entries must contain only ControlHitTarget, "
-                "RegionOcclusion, ControlSurface, TextHitTarget, or "
-                "ItemHitTarget values"
+                "RegionOcclusion, ControlSurface, TextHitTarget, "
+                "ItemHitTarget, or DocumentHitTarget values"
             )
         return entries
 
@@ -1060,6 +1046,40 @@ class _GuestKeyboardForwarder:
             params.update(content_revision=target.content_revision, item_key=item_key)
         return self._request_now("send_text_event", **params)
 
+    def send_document_event(
+        self,
+        target: DocumentHitTarget,
+        kind: ControlEventKind,
+        *,
+        modifiers: int,
+        position: TextPosition | None = None,
+        wheel_x: int = 0,
+        wheel_y: int = 0,
+    ) -> bool:
+        """Send one FOLLOW, or SCROLL, for an acknowledged document."""
+
+        if not isinstance(target, DocumentHitTarget):
+            raise TypeError("target must be DocumentHitTarget")
+        identity = target.identity
+        params = {
+            "owner_id": identity.owner_id,
+            "owner_generation": identity.owner_generation,
+            "control_id": identity.control_id,
+            "event_kind": int(kind),
+            "modifiers": modifiers,
+        }
+        if kind is ControlEventKind.SCROLL:
+            params.update(wheel_x=wheel_x, wheel_y=wheel_y)
+        else:
+            if not isinstance(position, TextPosition):
+                raise TypeError("FOLLOW requires a TextPosition")
+            params.update(
+                content_revision=target.content_revision,
+                item_key=position.item_key,
+                scalar_offset=position.scalar_offset,
+            )
+        return self._request_now("send_text_event", **params)
+
     def send_field_event(
         self,
         target: FieldHitTarget,
@@ -1519,6 +1539,19 @@ class _PointerRouter:
                 self._text_identity = target.identity
                 self._text_position = text_position
             return True
+        if isinstance(target, DocumentHitTarget):
+            # SEMANTIC-CONTENT-1: a document is read-only, so a press on a
+            # link without Shift follows it; nothing else a press does there
+            # reaches the client.
+            if bit != _LEFT_BUTTON or modifiers & _APT_SHIFT:
+                return False
+            x, y, _width, _height = self._point_and_extent(position, terminal_size)
+            link = target.link_at(x, y)
+            if link is None:
+                return False
+            return self.keyboard.send_document_event(
+                target, ControlEventKind.FOLLOW, modifiers=modifiers, position=link
+            )
         if isinstance(target, ItemHitTarget):
             if bit != _LEFT_BUTTON:
                 return False
@@ -1642,6 +1675,14 @@ class _PointerRouter:
                 wheel_x=wheel_x,
                 wheel_y=wheel_y,
             )
+        if isinstance(target, DocumentHitTarget):
+            return self.keyboard.send_document_event(
+                target,
+                ControlEventKind.SCROLL,
+                modifiers=modifiers,
+                wheel_x=wheel_x,
+                wheel_y=wheel_y,
+            )
         if isinstance(target, ResidualPoint):
             return self._send_raw(
                 (target.column, target.row),
@@ -1654,6 +1695,22 @@ class _PointerRouter:
         return False
 
 
+def _report_display_cell_pixels(client, cell_width: int, cell_height: int) -> None:
+    """Tell the terminal how many pixels one of this viewer's cells has.
+
+    The terminal answers guest PIXELS questions from it while this viewer
+    holds the display.
+    """
+
+    response = client.request(
+        "display_cell_pixels", cell_width=cell_width, cell_height=cell_height
+    )
+    if not isinstance(response, Mapping) or set(response) != {"status", "selected"}:
+        raise RuntimeError("display_cell_pixels returned an invalid response shape")
+    if response["selected"] is not (response["status"] == "selected"):
+        raise RuntimeError("display_cell_pixels returned an inconsistent status")
+
+
 def _retry_display_claim(
     client,
     *,
@@ -1661,6 +1718,7 @@ def _retry_display_claim(
     display_state: _RetainedDisplayState,
     revision: int,
     resource_cache: _DisplayResourceCache | None = None,
+    cell_pixels: tuple[int, int] | None = None,
 ) -> tuple[bool, int, bool]:
     """Retry one observer lease claim and invalidate state on exact takeover."""
 
@@ -1668,6 +1726,8 @@ def _retry_display_claim(
     claimed = _display_claimed(client.request("claim_display"))
     if not claimed:
         return False, revision, False
+    if cell_pixels is not None:
+        _report_display_cell_pixels(client, *cell_pixels)
     display_state.reset()
     if resource_cache is not None:
         resource_cache.clear()
@@ -2041,7 +2101,7 @@ def _revision_only(previous, draw) -> bool:
 
     return (
         type(draw) is type(previous)
-        and isinstance(draw, (TextAreaDraw, TextGridDraw, ItemViewDraw))
+        and isinstance(draw, (TextAreaDraw, TextGridDraw, ItemViewDraw, DocumentDraw))
         and replace(
             draw,
             content=replace(
@@ -2055,7 +2115,7 @@ def _revision_only(previous, draw) -> bool:
 def _with_revision(entries, revision: int) -> tuple[HitMapEntry, ...]:
     return tuple(
         replace(entry, content_revision=revision)
-        if isinstance(entry, (TextHitTarget, ItemHitTarget))
+        if isinstance(entry, (TextHitTarget, ItemHitTarget, DocumentHitTarget))
         else entry
         for entry in entries
     )
@@ -2687,6 +2747,8 @@ def main() -> int:
         )
         cell_w = max(1, font.size("M")[0])
         cell_h = font.get_linesize()
+        if display_holder:
+            _report_display_cell_pixels(client, cell_w, cell_h)
         status_h = max(24, status_font.get_linesize() + 8)
         screen = pygame.display.set_mode(
             (terminal.cols * cell_w, terminal.rows * cell_h + status_h)
@@ -2914,6 +2976,7 @@ def main() -> int:
                         display_state=display_state,
                         revision=revision,
                         resource_cache=resource_cache,
+                        cell_pixels=(cell_w, cell_h),
                     )
                 )
                 last_claim_attempt = now

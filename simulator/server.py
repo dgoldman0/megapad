@@ -10,8 +10,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from shared.session_options import (
-    configured_production_executor, retained_policy, rich_terminal_policy,
+    configured_production_executor, link_pace, retained_policy, rich_terminal_policy,
 )
+from shared.screen_profile import ScreenChangeProfile
 from shared_session import DEFAULT_SOCKET, SessionServer
 from simulator.image_bootstrap import (
     ImageBootstrapPreparation,
@@ -115,6 +116,26 @@ def build_argument_parser(
             "requires --rich-terminal-policy"
         ),
     )
+    parser.add_argument(
+        "--terminal-link-pace",
+        type=link_pace,
+        metavar="BYTES_PER_SECOND:FRAME_US",
+        help=(
+            "for testing, pace the guest-to-terminal link at BYTES_PER_SECOND "
+            "and advertise resource chunks it carries in one FRAME_US frame "
+            "time; requires --rich-terminal-policy"
+        ),
+    )
+    parser.add_argument(
+        "--profile-dir",
+        type=Path,
+        metavar="DIR",
+        help=(
+            "for diagnosis, write each PRESENT the guest sends and the guest "
+            "steps spent under each word into DIR (presents.jsonl, "
+            "guest-words.jsonl); changes nothing the guest or terminal does"
+        ),
+    )
     parser.add_argument("--paused", action="store_true")
     return parser
 
@@ -129,6 +150,8 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
         raise ValueError(
             "--retained-terminal-policy requires --rich-terminal-policy"
         )
+    if args.terminal_link_pace is not None and args.rich_terminal_policy is None:
+        raise ValueError("--terminal-link-pace requires --rich-terminal-policy")
     storage_path = args.storage.resolve()
     if not storage_path.is_file():
         raise ValueError(f"storage image does not exist: {storage_path}")
@@ -145,6 +168,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
             args.cols,
             args.rows,
             retained_policy=args.retained_terminal_policy,
+            link_pace=args.terminal_link_pace,
         )
 
     memory = create_one_core_address_space(
@@ -176,6 +200,11 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
         ),
         semantic_quantum_steps=quantum_steps,
         rich_terminal=rich_terminal,
+        screen_profile=(
+            None
+            if args.profile_dir is None
+            else ScreenChangeProfile(args.profile_dir)
+        ),
     )
     machine = SimulatorSharedMachine(session)
     machine.paused = args.paused

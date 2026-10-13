@@ -155,7 +155,8 @@ counts below remain historical.
 
 ### Layer 1: Crypto Stack (Items 5–8) — ✅ DONE
 
-5. ✅ **AES-256-GCM** — 10 BIOS words, KDOS §1.5
+5. ✅ **AES-256/128, GCM and CBC** — 13 BIOS words, KDOS §1.5; ⚠ the
+   executable, native and hosted engines only: the RTL block awaits item 50
 6. ✅ **SHA-3 / SHAKE / TRNG** — Keccak-f[1600], 4 modes, XOF squeeze, CSPRNG
 7. ✅ **KDOS crypto words** — `HASH`, `HMAC`, `ENCRYPT`, `DECRYPT`, `VERIFY`
 8. ✅ **Filesystem encryption** — `FENCRYPT`, `FDECRYPT`, `FS-KEY!`
@@ -393,6 +394,7 @@ CURRENT-SITUATION.
 | 28 | **On-device editor** — line/screen editor in Forth | ~1–2 days | Medium |
 | 30 | **Remote REPL** — UART or TCP-based remote Forth session | ~1 day | Medium |
 | 45 | **SCROLL** — network resource fetcher (HTTP/1.1, TFTP, Gopher); `SCROLL-GET`, `SCROLL-SAVE`, `SCROLL-LOAD` for over-LAN package loading | ~2–3 days | High |
+| 50 | **RTL AES rebuild** — rebuild `rtl/crypto/mp64_aes.v` to the executable byte ABI of `docs/extended-tpu-spec.md` §4.1: the byte register image `+0x700..+0x76F`, statuses 0–3, AAD/length finalization, tag comparison, fail-closed transactions, and CBC with `AES_MODE`, a 16-byte IV and the inverse cipher; and fix GCM encryption, which now runs inverse-cipher rounds on the counter block. Qualify it against the native model's GCM and CBC vectors | ~1 week | High |
 
 ### Nice-to-have (post-v1.0 candidates)
 

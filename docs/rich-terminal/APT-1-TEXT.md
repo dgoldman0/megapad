@@ -220,6 +220,9 @@ its two endpoints. In mixed-direction text its cells need not be contiguous.
 - **ITM1 fields and column labels** are logical text laid out like STX1
   text. A field in a `WRAP` column is broken into lines by Section 12, at the
   widths `SEMANTIC-CONTENT-1.md` gives.
+- **DOC1 block text** is logical text laid out like STX1 text, at the widths
+  and in the directions `SEMANTIC-CONTENT-1.md` gives. Prose is broken into
+  lines by Section 12, and code into hard lines by Section 12.
 
 ## 11. Cost
 
@@ -266,3 +269,14 @@ level 1.
 A paragraph whose scalars are all printable ASCII needs no table lookup: each
 byte is one character of width 1, and a break opportunity is a space byte
 followed by a byte that is not a space.
+
+A format may instead ask for hard lines, for text such as code whose spaces
+matter. Each line then ends only where the text reaches `N`: before the first
+character that would take the sum of the line's characters' widths, spaces
+included, past `N`, or after its first character when that one alone is
+wider than `N`. The last line ends at the paragraph's end, and an empty
+paragraph is one empty line. Every character takes its cells, the spaces at
+a line's end included. Levels, joining, and each line's start edge are as
+for other lines. A printable ASCII paragraph
+breaks into hard lines of exactly `N` bytes, with the last line taking the
+rest.

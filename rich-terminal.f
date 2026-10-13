@@ -12,6 +12,8 @@
 \  Normative wire text: docs/rich-terminal/APT-1-WIRE.md
 \  Cell text follows APT-1-TEXT-1-2026-09-26 (docs/rich-terminal/APT-1-TEXT.md):
 \  the caller lays text out; this module encodes and checks the cells.
+\  KDOS supplies the UART lock (UART-ACQUIRE, UART-RELEASE) and the checked
+\  CRC buffer feed (_CRC-BUF-CHECKED).
 
 PROVIDED rich-terminal.f
 
@@ -58,7 +60,7 @@ PROVIDED rich-terminal.f
 \ session.
 64  CONSTANT /PT-EVENT
 80  CONSTANT /PT-COMPLETION
-992 CONSTANT /PT-SESSION
+1064 CONSTANT /PT-SESSION
 
 : PT-SESSION-SIZE  ( -- bytes )  /PT-SESSION ;
 : PT-EVENT-SIZE    ( -- bytes )  /PT-EVENT ;
@@ -86,6 +88,7 @@ PROVIDED rich-terminal.f
 11 CONSTANT PT-CONTROL-TASK
 12 CONSTANT PT-CONTROL-LAUNCHER
 13 CONSTANT PT-CONTROL-FIELD
+14 CONSTANT PT-CONTROL-DOCUMENT
 1 CONSTANT PT-FIELD-INTEGER
 2 CONSTANT PT-FIELD-CHOICE
 3 CONSTANT PT-FIELD-TEXT
@@ -116,8 +119,13 @@ PROVIDED rich-terminal.f
 10 CONSTANT PT-CONTROL-CHECK
 11 CONSTANT PT-CONTROL-ADJUST
 
-\ RETAINED-1 semantic values accepted by the typed resource API.
+\ RETAINED-1 picture formats accepted by the typed resource API.  Format N
+\ is advertised by bit N-1 of RET_FORMATS' image_formats, read with
+\ PT-RESOURCE-FORMAT?.
 1 CONSTANT PT-RESOURCE-RGBA8
+2 CONSTANT PT-RESOURCE-QOI
+3 CONSTANT PT-RESOURCE-PNG
+4 CONSTANT PT-RESOURCE-JPEG
 
 0 CONSTANT PT-RESOURCE-ABORT-CALLER-CANCEL
 1 CONSTANT PT-RESOURCE-ABORT-RESET-REBUILD
@@ -145,6 +153,17 @@ PROVIDED rich-terminal.f
 0 CONSTANT PT-IMAGE-FIT-STRETCH
 1 CONSTANT PT-IMAGE-FIT-CONTAIN
 2 CONSTANT PT-IMAGE-FIT-COVER
+\ IMAGE flags: BACKDROP asks the renderer to paint its own opaque background
+\ over the object's whole rectangle before the picture.  CLIP paints the
+\ picture, fitted to the whole rectangle, only inside a clip rectangle.
+0x01 CONSTANT PT-IMAGE-BACKDROP
+0x02 CONSTANT PT-IMAGE-CLIP
+
+\ The one PIXELS_QUERY a session may have unanswered: none asked, asked and
+\ waiting, or answered.  PT-PIXELS-ANSWER@ holds an answer.
+0 CONSTANT PT-PIXELS-NONE
+1 CONSTANT PT-PIXELS-PENDING
+2 CONSTANT PT-PIXELS-ANSWERED
 
 0 CONSTANT PT-READOUT-INTEGER
 1 CONSTANT PT-READOUT-FIXED
@@ -277,7 +296,8 @@ PROVIDED rich-terminal.f
 0x2000   CONSTANT _PT-RET-TASKBARS
 0x4000   CONSTANT _PT-RET-FIELDS
 0x8000   CONSTANT _PT-RET-GRID-CELLS
-0xFF3F   CONSTANT _PT-RET-FEATURE-MASK
+0x10000  CONSTANT _PT-RET-CONTROL-DOCUMENTS
+0x1FF3F  CONSTANT _PT-RET-FEATURE-MASK
 250      CONSTANT _PT-TIMEOUT-MS
 3        CONSTANT _PT-PROBE-LIMIT
 256      CONSTANT _PT-SERVICE-BYTES
@@ -322,6 +342,8 @@ CREATE _PT-OWNER  0 ,
 0x8000 CONSTANT _PT-M-RET-QUERY
 0x8001 CONSTANT _PT-M-RET-CAPS
 0x8002 CONSTANT _PT-M-RET-FORMATS
+0x8003 CONSTANT _PT-M-PIXELS-QUERY
+0x8004 CONSTANT _PT-M-PIXELS
 0x1000 CONSTANT _PT-M-RESOURCE-BEGIN
 0x1001 CONSTANT _PT-M-RESOURCE-CHUNK
 0x1002 CONSTANT _PT-M-RESOURCE-COMMIT
@@ -485,6 +507,10 @@ _PT-M-RESOURCE-ABORT  CONSTANT PT-REQUEST-RESOURCE-ABORT
 : _PT.S.SPAN-TAIL       ( s -- a ) 976 + ;
 \ Which PT-INIT fixed the borrowed geometry; see PT-LAYOUT-SERIAL@.
 : _PT.S.LAYOUT-SERIAL   ( s -- a ) 984 + ;
+\ The one PIXELS_QUERY: its state, exact sent payload, and exact answer.
+: _PT.S.PIXELS-STATE    ( s -- a ) 992 + ;
+: _PT.S.PIXELS-QUERY    ( s -- a ) 1000 + ;  \ exact 24-byte PIXELS_QUERY payload
+: _PT.S.PIXELS-ANSWER   ( s -- a ) 1024 + ;  \ exact 40-byte PIXELS payload
 
 0 CONSTANT _PT-TX-NONE
 1 CONSTANT _PT-TX-CELL
@@ -559,6 +585,19 @@ _PT-M-RESOURCE-ABORT  CONSTANT PT-REQUEST-RESOURCE-ABORT
     DUP PT-RETAINED-AVAILABLE? 0= IF DROP 0 0 EXIT THEN
     _PT.S.RET-FORMATS 64 ;
 
+\ Where the session's one PIXELS_QUERY stands: PT-PIXELS-NONE,
+\ PT-PIXELS-PENDING, or PT-PIXELS-ANSWERED.  NONE without retained output.
+: PT-PIXELS-STATE@  ( session -- state )
+    DUP PT-RETAINED-AVAILABLE? 0= IF DROP PT-PIXELS-NONE EXIT THEN
+    _PT.S.PIXELS-STATE @ ;
+
+\ The exact little-endian 40-byte PIXELS answer of APT-1-RETAINED-1 section
+\ 8.1, or 0 0 before one has arrived.  It stays valid until the next query,
+\ soft reset, close, loss, or PT-INIT.
+: PT-PIXELS-ANSWER@  ( session -- a u )
+    DUP PT-PIXELS-STATE@ PT-PIXELS-ANSWERED <> IF DROP 0 0 EXIT THEN
+    _PT.S.PIXELS-ANSWER 40 ;
+
 \ The negotiated client-to-terminal payload ceiling is scalar admission data,
 \ not a borrowed session address.  Consumers need it for semantic families
 \ such as CONTROLS whose variable text has no separate format-specific cap.
@@ -567,7 +606,14 @@ _PT-M-RESOURCE-ABORT  CONSTANT PT-REQUEST-RESOURCE-ABORT
     DUP PT-ACTIVE? 0= IF DROP 0 EXIT THEN
     _PT.S.PEER-MAX-PAY @ ;
 
+\ A soft reset, epoch end, or lost discovery cancels an unanswered query.
+: _PT-PIXELS-CLEAR  ( s -- )
+    DUP _PT.S.PIXELS-STATE OFF
+    DUP _PT.S.PIXELS-QUERY 24 0 FILL
+    _PT.S.PIXELS-ANSWER 40 0 FILL ;
+
 : _PT-RET-RECORDS-CLEAR  ( s -- )
+    DUP _PT-PIXELS-CLEAR
     DUP _PT.S.RET-CAPS 64 0 FILL
     _PT.S.RET-FORMATS 64 0 FILL ;
 
@@ -698,6 +744,10 @@ VARIABLE _PT-U64-A
 : _PT-RET-CONTROL-ITEMS?  ( s -- flag )
     DUP PT-RETAINED-AVAILABLE? 0= IF DROP FALSE EXIT THEN
     _PT.S.RET-CAPS 8 + _PT-U64@ _PT-RET-CONTROL-ITEMS AND 0<> ;
+
+: _PT-RET-CONTROL-DOCUMENTS?  ( s -- flag )
+    DUP PT-RETAINED-AVAILABLE? 0= IF DROP FALSE EXIT THEN
+    _PT.S.RET-CAPS 8 + _PT-U64@ _PT-RET-CONTROL-DOCUMENTS AND 0<> ;
 
 : _PT-RET-CORE?  ( s -- flag )
     DUP PT-RETAINED-AVAILABLE? 0= IF DROP FALSE EXIT THEN
@@ -849,31 +899,18 @@ VARIABLE _PT-CI
 VARIABLE _PT-CRC-A
 VARIABLE _PT-CRC-U
 
-: _PT-CRC-FEED?  ( a u -- status )
-    BEGIN DUP 8 >= WHILE
-        OVER @ CRC-FEED ?DUP IF
-            >R 2DROP R> EXIT
-        THEN
-        SWAP 8 + SWAP 8 -
-    REPEAT
-    BEGIN DUP WHILE
-        OVER C@ CRC-FEED-BYTE ?DUP IF
-            >R 2DROP R> EXIT
-        THEN
-        SWAP 1+ SWAP 1-
-    REPEAT
-    2DROP 0 ;
-
+\ KDOS's checked buffer feed gives the unit the frame a cell at a time and
+\ returns another owner's status rather than taking its transaction.
 : _PT-FRAME-CRC-HARDWARE?  ( frame payload-u -- crc status )
     _PT-CRC-U ! _PT-CRC-A !
     5 CRC-MODE! ?DUP IF 0 SWAP EXIT THEN
     0xFFFFFFFF CRC-INIT! ?DUP IF
         >R CRC-FINAL@ DROP 0 R> EXIT
     THEN
-    _PT-CRC-A @ 36 _PT-CRC-FEED? ?DUP IF
+    _PT-CRC-A @ 36 _CRC-BUF-CHECKED ?DUP IF
         >R CRC-FINAL@ DROP 0 R> EXIT
     THEN
-    _PT-CRC-A @ _PT-HDR + _PT-CRC-U @ _PT-CRC-FEED? ?DUP IF
+    _PT-CRC-A @ _PT-HDR + _PT-CRC-U @ _CRC-BUF-CHECKED ?DUP IF
         >R CRC-FINAL@ DROP 0 R> EXIT
     THEN
     CRC-FINAL@ 0 ;
@@ -2224,8 +2261,10 @@ VARIABLE _PT-RV-TOTAL
     DUP 0x10 AND SWAP 0x08 AND 0= AND IF FALSE EXIT THEN
     _PT-RV-FEATURES @ _PT-RET-CONTROL-COLLECTIONS AND
     _PT-RV-FEATURES @ _PT-RET-CONTROLS AND 0= AND IF FALSE EXIT THEN
-    \ Item views need collections, whose minima also cover them.
+    \ Item views and documents need collections, whose minima also cover them.
     _PT-RV-FEATURES @ _PT-RET-CONTROL-ITEMS AND
+    _PT-RV-FEATURES @ _PT-RET-CONTROL-COLLECTIONS AND 0= AND IF FALSE EXIT THEN
+    _PT-RV-FEATURES @ _PT-RET-CONTROL-DOCUMENTS AND
     _PT-RV-FEATURES @ _PT-RET-CONTROL-COLLECTIONS AND 0= AND IF FALSE EXIT THEN
     _PT-RV-FEATURES @ _PT-RET-TASKBARS AND
     _PT-RV-FEATURES @ _PT-RET-CONTROLS AND 0= AND IF FALSE EXIT THEN
@@ -2269,8 +2308,11 @@ VARIABLE _PT-RV-TOTAL
     _PT-RV-P @ 56 + _PT-U64@
     _PT-RV-FEATURES @ 0x04 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
 
+    \ An IMAGE with CLIP has a 96-byte payload.
     _PT-RV-FEATURES @ 0x04 AND IF
-        _PT-RV-S @ _PT.S.PEER-MAX-PAY @ 80 U< IF FALSE EXIT THEN
+        _PT-RV-S @ _PT.S.PEER-MAX-PAY @ 96 U< IF FALSE EXIT THEN
+        _PT-RV-S @ _PT.S.TX-U @ 136 U< IF FALSE EXIT THEN
+        _PT-RV-RETMAX @ 296 U< IF FALSE EXIT THEN
         _PT-RV-P @ 44 + L@ 32 +
         _PT-RV-S @ _PT.S.PEER-MAX-PAY @ U> IF FALSE EXIT THEN
     THEN
@@ -2315,13 +2357,14 @@ VARIABLE _PT-RF-PIXELS
     _PT-RX-LEN @ 64 <> IF FALSE EXIT THEN
     _PT-RF-FORMATS @ L@ 2 <>
     _PT-RF-FORMATS @ 4 + L@ 1 <> OR IF FALSE EXIT THEN
-    _PT-RF-FORMATS @ 8 + L@ 1 U> IF FALSE EXIT THEN
+    _PT-RF-FORMATS @ 8 + L@ 15 INVERT AND IF FALSE EXIT THEN
     _PT-RF-FORMATS @ 56 + _PT-U64@ IF FALSE EXIT THEN
     _PT-RF-CAPS @ 8 + _PT-U64@ _PT-RV-FEATURES !
     _PT-RF-CAPS @ 48 + _PT-U64@ _PT-RV-RETMAX !
 
+    \ Pictures take raw pixels always, and other formats as advertised.
     _PT-RF-FORMATS @ 8 + L@
-    _PT-RV-FEATURES @ 0x04 AND 0<> IF 1 = ELSE 0= THEN
+    _PT-RV-FEATURES @ 0x04 AND 0<> IF 1 AND 0<> ELSE 0= THEN
     0= IF FALSE EXIT THEN
     _PT-RF-FORMATS @ 12 + L@
     _PT-RV-FEATURES @ 0x04 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
@@ -2687,6 +2730,28 @@ VARIABLE _PT-RSZ-BASE
     THEN
     _PT-ACCEPT-EVENT ;
 
+\ The terminal answers only the one outstanding question, echoing its ID and
+\ rectangle; width and height are zero only together.  Anything else breaks
+\ the contract: the terminal never sends an answer nobody asked for.
+: _PT-DISPATCH-PIXELS  ( s -- status )
+    _PT-RX-LEN @ 40 <> IF
+        1 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
+    THEN
+    DUP _PT.S.PIXELS-STATE @ PT-PIXELS-PENDING <> IF
+        6 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
+    THEN
+    _PT-RX-P @ _PT-U64@ OVER _PT.S.PIXELS-QUERY _PT-U64@ <>
+    _PT-RX-P @ 16 + _PT-U64@ 2 PICK _PT.S.PIXELS-QUERY 8 + _PT-U64@ <> OR
+    _PT-RX-P @ 24 + _PT-U64@ 2 PICK _PT.S.PIXELS-QUERY 16 + _PT-U64@ <> OR IF
+        6 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
+    THEN
+    _PT-RX-P @ 32 + L@ 0= _PT-RX-P @ 36 + L@ 0= <> IF
+        9 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
+    THEN
+    _PT-RX-P @ OVER _PT.S.PIXELS-ANSWER 40 MOVE
+    PT-PIXELS-ANSWERED OVER _PT.S.PIXELS-STATE !
+    _PT-RX-TOTAL @ SWAP _PT-RELEASE-DATA ;
+
 : _PT-DISPATCH  ( s -- status )
     DUP _PT-RET-CHECK-ADJACENCY
     DUP _PT.S.STATE @ PT-ST-OPENING = IF
@@ -2718,6 +2783,7 @@ VARIABLE _PT-RSZ-BASE
     _PT-RX-TYPE @ _PT-M-CONTROL-EVENT = IF
         _PT-DISPATCH-CONTROL-EVENT EXIT
     THEN
+    _PT-RX-TYPE @ _PT-M-PIXELS = IF _PT-DISPATCH-PIXELS EXIT THEN
     _PT-RX-TYPE @ 0x8000 AND IF
         _PT-RX-TOTAL @ SWAP _PT-RELEASE-DATA EXIT
     THEN
@@ -3375,14 +3441,65 @@ VARIABLE _PT-OO-MESSAGE
 : PT-OWNER-OPEN
     _PT-OWNER-QUOTA-ARGS _PT-M-OWNER-OPEN _PT-OO-MESSAGE ! _PT-OWNER-QUOTA-REQUEST ;
 
-\ Ask the terminal to grow a live owner's reservation to the complete quota
-\ set given, each at least the current one. The completion's status is
-\ PT-RET-OK when it is granted and PT-RET-NO-CAPACITY when the terminal has
-\ no room; a refusal leaves the old reservation in force.
+\ Ask the terminal to change a live owner's reservation to the complete quota
+\ set given. Every field is at least the current one, except the resource
+\ count and bytes, which may drop to the resources in use to give space
+\ back. The completion's status is PT-RET-OK when it is granted and
+\ PT-RET-NO-CAPACITY when the terminal has no room; a refusal leaves the old
+\ reservation in force.
 \ Stack: owner generation region-q resource-q object-q series-q
 \        resource-byte-q utf8-byte-q sample-slot-q session -- status
 : PT-OWNER-RESIZE
     _PT-OWNER-QUOTA-ARGS _PT-M-OWNER-RESIZE _PT-OO-MESSAGE ! _PT-OWNER-QUOTA-REQUEST ;
+
+VARIABLE _PT-PQ-S
+VARIABLE _PT-PQ-ID
+VARIABLE _PT-PQ-X
+VARIABLE _PT-PQ-Y
+VARIABLE _PT-PQ-COLS
+VARIABLE _PT-PQ-ROWS
+
+\ Ask how many pixels a cell rectangle covers on the selected surface.  The
+\ answer arrives later: PT-PIXELS-STATE@ turns PT-PIXELS-ANSWERED and
+\ PT-PIXELS-ANSWER@ holds it.  One question may be unanswered at a time.
+\ UNSUPPORTED unless the terminal advertised RGBA_IMAGE.
+\ Stack: query-id x y cols rows session -- status
+: PT-PIXELS-QUERY
+    _PT-PQ-S ! _PT-PQ-ROWS ! _PT-PQ-COLS ! _PT-PQ-Y ! _PT-PQ-X ! _PT-PQ-ID !
+    _PT-PQ-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
+    _PT-PQ-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
+    _PT-PQ-S @ _PT-RETAINED-WRITE-STATE? 0= IF PT-S-UNSUPPORTED EXIT THEN
+    _PT-PQ-S @ _PT-RET-RGBA-IMAGE? 0= IF PT-S-UNSUPPORTED EXIT THEN
+    _PT-PQ-ID @ 0= IF PT-S-INVALID EXIT THEN
+    _PT-PQ-X @ _PT-I32? 0= _PT-PQ-Y @ _PT-I32? 0= OR IF PT-S-INVALID EXIT THEN
+    _PT-PQ-COLS @ 0= _PT-PQ-COLS @ _PT-U32? 0= OR IF PT-S-INVALID EXIT THEN
+    _PT-PQ-ROWS @ 0= _PT-PQ-ROWS @ _PT-U32? 0= OR IF PT-S-INVALID EXIT THEN
+    _PT-PQ-S @ _PT-RETAINED-LIFECYCLE-STATE? 0= IF
+        PT-S-WOULD-BLOCK EXIT
+    THEN
+    _PT-PQ-S @ _PT.S.RESET-PENDING? @ IF PT-S-WOULD-BLOCK EXIT THEN
+    _PT-PQ-S @ _PT.S.TX-OPEN? @ IF PT-S-INVALID EXIT THEN
+    _PT-PQ-S @ _PT-RESULT-BUSY? IF PT-S-WOULD-BLOCK EXIT THEN
+    _PT-PQ-S @ _PT.S.UPLOAD? @ IF PT-S-WOULD-BLOCK EXIT THEN
+    _PT-PQ-S @ _PT.S.PIXELS-STATE @ PT-PIXELS-PENDING = IF
+        PT-S-WOULD-BLOCK EXIT
+    THEN
+    _PT-PQ-S @ _PT.S.PEER-SENT @ _PT-PQ-S @ _PT.S.PEER-GRANT @ U> IF
+        PT-ST-LOST _PT-PQ-S @ _PT.S.STATE ! PT-S-SESSION-LOST EXIT
+    THEN
+    _PT-PQ-S @ _PT.S.PEER-GRANT @ _PT-PQ-S @ _PT.S.PEER-SENT @ -
+    64 U< IF PT-S-WOULD-BLOCK EXIT THEN
+    _PT-M-PIXELS-QUERY 24 _PT-PQ-S @ _PT-FRAME-BEGIN ?DUP IF EXIT THEN
+    _PT-PQ-ID @ _PT-FRAME-PAYLOAD _PT-U64!
+    _PT-PQ-X @ _PT-FRAME-PAYLOAD 8 + L!
+    _PT-PQ-Y @ _PT-FRAME-PAYLOAD 12 + L!
+    _PT-PQ-COLS @ _PT-FRAME-PAYLOAD 16 + L!
+    _PT-PQ-ROWS @ _PT-FRAME-PAYLOAD 20 + L!
+    _PT-FRAME-PAYLOAD _PT-PQ-S @ _PT.S.PIXELS-QUERY 24 MOVE
+    TRUE _PT-PQ-S @ _PT-FRAME-SEND ?DUP IF EXIT THEN
+    _PT-PQ-S @ _PT.S.PIXELS-ANSWER 40 0 FILL
+    PT-PIXELS-PENDING _PT-PQ-S @ _PT.S.PIXELS-STATE !
+    PT-S-OK ;
 
 VARIABLE _PT-OD-S
 VARIABLE _PT-OD-OWNER
@@ -3486,14 +3603,23 @@ VARIABLE _PT-RBG-WIDTH
 VARIABLE _PT-RBG-HEIGHT
 VARIABLE _PT-RBG-FLAGS
 VARIABLE _PT-RBG-LENGTH
-VARIABLE _PT-RBG-DIGEST-A
-VARIABLE _PT-RBG-DIGEST-U
-VARIABLE _PT-RBG-PIXELS
 
+\ PT-RESOURCE-FORMAT? ( format session -- flag )
+\   Whether the terminal takes pictures in FORMAT, one of PT-RESOURCE-RGBA8,
+\   -QOI, -PNG or -JPEG.  A terminal that shows pictures always takes raw
+\   pixels; it decodes the file formats it advertises.
+: PT-RESOURCE-FORMAT?  ( format session -- flag )
+    DUP _PT-VALID-S? 0= IF 2DROP FALSE EXIT THEN
+    OVER 1- 4 U< 0= IF 2DROP FALSE EXIT THEN
+    _PT.S.RET-FORMATS 8 + L@ SWAP 1- RSHIFT 1 AND 0<> ;
+
+\ The declared picture: a format the terminal takes, positive dimensions
+\ within its bounds, and a decoded size within its resource bytes.  Raw
+\ pixels send exactly that size; a file sends its own positive length.
 : _PT-RESOURCE-BEGIN-FIELDS?  ( -- flag )
     _PT-RBG-OWNER @ 0= _PT-RBG-GENERATION @ 0= OR
     _PT-RBG-ITEM @ 0= OR IF FALSE EXIT THEN
-    _PT-RBG-FORMAT @ PT-RESOURCE-RGBA8 <> IF FALSE EXIT THEN
+    _PT-RBG-FORMAT @ _PT-RBG-S @ PT-RESOURCE-FORMAT? 0= IF FALSE EXIT THEN
     _PT-RBG-FLAGS @ 0<> IF FALSE EXIT THEN
     _PT-RBG-WIDTH @ DUP 0= SWAP _PT-U32? 0= OR
     _PT-RBG-HEIGHT @ DUP 0= SWAP _PT-U32? 0= OR OR IF FALSE EXIT THEN
@@ -3506,14 +3632,12 @@ VARIABLE _PT-RBG-PIXELS
     _PT-RBG-WIDTH @ _PT-RBG-HEIGHT @ _PT-UMUL? 0= IF
         DROP FALSE EXIT
     THEN
-    DUP _PT-RBG-PIXELS ! 4 _PT-UMUL? 0= IF DROP FALSE EXIT THEN
-    _PT-RBG-LENGTH @ <> IF FALSE EXIT THEN
-    _PT-RBG-LENGTH @ _PT-RBG-S @ _PT.S.RET-CAPS 56 + _PT-U64@ U> IF
-        FALSE EXIT
+    4 _PT-UMUL? 0= IF DROP FALSE EXIT THEN
+    DUP _PT-RBG-S @ _PT.S.RET-CAPS 56 + _PT-U64@ U> IF DROP FALSE EXIT THEN
+    _PT-RBG-FORMAT @ PT-RESOURCE-RGBA8 = IF
+        _PT-RBG-LENGTH @ = EXIT
     THEN
-    _PT-RBG-DIGEST-U @ 32 <> IF FALSE EXIT THEN
-    _PT-RBG-DIGEST-A @ _PT-RBG-DIGEST-U @ _PT-RBG-S @
-        _PT-RESOURCE-SOURCE? ;
+    DROP _PT-RBG-LENGTH @ 0<> ;
 
 : _PT-RESOURCE-BEGIN-BODY  ( -- status )
     _PT-RBG-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
@@ -3531,8 +3655,8 @@ VARIABLE _PT-RBG-PIXELS
     _PT-RBG-S @ _PT-RESULT-BUSY? IF PT-S-WOULD-BLOCK EXIT THEN
     _PT-RBG-S @ _PT.S.UPLOAD? @ IF PT-S-WOULD-BLOCK EXIT THEN
     _PT-RESOURCE-BEGIN-FIELDS? 0= IF PT-S-INVALID EXIT THEN
-    120 _PT-RBG-S @ _PT-RESOURCE-ORDINARY-ADMIT ?DUP IF EXIT THEN
-    _PT-M-RESOURCE-BEGIN 80 _PT-RBG-S @ _PT-FRAME-BEGIN ?DUP IF EXIT THEN
+    88 _PT-RBG-S @ _PT-RESOURCE-ORDINARY-ADMIT ?DUP IF EXIT THEN
+    _PT-M-RESOURCE-BEGIN 48 _PT-RBG-S @ _PT-FRAME-BEGIN ?DUP IF EXIT THEN
     _PT-RBG-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!
     _PT-RBG-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!
     _PT-RBG-ITEM @ _PT-FRAME-PAYLOAD 16 + _PT-U64!
@@ -3541,7 +3665,6 @@ VARIABLE _PT-RBG-PIXELS
     _PT-RBG-HEIGHT @ _PT-FRAME-PAYLOAD 32 + L!
     _PT-RBG-FLAGS @ _PT-FRAME-PAYLOAD 36 + L!
     _PT-RBG-LENGTH @ _PT-FRAME-PAYLOAD 40 + _PT-U64!
-    _PT-RBG-DIGEST-A @ 32 _PT-FRAME-PAYLOAD 48 + SWAP MOVE
     TRUE _PT-RBG-S @ _PT-FRAME-SEND ?DUP IF EXIT THEN
 
     TRUE _PT-RBG-S @ _PT.S.UPLOAD? !
@@ -3558,15 +3681,12 @@ VARIABLE _PT-RBG-PIXELS
     0 _PT-RBG-S ! 0 _PT-RBG-OWNER ! 0 _PT-RBG-GENERATION !
     0 _PT-RBG-ITEM ! 0 _PT-RBG-FORMAT !
     0 _PT-RBG-WIDTH ! 0 _PT-RBG-HEIGHT ! 0 _PT-RBG-FLAGS !
-    0 _PT-RBG-LENGTH ! 0 _PT-RBG-DIGEST-A ! 0 _PT-RBG-DIGEST-U !
-    0 _PT-RBG-PIXELS !
-    0 _PT-RSA ! 0 _PT-RSU ! 0 _PT-RSS !
-    0 _PT-RA ! 0 _PT-RU ! 0 _PT-RB ! 0 _PT-RV ! ;
+    0 _PT-RBG-LENGTH ! ;
 
 \ Stack: owner generation resource format width height flags byte-length
-\        sha3-a sha3-u session -- status
+\        session -- status
 : PT-RESOURCE-BEGIN
-    _PT-RBG-S ! _PT-RBG-DIGEST-U ! _PT-RBG-DIGEST-A !
+    _PT-RBG-S !
     _PT-RBG-LENGTH ! _PT-RBG-FLAGS ! _PT-RBG-HEIGHT ! _PT-RBG-WIDTH !
     _PT-RBG-FORMAT ! _PT-RBG-ITEM ! _PT-RBG-GENERATION ! _PT-RBG-OWNER !
     ['] _PT-RESOURCE-BEGIN-BODY CATCH ?DUP IF DROP PT-S-INVALID THEN
@@ -3846,8 +3966,10 @@ VARIABLE _PT-B-TAILS-BIG?
             PT-S-SESSION-LOST EXIT
         THEN
     THEN
+    \ An open upload does not hold the transaction slot: transactions run
+    \ between its frames, and the busy result holds one back while a chunk
+    \ awaits its covering CREDIT.
     _PT-B-S @ _PT-RESULT-BUSY? IF PT-S-WOULD-BLOCK EXIT THEN
-    _PT-B-S @ _PT.S.UPLOAD? @ IF PT-S-WOULD-BLOCK EXIT THEN
     _PT-B-S @ _PT.S.TX-OPEN? @ IF PT-S-INVALID EXIT THEN
     _PT-BEGIN-ARGS? 0= IF PT-S-INVALID EXIT THEN
     _PT-B-SNAPSHOT @ IF _PT-SNAPSHOT-COUNTS? 0= IF PT-S-INVALID EXIT THEN THEN
@@ -4046,8 +4168,8 @@ VARIABLE _PT-PB-RET-MIN
     _PT-PB-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
     _PT-PB-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
     _PT-PB-S @ _PT-RETAINED-WRITE-STATE? 0= IF PT-S-UNSUPPORTED EXIT THEN
+    \ As for a CELL transaction, an open upload does not hold the slot.
     _PT-PB-S @ _PT-RESULT-BUSY? IF PT-S-WOULD-BLOCK EXIT THEN
-    _PT-PB-S @ _PT.S.UPLOAD? @ IF PT-S-WOULD-BLOCK EXIT THEN
     _PT-PB-S @ _PT.S.TX-OPEN? @ IF PT-S-INVALID EXIT THEN
     _PT-PB-S @ _PT.S.REVISION @ 0xFFFFFFFFFFFFFFFF = IF
         PT-ST-LOST _PT-PB-S @ _PT.S.STATE !
@@ -5116,36 +5238,69 @@ VARIABLE _PT-IM-TYPE
 VARIABLE _PT-IM-RESOURCE
 VARIABLE _PT-IM-FIT
 VARIABLE _PT-IM-OPACITY
+VARIABLE _PT-IM-FLAGS
+VARIABLE _PT-IM-CLIP-X
+VARIABLE _PT-IM-CLIP-Y
+VARIABLE _PT-IM-CLIP-COLS
+VARIABLE _PT-IM-CLIP-ROWS
 
-\ Stack: common-prefix resource fit opacity session message-type -- status
+\ With CLIP, a clip rectangle of positive extents within the object's; with
+\ none, every clip field zero.
+: _PT-IMAGE-CLIP?  ( -- flag )
+    _PT-IM-FLAGS @ PT-IMAGE-CLIP AND 0= IF
+        _PT-IM-CLIP-X @ _PT-IM-CLIP-Y @ OR
+        _PT-IM-CLIP-COLS @ OR _PT-IM-CLIP-ROWS @ OR 0= EXIT
+    THEN
+    _PT-IM-CLIP-X @ _PT-U32? 0= _PT-IM-CLIP-Y @ _PT-U32? 0= OR
+    _PT-IM-CLIP-COLS @ _PT-U32? 0= OR _PT-IM-CLIP-ROWS @ _PT-U32? 0= OR
+    IF FALSE EXIT THEN
+    _PT-IM-CLIP-COLS @ 0= _PT-IM-CLIP-ROWS @ 0= OR IF FALSE EXIT THEN
+    _PT-IM-CLIP-X @ _PT-IM-CLIP-COLS @ + _PT-OB-COLS @ _PT-U<=
+    _PT-IM-CLIP-Y @ _PT-IM-CLIP-ROWS @ + _PT-OB-ROWS @ _PT-U<= AND ;
+
+\ Stack: common-prefix resource fit opacity flags clip-x clip-y clip-cols
+\        clip-rows session message-type -- status
 : _PT-IMAGE-WRITE
-    _PT-IM-TYPE ! _PT-IM-S ! _PT-IM-OPACITY ! _PT-IM-FIT !
-    _PT-IM-RESOURCE !
+    _PT-IM-TYPE ! _PT-IM-S !
+    _PT-IM-CLIP-ROWS ! _PT-IM-CLIP-COLS ! _PT-IM-CLIP-Y ! _PT-IM-CLIP-X !
+    _PT-IM-FLAGS ! _PT-IM-OPACITY ! _PT-IM-FIT ! _PT-IM-RESOURCE !
     _PT-IM-S @ _PT-IM-TYPE @ 3 _PT-OBJECT-COMMON!
     _PT-OB-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
     _PT-OB-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
     _PT-OB-S @ _PT-RET-RGBA-IMAGE? 0= IF PT-S-UNSUPPORTED EXIT THEN
-    _PT-OB-S @ _PT.S.RET-FORMATS 8 + L@ PT-RESOURCE-RGBA8 <> IF
-        PT-S-UNSUPPORTED EXIT
-    THEN
     _PT-IM-RESOURCE @ 0= IF PT-S-INVALID EXIT THEN
     _PT-IM-FIT @ DUP PT-IMAGE-FIT-STRETCH U<
     SWAP PT-IMAGE-FIT-COVER U> OR IF PT-S-INVALID EXIT THEN
     _PT-IM-OPACITY @ _PT-U8? 0= IF PT-S-INVALID EXIT THEN
-    80 _PT-OBJECT-ADMIT ?DUP IF EXIT THEN
+    _PT-IM-FLAGS @ PT-IMAGE-BACKDROP PT-IMAGE-CLIP OR INVERT AND IF
+        PT-S-INVALID EXIT
+    THEN
+    _PT-IMAGE-CLIP? 0= IF PT-S-INVALID EXIT THEN
+    _PT-IM-FLAGS @ PT-IMAGE-CLIP AND IF 96 ELSE 80 THEN
+    _PT-OBJECT-ADMIT ?DUP IF EXIT THEN
     _PT-OBJECT-COMMON-PAYLOAD!
     _PT-IM-RESOURCE @ _PT-FRAME-PAYLOAD 64 + _PT-U64!
     _PT-IM-FIT @ _PT-FRAME-PAYLOAD 72 + L!
     _PT-IM-OPACITY @ _PT-FRAME-PAYLOAD 76 + C!
+    _PT-IM-FLAGS @ _PT-FRAME-PAYLOAD 77 + C!
+    0 _PT-FRAME-PAYLOAD 78 + W!
+    _PT-IM-FLAGS @ PT-IMAGE-CLIP AND IF
+        _PT-IM-CLIP-X @ _PT-FRAME-PAYLOAD 80 + L!
+        _PT-IM-CLIP-Y @ _PT-FRAME-PAYLOAD 84 + L!
+        _PT-IM-CLIP-COLS @ _PT-FRAME-PAYLOAD 88 + L!
+        _PT-IM-CLIP-ROWS @ _PT-FRAME-PAYLOAD 92 + L!
+    THEN
     _PT-PO-SEND ;
 
 \ Stack: owner generation object region parent x y cols rows z visible
-\        resource fit opacity session -- status
+\        resource fit opacity flags clip-x clip-y clip-cols clip-rows
+\        session -- status
 : PT-IMAGE-DEFINE
     _PT-M-OBJECT-DEFINE _PT-IMAGE-WRITE ;
 
 \ Stack: owner generation object region parent x y cols rows z visible
-\        resource fit opacity session -- status
+\        resource fit opacity flags clip-x clip-y clip-cols clip-rows
+\        session -- status
 : PT-IMAGE-REPLACE
     _PT-M-OBJECT-REPLACE _PT-IMAGE-WRITE ;
 
@@ -6122,6 +6277,14 @@ VARIABLE _PT-FD-RECT
         _PT-CT-CONTENT-U @ IF FALSE EXIT THEN
         _PT-CT-STATE @ 0x0B INVERT AND 0= EXIT
     THEN
+    \ A document carries at least the 32-byte smallest DOC1 body.
+    _PT-CT-KIND @ PT-CONTROL-DOCUMENT = IF
+        _PT-CT-PARENT @ _PT-CT-ORDER @ OR IF FALSE EXIT THEN
+        _PT-CT-LABEL-U @ _PT-CT-SHORTCUT-U @ OR IF FALSE EXIT THEN
+        _PT-CT-CONTENT-U @ 32 U< IF FALSE EXIT THEN
+        _PT-CT-STATE @ 0x0B INVERT AND IF FALSE EXIT THEN
+        _PT-CT-ROOT-BOUNDS? EXIT
+    THEN
     \ An item view carries at least the 56-byte smallest ITM1 body.
     _PT-CT-KIND @ PT-CONTROL-ITEM-VIEW = IF
         _PT-CT-PARENT @ _PT-CT-ORDER @ OR IF FALSE EXIT THEN
@@ -6273,6 +6436,9 @@ VARIABLE _PT-GC-TYPED?
     THEN
     _PT-CT-KIND @ PT-CONTROL-ITEM-VIEW = IF
         _PT-CT-S @ _PT-RET-CONTROL-ITEMS? 0= IF PT-S-UNSUPPORTED EXIT THEN
+    THEN
+    _PT-CT-KIND @ PT-CONTROL-DOCUMENT = IF
+        _PT-CT-S @ _PT-RET-CONTROL-DOCUMENTS? 0= IF PT-S-UNSUPPORTED EXIT THEN
     THEN
     _PT-CT-KIND @ _PT-CT-TASKBAR-KIND? IF
         _PT-CT-S @ _PT-RET-TASKBARS? 0= IF PT-S-UNSUPPORTED EXIT THEN

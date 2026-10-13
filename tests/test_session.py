@@ -22,6 +22,7 @@ from rich_terminal import (
     DriverStatus,
     EgressWatermarks,
     HostPortLimits,
+    LinkPace,
     TerminalConfig,
     TerminalSessionError,
     TerminalState,
@@ -98,7 +99,7 @@ def _retained_policy(*, interval_us: int = 0) -> RetainedPolicy:
         max_resource_chunk_bytes=0,
         max_retained_transaction_bytes=512,
         total_resource_bytes=0,
-        image_format=0,
+        image_formats=0,
         max_image_width=0,
         max_image_height=0,
         max_path_points=0,
@@ -1398,7 +1399,7 @@ def test_rich_terminal_policy_derives_transport_from_retained_bounds():
         max_resource_chunk_bytes=0,
         max_retained_transaction_bytes=10_570_616,
         total_resource_bytes=0,
-        image_format=0,
+        image_formats=0,
         max_image_width=0,
         max_image_height=0,
         max_path_points=0,
@@ -1423,6 +1424,51 @@ def test_rich_terminal_policy_derives_transport_from_retained_bounds():
     assert config.host_limits.retained_publication_bytes == 10_574_712
     assert config.host_limits.egress.high_bytes == 21_149_424
     assert config.host_limits.egress.low_bytes == 10_574_712
+
+
+def test_a_paced_link_advertises_chunks_its_link_carries_in_a_frame():
+    """APT-1-RETAINED-1 section 8: the terminal, which knows its link, sizes
+    resource chunks so a frame waits behind at most one."""
+
+    product = _rich_terminal_policy()
+    image = RetainedPolicy(
+        features=RetainedFeature.CORE | RetainedFeature.RGBA_IMAGE,
+        max_owner_records=2,
+        max_live_owners=1,
+        max_regions=2,
+        max_resources=2,
+        max_objects=2,
+        max_series=0,
+        max_operations_per_transaction=4,
+        max_resource_chunk_bytes=4_096,
+        max_retained_transaction_bytes=8_192,
+        total_resource_bytes=16_384,
+        image_formats=1,
+        max_image_width=64,
+        max_image_height=64,
+        max_path_points=0,
+        max_glyph_run_bytes=0,
+        max_samples_per_append=0,
+        max_history_per_series=0,
+        minimum_presentation_interval_us=0,
+        total_sample_slots=0,
+        total_utf8_bytes=0,
+        client_to_terminal_max_payload=4_128,
+        terminal_to_client_max_payload=64,
+        base_max_transaction_bytes=8_192,
+    )
+    pace = LinkPace(64_000, 16_000)
+
+    paced = product.configuration(2, 2, retained_policy=image, link_pace=pace)
+    assert paced.link_pace is pace
+    assert paced.retained_policy == replace(image, max_resource_chunk_bytes=1_024)
+    # A link that carries more than the terminal's chunk in a frame keeps it.
+    fast = product.configuration(
+        2, 2, retained_policy=image, link_pace=LinkPace(1_000_000_000, 16_000)
+    )
+    assert fast.retained_policy is image
+    unpaced = product.configuration(2, 2, retained_policy=image)
+    assert unpaced.retained_policy is image and unpaced.link_pace is None
 
 
 def test_rich_terminal_policy_checks_retained_policy_before_derivation():
@@ -1499,7 +1545,7 @@ def test_session_server_carries_the_exact_retained_policy(monkeypatch):
         max_resource_chunk_bytes=0,
         max_retained_transaction_bytes=policy.maximum_transaction_bytes,
         total_resource_bytes=0,
-        image_format=0,
+        image_formats=0,
         max_image_width=0,
         max_image_height=0,
         max_path_points=0,
@@ -1539,6 +1585,56 @@ def test_session_server_carries_the_exact_retained_policy(monkeypatch):
     assert config == policy.configuration(100, 32, retained_policy=retained)
     assert config.retained_policy is not None
     assert config.retained_policy.to_dict() == retained.to_dict()
+
+
+def test_session_server_carries_a_terminal_link_pace(monkeypatch):
+    policy = _rich_terminal_policy()
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "megapad.py",
+            "--cols",
+            "100",
+            "--rows",
+            "32",
+            "--rich-terminal-policy",
+            json.dumps(policy.to_dict()),
+            "--terminal-link-pace",
+            "64000:16000",
+        ],
+    )
+    with (
+        patch("emulator.server.MachineSession.from_bios") as from_bios,
+        patch("emulator.server.SharedMachine"),
+        patch("emulator.server.SessionServer"),
+        patch("emulator.server.signal.signal"),
+    ):
+        assert session_server_main() == 0
+
+    config = from_bios.call_args.kwargs["rich_terminal"]
+    pace = LinkPace(64_000, 16_000)
+    assert config.link_pace == pace
+    assert config == policy.configuration(100, 32, link_pace=pace)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        ("--terminal-link-pace", "64000:16000"),
+        ("--rich-terminal-policy", "POLICY", "--terminal-link-pace", "64000"),
+        ("--rich-terminal-policy", "POLICY", "--terminal-link-pace", "0:16000"),
+    ),
+)
+def test_session_server_rejects_a_link_pace_it_cannot_use(monkeypatch, arguments):
+    policy = json.dumps(_rich_terminal_policy().to_dict())
+    monkeypatch.setattr(
+        "sys.argv",
+        ["megapad.py", *(policy if value == "POLICY" else value for value in arguments)],
+    )
+    with patch("emulator.server.MachineSession.from_bios") as from_bios:
+        with pytest.raises(SystemExit, match="2"):
+            session_server_main()
+    from_bios.assert_not_called()
 
 
 def test_session_server_rejects_retained_policy_without_base_attachment(monkeypatch):

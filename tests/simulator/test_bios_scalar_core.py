@@ -28,6 +28,11 @@ def test_rich_terminal_and_geometry_words_extend_the_core_append_only() -> None:
         b"LITERAL",
         b"EPOCH!",
         b"EPOCH-VALID?",
+        b"AES-MODE!",
+        b"AES-CBC-IV!",
+        b"SHA384-INIT",
+        b"SHA384-FINAL",
+        b"2ROT",
     )
     assert len(runtime.dictionary.words) == 380 + len(frontier)
     words = runtime.dictionary.words[:-len(frontier)]
@@ -142,6 +147,23 @@ def test_three_cell_rotations_match_bios_stack_order() -> None:
 
     runtime.execute("-ROT", context=context)
     assert context.data.snapshot() == (11, 22, 33)
+
+
+def test_double_rotation_matches_bios_stack_order_and_refuses_underflow() -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+
+    for value in (1, 2, 3, 4, 5, 6, 7):
+        context.data.push(value)
+    runtime.execute("2ROT", context=context)
+    assert context.data.snapshot() == (1, 4, 5, 6, 7, 2, 3)
+
+    short = runtime.new_context()
+    for value in (1, 2, 3, 4, 5):
+        short.data.push(value)
+    with pytest.raises(StackUnderflow, match="data stack underflow"):
+        runtime.execute("2ROT", context=short)
+    assert short.data.snapshot() == (1, 2, 3, 4, 5)
 
 
 @pytest.mark.parametrize(

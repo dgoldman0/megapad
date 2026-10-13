@@ -8,7 +8,7 @@ from rich_terminal.retained_wire import decode_control_definition, encode_contro
 from simulator.runtime import MegaForthRuntime
 from tests.simulator.test_kdos_exceptions import _load_exceptions
 from tests.test_rich_terminal_dual_backend import (
-    ONE_CORE_UART_LOCK_SHIMS,
+    KDOS_SHIMS,
     SIMULATOR_SOURCE_MAX_STEPS,
     _rich_terminal_module_source,
     _stored_cell,
@@ -22,8 +22,8 @@ def test_complete_module_taskbar_publication_uses_host_codec(execution_backend: 
     assert runtime.execution_backend == execution_backend
     catch_word = runtime.find("CATCH")
     result = runtime.evaluate(
-        ONE_CORE_UART_LOCK_SHIMS + _rich_terminal_module_source(),
-        source_name="one-core-uart-lock-shims+rich-terminal.f:complete",
+        KDOS_SHIMS + _rich_terminal_module_source(),
+        source_name="kdos-shims+rich-terminal.f:complete",
         step_budget=SIMULATOR_SOURCE_MAX_STEPS,
     )
     assert result.definitions[-1].name == b"PT-TX-ABORT"

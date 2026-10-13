@@ -1242,15 +1242,16 @@ Exceptions only set the sticky flags in `FPCSR`.
 
 ---
 
-## AES-256/128-GCM Engine (11 words)
+## AES-256/128 Engine, GCM and CBC (13 words)
 
-Authenticated encryption via the executable/native MMIO AES ABI at
+Encryption and decryption in GCM, which authenticates, and in CBC for the
+formats that use it, via the executable/native MMIO AES ABI at
 `0xFFFF_FF00_0000_0700`.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `AES-KEY!` | `( addr -- )` | Load 256-bit key (32 bytes at addr) into AES engine. |
-| `AES-IV!` | `( addr -- )` | Load 96-bit IV (12 bytes at addr) into AES engine. |
+| `AES-IV!` | `( addr -- )` | Load GCM's 96-bit IV (12 bytes at addr) into AES engine. |
 | `AES-AAD-LEN!` | `( n -- )` | Set additional authenticated data length (bytes). |
 | `AES-DATA-LEN!` | `( n -- )` | Set plaintext/ciphertext data length (bytes). |
 | `AES-CMD!` | `( cmd -- )` | Start operation: low bit 0 = encrypt, 1 = decrypt. |
@@ -1260,12 +1261,23 @@ Authenticated encryption via the executable/native MMIO AES ABI at
 | `AES-DOUT@` | `( addr -- )` | Read output data block (16 bytes) from engine. |
 | `AES-TAG@` | `( addr -- )` | Read 128-bit authentication tag (16 bytes) from engine. |
 | `AES-TAG!` | `( addr -- )` | Write expected tag (16 bytes) for decryption verification. |
+| `AES-MODE!` | `( n -- )` | Select the block mode: low bit 0 = GCM (the default), 1 = CBC. Completion or failure returns it to GCM. |
+| `AES-CBC-IV!` | `( addr -- )` | Load CBC's 16-byte IV (16 bytes at addr) into AES engine. |
+
+A CBC transaction is `AES-MODE!` 1, the key, `AES-CBC-IV!`, and
+`AES-DATA-LEN!` with whole 16-byte blocks, then `AES-CMD!`. It has no AAD and
+no tag: each block fed to `AES-DIN!` gives its block to `AES-DOUT@`, chained
+from the IV, and the status is 2 after the last. A GCM transaction takes
+exactly the 12 bytes `AES-IV!` writes and a CBC one exactly the 16 of
+`AES-CBC-IV!`; other IV bytes, a CBC length of part of a block, or a CBC AAD
+length fail closed with status 3.
 
 > **AES ABI discrepancy record.** The table above follows unchanged KDOS,
 > `bios.asm`, and the native architectural device: the byte aperture is
-> `+0x700..+0x76F`, key mode is at `+0x3A`, commands are 0/1, and statuses are
-> 0/1/2/3. Naturally aligned 1-, 2-, 4-, and 8-byte native accesses are
-> preflighted as complete spans and decomposed little-endian; the BIOS uses
+> `+0x700..+0x76F`, key mode is at `+0x3A`, block mode is at `+0x3B`, commands
+> are 0/1, and statuses are 0/1/2/3. Naturally aligned 1-, 2-, 4-, and 8-byte
+> native accesses are preflighted as complete spans and decomposed
+> little-endian; the BIOS uses
 > byte loops for key, IV, data, and tag transfers and 32-bit stores for the two
 > lengths. Older tables published commands 1/2, statuses 0/1/2, a 64-byte
 > aperture, or key mode at `+0x70`.
@@ -1277,10 +1289,12 @@ Authenticated encryption via the executable/native MMIO AES ABI at
 > the BIOS byte loops therefore do not configure or transfer the same register
 > image. RTL also exposes a busy/done/auth-fail bitfield rather than statuses
 > 0/1/2/3 and does not implement the executable AAD/length-finalization/tag-
-> comparison and fail-closed transaction protocol. Published throughput and
-> interrupt behavior remain unqualified RTL design targets, not current
-> executable/native ABI guarantees. This records the mismatch without choosing
-> which implementation must ultimately change.
+> comparison and fail-closed transaction protocol. It has no CBC mode, and its
+> GCM encryption runs inverse-cipher rounds on the counter block, which GCM
+> never uses. Published throughput and interrupt behavior remain unqualified
+> RTL design targets, not current executable/native ABI guarantees. The RTL
+> block is to be rebuilt to the table above; `ROADMAP-v1.0.md` item 50 tracks
+> it.
 
 ---
 
@@ -1343,7 +1357,7 @@ Statuses are `0` OK, `1` STATE, `2` RANGE, `3` CONTEXT-ALIAS, and
 the active marker must be exactly one. Every nonzero result aborts and wipes.
 A failed `FINAL` leaves every non-context destination byte unchanged.
 
-## SHA-512 Streaming (4 words)
+## SHA-512 and SHA-384 Streaming (6 words)
 
 `SHA512-*` uses EXT.CRYPTO mode 2 but does not expose the engine's
 R16–R19-backed digest state across a Forth return. Each core has a private
@@ -1360,11 +1374,19 @@ engine is owned, releases only after cleanup, and publishes afterward. The
 contexts are erased on warm boot, on every checked failure, and after
 successful `FINAL` or `CLEAR`.
 
+SHA-384 is SHA-512 from its own initial value, truncated to 48 bytes (FIPS
+180-4 section 6.5). `SHA384-INIT` takes that value from EXT.CRYPTO mode 1 and
+leaves the same context's active marker at 2 instead of 1; every later step
+restores the saved words into mode 2. `SHA512-UPDATE` and `SHA512-CLEAR`
+serve either transaction, and `SHA384-FINAL` publishes the first 48 bytes of
+the staged digest.
+
 Before even a zero-length `UPDATE` can succeed, and before `FINAL` validates
-the destination, the saved active marker must be exactly one, the partial
-offset must be below 128, the low bit length must be byte-aligned, and
-`((low >> 3) & 127)` must equal the saved offset. Any mismatch returns STATE
-and aborts the context.
+the destination, the saved active marker must be 1 (SHA-512) or 2 (SHA-384),
+the partial offset must be below 128, the low bit length must be
+byte-aligned, and `((low >> 3) & 127)` must equal the saved offset. `UPDATE`
+takes either marker; each `FINAL` takes only its own. Any mismatch returns
+STATE and aborts the context.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -1372,11 +1394,13 @@ and aborts the context.
 | `SHA512-UPDATE` | `( addr len -- status )` | Absorb an arbitrary validated Bank 0, external, HBW, or VRAM span, including zero-length and cross-block updates. |
 | `SHA512-FINAL` | `( dst -- status )` | On success, write the 64-byte big-endian digest; always erase saved and staged state. |
 | `SHA512-CLEAR` | `( -- status )` | Idempotently abort and zeroize context and visible SHA state, release the engine, and return zero. |
+| `SHA384-INIT` | `( -- status )` | Reset this core's SHA-512 context to the SHA-384 IV. |
+| `SHA384-FINAL` | `( dst -- status )` | As `SHA512-FINAL` for a `SHA384-INIT` transaction, writing the 48-byte digest. |
 
 | Status | Name | Meaning |
 |--------|------|---------|
 | `0` | OK | Operation completed. |
-| `1` | STATE | `UPDATE` or `FINAL` was called without an active `INIT`. |
+| `1` | STATE | `UPDATE` or `FINAL` was called without an active `INIT`, or a `FINAL` on the other digest's transaction. |
 | `2` | RANGE | The complete caller span is not in one advertised physical-memory window. |
 | `3` | CONTEXT-ALIAS | The caller span intersects any core's private SHA-512 context. |
 | `4` | LENGTH-OVERFLOW | Absorbing the span would wrap the 128-bit bit length. |

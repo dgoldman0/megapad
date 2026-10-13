@@ -25,7 +25,7 @@ from tests.simulator.test_simulator_session import (
 )
 from tests.test_rich_terminal_dual_backend import (
     LIVE_HANDSHAKE_SCENARIO_SOURCE,
-    ONE_CORE_UART_LOCK_SHIMS,
+    KDOS_SHIMS,
     RICH_TERMINAL_SOURCE,
 )
 
@@ -39,8 +39,8 @@ IDLE_ROOT_SOURCE = b"""
 def _cell_session() -> SimulatorMachineSession:
     runtime = _load_exceptions()
     runtime.evaluate(
-        ONE_CORE_UART_LOCK_SHIMS + RICH_TERMINAL_SOURCE.read_bytes(),
-        source_name="one-core-uart-lock-shims+rich-terminal.f",
+        KDOS_SHIMS + RICH_TERMINAL_SOURCE.read_bytes(),
+        source_name="kdos-shims+rich-terminal.f",
         step_budget=1_000_000,
     )
     runtime.evaluate(

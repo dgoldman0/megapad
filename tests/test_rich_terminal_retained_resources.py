@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-import hashlib
+import io
 from dataclasses import FrozenInstanceError
 from types import MappingProxyType
 
 import pytest
+from PIL import Image
 
 from rich_terminal.retained_model import (
+    IMAGE_FORMATS,
     OwnerIdentity,
     OwnerLedger,
     OwnerQuotas,
@@ -49,7 +51,7 @@ def _policy(**changes) -> RetainedPolicy:
         "max_resource_chunk_bytes": 64,
         "max_retained_transaction_bytes": 4096,
         "total_resource_bytes": 4096,
-        "image_format": 1,
+        "image_formats": IMAGE_FORMATS,
         "max_image_width": 16,
         "max_image_height": 16,
         "max_path_points": 8,
@@ -102,18 +104,37 @@ def _begin(
     width: int = 2,
     height: int = 2,
     flags: int = 0,
-    digest: bytes | None = None,
+    format=ResourceFormat.RGBA8,
 ):
     return store.begin(
         owner,
         resource_id=resource_id,
-        format=ResourceFormat.RGBA8,
+        format=format,
         width=width,
         height=height,
         flags=flags,
         byte_length=len(data),
-        digest=hashlib.sha3_256(data).digest() if digest is None else digest,
     )
+
+
+# A 3 by 2 picture with transparency, and its bytes in each file format.
+PICTURE = bytes(
+    channel
+    for pixel in (
+        (255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255),
+        (255, 255, 0, 128), (0, 255, 255, 0), (255, 255, 255, 255),
+    )
+    for channel in pixel
+)
+
+
+def _file(format_name: str, pixels: bytes = PICTURE, size=(3, 2)) -> bytes:
+    image = Image.frombytes("RGBA", size, pixels)
+    if format_name == "JPEG":
+        image = image.convert("RGB")
+    out = io.BytesIO()
+    image.save(out, format=format_name, **({"quality": 100} if format_name == "JPEG" else {}))
+    return out.getvalue()
 
 
 def _commit_resource(
@@ -162,7 +183,7 @@ def test_ordered_upload_publishes_only_verified_immutable_resource_state():
         readonly.obj[0] = 0xFF
     readonly.release()
     assert resource.read(0, len(data)) == data
-    assert resource.digest == hashlib.sha3_256(data).digest()
+    assert resource.format is ResourceFormat.RGBA8
     assert resource.width == 2
     assert resource.height == 2
     assert store.resource(owner, 7) is resource
@@ -185,7 +206,7 @@ def test_ordered_upload_publishes_only_verified_immutable_resource_state():
         ("abort", None),
         ("bad_chunk", ResourceStoreErrorCode.INVALID),
         ("incomplete_commit", ResourceStoreErrorCode.INVALID),
-        ("bad_digest", ResourceStoreErrorCode.BAD_CONTENT),
+        ("bad_file", ResourceStoreErrorCode.BAD_CONTENT),
     ),
 )
 def test_upload_termination_releases_staging_but_consumes_resource_high_water(
@@ -197,8 +218,9 @@ def test_upload_termination_releases_staging_but_consumes_resource_high_water(
     ledger.open(owner, _quotas())
     store = RetainedResourceStore(ledger)
     data = bytes(range(16))
-    digest = b"\x00" * 32 if termination == "bad_digest" else None
-    _begin(store, owner, 5, data, digest=digest)
+    # Sixteen bytes that are no QOI file, declared as a 2 by 2 picture.
+    file_format = ResourceFormat.QOI if termination == "bad_file" else ResourceFormat.RGBA8
+    _begin(store, owner, 5, data, format=file_format)
 
     if termination == "abort":
         store.append(owner, 5, 0, data[:4])
@@ -310,7 +332,7 @@ def test_consumed_resource_id_precedes_invalid_replay_content():
     store.abort(owner, 4, 0)
 
     with pytest.raises(ResourceStoreError) as duplicate:
-        _begin(store, owner, 4, data, flags=1, digest=b"bad")
+        _begin(store, owner, 4, data, flags=1, format=9)
 
     assert duplicate.value.code is ResourceStoreErrorCode.DUPLICATE_ID
     assert store.upload is None
@@ -422,7 +444,6 @@ def test_prepared_resource_changes_publish_only_after_exact_install():
         height=2,
         flags=0,
         byte_length=len(data),
-        digest=hashlib.sha3_256(data).digest(),
     )
     with pytest.raises(FrozenInstanceError):
         begin.accepted_bytes = 99
@@ -494,7 +515,6 @@ def test_prepared_resource_change_is_bound_to_owner_ledger_state():
         height=2,
         flags=0,
         byte_length=len(data),
-        digest=hashlib.sha3_256(data).digest(),
     )
 
     ledger.open(_identity(2), _quotas())
@@ -504,30 +524,127 @@ def test_prepared_resource_change_is_bound_to_owner_ledger_state():
     assert ledger.require_live(owner).high_water.resource == 0
 
 
-def test_public_rgba_resource_construction_cannot_bypass_digest_validation():
+def test_public_rgba_resource_construction_holds_exactly_the_decoded_pixels():
     owner = _identity(1)
     data = bytes(range(16))
-    valid = ResourceDeclaration(
-        1,
-        ResourceFormat.RGBA8,
-        2,
-        2,
-        len(data),
-        hashlib.sha3_256(data).digest(),
-    )
+    valid = ResourceDeclaration(1, ResourceFormat.RGBA8, 2, 2, len(data))
     assert RGBAResource(owner, valid, data).read(0, len(data)) == data
-
-    invalid = ResourceDeclaration(
-        1,
-        ResourceFormat.RGBA8,
-        2,
-        2,
-        len(data),
-        b"\x00" * 32,
-    )
-    with pytest.raises(ValueError, match="digest is inconsistent"):
-        RGBAResource(owner, invalid, data)
-    with pytest.raises(ValueError, match="digest is inconsistent"):
-        RGBAResource(owner, invalid, data, _verification=object())
+    with pytest.raises(ValueError, match="length is inconsistent"):
+        RGBAResource(owner, valid, data[:12])
     with pytest.raises(TypeError, match="data must be bytes"):
         RGBAResource(owner, valid, bytearray(data))
+    # A file's declaration sends the file but holds its decoded pixels.
+    qoi = ResourceDeclaration(2, ResourceFormat.QOI, 2, 2, 9)
+    assert (qoi.byte_length, qoi.decoded_bytes) == (9, 16)
+    assert RGBAResource(owner, qoi, data).byte_length == 16
+    with pytest.raises(ValueError, match="raw resource byte length"):
+        ResourceDeclaration(3, ResourceFormat.RGBA8, 2, 2, 9)
+
+
+@pytest.mark.parametrize("format_name", ("QOI", "PNG", "JPEG"))
+def test_a_file_upload_is_decoded_at_commit_into_rgba_pixels(format_name):
+    ledger = _ledger()
+    owner = _identity(1)
+    ledger.open(owner, _quotas())
+    store = RetainedResourceStore(ledger)
+    data = _file(format_name)
+
+    _begin(store, owner, 1, data, width=3, height=2, format=ResourceFormat[format_name])
+    # The owner is charged the decoded picture, not the file.
+    assert store.usage(owner) == ResourceUsage(resources=1, bytes=24)
+    for offset in range(0, len(data), 64):
+        store.append(owner, 1, offset, data[offset:offset + 64])
+    resource = store.commit(owner, 1)
+
+    pixels = resource.read(0, 24)
+    assert (resource.width, resource.height, resource.byte_length) == (3, 2, 24)
+    assert resource.format is ResourceFormat.RGBA8
+    if format_name == "JPEG":
+        # Lossy, and opaque.
+        assert all(pixels[index] == 255 for index in range(3, 24, 4))
+    else:
+        assert pixels == PICTURE
+    assert store.usage(owner) == ResourceUsage(resources=1, bytes=24)
+    assert store.drop(owner, 1, in_use=False) is resource
+    assert store.usage(owner) == ResourceUsage()
+
+
+@pytest.mark.parametrize(
+    ("declared", "case"),
+    (
+        ("PNG", "other_size"),
+        ("PNG", "other_format"),
+        ("PNG", "not_a_picture"),
+        ("QOI", "truncated"),
+        ("PNG", "truncated"),
+        ("JPEG", "truncated"),
+    ),
+)
+def test_a_file_that_is_not_its_declared_picture_fails_with_bad_content(
+    declared, case
+):
+    ledger = _ledger()
+    owner = _identity(1)
+    ledger.open(owner, _quotas())
+    store = RetainedResourceStore(ledger)
+    data = {
+        "other_size": _file(declared, PICTURE[:16], (2, 2)),
+        "other_format": _file("QOI"),
+        # Cut inside the first pixels; Pillow's QOI decoder fails here
+        # with IndexError rather than OSError.
+        "truncated": _file(declared)[:16],
+        "not_a_picture": b"no picture here",
+    }[case]
+    _begin(store, owner, 4, data, width=3, height=2,
+           format=ResourceFormat[declared])
+    for offset in range(0, len(data), 64):
+        store.append(owner, 4, offset, data[offset:offset + 64])
+
+    with pytest.raises(ResourceStoreError) as caught:
+        store.commit(owner, 4)
+    assert caught.value.code is ResourceStoreErrorCode.BAD_CONTENT
+    assert caught.value.prepared is None or store.upload is None
+    assert store.upload is None
+    assert not store.state.resources
+    assert store.usage(owner) == ResourceUsage()
+    assert ledger.require_live(owner).high_water.resource == 4
+
+
+def test_only_advertised_formats_are_taken():
+    ledger = _ledger(_policy(image_formats=ResourceFormat.RGBA8.bit))
+    owner = _identity(1)
+    ledger.open(owner, _quotas())
+    store = RetainedResourceStore(ledger)
+    with pytest.raises(ResourceStoreError) as caught:
+        _begin(store, owner, 1, _file("QOI"), width=3, height=2,
+               format=ResourceFormat.QOI)
+    assert caught.value.code is ResourceStoreErrorCode.INVALID
+    assert store.upload is None
+    _commit_resource(store, owner, 1, bytes(range(16)))
+
+    for formats, message in (
+        (ResourceFormat.QOI.bit, "requires raw RGBA8"),
+        (IMAGE_FORMATS | 0x10, "does not define"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            _policy(image_formats=formats)
+    with pytest.raises(ValueError, match="zero without RGBA_IMAGE"):
+        _policy(
+            features=ALL_FEATURES & ~RetainedFeature.RGBA_IMAGE,
+            image_formats=1, max_resources=0, max_resource_chunk_bytes=0,
+            total_resource_bytes=0, max_image_width=0, max_image_height=0,
+        )
+
+
+def test_a_file_charges_its_decoded_size_against_the_owner_quota():
+    ledger = _ledger()
+    owner = _identity(1)
+    ledger.open(owner, _quotas(resource_bytes=255))
+    store = RetainedResourceStore(ledger)
+    # One colour compresses to a few bytes, but decodes to 8 * 8 * 4 = 256.
+    data = _file("QOI", bytes((10, 20, 30, 255)) * 64, (8, 8))
+    assert len(data) < 64
+    with pytest.raises(ResourceStoreError) as caught:
+        _begin(store, owner, 1, data, width=8, height=8, format=ResourceFormat.QOI)
+    assert caught.value.code is ResourceStoreErrorCode.NO_CAPACITY
+    assert ledger.require_live(owner).high_water.resource == 0

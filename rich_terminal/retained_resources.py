@@ -1,15 +1,16 @@
 """Owner-bounded immutable RGBA resources and the one upload lifecycle.
 
 Resources deliberately live outside retained scene transactions.  The store
-charges committed bytes and the one open upload against OWNER_OPEN quotas,
-consumes RESOURCE namespace high-water at successful BEGIN, and publishes only
-digest-verified immutable bytes.  Scene references are supplied to DROP by the
+charges each picture's decoded size, committed or uploading, against
+OWNER_OPEN quotas, consumes RESOURCE namespace high-water at successful BEGIN,
+and publishes only immutable RGBA8 pixels: raw pixels as sent, or a QOI, PNG
+or JPEG file decoded at COMMIT.  Scene references are supplied to DROP by the
 coordinator rather than introducing a reverse dependency on scene internals.
 """
 
 from __future__ import annotations
 
-import hashlib
+import io
 import mmap
 import operator
 import os
@@ -19,6 +20,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from .apt1 import UINT32_MAX, UINT64_MAX
+from .qoi import decode_qoi
 from .retained_model import (
     ItemNamespace,
     OwnerIdentity,
@@ -73,15 +75,6 @@ def _integer(name: str, value, *, minimum: int, maximum: int) -> int:
     return int(result)
 
 
-def _digest(value) -> bytes:
-    if not isinstance(value, (bytes, bytearray, memoryview)):
-        raise TypeError("digest must be bytes-like")
-    result = bytes(value)
-    if len(result) != 32:
-        raise ValueError("digest must be exactly 32 bytes")
-    return result
-
-
 def _resource_key(owner: OwnerIdentity, resource_id: int) -> tuple[int, int, int]:
     return owner.owner_id, owner.owner_generation, resource_id
 
@@ -92,12 +85,15 @@ def _owner_key(owner: OwnerIdentity) -> tuple[int, int]:
 
 @dataclass(frozen=True, slots=True)
 class ResourceDeclaration:
+    """One upload's declared picture: its format, its decoded width and height,
+    and the bytes sent, which are the pixels for raw RGBA8 and the file
+    otherwise."""
+
     resource_id: int
     format: ResourceFormat
     width: int
     height: int
     byte_length: int
-    digest: bytes
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -132,10 +128,66 @@ class ResourceDeclaration:
                 "byte_length", self.byte_length, minimum=1, maximum=UINT64_MAX
             ),
         )
-        expected = self.width * self.height * 4
-        if expected > UINT64_MAX or self.byte_length != expected:
-            raise ValueError("resource byte length is not width * height * 4")
-        object.__setattr__(self, "digest", _digest(self.digest))
+        if self.decoded_bytes > UINT64_MAX:
+            raise ValueError("resource decoded size overflows")
+        if (
+            self.format is ResourceFormat.RGBA8
+            and self.byte_length != self.decoded_bytes
+        ):
+            raise ValueError("raw resource byte length is not width * height * 4")
+
+    @property
+    def decoded_bytes(self) -> int:
+        """The picture's RGBA8 size, which the terminal holds and charges."""
+
+        return self.width * self.height * 4
+
+
+# Pillow's decoder for each file format it decodes for the hosted terminal.
+# QOI has the terminal's own decoder (qoi.py), which Pillow's would take
+# seconds to match on a photograph.
+_PILLOW_DECODERS = {
+    ResourceFormat.PNG: "PNG",
+    ResourceFormat.JPEG: "JPEG",
+}
+
+
+def _decode_with_pillow(declaration: ResourceDeclaration, data: bytes) -> bytes:
+    from PIL import Image
+
+    with Image.open(
+        io.BytesIO(data), formats=[_PILLOW_DECODERS[declaration.format]]
+    ) as image:
+        if image.size != (declaration.width, declaration.height):
+            raise ValueError("the file's picture is not its declared size")
+        image.seek(0)
+        return image.convert("RGBA").tobytes()
+
+
+def _decode_picture(declaration: ResourceDeclaration, data: bytes) -> bytes:
+    """The RGBA8 pixels of an uploaded file.
+
+    The file's own header must give the declared size before any pixel is
+    decoded, so decoding stays within the advertised bounds.  Colour values
+    are taken as sRGB; an embedded profile is ignored, a JPEG decodes opaque,
+    and an animated file gives its first image.  Anything that does not
+    decode to exactly the declared picture raises ValueError.
+    """
+
+    try:
+        if declaration.format is ResourceFormat.QOI:
+            pixels = decode_qoi(data, declaration.width, declaration.height)
+        else:
+            pixels = _decode_with_pillow(declaration, data)
+    except Exception as exc:
+        # A decoder fed a client's bytes may fail in any way.  Every failure
+        # means the file is not its declared picture.
+        raise ValueError(
+            f"the file does not decode as {declaration.format.name}: {exc}"
+        ) from exc
+    if len(pixels) != declaration.decoded_bytes:
+        raise ValueError("the file decodes to another size")
+    return pixels
 
 
 class _ImmutableBacking:
@@ -227,8 +279,11 @@ class _UploadBacking:
     def write(self, offset: int, data: bytes) -> None:
         self._write[offset : offset + len(data)] = data
 
-    def digest(self) -> bytes:
-        return hashlib.sha3_256(self._write).digest()
+    def written(self) -> bytes:
+        """A copy of the staged bytes.  No view of the mapping is exported, so
+        COMMIT and ABORT can always close it."""
+
+        return bytes(self._write)
 
     def commit(self) -> None:
         """Retire every writable handle while preserving the read mapping."""
@@ -292,13 +347,8 @@ class RGBAResource:
         elif not isinstance(data, bytes):
             raise TypeError("public committed resource data must be bytes")
         length = data._length if isinstance(data, _ImmutableBacking) else len(data)
-        if length != self.declaration.byte_length:
+        if length != self.declaration.decoded_bytes:
             raise ValueError("committed resource data length is inconsistent")
-        if (
-            _verification is not _VERIFIED_RESOURCE
-            and hashlib.sha3_256(data).digest() != self.declaration.digest
-        ):
-            raise ValueError("committed resource digest is inconsistent")
         object.__setattr__(self, "_backing", data)
 
     @property
@@ -315,15 +365,14 @@ class RGBAResource:
 
     @property
     def format(self) -> ResourceFormat:
-        return self.declaration.format
+        """The pixels the resource holds are always RGBA8, whatever format
+        its upload used."""
+
+        return ResourceFormat.RGBA8
 
     @property
     def byte_length(self) -> int:
-        return self.declaration.byte_length
-
-    @property
-    def digest(self) -> bytes:
-        return self.declaration.digest
+        return self.declaration.decoded_bytes
 
     def read(self, offset, max_bytes) -> bytes:
         """Copy one explicitly bounded range from the immutable backing.
@@ -334,13 +383,13 @@ class RGBAResource:
         """
 
         normalized_offset = _integer(
-            "offset", offset, minimum=0, maximum=self.declaration.byte_length
+            "offset", offset, minimum=0, maximum=self.byte_length
         )
         normalized_count = _integer(
             "max_bytes", max_bytes, minimum=0, maximum=UINT64_MAX
         )
         end = min(
-            self.declaration.byte_length,
+            self.byte_length,
             normalized_offset + normalized_count,
         )
         if isinstance(self._backing, bytes):
@@ -407,7 +456,14 @@ class _ResourceUpload:
     owner: OwnerIdentity
     declaration: ResourceDeclaration
     backing: _UploadBacking
+    # A file's decoded pixels, reserved at BEGIN so COMMIT never allocates.
+    decoded: _UploadBacking | None = None
     accepted_bytes: int = 0
+
+    def abort(self) -> None:
+        self.backing.abort()
+        if self.decoded is not None:
+            self.decoded.abort()
 
     @property
     def token(self) -> object:
@@ -437,7 +493,7 @@ class PreparedResourceInstall:
     The candidate captures both store and owner-ledger provenance.  A chunk
     candidate owns its bounded immutable input copy but does not write it into
     upload staging until install; every other candidate is a set of assignment
-    targets whose allocations and digest work have already completed.
+    targets whose allocations and decoding work have already completed.
     """
 
     state: ResourceStoreState
@@ -500,7 +556,7 @@ class RetainedResourceStore:
             return committed
         return ResourceUsage(
             committed.resources + 1,
-            committed.bytes + upload.declaration.byte_length,
+            committed.bytes + upload.declaration.decoded_bytes,
         )
 
     def begin(
@@ -513,7 +569,6 @@ class RetainedResourceStore:
         height,
         flags,
         byte_length,
-        digest,
     ) -> ResourceUploadView:
         prepared = self.prepare_begin(
             owner,
@@ -523,7 +578,6 @@ class RetainedResourceStore:
             height=height,
             flags=flags,
             byte_length=byte_length,
-            digest=digest,
         )
         self.install_prepared(prepared)
         assert prepared.upload is not None
@@ -539,7 +593,6 @@ class RetainedResourceStore:
         height,
         flags,
         byte_length,
-        digest,
     ) -> PreparedResourceInstall:
         if self._upload is not None:
             raise ResourceStoreError(
@@ -573,7 +626,6 @@ class RetainedResourceStore:
                 width,
                 height,
                 byte_length,
-                digest,
             )
         except (TypeError, ValueError) as exc:
             raise ResourceStoreError(ResourceStoreErrorCode.INVALID, str(exc)) from exc
@@ -585,10 +637,10 @@ class RetainedResourceStore:
         policy = self._owners.policy
         if (
             not policy.features & RetainedFeature.RGBA_IMAGE
-            or declaration.format is not ResourceFormat.RGBA8
+            or not policy.image_formats & declaration.format.bit
             or declaration.width > policy.max_image_width
             or declaration.height > policy.max_image_height
-            or declaration.byte_length > policy.total_resource_bytes
+            or declaration.decoded_bytes > policy.total_resource_bytes
         ):
             raise ResourceStoreError(
                 ResourceStoreErrorCode.INVALID,
@@ -598,21 +650,27 @@ class RetainedResourceStore:
         committed = self._state.usage.get(_owner_key(owner), ResourceUsage())
         if (
             committed.resources >= record.quotas.resources
-            or declaration.byte_length > record.quotas.resource_bytes - committed.bytes
+            or declaration.decoded_bytes
+            > record.quotas.resource_bytes - committed.bytes
         ):
             raise ResourceStoreError(
                 ResourceStoreErrorCode.NO_CAPACITY,
                 "resource declaration exceeds owner-wide remaining quota",
             )
+        backing = decoded = None
         try:
             backing = _UploadBacking.allocate(declaration.byte_length)
+            if declaration.format is not ResourceFormat.RGBA8:
+                decoded = _UploadBacking.allocate(declaration.decoded_bytes)
         except (MemoryError, OSError, OverflowError) as exc:
+            if backing is not None:
+                backing.abort()
             raise ResourceStoreError(
                 ResourceStoreErrorCode.NO_CAPACITY,
                 "resource upload staging cannot be allocated",
             ) from exc
         self._owners.validate_prepared(prepared_ledger)
-        upload = _ResourceUpload(owner, declaration, backing)
+        upload = _ResourceUpload(owner, declaration, backing, decoded)
         return self._prepared(
             state=self._state,
             mode=_UploadInstallMode.OPEN,
@@ -712,17 +770,25 @@ class RetainedResourceStore:
                     accepted_bytes=0,
                 ),
             )
-        if upload.backing.digest() != upload.declaration.digest:
-            raise ResourceStoreError(
-                ResourceStoreErrorCode.BAD_CONTENT,
-                "resource upload digest does not match declaration",
-                prepared=self._prepared(
-                    state=self._state,
-                    mode=_UploadInstallMode.ABORT,
-                    accepted_bytes=0,
-                ),
-            )
-        immutable = upload.backing.immutable
+        pixels = upload.backing
+        if upload.decoded is not None:
+            try:
+                decoded = _decode_picture(upload.declaration, upload.backing.written())
+            except ValueError as exc:
+                raise ResourceStoreError(
+                    ResourceStoreErrorCode.BAD_CONTENT,
+                    str(exc),
+                    prepared=self._prepared(
+                        state=self._state,
+                        mode=_UploadInstallMode.ABORT,
+                        accepted_bytes=0,
+                    ),
+                ) from exc
+            # Prepared work only: the decoded mapping is the upload's own,
+            # invisible until COMMIT installs it and released by an ABORT.
+            upload.decoded.write(0, decoded)
+            pixels = upload.decoded
+        immutable = pixels.immutable
         if immutable is None:
             raise RuntimeError("resource upload lost its immutable mapping")
         resource = RGBAResource(
@@ -740,7 +806,7 @@ class RetainedResourceStore:
         prior = usage.get(_owner_key(owner), ResourceUsage())
         usage[_owner_key(owner)] = ResourceUsage(
             prior.resources + 1,
-            prior.bytes + upload.declaration.byte_length,
+            prior.bytes + upload.declaration.decoded_bytes,
         )
         return self._prepared(
             state=self._make_state(resources, usage),
@@ -831,7 +897,7 @@ class RetainedResourceStore:
         prior = usage[_owner_key(owner)]
         replacement = ResourceUsage(
             prior.resources - 1,
-            prior.bytes - resource.declaration.byte_length,
+            prior.bytes - resource.byte_length,
         )
         if replacement == ResourceUsage():
             del usage[_owner_key(owner)]
@@ -970,12 +1036,16 @@ class RetainedResourceStore:
         elif mode is _UploadInstallMode.COMMIT:
             if source_upload is None:
                 raise RuntimeError("prepared resource COMMIT lost its upload")
-            source_upload.backing.commit()
+            if source_upload.decoded is None:
+                source_upload.backing.commit()
+            else:
+                source_upload.decoded.commit()
+                source_upload.backing.abort()
             self._upload = None
         elif mode is _UploadInstallMode.ABORT:
             if source_upload is None:
                 raise RuntimeError("prepared resource retirement lost its upload")
-            source_upload.backing.abort()
+            source_upload.abort()
             self._upload = None
         elif mode is not _UploadInstallMode.PRESERVE:
             raise RuntimeError("prepared resource install has an unknown mode")

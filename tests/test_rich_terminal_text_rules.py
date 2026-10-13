@@ -301,3 +301,53 @@ def test_lines_resolve_levels_once_and_apply_l1_per_line() -> None:
     )
     # The space ends the first line, so L1 gives it the paragraph level.
     assert paragraph == 1 and levels == [2, 2, 1, 2, 2]
+
+
+def _hard_lines(text: str, limit: int, direction: int = tr.DIRECTION_LTR):
+    return [
+        (line.start, line.end, "".join(placed.text for placed in line.characters))
+        for line in tr.layout_lines(text, direction, limit, hard=True)
+    ]
+
+
+@pytest.mark.parametrize(
+    "text, limit, lines",
+    [
+        # Printable ASCII breaks into exactly LIMIT bytes, spaces and all.
+        ("abc def ghi", 4, [(0, 4, "abc "), (4, 8, "def "), (8, 11, "ghi")]),
+        ("a   b", 2, [(0, 2, "a "), (2, 4, "  "), (4, 5, "b")]),
+        ("    x = 1", 20, [(0, 9, "    x = 1")]),
+        # A wide character that would pass the limit starts the next line;
+        # alone and too wide, it takes a line anyway.
+        ("a日本", 2, [(0, 1, "a"), (1, 2, "日"), (2, 3, "本")]),
+        ("日本", 1, [(0, 1, "日"), (1, 2, "本")]),
+        # Paragraphs end at line feeds; an empty one is one empty line.
+        ("", 3, [(0, 0, "")]),
+        ("x = 1\n\ny", 3, [(0, 3, "x ="), (3, 5, " 1"), (6, 6, ""), (7, 8, "y")]),
+    ],
+)
+def test_hard_lines_end_only_where_the_text_reaches_the_width(text, limit, lines) -> None:
+    assert _hard_lines(text, limit) == lines
+
+
+def test_hard_lines_keep_every_character_in_its_cells() -> None:
+    import random
+
+    randomizer = random.Random(1213)
+    alphabet = "ab cd  eé́日本\U0001f600 x"
+    for _ in range(400):
+        text = "".join(randomizer.choice(alphabet) for _ in range(randomizer.randrange(0, 40)))
+        limit = randomizer.randrange(1, 12)
+        lines = tr.layout_lines(text, tr.DIRECTION_LTR, limit, hard=True)
+        assert lines[0].start == 0 and lines[-1].end == len(text)
+        for before, after in zip(lines, lines[1:]):
+            assert before.end == after.start
+        for line in lines:
+            # Spaces at a line's end take their cells on a hard line.
+            assert line.width == tr.string_width(text[line.start:line.end])
+            assert line.width <= limit or len(tr.characters(text[line.start:line.end])) == 1
+        for before, after in zip(lines, lines[1:]):
+            if "\n" not in text[before.start:after.start]:
+                # A line ends only when the next character would not fit.
+                first = tr.characters(text[after.start:after.end])[0]
+                assert before.width + tr.char_width(first) > limit

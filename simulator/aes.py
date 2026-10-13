@@ -1,4 +1,4 @@
-"""Hosted AES-128/256-GCM service for the MegaPad MMIO byte ABI.
+"""Hosted AES-128/256 service, GCM and CBC, for the MegaPad MMIO byte ABI.
 
 The service mirrors the executable BIOS/native transaction protocol while
 remaining synchronous and timing-free.  It is both the direct virtual-MMIO
@@ -32,9 +32,18 @@ AES_DATA_LENGTH = AES_OFFSET + 0x34
 AES_COMMAND = AES_OFFSET + 0x38
 AES_STATUS = AES_OFFSET + 0x39
 AES_KEY_MODE = AES_OFFSET + 0x3A
+AES_MODE = AES_OFFSET + 0x3B
 AES_DATA_INPUT = AES_OFFSET + 0x40
 AES_DATA_OUTPUT = AES_OFFSET + 0x50
 AES_TAG = AES_OFFSET + 0x60
+
+AES_MODE_GCM = 0
+AES_MODE_CBC = 1
+
+# GCM's IV is exactly the window's first 12 bytes; CBC's is all 16.  A
+# transaction whose written IV bytes are not its mode's fails closed.
+_GCM_IV_MASK = 0x0FFF
+_CBC_IV_MASK = 0xFFFF
 
 _INTEGER_WIDTHS = frozenset((1, 2, 4, 8))
 
@@ -57,12 +66,14 @@ class AESAccessError(ValueError):
 
 
 class HostedAESService:
-    """One byte-addressed, synchronous AES-GCM transaction engine."""
+    """One byte-addressed, synchronous AES transaction engine: GCM, which
+    authenticates, or CBC, a whole number of blocks with a 16-byte IV."""
 
     __slots__ = (
         "_aad_length",
         "_aad_length_written_mask",
         "_aad_processed",
+        "_chain",
         "_cipher",
         "_command",
         "_counter",
@@ -80,6 +91,7 @@ class HostedAESService:
         "_key",
         "_key_mode",
         "_key_written_mask",
+        "_mode",
         "_status",
         "_tag",
         "_tag_written_mask",
@@ -87,12 +99,13 @@ class HostedAESService:
 
     def __init__(self) -> None:
         self._key = bytearray(32)
-        self._iv = bytearray(12)
+        self._iv = bytearray(AES_BLOCK_BYTES)
         self._data_input = bytearray(AES_BLOCK_BYTES)
         self._data_output = bytes(AES_BLOCK_BYTES)
         self._tag = bytearray(AES_BLOCK_BYTES)
         self._status = AES_STATUS_IDLE
         self._key_mode = 0
+        self._mode = AES_MODE_GCM
         self._command = 0
         self._aad_length = 0
         self._data_length = 0
@@ -100,11 +113,16 @@ class HostedAESService:
         self._hash_subkey = 0
         self._counter = bytes(AES_BLOCK_BYTES)
         self._j0 = bytes(AES_BLOCK_BYTES)
+        self._chain = bytes(AES_BLOCK_BYTES)
         self._ghash_state = 0
         self._aad_processed = 0
         self._data_processed = 0
         self._din_written = 0
         self._clear_configuration_tracking()
+
+    @property
+    def mode(self) -> int:
+        return self._mode
 
     @property
     def status(self) -> int:
@@ -168,6 +186,8 @@ class HostedAESService:
             return self._status
         if local == 0x3A:
             return self._key_mode
+        if local == 0x3B:
+            return self._mode
         if 0x50 <= local < 0x60:
             return self._data_output[local - 0x50]
         if 0x60 <= local < 0x70:
@@ -188,7 +208,7 @@ class HostedAESService:
             self._begin_configuration_write()
             self._key[local] = value
             self._key_written_mask |= 1 << local
-        elif 0x20 <= local < 0x2C:
+        elif 0x20 <= local < 0x30:
             self._begin_configuration_write()
             index = local - 0x20
             self._iv[index] = value
@@ -214,10 +234,16 @@ class HostedAESService:
         elif local == 0x38:
             self._begin_configuration_write()
             self._command = value & 1
-            self._start_gcm()
+            if self._mode == AES_MODE_CBC:
+                self._start_cbc()
+            else:
+                self._start_gcm()
         elif local == 0x3A:
             self._begin_configuration_write()
             self._key_mode = value & 1
+        elif local == 0x3B:
+            self._begin_configuration_write()
+            self._mode = value & 1
         elif 0x40 <= local < 0x50:
             index = local - 0x40
             if self._status != AES_STATUS_ACTIVE or index != self._din_written:
@@ -247,21 +273,76 @@ class HostedAESService:
             self._tag[:] = bytes(AES_BLOCK_BYTES)
         self._status = AES_STATUS_ACTIVE
 
-        key = bytes(self._key[:16] if self._key_mode else self._key)
-        self._cipher = AESBlockCipher(key)
+        self._cipher = AESBlockCipher(self._selected_key())
         hash_bytes = self._cipher.encrypt(bytes(AES_BLOCK_BYTES))
         self._hash_subkey = int.from_bytes(hash_bytes, "big")
-        self._j0 = bytes(self._iv) + b"\x00\x00\x00\x01"
+        self._j0 = bytes(self._iv[:12]) + b"\x00\x00\x00\x01"
         self._counter = self._j0
         self._ghash_state = 0
 
         if self._aad_length == 0 and self._data_length == 0:
             self._finalize_tag()
 
+    def _selected_key(self) -> bytes:
+        return bytes(self._key[:16] if self._key_mode else self._key)
+
+    def _start_cbc(self) -> None:
+        """Start a CBC transaction: a whole number of blocks, chained from
+        the 16-byte IV, with no AAD and no tag."""
+
+        if not (
+            self._key_written_mask == 0xFFFF_FFFF
+            and self._iv_written_mask == _CBC_IV_MASK
+            and self._data_length_written_mask == 0x0F
+            and self._aad_length == 0
+            and self._data_length % AES_BLOCK_BYTES == 0
+        ):
+            self._latch_transaction_fault()
+            return
+
+        self._clear_derived_state()
+        self._data_input[:] = bytes(AES_BLOCK_BYTES)
+        self._data_output = bytes(AES_BLOCK_BYTES)
+        self._tag[:] = bytes(AES_BLOCK_BYTES)
+        self._status = AES_STATUS_ACTIVE
+        self._cipher = AESBlockCipher(self._selected_key())
+        self._chain = bytes(self._iv)
+        if self._data_length == 0:
+            self._finish_cbc()
+
+    def _process_cbc_block(self, cipher: AESBlockCipher) -> None:
+        if self._data_processed >= self._data_length:
+            self._latch_transaction_fault()
+            return
+
+        block = bytes(self._data_input)
+        if self._command == 0:
+            output = cipher.encrypt(
+                bytes(left ^ right for left, right in zip(block, self._chain))
+            )
+            self._chain = output
+        else:
+            plain = cipher.decrypt(block)
+            output = bytes(left ^ right for left, right in zip(plain, self._chain))
+            self._chain = block
+        self._data_output = output
+        self._data_processed += AES_BLOCK_BYTES
+        self._data_input[:] = bytes(AES_BLOCK_BYTES)
+        if self._data_processed == self._data_length:
+            self._finish_cbc()
+
+    def _finish_cbc(self) -> None:
+        self._status = AES_STATUS_DONE
+        self._clear_completed_secrets(clear_tag=True)
+
     def _process_block(self) -> None:
         cipher = self._cipher
         if self._status != AES_STATUS_ACTIVE or cipher is None:
             self._latch_transaction_fault()
+            return
+
+        if self._mode == AES_MODE_CBC:
+            self._process_cbc_block(cipher)
             return
 
         if self._aad_processed < self._aad_length:
@@ -363,6 +444,7 @@ class HostedAESService:
         self._hash_subkey = 0
         self._counter = bytes(AES_BLOCK_BYTES)
         self._j0 = bytes(AES_BLOCK_BYTES)
+        self._chain = bytes(AES_BLOCK_BYTES)
         self._ghash_state = 0
         self._aad_processed = 0
         self._data_processed = 0
@@ -370,7 +452,7 @@ class HostedAESService:
 
     def _clear_completed_secrets(self, *, clear_tag: bool) -> None:
         self._key[:] = bytes(32)
-        self._iv[:] = bytes(12)
+        self._iv[:] = bytes(AES_BLOCK_BYTES)
         self._data_input[:] = bytes(AES_BLOCK_BYTES)
         self._clear_derived_state()
         if clear_tag:
@@ -379,6 +461,7 @@ class HostedAESService:
         self._data_length = 0
         self._command = 0
         self._key_mode = 0
+        self._mode = AES_MODE_GCM
         self._clear_configuration_tracking()
 
     def _clear_configuration_tracking(self) -> None:
@@ -391,7 +474,7 @@ class HostedAESService:
     def _configuration_complete(self, decrypting: bool) -> bool:
         return (
             self._key_written_mask == 0xFFFF_FFFF
-            and self._iv_written_mask == 0x0FFF
+            and self._iv_written_mask == _GCM_IV_MASK
             and self._aad_length_written_mask == 0x0F
             and self._data_length_written_mask == 0x0F
             and (not decrypting or self._tag_written_mask == 0xFFFF)
@@ -440,6 +523,9 @@ __all__ = [
     "AES_KEY",
     "AES_KEY_MODE",
     "AES_LIMIT",
+    "AES_MODE",
+    "AES_MODE_CBC",
+    "AES_MODE_GCM",
     "AES_OFFSET",
     "AES_SIZE",
     "AES_STATUS",

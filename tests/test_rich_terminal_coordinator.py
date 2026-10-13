@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 
 import pytest
 
@@ -59,7 +58,7 @@ def _policy() -> RetainedPolicy:
         max_resource_chunk_bytes=16,
         max_retained_transaction_bytes=1024,
         total_resource_bytes=48,
-        image_format=1,
+        image_formats=1,
         max_image_width=2,
         max_image_height=2,
         max_path_points=0,
@@ -161,7 +160,6 @@ def _commit_resource(
         height=1,
         flags=0,
         byte_length=len(IMAGE_BYTES),
-        digest=hashlib.sha3_256(IMAGE_BYTES).digest(),
     )
     resources.append(owner, resource_id, 0, IMAGE_BYTES)
     return resources.commit(owner, resource_id)

@@ -66,6 +66,9 @@ CAPACITY_LIMITS = {
 }
 MAX_OWNER_RECORDS = 8
 MAX_LIVE_OWNERS = 4
+RAW_RGBA8 = 1
+QOI = 2
+ADVERTISED_FORMATS = {RAW_RGBA8,QOI}
 
 HEADER_PREFIX = struct.Struct("<4sBBHHHIQQI")
 HEADER = struct.Struct("<4sBBHHHIQQII")
@@ -98,7 +101,7 @@ OBJECT_SET_VALUE = struct.Struct("<QQQq")
 OBJECT_SET_VISIBILITY = struct.Struct("<QQQB7x")
 SERIES_DEFINE = struct.Struct("<QQQIIQ")
 SERIES_SAMPLES = struct.Struct("<QQQIIQ")
-RESOURCE_BEGIN = struct.Struct("<QQQIIIIQ32s")
+RESOURCE_BEGIN = struct.Struct("<QQQIIIIQ")
 RESOURCE_CHUNK = struct.Struct("<QQQQ")
 RESOURCE_COMMIT = struct.Struct("<QQQ")
 RESOURCE_ABORT = struct.Struct("<QQQH6x")
@@ -108,6 +111,51 @@ OWNER_ITEM = struct.Struct("<QQQ")
 
 def _fail(message: str) -> None:
     raise AssertionError(message)
+
+
+def _qoi_size(data: bytes) -> tuple[int,int] | None:
+    """Decode a whole QOI file; its picture size, or None when it does not decode."""
+    if len(data) < 22 or data[:4] != b"qoif":
+        return None
+    width,height,channels,colorspace = struct.unpack_from(">IIBB",data,4)
+    if width == 0 or height == 0 or channels not in {3,4} or colorspace not in {0,1}:
+        return None
+    pixel = [0,0,0,255]
+    seen = [[0,0,0,0] for _ in range(64)]
+    position,end,remaining = 14,len(data)-8,width*height
+    while remaining:
+        if position >= end:
+            return None
+        op = data[position]
+        position += 1
+        run = 1
+        if op in {0xFE,0xFF}:
+            count = 3 if op == 0xFE else 4
+            if position+count > end:
+                return None
+            pixel[:count] = data[position:position+count]
+            position += count
+        elif op >> 6 == 0:
+            pixel = list(seen[op])
+        elif op >> 6 == 1:
+            for channel,shift in enumerate((4,2,0)):
+                pixel[channel] = (pixel[channel]+(op>>shift&3)-2)&255
+        elif op >> 6 == 2:
+            if position >= end:
+                return None
+            green = (op&63)-32
+            pair = data[position]
+            position += 1
+            pixel[0] = (pixel[0]+green-8+(pair>>4))&255
+            pixel[1] = (pixel[1]+green)&255
+            pixel[2] = (pixel[2]+green-8+(pair&15))&255
+        else:
+            run = (op&63)+1
+        if run > remaining:
+            return None
+        remaining -= run
+        seen[(pixel[0]*3+pixel[1]*5+pixel[2]*7+pixel[3]*11)%64] = list(pixel)
+    return width,height
 
 
 def _crc32c(data: bytes) -> int:
@@ -208,7 +256,7 @@ def _recompute_reducer_ledgers(state: dict[str,Any]) -> None:
         upload = state["upload"]
         item = resource_bucket(upload["owner_id"],upload["generation"])
         item["upload_count"] = 1
-        item["upload_bytes"] = int(upload["declared_bytes"])
+        item["upload_bytes"] = int(upload["width"])*int(upload["height"])*4
         item["upload_accepted_bytes"] = int(upload["accepted_bytes"])
     state["owner_wide_resource_usage"] = [usage_by_owner[key] for key in sorted(usage_by_owner)]
 
@@ -679,7 +727,7 @@ def _resource_usage(state: dict[str,Any], owner: int, generation: int) -> tuple[
     upload = state["upload"]
     if upload is not None and (upload["owner_id"],upload["generation"]) == (owner,generation):
         count += 1
-        size += upload["declared_bytes"]
+        size += upload["width"]*upload["height"]*4
     return count,size
 
 
@@ -701,7 +749,7 @@ def _process_lifecycle(state: dict[str,Any], message: str, payload: bytes) -> No
         return
 
     if message == "RESOURCE_BEGIN":
-        owner,generation,item,format_id,width,height,flags,declared,digest = RESOURCE_BEGIN.unpack(payload)
+        owner,generation,item,format_id,width,height,flags,declared = RESOURCE_BEGIN.unpack(payload)
         _set_lifecycle(state,message,owner,generation,item)
         authority = state["owners"].get(owner_key(owner,generation))
         status = STATUS["RET_OK"]
@@ -709,15 +757,21 @@ def _process_lifecycle(state: dict[str,Any], message: str, payload: bytes) -> No
             status = STATUS["RET_STALE_OWNER"]
         elif state["upload"] is not None or resource_key(owner,generation,item) in state["resources"]:
             status = STATUS["RET_DUPLICATE_ID"]
+        elif (
+            format_id not in ADVERTISED_FORMATS
+            or width == 0 or height == 0 or flags != 0 or declared == 0
+            or (format_id == RAW_RGBA8 and declared != width*height*4)
+        ):
+            status = STATUS["RET_INVALID"]
         else:
             count,size = _resource_usage(state,owner,generation)
-            if count+1 > authority["resource_quota"] or size+declared > authority["resource_bytes"]:
+            if count+1 > authority["resource_quota"] or size+width*height*4 > authority["resource_bytes"]:
                 status = STATUS["RET_NO_CAPACITY"]
         if status == STATUS["RET_OK"]:
             state["upload"] = {
                 "owner_id":owner,"generation":generation,"resource_id":item,"format":format_id,
                 "width":width,"height":height,"flags":flags,"declared_bytes":declared,
-                "sha3_256":digest.hex(),"accepted_bytes":0,
+                "accepted_bytes":0,
             }
             state["_upload_bytes"] = b""
         state["_expected_result"] = _expected_ret(message,status,state,owner,generation,item)
@@ -771,20 +825,19 @@ def _process_lifecycle(state: dict[str,Any], message: str, payload: bytes) -> No
             accepted = 0
         else:
             accepted = upload["accepted_bytes"]
-            digest = hashlib.sha3_256(state.get("_upload_bytes",b"")).hexdigest()
+            size = (upload["width"],upload["height"])
             if accepted != upload["declared_bytes"]:
                 status = STATUS["RET_INVALID"]
                 accepted = 0
-            elif digest != upload["sha3_256"]:
+            elif upload["format"] == QOI and _qoi_size(state.get("_upload_bytes",b"")) != size:
                 status = STATUS["RET_BAD_CONTENT"]
                 accepted = 0
             else:
                 status = STATUS["RET_OK"]
                 state["resources"][resource_key(owner,generation,item)] = {
                     "owner_id":owner,"generation":generation,"resource_id":item,
-                    "format":upload["format"],"width":upload["width"],"height":upload["height"],
-                    "flags":upload["flags"],"byte_length":upload["declared_bytes"],
-                    "sha3_256":upload["sha3_256"],
+                    "format":RAW_RGBA8,"width":upload["width"],"height":upload["height"],
+                    "flags":upload["flags"],"byte_length":upload["width"]*upload["height"]*4,
                 }
             state["upload"] = None
             state["_upload_bytes"] = b""

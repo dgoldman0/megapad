@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import struct
 
 import pytest
@@ -27,6 +26,7 @@ from rich_terminal import text_rules
 from rich_terminal.driver import (
     DriverLimits,
     DriverStatus,
+    LinkPace,
     RichTerminalDriver,
 )
 from rich_terminal.retained_model import (
@@ -100,7 +100,7 @@ def _retained_policy() -> RetainedPolicy:
         max_resource_chunk_bytes=0,
         max_retained_transaction_bytes=512,
         total_resource_bytes=0,
-        image_format=0,
+        image_formats=0,
         max_image_width=0,
         max_image_height=0,
         max_path_points=0,
@@ -129,7 +129,7 @@ def _image_policy() -> RetainedPolicy:
         max_resource_chunk_bytes=16,
         max_retained_transaction_bytes=512,
         total_resource_bytes=16,
-        image_format=1,
+        image_formats=1,
         max_image_width=2,
         max_image_height=2,
         max_path_points=0,
@@ -237,6 +237,56 @@ def _open_bytes(
         READY.pack(0, 256, 0, client_credit, 64, 0, 0x3F),
     )
     return encode_open(request) + ready + _snapshot(encoder), encoder
+
+
+def test_a_link_pace_advertises_chunks_one_frame_long():
+    assert LinkPace(1_000_000, 16_667).chunk_bytes == 16_667
+    # A link too slow for a byte a frame still carries one.
+    assert LinkPace(10, 1_000).chunk_bytes == 1
+    for rate, frame in ((0, 1), (1, 0), (True, 1)):
+        with pytest.raises((TypeError, ValueError)):
+            LinkPace(rate, frame)
+
+
+def test_a_paced_link_delivers_each_batch_once_the_link_has_carried_it():
+    now = [0]
+    system = MegapadSystem(ram_size=64 * 1024, terminal_cols=2, terminal_rows=2)
+    ansi_batches: list[bytes] = []
+    system.uart.on_tx = None
+    system.uart.on_tx_batch = lambda batch: None
+    driver = RichTerminalDriver.attach(
+        system,
+        _host_limits(),
+        _terminal_config(),
+        DriverLimits(4_096, 3),
+        ansi_sink=ansi_batches.append,
+        session_id_factory=lambda: 0x0123456789ABCDEF,
+        link_pace=LinkPace(1_000, 16_000),
+        monotonic_ns=lambda: now[0],
+    )
+
+    # A thousand bytes a second: four bytes arrive four milliseconds on.
+    _write_native_uart(system, b"ANSI")
+    assert driver.service().status is DriverStatus.IDLE
+    now[0] = 3_999_999
+    assert driver.service().status is DriverStatus.IDLE
+    assert ansi_batches == []
+    now[0] = 4_000_000
+    assert driver.service().status is DriverStatus.PROGRESS
+    assert ansi_batches == [b"ANSI"]
+
+    # Back to back, a batch follows the one before it on the link.
+    _write_native_uart(system, b"ab")
+    _write_native_uart(system, b"cde")
+    assert driver.service().status is DriverStatus.IDLE
+    now[0] = 6_000_000
+    assert driver.service().status is DriverStatus.PROGRESS
+    assert ansi_batches == [b"ANSI", b"ab"]
+    now[0] = 8_999_999
+    assert driver.service().status is DriverStatus.IDLE
+    now[0] = 9_000_000
+    assert driver.service().status is DriverStatus.PROGRESS
+    assert ansi_batches == [b"ANSI", b"ab", b"cde"]
 
 
 def test_driver_keeps_ansi_default_then_runs_a_real_cell_snapshot():
@@ -734,7 +784,6 @@ def test_driver_settles_resource_chunk_only_when_covering_credit_is_admitted():
                     1,
                     0,
                     len(pixels),
-                    hashlib.sha3_256(pixels).digest(),
                 )
             ),
         ),
@@ -754,7 +803,8 @@ def test_driver_settles_resource_chunk_only_when_covering_credit_is_admitted():
     # The driver has no retained output at this point, so the next chunk can be
     # processed while its own CREDIT remains unable to cross host admission.
     for _ in range(16):
-        _write_native_uart(system, encoder.encode(0x8003))
+        # 0xFFFF is an optional message type that no contract assigns.
+        _write_native_uart(system, encoder.encode(0xFFFF))
         assert driver.service().outbound_records == 1
 
     _write_native_uart(

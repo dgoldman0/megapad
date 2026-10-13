@@ -202,7 +202,13 @@ It takes `--storage` (required), `--socket`, the memory sizes (`--ram-kib`,
 `--ext-mem-mib`, `--vram-mib`), and the geometry (`--cols`, `--rows`). It also
 takes `--semantic-step-budget`, `--semantic-quantum-steps`, `--paused`, and
 the complete caller-owned `--rich-terminal-policy` and
-`--retained-terminal-policy` JSON. It has no NIC or audible audio option.
+`--retained-terminal-policy` JSON. For testing,
+`--terminal-link-pace BYTES_PER_SECOND:FRAME_US` makes the guest-to-terminal
+link carry the guest's bytes no faster than that, as a slower wire would, and
+makes the terminal advertise resource chunks that link carries in one
+`FRAME_US` frame time, so a frame waits behind at most one chunk of a picture
+upload. Without it the link runs at host speed. It has no NIC or audible
+audio option.
 `--executor python|native|auto` takes precedence over `MEGAFORTH_EXECUTOR`.
 With neither set, the production server requires native execution; only
 `auto` permits fallback to Python. Embedded `MegaForthRuntime` construction

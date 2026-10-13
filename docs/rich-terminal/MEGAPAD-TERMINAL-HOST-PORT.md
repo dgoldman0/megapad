@@ -507,7 +507,10 @@ scene, and a `FOLLOW` only on a link. Enabled item views enter as item
 targets holding each shown item's area, disclosure mark, and check box, so
 the viewer can send `SELECT`, `OPEN` for a double press, `EXPAND`,
 `COLLAPSE`, `CHECK`, and `SCROLL`, which the core checks against the item's
-state in the active scene. The selected Akashic `desktop-apt1` policy now advertises bit 9;
+state in the active scene. Enabled documents enter as document targets
+holding the rectangle of each link character drawn, so the viewer sends
+`FOLLOW` for a press on one and `SCROLL` for the wheel, and the core accepts a
+`FOLLOW` only on a link character the root shows. The selected Akashic `desktop-apt1` policy now advertises bit 9;
 its generic UIDL/canonical-widget producer and ordinary product journey exercise
 this physical path. Applets do not register that projection or acquire
 renderer-facing code.

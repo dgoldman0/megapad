@@ -14,6 +14,7 @@ from enum import Enum, IntEnum
 
 from .apt1 import UINT16_MAX, UINT32_MAX, UINT64_MAX
 from .retained_model import (
+    IMAGE_FORMATS,
     OwnerQuotas,
     ResourceFormat,
     RetainedFeature,
@@ -28,6 +29,7 @@ from .retained_scene import (
     GroupBody,
     GlyphRunBody,
     ImageBody,
+    ImageClip,
     ImageFit,
     MeterBody,
     ObjectBounds,
@@ -47,6 +49,7 @@ from .retained_scene import (
     UniformSamples,
     validate_control_shape,
     WaveformBody,
+    validate_image_shape,
     validate_pane_shape,
     validate_status_field_shape,
 )
@@ -63,9 +66,14 @@ from .semantic_items import (
 )
 
 from .semantic_fields import FieldContent, encode_field_content, decode_field_content
+from .semantic_documents import (
+    DocumentContent,
+    decode_document_content,
+    encode_document_content,
+)
 
 RET1_TAG = 0x31544552
-_RETAINED_FEATURE_MASK = 0xFF3F
+_RETAINED_FEATURE_MASK = 0x1FF3F
 
 _RET_QUERY = struct.Struct("<II")
 _RET_CAPS = struct.Struct("<IHHQIIIIIIIIQQ")
@@ -73,7 +81,7 @@ _RET_FORMATS = struct.Struct("<IIIIIIIIIIQQQ")
 _OWNER_OPEN = struct.Struct("<QQIIIIQQQQ")
 _RET_RESULT = struct.Struct("<HHIQQQQQ")
 _OWNER_DROP = struct.Struct("<QQQQ")
-_RESOURCE_BEGIN = struct.Struct("<QQQIIIIQ32s")
+_RESOURCE_BEGIN = struct.Struct("<QQQIIIIQ")
 _RESOURCE_CHUNK = struct.Struct("<QQQQ")
 _RESOURCE_ITEM = struct.Struct("<QQQ")
 # ``s`` rather than ``x`` keeps canonical padding observable to the decoder.
@@ -86,7 +94,12 @@ _OBJECT_PREFIX = struct.Struct("<QQQHHiQQiiII")
 _POLYLINE_BODY = struct.Struct("<II4BI")
 _POINT = struct.Struct("<II")
 # ``s`` rather than ``x`` keeps canonical padding observable to the decoder.
-_IMAGE_BODY = struct.Struct("<QIB3s")
+_IMAGE_BODY = struct.Struct("<QIBB2s")
+_IMAGE_CLIP = struct.Struct("<IIII")
+IMAGE_FLAG_BACKDROP = 0x01
+IMAGE_FLAG_CLIP = 0x02
+_PIXELS_QUERY = struct.Struct("<QiiII")
+_PIXELS = struct.Struct("<QQiiIIII")
 _GLYPH_RUN_BODY = struct.Struct("<4B4BHHI")
 _PANE_BODY = struct.Struct("<IHHQiiIIII")
 PANE_BODY_TAG = 0x31454E50
@@ -140,6 +153,8 @@ class RetainedMessageType(IntEnum):
     RET_QUERY = 0x8000
     RET_CAPS = 0x8001
     RET_FORMATS = 0x8002
+    PIXELS_QUERY = 0x8003
+    PIXELS = 0x8004
 
 
 class RetStatus(IntEnum):
@@ -348,6 +363,79 @@ class RetainedQuery:
 
 
 @dataclass(frozen=True, slots=True)
+class PixelsQuery:
+    """Ask how many pixels a cell rectangle covers on the selected surface."""
+
+    query_id: int
+    cell_x: int
+    cell_y: int
+    cols: int
+    rows: int
+
+    def __post_init__(self) -> None:
+        for name, minimum, maximum in (
+            ("query_id", 1, UINT64_MAX),
+            ("cell_x", -(1 << 31), (1 << 31) - 1),
+            ("cell_y", -(1 << 31), (1 << 31) - 1),
+            ("cols", 1, UINT32_MAX),
+            ("rows", 1, UINT32_MAX),
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _integer(name, getattr(self, name), minimum=minimum, maximum=maximum),
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class PixelsAnswer:
+    """The pixels a queried rectangle covers, or zeros when nobody can say."""
+
+    query_id: int
+    geometry_generation: int
+    cell_x: int
+    cell_y: int
+    cols: int
+    rows: int
+    pixel_width: int
+    pixel_height: int
+
+    def __post_init__(self) -> None:
+        for name, minimum, maximum in (
+            ("query_id", 1, UINT64_MAX),
+            ("geometry_generation", 0, UINT64_MAX),
+            ("cell_x", -(1 << 31), (1 << 31) - 1),
+            ("cell_y", -(1 << 31), (1 << 31) - 1),
+            ("cols", 1, UINT32_MAX),
+            ("rows", 1, UINT32_MAX),
+            ("pixel_width", 0, UINT32_MAX),
+            ("pixel_height", 0, UINT32_MAX),
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _integer(name, getattr(self, name), minimum=minimum, maximum=maximum),
+            )
+        if (self.pixel_width == 0) != (self.pixel_height == 0):
+            raise ValueError("pixel width and height are zero only together")
+
+    @property
+    def known(self) -> bool:
+        return self.pixel_width != 0
+
+    def answers(self, query: PixelsQuery) -> bool:
+        """Whether this answer echoes exactly ``query``."""
+
+        return (
+            self.query_id == query.query_id
+            and self.cell_x == query.cell_x
+            and self.cell_y == query.cell_y
+            and self.cols == query.cols
+            and self.rows == query.rows
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class RetainedCaps:
     features: RetainedFeature
     max_owner_records: int
@@ -393,6 +481,11 @@ class RetainedCaps:
             raise ValueError("GRID_CELLS requires CONTROL_COLLECTIONS")
         if features & RetainedFeature.FIELDS and not features & RetainedFeature.CONTROLS:
             raise ValueError("FIELDS requires CONTROLS")
+        if (
+            features & RetainedFeature.CONTROL_DOCUMENTS
+            and not features & RetainedFeature.CONTROL_COLLECTIONS
+        ):
+            raise ValueError("CONTROL_DOCUMENTS requires CONTROL_COLLECTIONS")
         object.__setattr__(self, "features", features)
         for name in (
             "max_owner_records",
@@ -456,7 +549,7 @@ class RetainedCaps:
             max_resource_chunk_bytes=self.max_resource_chunk_bytes,
             max_retained_transaction_bytes=self.max_retained_transaction_bytes,
             total_resource_bytes=self.total_resource_bytes,
-            image_format=formats.image_format,
+            image_formats=formats.image_formats,
             max_image_width=formats.max_image_width,
             max_image_height=formats.max_image_height,
             max_path_points=formats.max_path_points,
@@ -476,7 +569,7 @@ class RetainedCaps:
 class RetainedFormats:
     bounds_format: int
     color_format: int
-    image_format: int
+    image_formats: int
     max_image_width: int
     max_image_height: int
     max_path_points: int
@@ -491,7 +584,7 @@ class RetainedFormats:
         for name in (
             "bounds_format",
             "color_format",
-            "image_format",
+            "image_formats",
             "max_image_width",
             "max_image_height",
             "max_path_points",
@@ -513,8 +606,10 @@ class RetainedFormats:
             )
         if self.bounds_format != 2 or self.color_format != 1:
             raise ValueError("RETAINED-1 requires CELL_RECT32 bounds and RGBA8 colors")
-        if self.image_format not in (0, 1):
-            raise ValueError("image_format must be zero or raw RGBA8")
+        if self.image_formats & ~IMAGE_FORMATS:
+            raise ValueError("image_formats names a format RETAINED-1 does not define")
+        if self.image_formats and not self.image_formats & ResourceFormat.RGBA8.bit:
+            raise ValueError("image_formats must include raw RGBA8")
 
 
 @dataclass(frozen=True, slots=True)
@@ -676,7 +771,6 @@ class ResourceBegin:
     height: int
     flags: int
     byte_length: int
-    sha3_256: bytes
 
     def __post_init__(self) -> None:
         for name in ("owner_id", "owner_generation", "resource_id"):
@@ -686,10 +780,14 @@ class ResourceBegin:
                 _integer(name, getattr(self, name), minimum=0, maximum=UINT64_MAX),
             )
         format_id = _integer("format", self.format, minimum=0, maximum=UINT32_MAX)
+        # An undefined format is kept as its number, so status selection can
+        # refuse it rather than the decoder.
         object.__setattr__(
             self,
             "format",
-            ResourceFormat(format_id) if format_id == int(ResourceFormat.RGBA8) else format_id,
+            ResourceFormat(format_id)
+            if format_id in ResourceFormat._value2member_map_
+            else format_id,
         )
         for name in ("width", "height"):
             object.__setattr__(
@@ -706,15 +804,6 @@ class ResourceBegin:
                 "byte_length", self.byte_length, minimum=0, maximum=UINT64_MAX
             ),
         )
-        object.__setattr__(
-            self,
-            "sha3_256",
-            _byte_string(self.sha3_256, "sha3_256", exact_size=32),
-        )
-
-    @property
-    def digest(self) -> bytes:
-        return self.sha3_256
 
 
 @dataclass(frozen=True, slots=True)
@@ -1031,7 +1120,7 @@ class ControlWireDefinition:
     bounds: ObjectBounds | None
     label: str
     shortcut: str
-    content: SemanticTextContent | ItemViewContent | FieldContent | None = None
+    content: SemanticTextContent | ItemViewContent | FieldContent | DocumentContent | None = None
 
     def __post_init__(self) -> None:
         for name, minimum in (
@@ -1237,6 +1326,8 @@ class ObjectWireDefinition:
             raise TypeError("body is not a supported RETAINED-1 wire body")
         if isinstance(self.body, StatusFieldBody):
             validate_status_field_shape(self.body, bounds=self.bounds)
+        if isinstance(self.body, ImageBody):
+            validate_image_shape(self.body, bounds=self.bounds)
         if isinstance(self.body, PaneBody):
             validate_pane_shape(
                 self.body, bounds=self.bounds, region_id=self.region_id,
@@ -1386,6 +1477,45 @@ def decode_ret_query(payload) -> RetainedQuery:
     return RetainedQuery()
 
 
+def encode_pixels_query(query: PixelsQuery) -> bytes:
+    if not isinstance(query, PixelsQuery):
+        raise TypeError("query must be PixelsQuery")
+    return _PIXELS_QUERY.pack(
+        query.query_id, query.cell_x, query.cell_y, query.cols, query.rows
+    )
+
+
+def decode_pixels_query(payload) -> PixelsQuery:
+    raw = _payload(payload, _PIXELS_QUERY.size, "PIXELS_QUERY")
+    try:
+        return PixelsQuery(*_PIXELS_QUERY.unpack(raw))
+    except (TypeError, ValueError) as exc:
+        raise RetainedWireError(RetainedWireErrorCode.SCALAR, str(exc)) from exc
+
+
+def encode_pixels(answer: PixelsAnswer) -> bytes:
+    if not isinstance(answer, PixelsAnswer):
+        raise TypeError("answer must be PixelsAnswer")
+    return _PIXELS.pack(
+        answer.query_id,
+        answer.geometry_generation,
+        answer.cell_x,
+        answer.cell_y,
+        answer.cols,
+        answer.rows,
+        answer.pixel_width,
+        answer.pixel_height,
+    )
+
+
+def decode_pixels(payload) -> PixelsAnswer:
+    raw = _payload(payload, _PIXELS.size, "PIXELS")
+    try:
+        return PixelsAnswer(*_PIXELS.unpack(raw))
+    except (TypeError, ValueError) as exc:
+        raise RetainedWireError(RetainedWireErrorCode.SCALAR, str(exc)) from exc
+
+
 def encode_ret_caps(caps: RetainedCaps) -> bytes:
     if not isinstance(caps, RetainedCaps):
         raise TypeError("caps must be RetainedCaps")
@@ -1418,7 +1548,7 @@ def encode_ret_formats(formats: RetainedFormats) -> bytes:
     if not isinstance(formats, RetainedFormats):
         raise TypeError("formats must be RetainedFormats")
     return _RET_FORMATS.pack(
-        formats.bounds_format, formats.color_format, formats.image_format,
+        formats.bounds_format, formats.color_format, formats.image_formats,
         formats.max_image_width, formats.max_image_height, formats.max_path_points,
         formats.max_glyph_run_bytes, formats.max_samples_per_append,
         formats.max_history_per_series, formats.minimum_presentation_interval_us,
@@ -1523,7 +1653,6 @@ def encode_resource_begin(begin: ResourceBegin) -> bytes:
         begin.height,
         begin.flags,
         begin.byte_length,
-        begin.sha3_256,
     )
 
 
@@ -1531,11 +1660,7 @@ def decode_resource_begin(payload) -> ResourceBegin:
     raw = _payload(payload, _RESOURCE_BEGIN.size, "RESOURCE_BEGIN")
     values = _RESOURCE_BEGIN.unpack(raw)
     try:
-        return ResourceBegin(
-            *values[:7],
-            values[7],
-            values[8],
-        )
+        return ResourceBegin(*values)
     except (TypeError, ValueError) as exc:
         raise RetainedWireError(RetainedWireErrorCode.CONSISTENCY, str(exc)) from exc
 
@@ -1817,12 +1942,20 @@ def _encode_object_body(body: ObjectWireBody) -> bytes:
             offset += _POINT.size
         return bytes(result)
     if isinstance(body, ImageBody):
-        return _IMAGE_BODY.pack(
+        flags = (IMAGE_FLAG_BACKDROP if body.backdrop else 0) | (
+            IMAGE_FLAG_CLIP if body.clip is not None else 0
+        )
+        prefix = _IMAGE_BODY.pack(
             body.resource_id,
             int(body.fit),
             body.opacity,
-            bytes(3),
+            flags,
+            bytes(2),
         )
+        if body.clip is None:
+            return prefix
+        clip = body.clip
+        return prefix + _IMAGE_CLIP.pack(clip.x, clip.y, clip.cols, clip.rows)
     if isinstance(body, GlyphRunBody):
         text = body.text.encode("utf-8", "strict")
         text_bytes = _integer(
@@ -1971,9 +2104,21 @@ def _decode_object_body(kind: ObjectKind | int, raw: bytes) -> ObjectWireBody:
                 bool(path_flags),
             )
         if kind is ObjectKind.IMAGE:
-            _body_size(raw, _IMAGE_BODY.size, "IMAGE")
-            resource_id, fit, opacity, reserved = _IMAGE_BODY.unpack(raw)
-            if reserved != bytes(3):
+            if len(raw) < _IMAGE_BODY.size:
+                _body_size(raw, _IMAGE_BODY.size, "IMAGE")
+            resource_id, fit, opacity, flags, reserved = _IMAGE_BODY.unpack_from(raw)
+            if flags & ~(IMAGE_FLAG_BACKDROP | IMAGE_FLAG_CLIP):
+                raise RetainedWireError(
+                    RetainedWireErrorCode.RESERVED,
+                    "IMAGE flags contain reserved bits",
+                )
+            clip_flagged = bool(flags & IMAGE_FLAG_CLIP)
+            _body_size(
+                raw,
+                _IMAGE_BODY.size + (_IMAGE_CLIP.size if clip_flagged else 0),
+                "IMAGE",
+            )
+            if reserved != bytes(2):
                 raise RetainedWireError(
                     RetainedWireErrorCode.RESERVED,
                     "IMAGE padding is nonzero",
@@ -1988,7 +2133,24 @@ def _decode_object_body(kind: ObjectKind | int, raw: bytes) -> ObjectWireBody:
                     RetainedWireErrorCode.SCALAR,
                     "IMAGE resource ID must be nonzero",
                 )
-            return ImageBody(resource_id, ImageFit(fit), opacity)
+            clip = None
+            if clip_flagged:
+                clip_x, clip_y, clip_cols, clip_rows = _IMAGE_CLIP.unpack_from(
+                    raw, _IMAGE_BODY.size
+                )
+                if not clip_cols or not clip_rows:
+                    raise RetainedWireError(
+                        RetainedWireErrorCode.SCALAR,
+                        "IMAGE clip extents must be positive",
+                    )
+                clip = ImageClip(clip_x, clip_y, clip_cols, clip_rows)
+            return ImageBody(
+                resource_id,
+                ImageFit(fit),
+                opacity,
+                backdrop=bool(flags & IMAGE_FLAG_BACKDROP),
+                clip=clip,
+            )
         if kind is ObjectKind.GLYPH_RUN:
             if len(raw) < _GLYPH_RUN_BODY.size:
                 _body_size(raw, _GLYPH_RUN_BODY.size, "GLYPH_RUN prefix")
@@ -2244,6 +2406,8 @@ def encode_control_definition(definition: ControlWireDefinition) -> bytes:
         content = encode_field_content(definition.content)
     elif isinstance(definition.content, ItemViewContent):
         content = encode_item_view_content(definition.content)
+    elif isinstance(definition.content, DocumentContent):
+        content = encode_document_content(definition.content)
     else:
         content = encode_semantic_text_content(definition.content)
     content_bytes = _integer(
@@ -2326,6 +2490,8 @@ def decode_control_definition(payload) -> ControlWireDefinition:
             content = decode_field_content(body)
         elif kind is ControlKind.ITEM_VIEW:
             content = decode_item_view_content(body)
+        elif kind is ControlKind.DOCUMENT:
+            content = decode_document_content(body)
         else:
             content = decode_semantic_text_content(body)
     except SemanticContentError as exc:
@@ -2626,13 +2792,14 @@ def decode_series_drop(payload) -> RetainedItemReference:
 __all__ = [
     "CONTROL_EVENT_MAX_PAYLOAD", "CellMode", "ControlEvent", "ControlEventKind",
     "ControlKind", "ControlState", "control_event_payload_size",
-    "ControlWireDefinition", "ImageBody", "ImageFit", "ObjectSetValue",
+    "ControlWireDefinition", "IMAGE_FLAG_BACKDROP", "IMAGE_FLAG_CLIP", "ImageBody", "ImageFit", "ObjectSetValue",
     "ObjectSetVisibility", "ObjectWireBody",
     "ObjectWireDefinition", "OwnerDrop", "OwnerOpen", "PresentBegin", "PresentDisposition",
     "PaneBody", "PANE_BODY_TAG",
     "StatusFieldBody", "StatusSeverity", "STATUS_FIELD_BODY_TAG",
     "PresentRetainedMode", "PresentCommit", "RegionWireDefinition", "RetainedItemReference",
     "RET1_TAG", "RetStatus", "SeriesWireBatch", "SeriesWireDefinition", "SeriesWireSamples",
+    "PixelsAnswer", "PixelsQuery",
     "RetainedCaps", "RetainedFormats", "RetainedMessageType", "RetainedQuery",
     "RetainedResult", "RetainedWireError", "RetainedWireErrorCode", "ResourceAbort",
     "ResourceAbortReason", "ResourceBegin", "ResourceChunk", "ResourceCommit",
@@ -2641,7 +2808,8 @@ __all__ = [
     "decode_control_replace",
     "decode_object_definition", "decode_object_drop", "decode_object_replace",
     "decode_object_set_value", "decode_object_set_visibility", "decode_owner_drop",
-    "decode_owner_open", "decode_owner_resize", "decode_present_begin", "decode_present_commit",
+    "decode_owner_open", "decode_owner_resize", "decode_pixels", "decode_pixels_query",
+    "decode_present_begin", "decode_present_commit",
     "decode_region_definition", "decode_region_drop", "decode_region_replace",
     "decode_resource_abort", "decode_resource_begin", "decode_resource_chunk",
     "decode_resource_commit", "decode_resource_drop",
@@ -2652,6 +2820,7 @@ __all__ = [
     "encode_object_definition",
     "encode_object_drop", "encode_object_replace", "encode_object_set_value",
     "encode_object_set_visibility", "encode_owner_drop", "encode_owner_open", "encode_owner_resize",
+    "encode_pixels", "encode_pixels_query",
     "encode_present_begin", "encode_present_commit", "encode_region_definition",
     "encode_region_drop", "encode_region_replace", "encode_ret_caps", "encode_ret_formats",
     "encode_resource_abort", "encode_resource_begin", "encode_resource_chunk",

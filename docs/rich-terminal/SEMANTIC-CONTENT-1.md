@@ -25,10 +25,20 @@ the codec, the terminal's viewport-row check, and the reference renderer.
 Akashic's canonical list publishes them in card mode, and breaks the same
 lines for its CELL fallback; the Agent's transcript uses them.
 
+The `DOCUMENT` kind and its `DOC1` body serve part 12 of Akashic's rich
+experience plan: a document's blocks, with their structure, broken into
+lines by the renderer on rows the client also finds. Part 14 adds the
+`PAGE` block, which marks where a page of a paged document, such as a PDF,
+starts. They are specified
+below, with `SCROLL` and `FOLLOW` on documents. MegaPad implements them in
+the codec, the terminal's viewport and link checks, the reference renderer
+and its hit map, viewer routing, the shared-viewer transport, and the guest
+module.
+
 ## Decision
 
-Text areas, logical text grids, tabsets, tabs, and item views extend the
-existing retained `CONTROL` namespace. They do not create message families of
+Text areas, logical text grids, tabsets, tabs, item views, and documents
+extend the existing retained `CONTROL` namespace. They do not create message families of
 their own, an applet scene API, or terminal-buffer reservations.
 
 The wire does not equate one CONTROL root with one UIDL source element. One
@@ -46,13 +56,16 @@ semantic description.
 Feature bit 9, `RET_CONTROL_COLLECTIONS`, gates the text, grid, tabset, and
 tab kinds and depends on bit 8 `RET_CONTROLS`. Feature bit 10,
 `RET_CONTROL_ITEMS`, gates `ITEM_VIEW` and the item input below and depends
-on bits 8 and 9. The same `CONTROL_DEFINE`, `CONTROL_REPLACE`,
+on bits 8 and 9. Feature bit 16, `RET_CONTROL_DOCUMENTS`, gates `DOCUMENT`
+and the document input below, every `DOC1` block kind with it, and depends
+on bits 8 and 9. The same
+`CONTROL_DEFINE`, `CONTROL_REPLACE`,
 `CONTROL_DROP`, owner authority, independent control-ID high-water, object
 quota, UTF-8 quota, transaction, and exact-revision publication rules apply.
 Menus remain valid with bit 8 alone.
 
-This is one extensible semantic record with two content bodies, the text
-collection `STX1` and the item collection `ITM1`:
+This is one extensible semantic record with three content bodies, the text
+collection `STX1`, the item collection `ITM1`, and the document `DOC1`:
 
 | Control kind | Value | Shape |
 |---|---:|---|
@@ -61,6 +74,7 @@ collection `STX1` and the item collection `ITM1`:
 | `TABSET` | 7 | bounded root, no content body |
 | `TAB` | 8 | renderer-laid-out `TABSET` child using the existing label/shortcut fields |
 | `ITEM_VIEW` | 9 | bounded root plus one `ITM1` item collection |
+| `DOCUMENT` | 14 | bounded root plus one `DOC1` document |
 
 The design is renderer-neutral. It carries logical rows, columns, spans,
 stable item keys, logical-order text with a paragraph direction, style runs
@@ -68,7 +82,8 @@ that say what parts of the text mean, a generic viewport origin,
 authoritative state, and selection/caret positions. Item views carry each
 item's key, parent, depth, fields, and state, and a viewport over the items'
 order, and say whether they are a list, a tree, a table, sections, or cards.
-It does not carry a
+Documents carry the blocks in view, with their kinds, the quotes and lists
+around them, and their text. It does not carry a
 retained-cell capacity, font, colour, text size, padding, pixel rectangle,
 refresh waveform, e-paper cadence, or physical hit box. Characters, widths,
 ordering, mirroring, and joining follow the shared text rules in
@@ -93,14 +108,16 @@ Menu controls, `TABSET`, and `TAB` require `content_bytes = 0`.
 smallest body is 72 bytes, so advertising bit 9 requires at least 152 inbound
 payload bytes and a retained transaction maximum of at least 352 bytes.
 `ITEM_VIEW` requires a nonempty canonical `ITM1` body, whose smallest form is
-56 bytes; bit 10 depends on bit 9, whose minima already cover it. There
+56 bytes; bit 10 depends on bit 9, whose minima already cover it.
+`DOCUMENT` requires a nonempty canonical `DOC1` body, whose smallest form is
+32 bytes; bit 16 depends on bit 9, whose minima already cover it. There
 is no second item-count or content-byte policy maximum; the negotiated frame
 maximum, retained transaction maximum, object quota, owner aggregate UTF-8
 quota, and caller's terminal allocation are the bounds.
 Every CONTROL record consumes one existing object-quota slot and every STX1
-or ITM1 item consumes one more; this accounts for stable retained values a
-selected renderer may materialize without introducing a new kind-specific
-capacity.
+or ITM1 item and DOC1 block consumes one more; this accounts for stable
+retained values a selected renderer may materialize without introducing a
+new kind-specific capacity.
 
 Existing menu frames are byte-for-byte unchanged because their former zero
 reserved field is still zero as `content_bytes`. This repository is unreleased,
@@ -417,29 +434,193 @@ rows past the root's bottom edge are clipped. The renderer adds no row
 between cards and chooses where each field's lines sit across the card,
 within their widths. A card box or other mark lies within the card's rows.
 
+## DOC1 body
+
+A document is text read from top to bottom, with its structure: paragraphs,
+headings, code, rules, figures and the starts of pages, inside quotes and
+lists. The client
+carries the blocks the root shows, in order, and says how far the first is
+scrolled. The renderer breaks their lines and draws them, and the client
+finds the same rows for its CELL fallback, so both agree on every row and
+the client stays in charge of scrolling.
+
+All integers are little-endian. The 32-byte header is `<IHHQHHIII>`:
+
+| Offset | Field | Type |
+|---:|---|---|
+| 0 | tag = `0x31434F44` (`DOC1`) | u32 |
+| 4 | version = 1 | u16 |
+| 6 | reserved = 0 | u16 |
+| 8 | content revision | u64, positive |
+| 16 | content flags | u16 |
+| 18 | reserved = 0 | u16 |
+| 20 | block count | u32 |
+| 24 | viewport row | u32 |
+| 28 | reserved = 0 | u32 |
+
+Content flag bits 0 and 1 hold the paragraph direction of the document's
+prose (`APT-1-TEXT.md` Section 7.1): 0 `AUTO`, 1 `LTR`, 2 `RTL`; 3 is
+invalid. All other bits are zero.
+
+Exactly `block count` blocks follow, in the document's order. Each begins
+with the 32-byte header `<QHHHHIHHII>`:
+
+| Offset | Field | Type |
+|---:|---|---|
+| 0 | stable nonzero block key | u64 |
+| 8 | kind | u16 |
+| 10 | level | u16 |
+| 12 | rows before | u16 |
+| 14 | containers around the rows before | u16 |
+| 16 | picture rows | u32 |
+| 20 | container count | u16 |
+| 22 | reserved = 0 | u16 |
+| 24 | text bytes | u32 |
+| 28 | style run count | u32 |
+
+Then come `container count` containers, each the 8-byte `<BBHI>`: u8 kind,
+u8 flags, u16 width in cells, and u32 number. Then come the block's UTF-8
+text and its style runs, exactly as an STX1 item carries its text and runs.
+
+Block kinds are:
+
+| Value | Kind | Is |
+|---:|---|---|
+| 1 | `PARAGRAPH` | prose |
+| 2 | `HEADING` | a heading; `level` is 1 to 6, 1 the highest |
+| 3 | `CODE` | preformatted text, such as code, whose spaces and lines matter |
+| 4 | `RULE` | a break between parts of the text; it has no text |
+| 5 | `FIGURE` | a picture, then its caption as text |
+| 6 | `PAGE` | the start of a page; its text is the page's label |
+
+`level` is zero for every kind but `HEADING`. `picture rows` is positive for
+a `FIGURE` and zero for every other kind. A `RULE` has no text and no style
+runs. A `PAGE` sits in no container, so its container count is zero; its
+text is the label the document gives the page, such as `iv` or `12`, and may
+be empty.
+
+A block's containers are the quotes and list items it sits in, outermost
+first:
+
+| Value | Kind | Is |
+|---:|---|---|
+| 1 | `QUOTE` | a block quote |
+| 2 | `BULLET_ITEM` | an item of a list whose items are marked alike |
+| 3 | `NUMBERED_ITEM` | an item of a numbered list; `number` is its number |
+
+`number` is zero for the other kinds. Container flag bit 0, `ITEM_START`, is
+valid only on a list item: the block starts that item, so the item's mark is
+shown on the block's first row after its rows before. All other flag bits are
+zero. `width` is positive: it is how many cells the container takes at the
+left of each of the block's rows. `containers around the rows before` is at
+most the container count. The block's rows before lie inside that many of
+its outermost containers, as the blank row between two paragraphs of one
+quote does, and outside the others.
+
+Text is well-formed Unicode scalar UTF-8 with no C0 control scalar other
+than U+000A LINE FEED, and no DEL. A line feed ends a paragraph, so a
+block's text is one paragraph more than it has line feeds. Style runs follow
+STX1's rules and meanings, and a line feed is a scalar that a run may cover.
+`CODE` text may carry any meaning, such as the keywords of a programming
+language.
+
+Keys are unique among the carried blocks. A block keeps its key while the
+client shows the same document, so a key names the same block in every
+revision that carries it.
+
+Trailing bytes, impossible counts, unknown versions, kinds or flags, nonzero
+reserved fields, and any rule above that fails are rejected.
+
+### Rows
+
+A document's rows are exact. With `W` the root's width in cells, a block's
+indent `I` is the sum of its containers' widths, and its text width is
+`T = max(W - I, 1)`. Its rows are, in order:
+
+1. its rows before, which hold no text;
+2. its content rows:
+   - for a `PARAGRAPH`, `HEADING` or `PAGE`, its text broken into lines of
+     width `T`, paragraph by paragraph, by `APT-1-TEXT.md` Section 12;
+   - for a `CODE` block, its text broken into hard lines of width `T`,
+     paragraph by paragraph, by Section 12;
+   - for a `RULE`, one row;
+   - for a `FIGURE`, its picture rows, then its text broken as a
+     paragraph's, or nothing more when its text is empty.
+
+An empty paragraph is one empty line, so an empty `PARAGRAPH`, `HEADING`,
+or `CODE` block takes one content row.
+
+The first block starts `viewport row` rows above the root's top edge, and
+each later block starts on the row after the one before it ends. Rows past
+the root's bottom edge are clipped. `viewport row` is less than the first
+block's row count, so the first block always shows a row, and every later
+block starts above the root's bottom edge, so it shows a row too. When there
+are no blocks, `viewport row` is zero. A terminal checks both against the
+control's bounds before it commits the control. The client carries every
+block with a row in the root, in order from the first, so a root row below
+the last carried block is empty.
+
+Each of a block's rows has its containers' cells at its left, outermost
+first, and then its text area of `T` cells. A paragraph's lines start at its
+start edge in the text area: the left for one that resolves left to right,
+the right for one that resolves right to left. Containers stay at the left
+in every direction. `CODE` paragraphs are laid out left to right (`LTR`),
+whatever the content's direction; every other paragraph has the content's
+direction.
+
+The renderer chooses the look of each block and container within those
+cells, and never moves a character from the cells the text rules give it:
+
+- a `QUOTE` shows a mark, such as a bar, in its cells on each of the block's
+  rows, and on its rows before when they lie inside it;
+- a list item shows its mark in its cells on the first content row of the
+  block that starts it, a bullet for a `BULLET_ITEM` and its `number` for a
+  `NUMBERED_ITEM`, and leaves those cells blank on every other row;
+- a `HEADING` shows its level by weight, colour or a mark, and keeps its
+  cells: it is not set in larger text;
+- a `CODE` block may have a background across its text area;
+- a `RULE` shows a line across its text area;
+- a `PAGE` marks the break in the cells its label's lines leave in its text
+  area, such as with a line across them;
+- a `FIGURE`'s picture rows are left unpainted across its text area.
+
+Text takes the looks of its style runs' meanings, as in STX1, and `LINK`
+always looks different from plain text.
+
+### Figures
+
+A figure's picture is not part of DOC1. The client shows it, when it can, as
+an ordinary `IMAGE` object over the picture rows' text area, above the
+document in paint order. When the figure is partly scrolled out of the root,
+the `IMAGE` keeps the figure's whole rectangle and shows only the part within
+the root (RETAINED-1 Section 11.3, `CLIP`). Where no `IMAGE` covers the
+picture rows, the CELL plane shows through, and with it the client's own
+CELL drawing of the figure.
+
 ## Hierarchy and mutation
 
-`TEXT_AREA`, `TEXT_GRID`, `TABSET`, and `ITEM_VIEW` are bounded roots with
-parent and order zero. They have no label or shortcut. `TAB` is a
+`TEXT_AREA`, `TEXT_GRID`, `TABSET`, `ITEM_VIEW`, and `DOCUMENT` are bounded
+roots with parent and order zero. They have no label or shortcut. `TAB` is a
 label-bearing child of one
 same-owner, same-region `TABSET`; it has renderer-owned child geometry and a
 unique sibling order. At most one visible/enabled tab is `SELECTED` per tabset.
-TEXT_AREA, TEXT_GRID, ITEM_VIEW, and TAB admit `VISIBLE`, `ENABLED`, and
-`SELECTED`; TABSET admits `VISIBLE` and `ENABLED`. As elsewhere, `SELECTED`
-requires the same control to be visible and enabled.
+TEXT_AREA, TEXT_GRID, ITEM_VIEW, DOCUMENT, and TAB admit `VISIBLE`,
+`ENABLED`, and `SELECTED`; TABSET admits `VISIBLE` and `ENABLED`. As
+elsewhere, `SELECTED` requires the same control to be visible and enabled.
 
 Menu and tabset replacements retain the existing state-only rule. `TAB`
 replacement may change state, label, or shortcut while preserving identity and
-hierarchy. Text area, text grid, and item view replacement may change state
-and the complete semantic content while preserving identity and geometry; a
-changed body must carry a strictly newer content revision. UTF-8 usage is
-removed and added atomically against the owner's existing aggregate
+hierarchy. Text area, text grid, item view, and document replacement may
+change state and the complete semantic content while preserving identity and
+geometry; a changed body must carry a strictly newer content revision. UTF-8
+usage is removed and added atomically against the owner's existing aggregate
 reservation.
 
 `CONTROL_EVENT` activation is sufficient for `TAB` and remains revision-bound.
 Existing revision-bound KEY/TEXT input remains usable by the authoritative
 focused UI. Pointer input on text areas and grids uses the positioned kinds
-below, and on item views the item kinds.
+below, on item views the item kinds, and on documents `SCROLL` and
+`FOLLOW`.
 
 ## Positioned input
 
@@ -488,6 +669,16 @@ caret, and Ctrl and a press follows the link; in read-only text a plain press
 follows it. The client decides what following a link does, such as opening
 the file it names. The terminal never opens anything itself, and no link
 target is carried on the wire.
+
+On a `DOCUMENT`, which requires feature bit 16, `SCROLL` carries wheel
+detents over the root as it does over a text area, and `FOLLOW` names a link
+as it does in a text area: `content_revision` is the control's DOC1 content
+revision, `item_key` names a carried block with a row the root shows, and
+`scalar_offset` is the start of a character of that block's text whose
+meaning is `LINK` and which the root shows. A document is read-only, so a
+terminal sends `FOLLOW` for a primary press on such a character without
+Shift, whether or not Ctrl is held. `PLACE` and `EXTEND` never target a
+document, and a press elsewhere on one emits nothing.
 
 The client revalidates the owner, generation, control identity, kind, event
 revision, and content revision, and resolves the item key in the content it
@@ -567,6 +758,13 @@ with the one before it and, through a key lookup, with its parent. Breaking a
 `WRAP` field into lines is one pass over its text, and checking the viewport
 row breaks only the first viewport item's fields.
 
+DOC1 adds a 32-byte header, a 32-byte header per carried block, 8 bytes per
+container, the block's text, and 12 bytes per style run. Decode and
+validation make one linear pass over blocks, containers, text, and runs,
+plus the key-uniqueness check, which may sort. Checking the viewport breaks
+each carried block's text into lines once, which the renderer needs to lay
+the block out in any case; a client carries only the blocks the root shows.
+
 That full replacement is the bounded first slice, not a claim that it is the
 best steady-state Pad keystroke transport. Before adding machinery, measure its
 guest instructions and exact UART bytes against the residual-glyph path. If
@@ -578,10 +776,11 @@ renderer cache exposed on the wire.
 ## Shared-viewer transport
 
 The local JSON display-offer wire carries the renderer-facing values with exact
-tags `text_area`, `text_grid`, `tabset`, nested `tab`, and `item_view`. Text
-collection roots use the exact fields `kind`, `control_id`, `state`, `order`,
-`z_order`, `bounds`, and `content_stx1_base64`. An item view has the same
-fields with `content_itm1_base64`, canonical padded base64 of its ITM1 bytes,
+tags `text_area`, `text_grid`, `tabset`, nested `tab`, `item_view`, and
+`document`. Text collection roots use the exact fields `kind`, `control_id`,
+`state`, `order`, `z_order`, `bounds`, and `content_stx1_base64`. An item
+view has the same fields with `content_itm1_base64`, and a document with
+`content_doc1_base64`, canonical padded base64 of its ITM1 or DOC1 bytes,
 decoded and checked as STX1 is below. A tabset replaces the content field with
 `tabs`; each tab has only `kind`, `control_id`, `state`, `order`, `label`, and
 `shortcut`.
@@ -661,6 +860,21 @@ reference viewer routes a left press there as `EXPAND`, `COLLAPSE`, `CHECK`,
 or `SELECT` by what it hits, a second press on the same item within its
 double-press interval as `OPEN`, and wheel input as `SCROLL`.
 
+A DOCUMENT shows its blocks on the exact rows the rules above give, in the
+terminal monospace font. A quote is a bar in its first cell, a bullet item a
+bullet in its first cell, and a numbered item its number and a full stop,
+right-aligned before its last cell, clipped to its cells when longer.
+Headings take the theme's `HEADING` look, in the bold face, with level 1 and
+2 also underlined; code blocks get a background across their text area;
+rules are a line across it; a page's label is muted, with a rule's line
+through the middle of the cells each of its lines leaves, one cell clear of
+the label; and a figure's picture rows are left as the CELL plane shows
+them. Text takes its style runs' looks from the theme. An
+enabled document enters the hit map as a document target that keeps the
+rectangle of each link character its paint pass drew, and the reference
+viewer routes a left press on one, without Shift, as `FOLLOW`, and wheel
+input as `SCROLL`.
+
 The reference viewer routes a left press on a text target as `PLACE` (as
 `EXTEND` with Shift on a text area), a drag that began there as `EXTEND` at the
 clamped position, and wheel input there as `SCROLL`. A left press on a text
@@ -695,6 +909,8 @@ The coherent protocol slice is owned by:
 
 - `rich_terminal/semantic_content.py`: immutable STX1 values and exact codec;
 - `rich_terminal/semantic_items.py`: immutable ITM1 values and exact codec;
+- `rich_terminal/semantic_documents.py`: immutable DOC1 values, exact codec,
+  and the rows of each block;
 - `rich_terminal/retained_model.py`: negotiated bit and caller-bound policy;
 - `rich_terminal/retained_wire.py`: CONTROL envelope and kind validation;
 - `rich_terminal/retained_scene.py`: authority, graph, quota, replacement, and

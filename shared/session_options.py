@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 
+from rich_terminal import LinkPace
 from rich_terminal.retained_model import RetainedPolicy
 from shared.session import RichTerminalSessionPolicy
 
@@ -47,6 +48,18 @@ def rich_terminal_policy(value: str) -> RichTerminalSessionPolicy:
         raise argparse.ArgumentTypeError(
             f"invalid rich-terminal policy: {exc}"
         ) from exc
+
+
+def link_pace(value: str) -> LinkPace:
+    """BYTES_PER_SECOND:FRAME_US, a paced client-to-terminal link."""
+
+    rate, separator, frame = value.partition(":")
+    try:
+        if not separator:
+            raise ValueError("expected BYTES_PER_SECOND:FRAME_US")
+        return LinkPace(int(rate, 10), int(frame, 10))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise argparse.ArgumentTypeError(f"invalid terminal link pace: {exc}") from exc
 
 
 def retained_policy(value: str) -> RetainedPolicy:

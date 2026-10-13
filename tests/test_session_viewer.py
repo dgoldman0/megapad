@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import sys
 from contextlib import nullcontext
 from dataclasses import replace
@@ -164,7 +163,6 @@ def _image_offer(
         width=2,
         height=1,
         byte_length=len(data),
-        sha3_256=hashlib.sha3_256(data).digest(),
     )
     draw = ImageDraw(
         object_id=5,
@@ -214,7 +212,6 @@ def _resource_chunk_response(
         "owner_id": manifest.owner_id,
         "owner_generation": manifest.owner_generation,
         "resource_id": manifest.resource_id,
-        "sha3_256": hashlib.sha3_256(data).hexdigest(),
         "offset": offset,
         "next_offset": next_offset,
         "byte_length": len(data),
@@ -1320,6 +1317,9 @@ def test_pygame_initialization_failure_closes_client_and_pygame(monkeypatch):
         def request(self, method, **params):
             if method == "claim_display":
                 return {"status": "claimed", "claimed": True}
+            if method == "display_cell_pixels":
+                assert set(params) == {"cell_width", "cell_height"}
+                return {"status": "selected", "selected": True}
             if method == "status":
                 return {
                     "generation": 1,
@@ -1437,6 +1437,9 @@ def test_viewer_presents_only_the_rectangles_a_frame_changed(monkeypatch):
         def request(self, method, **params):
             if method == "claim_display":
                 return {"status": "claimed", "claimed": True}
+            if method == "display_cell_pixels":
+                assert set(params) == {"cell_width", "cell_height"}
+                return {"status": "selected", "selected": True}
             if method == "status":
                 return {
                     "generation": 1,
@@ -1525,6 +1528,9 @@ def test_idle_viewer_neither_recomposes_nor_flips_an_unchanged_window(monkeypatc
         def request(self, method, **params):
             if method == "claim_display":
                 return {"status": "claimed", "claimed": True}
+            if method == "display_cell_pixels":
+                assert set(params) == {"cell_width", "cell_height"}
+                return {"status": "selected", "selected": True}
             if method == "status":
                 return {
                     "generation": 1,

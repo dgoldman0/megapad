@@ -26,6 +26,7 @@ from rich_terminal.retained_view import (
     INT64_MAX,
     INT64_MIN,
     DisplayScope,
+    DocumentDraw,
     FieldDraw,
     GlyphRunDraw,
     ImageDraw,
@@ -58,6 +59,7 @@ from rich_terminal.retained_view import (
 from rich_terminal.retained_scene import (
     ControlKind,
     ControlState,
+    ImageClip,
     ImageFit,
     ObjectBounds,
     Point,
@@ -79,6 +81,11 @@ from rich_terminal.semantic_items import (
 )
 from rich_terminal.semantic_fields import (
     FieldContent, decode_field_content, encode_field_content,
+)
+from rich_terminal.semantic_documents import (
+    DocumentContent,
+    decode_document_content,
+    encode_document_content,
 )
 from rich_terminal.update_authority import TerminalUpdateError
 from rich_terminal.retained_wire import ControlEventKind
@@ -219,23 +226,6 @@ def _wire_text(value, name: str) -> str:
     except UnicodeEncodeError as exc:
         raise ValueError(f"{name} must contain only Unicode scalar values") from exc
     return value
-
-
-def _wire_sha3_256(value, name: str) -> bytes:
-    """Decode one canonical lowercase SHA3-256 hex identity."""
-
-    encoded = _wire_text(value, name)
-    if len(encoded) != 64 or encoded != encoded.lower():
-        raise ValueError(f"{name} must be 64 lowercase hexadecimal characters")
-    try:
-        digest = bytes.fromhex(encoded)
-    except ValueError as exc:
-        raise ValueError(
-            f"{name} must be 64 lowercase hexadecimal characters"
-        ) from exc
-    if len(digest) != 32 or digest.hex() != encoded:
-        raise ValueError(f"{name} must be canonical lowercase SHA3-256 hex")
-    return digest
 
 
 def _wire_integer_array(
@@ -652,6 +642,8 @@ _IMAGE_WIRE_FIELDS = (
     "resource_id",
     "fit",
     "opacity",
+    "backdrop",
+    "clip",
 )
 _PANE_WIRE_FIELDS = (
     "kind",
@@ -753,7 +745,6 @@ _IMAGE_RESOURCE_WIRE_FIELDS = (
     "width",
     "height",
     "byte_length",
-    "sha3_256",
 )
 _MENU_BAR_WIRE_FIELDS = (
     "kind",
@@ -803,6 +794,15 @@ _ITEM_VIEW_WIRE_FIELDS = (
     "z_order",
     "bounds",
     "content_itm1_base64",
+)
+_DOCUMENT_WIRE_FIELDS = (
+    "kind",
+    "control_id",
+    "state",
+    "order",
+    "z_order",
+    "bounds",
+    "content_doc1_base64",
 )
 _FIELD_WIRE_FIELDS = (
     "kind", "control_id", "state", "order", "z_order", "bounds", "label",
@@ -864,6 +864,12 @@ def _item_content_to_wire(content: ItemViewContent) -> str:
     return base64.b64encode(encode_item_view_content(content)).decode("ascii")
 
 
+def _document_content_to_wire(content: DocumentContent) -> str:
+    """Carry the one canonical DOC1 schema through JSON without restating it."""
+
+    return base64.b64encode(encode_document_content(content)).decode("ascii")
+
+
 def _field_content_to_wire(content: FieldContent) -> str:
     """Carry canonical FDC1 through the same transport as STX1 and ITM1."""
 
@@ -883,17 +889,6 @@ def _bounds_to_wire(bounds: ObjectBounds) -> list[int]:
 
 def _bounds_path_to_wire(bounds_path: tuple[ObjectBounds, ...]) -> list[list[int]]:
     return [_bounds_to_wire(bounds) for bounds in bounds_path]
-
-
-def _bounds_path_from_wire(value, name: str) -> tuple[ObjectBounds, ...]:
-    if not isinstance(value, (list, tuple)):
-        raise TypeError(f"{name} must be an array")
-    return tuple(
-        ObjectBounds(
-            *_wire_integer_array(item, f"{name}[{index}]", 4)
-        )
-        for index, item in enumerate(value)
-    )
 
 
 def _series_history_to_wire(history: SeriesHistoryDraw) -> dict:
@@ -958,7 +953,6 @@ def _image_resource_to_wire(resource: ImageResourceManifest) -> dict:
         "width": resource.width,
         "height": resource.height,
         "byte_length": resource.byte_length,
-        "sha3_256": resource.sha3_256.hex(),
     }
 
 
@@ -995,7 +989,6 @@ def _image_resource_from_wire(data, name: str) -> ImageResourceManifest:
             minimum=1,
             maximum=UINT64_MAX,
         ),
-        sha3_256=_wire_sha3_256(wire["sha3_256"], f"{name} sha3_256"),
     )
 
 
@@ -1012,6 +1005,14 @@ def _canonical_base64(value, name: str) -> bytes:
     if base64.b64encode(payload).decode("ascii") != encoded:
         raise ValueError(f"{name} must use canonical base64 padding")
     return payload
+
+
+def _document_content_from_wire(value, name: str) -> DocumentContent:
+    payload = _canonical_base64(value, name)
+    try:
+        return decode_document_content(payload)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} is not canonical DOC1: {exc}") from exc
 
 
 def _item_content_from_wire(value, name: str) -> ItemViewContent:
@@ -1054,7 +1055,7 @@ def _validate_collection_draw_shape(
     order: int,
     z_order: int,
     bounds: ObjectBounds,
-    content: SemanticTextContent | ItemViewContent,
+    content: SemanticTextContent | ItemViewContent | DocumentContent,
 ) -> None:
     """Reassert family rules from immutable O(1) content summaries."""
 
@@ -1200,6 +1201,10 @@ def _retained_draw_to_wire(
             "resource_id": draw.resource_id,
             "fit": int(draw.fit),
             "opacity": draw.opacity,
+            "backdrop": draw.backdrop,
+            "clip": None
+            if draw.clip is None
+            else [draw.clip.x, draw.clip.y, draw.clip.cols, draw.clip.rows],
         }
     if isinstance(draw, PaneDraw):
         return {
@@ -1384,6 +1389,24 @@ def _retained_draw_to_wire(
             "z_order": draw.z_order,
             "bounds": _bounds_to_wire(draw.bounds),
             "content_itm1_base64": _item_content_to_wire(draw.content),
+        }
+    if isinstance(draw, DocumentDraw):
+        _validate_collection_draw_shape(
+            ControlKind.DOCUMENT,
+            draw.state,
+            draw.order,
+            draw.z_order,
+            draw.bounds,
+            draw.content,
+        )
+        return {
+            "kind": "document",
+            "control_id": draw.control_id,
+            "state": int(draw.state),
+            "order": draw.order,
+            "z_order": draw.z_order,
+            "bounds": _bounds_to_wire(draw.bounds),
+            "content_doc1_base64": _document_content_to_wire(draw.content),
         }
     if isinstance(draw, FieldDraw):
         validate_control_shape(
@@ -1634,9 +1657,7 @@ def _text_collection_from_wire(
         minimum=INT32_MIN,
         maximum=INT32_MAX,
     )
-    bounds = ObjectBounds(
-        *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
-    )
+    bounds = _cell_bounds_from_wire(wire["bounds"], f"{name} bounds")
     content = _semantic_content_from_wire(
         wire["content_stx1_base64"],
         f"{name} content_stx1_base64",
@@ -1665,6 +1686,43 @@ def _text_collection_from_wire(
     )
 
 
+def _document_from_wire(data, name: str) -> DocumentDraw:
+    wire = _wire_object(data, name, _DOCUMENT_WIRE_FIELDS)
+    if wire["kind"] != "document":
+        raise ValueError(f"{name} kind must be document")
+    state = _control_state_from_wire(wire["state"], f"{name} state")
+    order = _wire_integer(
+        wire["order"], f"{name} order", minimum=0, maximum=UINT32_MAX
+    )
+    z_order = _wire_integer(
+        wire["z_order"],
+        f"{name} z_order",
+        minimum=INT32_MIN,
+        maximum=INT32_MAX,
+    )
+    bounds = _cell_bounds_from_wire(wire["bounds"], f"{name} bounds")
+    content = _document_content_from_wire(
+        wire["content_doc1_base64"],
+        f"{name} content_doc1_base64",
+    )
+    _validate_collection_draw_shape(
+        ControlKind.DOCUMENT, state, order, z_order, bounds, content
+    )
+    return DocumentDraw(
+        control_id=_wire_integer(
+            wire["control_id"],
+            f"{name} control_id",
+            minimum=1,
+            maximum=UINT64_MAX,
+        ),
+        state=state,
+        order=order,
+        z_order=z_order,
+        bounds=bounds,
+        content=content,
+    )
+
+
 def _item_view_from_wire(data, name: str) -> ItemViewDraw:
     wire = _wire_object(data, name, _ITEM_VIEW_WIRE_FIELDS)
     if wire["kind"] != "item_view":
@@ -1679,9 +1737,7 @@ def _item_view_from_wire(data, name: str) -> ItemViewDraw:
         minimum=INT32_MIN,
         maximum=INT32_MAX,
     )
-    bounds = ObjectBounds(
-        *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
-    )
+    bounds = _cell_bounds_from_wire(wire["bounds"], f"{name} bounds")
     content = _item_content_from_wire(
         wire["content_itm1_base64"],
         f"{name} content_itm1_base64",
@@ -1750,9 +1806,7 @@ def _tabset_from_wire(data, name: str) -> TabSetDraw:
             minimum=INT32_MIN,
             maximum=INT32_MAX,
         ),
-        bounds=ObjectBounds(
-            *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
-        ),
+        bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
         tabs=tuple(
             _tab_from_wire(tab, f"{name} tab {tab_index}")
             for tab_index, tab in enumerate(tabs_wire)
@@ -1848,13 +1902,14 @@ def _retained_draw_from_wire(
     | TaskBarDraw
     | ItemViewDraw
     | FieldDraw
+    | DocumentDraw
 ):
     if not isinstance(data, Mapping):
         raise TypeError(f"{name} must be an object")
     kind = data.get("kind")
     if kind == "glyph_run":
         wire = _wire_object(data, name, _GLYPH_RUN_WIRE_FIELDS)
-        bounds = _wire_integer_array(wire["bounds"], f"{name} bounds", 4)
+        bounds = _cell_bounds_from_wire(wire["bounds"], f"{name} bounds")
         foreground = _wire_integer_array(
             wire["foreground"], f"{name} foreground", 4, maximum=0xFF
         )
@@ -1874,7 +1929,7 @@ def _retained_draw_from_wire(
                 minimum=INT32_MIN,
                 maximum=INT32_MAX,
             ),
-            bounds=ObjectBounds(*bounds),
+            bounds=bounds,
             foreground=RGBA(*foreground),
             background=RGBA(*background),
             attributes=_wire_integer(
@@ -1884,7 +1939,7 @@ def _retained_draw_from_wire(
                 maximum=0x7F,
             ),
             text=_wire_text(wire["text"], f"{name} text"),
-            parent_bounds=_bounds_path_from_wire(
+            parent_bounds=_cell_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
         )
@@ -1906,10 +1961,8 @@ def _retained_draw_from_wire(
                 minimum=INT32_MIN,
                 maximum=INT32_MAX,
             ),
-            bounds=ObjectBounds(
-                *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
-            ),
-            parent_bounds=_bounds_path_from_wire(
+            bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+            parent_bounds=_cell_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
             points=tuple(
@@ -1946,9 +1999,7 @@ def _retained_draw_from_wire(
                 minimum=INT32_MIN,
                 maximum=INT32_MAX,
             ),
-            bounds=ObjectBounds(
-                *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
-            ),
+            bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
             resource_id=_wire_integer(
                 wire["resource_id"],
                 f"{name} resource_id",
@@ -1963,9 +2014,13 @@ def _retained_draw_from_wire(
             opacity=_wire_integer(
                 wire["opacity"], f"{name} opacity", minimum=0, maximum=0xFF
             ),
-            parent_bounds=_bounds_path_from_wire(
+            backdrop=_wire_boolean(wire["backdrop"], f"{name} backdrop"),
+            parent_bounds=_cell_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
+            clip=None
+            if wire["clip"] is None
+            else ImageClip(*_wire_integer_array(wire["clip"], f"{name} clip", 4)),
         )
     if kind == "pane":
         wire = _wire_object(data, name, _PANE_WIRE_FIELDS)
@@ -1987,7 +2042,7 @@ def _retained_draw_from_wire(
             ),
             title=_wire_text(wire["title"], f"{name} title"),
             focused=_wire_boolean(wire["focused"], f"{name} focused"),
-            parent_bounds=_bounds_path_from_wire(
+            parent_bounds=_cell_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
         )
@@ -2027,10 +2082,8 @@ def _retained_draw_from_wire(
                 minimum=INT32_MIN,
                 maximum=INT32_MAX,
             ),
-            bounds=ObjectBounds(
-                *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
-            ),
-            parent_bounds=_bounds_path_from_wire(
+            bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+            parent_bounds=_cell_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
             foreground=RGBA(
@@ -2057,10 +2110,8 @@ def _retained_draw_from_wire(
                 minimum=INT32_MIN,
                 maximum=INT32_MAX,
             ),
-            bounds=ObjectBounds(
-                *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
-            ),
-            parent_bounds=_bounds_path_from_wire(
+            bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+            parent_bounds=_cell_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
             foreground=RGBA(
@@ -2106,10 +2157,8 @@ def _retained_draw_from_wire(
                 minimum=INT32_MIN,
                 maximum=INT32_MAX,
             ),
-            bounds=ObjectBounds(
-                *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
-            ),
-            parent_bounds=_bounds_path_from_wire(
+            bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+            parent_bounds=_cell_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
             inactive=RGBA(
@@ -2141,10 +2190,8 @@ def _retained_draw_from_wire(
             z_order=_wire_integer(
                 wire["z_order"], f"{name} z_order", minimum=INT32_MIN, maximum=INT32_MAX
             ),
-            bounds=ObjectBounds(
-                *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
-            ),
-            parent_bounds=_bounds_path_from_wire(
+            bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+            parent_bounds=_cell_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
             series_id=_wire_integer(
@@ -2176,10 +2223,8 @@ def _retained_draw_from_wire(
             z_order=_wire_integer(
                 wire["z_order"], f"{name} z_order", minimum=INT32_MIN, maximum=INT32_MAX
             ),
-            bounds=ObjectBounds(
-                *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
-            ),
-            parent_bounds=_bounds_path_from_wire(
+            bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+            parent_bounds=_cell_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
             series_id=_wire_integer(
@@ -2211,7 +2256,7 @@ def _retained_draw_from_wire(
         )
     if kind == "menu_bar":
         wire = _wire_object(data, name, _MENU_BAR_WIRE_FIELDS)
-        bounds = _wire_integer_array(wire["bounds"], f"{name} bounds", 4)
+        bounds = _cell_bounds_from_wire(wire["bounds"], f"{name} bounds")
         menus_wire = wire["menus"]
         if not isinstance(menus_wire, (list, tuple)):
             raise TypeError(f"{name} menus must be an array")
@@ -2235,7 +2280,7 @@ def _retained_draw_from_wire(
                 minimum=INT32_MIN,
                 maximum=INT32_MAX,
             ),
-            bounds=ObjectBounds(*bounds),
+            bounds=bounds,
             menus=tuple(
                 _menu_from_wire(menu, f"{name} menu {menu_index}")
                 for menu_index, menu in enumerate(menus_wire)
@@ -2251,6 +2296,8 @@ def _retained_draw_from_wire(
         return _taskbar_from_wire(data, name)
     if kind == "item_view":
         return _item_view_from_wire(data, name)
+    if kind == "document":
+        return _document_from_wire(data, name)
     if kind == "field":
         return _field_from_wire(data, name)
     raise ValueError(f"{name} kind is not a retained draw kind")
@@ -3322,7 +3369,6 @@ class SharedSessionOwner(ABC):
         owner_id: int,
         owner_generation: int,
         resource_id: int,
-        sha3_256: bytes,
         offset: int,
         max_bytes: int,
         *,
@@ -3352,11 +3398,6 @@ class SharedSessionOwner(ABC):
         normalized_resource = _wire_integer(
             resource_id, "resource_id", minimum=1, maximum=UINT64_MAX
         )
-        if not isinstance(sha3_256, (bytes, bytearray, memoryview)):
-            raise TypeError("sha3_256 must be bytes-like")
-        normalized_digest = bytes(sha3_256)
-        if len(normalized_digest) != 32:
-            raise ValueError("sha3_256 must be exactly 32 bytes")
         normalized_offset = _wire_integer(
             offset, "resource offset", minimum=0, maximum=UINT64_MAX
         )
@@ -3427,8 +3468,6 @@ class SharedSessionOwner(ABC):
             if (
                 manifest is None
                 or resource is None
-                or manifest.sha3_256 != normalized_digest
-                or resource.digest != normalized_digest
                 or resource.owner.session_id != scope.session_id
                 or resource.owner.presentation_epoch != scope.presentation_epoch
                 or resource.format != manifest.format
@@ -3451,7 +3490,6 @@ class SharedSessionOwner(ABC):
                 "owner_id": normalized_owner,
                 "owner_generation": normalized_owner_generation,
                 "resource_id": normalized_resource,
-                "sha3_256": normalized_digest.hex(),
                 "offset": normalized_offset,
                 "next_offset": next_offset,
                 "byte_length": resource.byte_length,
@@ -3492,8 +3530,17 @@ class SharedSessionOwner(ABC):
 
         with self.condition:
             changed = self.session.revoke_physical_display()
+            self.session.select_display_cell_pixels(None)
             self.condition.notify_all()
             return changed
+
+    def select_display_cell_pixels(
+        self, cell_pixels: tuple[int, int] | None
+    ) -> None:
+        """Give the terminal the display holder's pixel size of one cell."""
+
+        with self.condition:
+            self.session.select_display_cell_pixels(cell_pixels)
 
     def text(self, trim_right: bool = True) -> dict:
         with self.lock:
@@ -3819,6 +3866,34 @@ class SessionServer:
                 return {"status": "claimed", "claimed": True}
             return {"status": "display_busy", "claimed": False}
 
+    def _display_cell_pixels_for_connection(
+        self,
+        params: Mapping[str, Any],
+        connection_id: int | None,
+    ) -> dict:
+        """Let the display holder say how many pixels one of its cells has.
+
+        The terminal answers PIXELS queries from this until the holder
+        releases the display.
+        """
+
+        wire = _wire_object(
+            params, "display cell pixels", ("cell_width", "cell_height")
+        )
+        cell_pixels = (
+            _wire_integer(
+                wire["cell_width"], "cell width", minimum=1, maximum=UINT32_MAX
+            ),
+            _wire_integer(
+                wire["cell_height"], "cell height", minimum=1, maximum=UINT32_MAX
+            ),
+        )
+        with self._display_lock:
+            if connection_id is None or self._display_holder != connection_id:
+                return {"status": "stale_display", "selected": False}
+            self.machine.select_display_cell_pixels(cell_pixels)
+            return {"status": "selected", "selected": True}
+
     def _release_display_holder(self, connection_id: int) -> bool:
         """Drop one exact lease and requeue all of its physical sink state."""
 
@@ -3897,7 +3972,6 @@ class SessionServer:
                 "owner_id",
                 "owner_generation",
                 "resource_id",
-                "sha3_256",
                 "offset",
                 "max_bytes",
             ),
@@ -3922,7 +3996,6 @@ class SessionServer:
             minimum=1,
             maximum=UINT64_MAX,
         )
-        digest = _wire_sha3_256(params["sha3_256"], "resource sha3_256")
         offset = _wire_integer(
             params["offset"],
             "resource offset",
@@ -3947,7 +4020,6 @@ class SessionServer:
                 owner_id,
                 owner_generation,
                 resource_id,
-                digest,
                 offset,
                 max_bytes,
                 generation=generation,
@@ -4098,6 +4170,8 @@ class SessionServer:
                 return result
         if method == "claim_display":
             return self._claim_display(connection_id)
+        if method == "display_cell_pixels":
+            return self._display_cell_pixels_for_connection(params, connection_id)
         if method == "present":
             return self._present_for_connection(params, connection_id)
         if method == "display_resource_chunk":

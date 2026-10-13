@@ -5,6 +5,7 @@ from .driver import (
     DriverLimits,
     DriverServiceResult,
     DriverStatus,
+    LinkPace,
     RichTerminalDriver,
 )
 from .server import TerminalConfig, TerminalSessionError, TerminalState
@@ -43,6 +44,7 @@ __all__ = [
     "GeometryRecord",
     "HostPortLimits",
     "IngressRecord",
+    "LinkPace",
     "RichTerminalDriver",
     "ResizeRecord",
     "ScheduledEventPoll",

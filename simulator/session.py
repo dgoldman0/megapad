@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 
 from rich_terminal import DriverServiceResult, DriverStatus
+from shared.screen_profile import ScreenChangeProfile
 from shared.session import TerminalSession, RichTerminalSessionConfig
 from shared.session_status import SessionRuntimeDescriptor, terminal_status
 from shared_session import SharedSessionOwner
@@ -83,9 +84,14 @@ class SimulatorMachineSession(TerminalSession):
         semantic_quantum_steps: int | None = None,
         machine_quantum_instructions: int | None = None,
         rich_terminal: RichTerminalSessionConfig | None = None,
+        screen_profile: ScreenChangeProfile | None = None,
     ) -> None:
         if not isinstance(runtime, MegaForthRuntime):
             raise TypeError("runtime must be a MegaForthRuntime")
+        if screen_profile is not None and not isinstance(
+            screen_profile, ScreenChangeProfile
+        ):
+            raise TypeError("screen_profile must be a ScreenChangeProfile or None")
         if isinstance(entry, bool) or not isinstance(entry, (bytes, str, int)):
             raise TypeError("entry must be a word name or execution token")
         if semantic_step_budget is not None:
@@ -116,6 +122,7 @@ class SimulatorMachineSession(TerminalSession):
         self._dispatch_started = False
         self._halted = False
         self._semantic_steps_total = 0
+        self._screen_profile = screen_profile
         super().__init__(cols, rows, rich_terminal)
 
         backend = SimulatorSessionBackend(
@@ -141,6 +148,8 @@ class SimulatorMachineSession(TerminalSession):
             backend.close()
             self._backend = None
             raise
+        if screen_profile is not None:
+            self.observe_presents(screen_profile.record_present)
 
     @property
     def backend(self) -> SimulatorSessionBackend:
@@ -245,6 +254,7 @@ class SimulatorMachineSession(TerminalSession):
                 )
 
         self._semantic_steps_total += semantic.semantic_steps
+        self._sample_screen_profile(semantic.semantic_steps)
         if semantic.stop_reason is SemanticBatchStop.COMPLETED:
             self._halted = True
         elif semantic.stop_reason is SemanticBatchStop.TERMINAL_FAILURE:
@@ -314,6 +324,22 @@ class SimulatorMachineSession(TerminalSession):
 
         return self.run_boundary().semantic_steps
 
+    def _sample_screen_profile(self, steps: int) -> None:
+        """Charge a batch's steps to where the guest stopped, and to each
+        colon word that called it."""
+
+        profile = self._screen_profile
+        if profile is None or steps <= 0:
+            return
+        names = []
+        for xt in self.runtime.suspended_call_chain():
+            try:
+                name = self.runtime.dictionary.resolve(xt).name
+            except KeyError:
+                name = b""
+            names.append(name.decode("ascii", "replace") or f"xt:{xt:#x}")
+        profile.sample_guest(names, steps)
+
     def close(self) -> None:
         if self._closed:
             return
@@ -326,6 +352,8 @@ class SimulatorMachineSession(TerminalSession):
                     backend.close()
             finally:
                 self._closed = True
+                if self._screen_profile is not None:
+                    self._screen_profile.close()
 
 
 class SimulatorSharedMachine(SharedSessionOwner):

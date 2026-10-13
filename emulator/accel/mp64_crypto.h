@@ -2,7 +2,7 @@
 // =========================================================================
 //  mp64_crypto.h — C++ implementations of Megapad-64 crypto MMIO devices
 //
-//  Devices:  AES-GCM, SHA-256, SHA-3/SHAKE, FieldALU (X25519 + GF(p))
+//  Devices:  AES (GCM and CBC), SHA-256, SHA-3/SHAKE, FieldALU (X25519 + GF(p))
 //
 //  These run entirely in C++ so MMIO byte accesses from the CPU inner loop
 //  never cross the Python ↔ C++ boundary, eliminating ~6000 pybind11
@@ -42,6 +42,25 @@ static const uint8_t AES_SBOX[256] = {
     0x8C,0xA1,0x89,0x0D,0xBF,0xE6,0x42,0x68,0x41,0x99,0x2D,0x0F,0xB0,0x54,0xBB,0x16,
 };
 
+static const uint8_t AES_INV_SBOX[256] = {
+    0x52,0x09,0x6A,0xD5,0x30,0x36,0xA5,0x38,0xBF,0x40,0xA3,0x9E,0x81,0xF3,0xD7,0xFB,
+    0x7C,0xE3,0x39,0x82,0x9B,0x2F,0xFF,0x87,0x34,0x8E,0x43,0x44,0xC4,0xDE,0xE9,0xCB,
+    0x54,0x7B,0x94,0x32,0xA6,0xC2,0x23,0x3D,0xEE,0x4C,0x95,0x0B,0x42,0xFA,0xC3,0x4E,
+    0x08,0x2E,0xA1,0x66,0x28,0xD9,0x24,0xB2,0x76,0x5B,0xA2,0x49,0x6D,0x8B,0xD1,0x25,
+    0x72,0xF8,0xF6,0x64,0x86,0x68,0x98,0x16,0xD4,0xA4,0x5C,0xCC,0x5D,0x65,0xB6,0x92,
+    0x6C,0x70,0x48,0x50,0xFD,0xED,0xB9,0xDA,0x5E,0x15,0x46,0x57,0xA7,0x8D,0x9D,0x84,
+    0x90,0xD8,0xAB,0x00,0x8C,0xBC,0xD3,0x0A,0xF7,0xE4,0x58,0x05,0xB8,0xB3,0x45,0x06,
+    0xD0,0x2C,0x1E,0x8F,0xCA,0x3F,0x0F,0x02,0xC1,0xAF,0xBD,0x03,0x01,0x13,0x8A,0x6B,
+    0x3A,0x91,0x11,0x41,0x4F,0x67,0xDC,0xEA,0x97,0xF2,0xCF,0xCE,0xF0,0xB4,0xE6,0x73,
+    0x96,0xAC,0x74,0x22,0xE7,0xAD,0x35,0x85,0xE2,0xF9,0x37,0xE8,0x1C,0x75,0xDF,0x6E,
+    0x47,0xF1,0x1A,0x71,0x1D,0x29,0xC5,0x89,0x6F,0xB7,0x62,0x0E,0xAA,0x18,0xBE,0x1B,
+    0xFC,0x56,0x3E,0x4B,0xC6,0xD2,0x79,0x20,0x9A,0xDB,0xC0,0xFE,0x78,0xCD,0x5A,0xF4,
+    0x1F,0xDD,0xA8,0x33,0x88,0x07,0xC7,0x31,0xB1,0x12,0x10,0x59,0x27,0x80,0xEC,0x5F,
+    0x60,0x51,0x7F,0xA9,0x19,0xB5,0x4A,0x0D,0x2D,0xE5,0x7A,0x9F,0x93,0xC9,0x9C,0xEF,
+    0xA0,0xE0,0x3B,0x4D,0xAE,0x2A,0xF5,0xB0,0xC8,0xEB,0xBB,0x3C,0x83,0x53,0x99,0x61,
+    0x17,0x2B,0x04,0x7E,0xBA,0x77,0xD6,0x26,0xE1,0x69,0x14,0x63,0x55,0x21,0x0C,0x7D,
+};
+
 static const uint8_t AES_RCON[10] = {
     0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1B,0x36
 };
@@ -60,6 +79,17 @@ static inline uint8_t gm2(uint8_t v) {
 }
 static inline uint8_t gm3(uint8_t v) {
     return gm2(v) ^ v;
+}
+// V times FACTOR in GF(2^8), as InvMixColumns multiplies (9, 11, 13, 14).
+static inline uint8_t gmul(uint8_t v, uint8_t factor) {
+    uint8_t product = 0;
+    while (factor != 0) {
+        if (factor & 1)
+            product ^= v;
+        v = gm2(v);
+        factor >>= 1;
+    }
+    return product;
 }
 
 // AES key expansion: 128-bit → 11 round keys (176 bytes)
@@ -144,6 +174,53 @@ static void aes_encrypt_block(const uint8_t in[16], uint8_t out[16],
     aes_secure_clear(s, sizeof(s));
 }
 
+// AES single-block decrypt with the inverse cipher (FIPS 197 section 5.3),
+// for CBC decryption.
+static void aes_decrypt_block(const uint8_t in[16], uint8_t out[16],
+                              const uint8_t* rkeys, int nr) {
+    uint8_t s[16];
+    const uint8_t* last = rkeys + nr * 16;
+    for (int i = 0; i < 16; i++) s[i] = in[i] ^ last[i];
+
+    for (int r = nr - 1; r >= 1; r--) {
+        // InvShiftRows and InvSubBytes
+        uint8_t t[16];
+        t[0]  = AES_INV_SBOX[s[0]];  t[5]  = AES_INV_SBOX[s[1]];
+        t[10] = AES_INV_SBOX[s[2]];  t[15] = AES_INV_SBOX[s[3]];
+        t[4]  = AES_INV_SBOX[s[4]];  t[9]  = AES_INV_SBOX[s[5]];
+        t[14] = AES_INV_SBOX[s[6]];  t[3]  = AES_INV_SBOX[s[7]];
+        t[8]  = AES_INV_SBOX[s[8]];  t[13] = AES_INV_SBOX[s[9]];
+        t[2]  = AES_INV_SBOX[s[10]]; t[7]  = AES_INV_SBOX[s[11]];
+        t[12] = AES_INV_SBOX[s[12]]; t[1]  = AES_INV_SBOX[s[13]];
+        t[6]  = AES_INV_SBOX[s[14]]; t[11] = AES_INV_SBOX[s[15]];
+        // AddRoundKey
+        const uint8_t* rk = rkeys + r * 16;
+        for (int i = 0; i < 16; i++) t[i] ^= rk[i];
+        // InvMixColumns
+        for (int c = 0; c < 4; c++) {
+            uint8_t a0 = t[4*c], a1 = t[4*c+1], a2 = t[4*c+2], a3 = t[4*c+3];
+            s[4*c]   = gmul(a0, 14) ^ gmul(a1, 11) ^ gmul(a2, 13) ^ gmul(a3, 9);
+            s[4*c+1] = gmul(a0, 9)  ^ gmul(a1, 14) ^ gmul(a2, 11) ^ gmul(a3, 13);
+            s[4*c+2] = gmul(a0, 13) ^ gmul(a1, 9)  ^ gmul(a2, 14) ^ gmul(a3, 11);
+            s[4*c+3] = gmul(a0, 11) ^ gmul(a1, 13) ^ gmul(a2, 9)  ^ gmul(a3, 14);
+        }
+        aes_secure_clear(t, sizeof(t));
+    }
+    // Final round (no InvMixColumns)
+    uint8_t t[16];
+    t[0]  = AES_INV_SBOX[s[0]];  t[5]  = AES_INV_SBOX[s[1]];
+    t[10] = AES_INV_SBOX[s[2]];  t[15] = AES_INV_SBOX[s[3]];
+    t[4]  = AES_INV_SBOX[s[4]];  t[9]  = AES_INV_SBOX[s[5]];
+    t[14] = AES_INV_SBOX[s[6]];  t[3]  = AES_INV_SBOX[s[7]];
+    t[8]  = AES_INV_SBOX[s[8]];  t[13] = AES_INV_SBOX[s[9]];
+    t[2]  = AES_INV_SBOX[s[10]]; t[7]  = AES_INV_SBOX[s[11]];
+    t[12] = AES_INV_SBOX[s[12]]; t[1]  = AES_INV_SBOX[s[13]];
+    t[6]  = AES_INV_SBOX[s[14]]; t[11] = AES_INV_SBOX[s[15]];
+    for (int i = 0; i < 16; i++) out[i] = t[i] ^ rkeys[i];
+    aes_secure_clear(t, sizeof(t));
+    aes_secure_clear(s, sizeof(s));
+}
+
 // ── GHASH GF(2^128) multiplication ──────────────────────────────
 
 // We use a simple bitwise approach (same as the Python implementation).
@@ -206,17 +283,25 @@ static inline void inc32(uint8_t counter[16]) {
 }
 
 // =========================================================================
-//  AES-GCM Device
+//  AES Device: GCM and CBC
 // =========================================================================
+
+// GCM's IV is exactly the window's first 12 bytes; CBC's is all 16.  A
+// transaction whose written IV bytes are not its mode's fails closed.
+static const uint16_t AES_GCM_IV_MASK = 0x0FFFu;
+static const uint16_t AES_CBC_IV_MASK = 0xFFFFu;
+static const uint8_t AES_MODE_GCM = 0;
+static const uint8_t AES_MODE_CBC = 1;
 
 struct CryptoAES {
     uint8_t key[32];
-    uint8_t iv[12];
+    uint8_t iv[16];
     uint8_t din[16];
     uint8_t dout[16];
     uint8_t tag[16];
     uint8_t status;      // 0=idle, 1=active, 2=done, 3=auth/transaction fail
     uint8_t key_mode;    // 0=AES-256, 1=AES-128
+    uint8_t mode;        // 0=GCM, 1=CBC
     uint8_t cmd;         // bit 0: 0=encrypt, 1=decrypt
 
     // Internal
@@ -225,6 +310,7 @@ struct CryptoAES {
     u128 h;              // GHASH subkey
     uint8_t counter[16];
     uint8_t j0[16];
+    uint8_t chain[16];   // CBC: the last ciphertext block, the IV first
     u128 ghash_state;
     uint32_t aad_len;
     uint32_t data_len;
@@ -242,6 +328,7 @@ struct CryptoAES {
         aes_secure_clear(rkeys, sizeof(rkeys));
         aes_secure_clear(counter, sizeof(counter));
         aes_secure_clear(j0, sizeof(j0));
+        aes_secure_clear(chain, sizeof(chain));
         aes_secure_clear(&h, sizeof(h));
         aes_secure_clear(&ghash_state, sizeof(ghash_state));
         nr = 0;
@@ -267,6 +354,7 @@ struct CryptoAES {
         clear_derived_state();
         status = 0;
         key_mode = 0;
+        mode = AES_MODE_GCM;
         cmd = 0;
         aad_len = 0;
         data_len = 0;
@@ -288,6 +376,7 @@ struct CryptoAES {
         data_len = 0;
         cmd = 0;
         key_mode = 0;
+        mode = AES_MODE_GCM;
         clear_configuration_tracking();
         fault_latched = false;
     }
@@ -324,7 +413,7 @@ struct CryptoAES {
 
     bool configuration_complete(bool decrypting) const {
         return key_written_mask == 0xFFFFFFFFu
-            && iv_written_mask == 0x0FFFu
+            && iv_written_mask == AES_GCM_IV_MASK
             && aad_len_written_mask == 0x0Fu
             && data_len_written_mask == 0x0Fu
             && (!decrypting || tag_written_mask == 0xFFFFu);
@@ -347,13 +436,7 @@ struct CryptoAES {
         fault_latched = false;
         status = 1;
 
-        if (key_mode == 1) {
-            aes128_key_expand(key, rkeys);
-            nr = 10;
-        } else {
-            aes256_key_expand(key, rkeys);
-            nr = 14;
-        }
+        expand_selected_key();
         // H = AES_K(0^128)
         uint8_t zero[16] = {0};
         uint8_t h_bytes[16];
@@ -373,6 +456,70 @@ struct CryptoAES {
         // final byte could otherwise trigger finalization.
         if (aad_len == 0 && data_len == 0)
             finalize_tag();
+    }
+
+    void expand_selected_key() {
+        if (key_mode == 1) {
+            aes128_key_expand(key, rkeys);
+            nr = 10;
+        } else {
+            aes256_key_expand(key, rkeys);
+            nr = 14;
+        }
+    }
+
+    // Start a CBC transaction: a whole number of blocks, chained from the
+    // 16-byte IV, with no AAD and no tag.
+    void start_cbc() {
+        if (!(key_written_mask == 0xFFFFFFFFu
+              && iv_written_mask == AES_CBC_IV_MASK
+              && data_len_written_mask == 0x0Fu
+              && aad_len == 0
+              && data_len % 16 == 0)) {
+            latch_transaction_fault();
+            return;
+        }
+        clear_derived_state();
+        aes_secure_clear(din, sizeof(din));
+        aes_secure_clear(dout, sizeof(dout));
+        aes_secure_clear(tag, sizeof(tag));
+        fault_latched = false;
+        status = 1;
+        expand_selected_key();
+        std::memcpy(chain, iv, 16);
+        if (data_len == 0)
+            finish_cbc();
+    }
+
+    void finish_cbc() {
+        status = 2;
+        clear_completed_secrets(true);
+    }
+
+    void process_cbc_block() {
+        if (data_processed >= data_len) {
+            reject_operation();
+            return;
+        }
+        uint8_t block[16];
+        uint8_t out[16];
+        std::memcpy(block, din, 16);
+        if (cmd == 0) {
+            for (int i = 0; i < 16; i++) block[i] ^= chain[i];
+            aes_encrypt_block(block, out, rkeys, nr);
+            std::memcpy(chain, out, 16);
+        } else {
+            aes_decrypt_block(block, out, rkeys, nr);
+            for (int i = 0; i < 16; i++) out[i] ^= chain[i];
+            std::memcpy(chain, block, 16);
+        }
+        std::memcpy(dout, out, 16);
+        data_processed += 16;
+        aes_secure_clear(block, sizeof(block));
+        aes_secure_clear(out, sizeof(out));
+        aes_secure_clear(din, sizeof(din));
+        if (data_processed == data_len)
+            finish_cbc();
     }
 
     void ghash_update(const uint8_t block[16]) {
@@ -437,6 +584,10 @@ struct CryptoAES {
             reject_operation();
             return;
         }
+        if (mode == AES_MODE_CBC) {
+            process_cbc_block();
+            return;
+        }
 
         if (aad_processed < aad_len) {
             uint32_t remaining = aad_len - aad_processed;
@@ -489,6 +640,7 @@ struct CryptoAES {
     uint8_t read8(uint32_t offset) const {
         if (offset == 0x39) return status;
         if (offset == 0x3A) return key_mode;
+        if (offset == 0x3B) return mode;
         if (offset >= 0x50 && offset < 0x60) return dout[offset - 0x50];
         if (offset >= 0x60 && offset < 0x70) return tag[offset - 0x60];
         return 0;
@@ -499,7 +651,7 @@ struct CryptoAES {
             begin_configuration_write();
             key[offset] = value;
             key_written_mask |= uint32_t(1) << offset;
-        } else if (offset >= 0x20 && offset < 0x2C) {
+        } else if (offset >= 0x20 && offset < 0x30) {
             begin_configuration_write();
             const uint32_t idx = offset - 0x20;
             iv[idx] = value;
@@ -517,10 +669,16 @@ struct CryptoAES {
         } else if (offset == 0x38) {
             begin_configuration_write();
             cmd = value & 1;
-            start_gcm();
+            if (mode == AES_MODE_CBC)
+                start_cbc();
+            else
+                start_gcm();
         } else if (offset == 0x3A) {
             begin_configuration_write();
             key_mode = value & 1;
+        } else if (offset == 0x3B) {
+            begin_configuration_write();
+            mode = value & 1;
         } else if (offset >= 0x40 && offset < 0x50) {
             int idx = offset - 0x40;
             if (status != 1 || idx != din_written) {

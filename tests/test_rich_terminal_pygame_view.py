@@ -572,7 +572,6 @@ def _image_manifest(resource_id, width, height):
         width=width,
         height=height,
         byte_length=width * height * 4,
-        sha3_256=bytes((resource_id,)) * 32,
     )
 
 
@@ -735,6 +734,38 @@ def test_cover_centers_oversized_raster_and_crops_at_the_object_bounds():
     assert tuple(destination.get_at((3, 2)))[:3] == (20, 210, 70)
 
 
+def test_a_scaled_picture_lends_no_colour_from_its_transparent_pixels():
+    pygame = pytest.importorskip("pygame")
+    source = pygame.Surface((2, 1), flags=pygame.SRCALPHA)
+    source.set_at((0, 0), (220, 30, 40, 255))
+    source.set_at((1, 0), (0, 0, 0, 0))
+    manifest = _image_manifest(1, 2, 1)
+    destination = pygame.Surface((6, 3))
+    destination.fill((255, 255, 255))
+
+    composite_draw_plane(
+        pygame,
+        destination,
+        _image_plane((_image_draw(1, ImageFit.CONTAIN),), (manifest,)),
+        _PixelFont(pygame),
+        6,
+        3,
+        resource_surfaces={manifest.key: source},
+    )
+
+    # Scaled up smoothly, the red fades into the white behind it.  Averaged
+    # without premultiplying, the transparent pixel's black would darken the
+    # fade below both.
+    row = [tuple(destination.get_at((x, 1)))[:3] for x in range(6)]
+    assert row[0] == (220, 30, 40)
+    assert len(set(row)) == 6
+    for pixel in row:
+        assert all(
+            low <= channel <= 255
+            for low, channel in zip((220, 30, 40), pixel)
+        )
+
+
 def test_cover_samples_extreme_aspect_source_with_bounded_temporary_storage(monkeypatch):
     pygame = pytest.importorskip("pygame")
     destination = pygame.Surface((20, 10))
@@ -747,13 +778,19 @@ def test_cover_samples_extreme_aspect_source_with_bounded_temporary_storage(monk
         (manifest,),
     )
     original_surface = pygame.Surface
+    original_smoothscale = pygame.transform.smoothscale
     allocations = []
 
     def recording_surface(size, *args, **kwargs):
         allocations.append(tuple(size))
         return original_surface(size, *args, **kwargs)
 
+    def recording_smoothscale(picture, size, *args, **kwargs):
+        allocations.append(tuple(size))
+        return original_smoothscale(picture, size, *args, **kwargs)
+
     monkeypatch.setattr(pygame, "Surface", recording_surface)
+    monkeypatch.setattr(pygame.transform, "smoothscale", recording_smoothscale)
     composite_draw_plane(
         pygame,
         destination,
@@ -766,7 +803,10 @@ def test_cover_samples_extreme_aspect_source_with_bounded_temporary_storage(monk
 
     assert allocations and all(0 < w <= 20 and 0 < h <= 10 for w, h in allocations)
     assert tuple(destination.get_at((0, 0)))[:3] == (80, 120, 200)
-    assert tuple(destination.get_at((19, 9)))[:3] == (210, 90, 30)
+    # Scaled smoothly from the two centre pixels, the far corner is nearly
+    # the marker.
+    corner = tuple(destination.get_at((19, 9)))[:3]
+    assert all(abs(a - b) <= 16 for a, b in zip(corner, (210, 90, 30)))
 
 
 def test_image_opacity_uses_a_temporary_and_preserves_cache_surface_and_clip():

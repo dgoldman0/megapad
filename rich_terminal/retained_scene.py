@@ -49,6 +49,12 @@ from .semantic_content import (
 )
 from .semantic_items import ItemRole, ItemViewContent, ViewItem, card_row_count
 from .semantic_fields import FieldContent
+from .semantic_documents import (
+    DocumentBlock,
+    DocumentContent,
+    document_viewport_problem,
+    shown_link,
+)
 
 
 INT32_MIN = -(1 << 31)
@@ -149,6 +155,7 @@ class ControlKind(IntEnum):
     TASK = 11
     LAUNCHER = 12
     FIELD = 13
+    DOCUMENT = 14
 
 
 class ControlState(IntFlag):
@@ -169,6 +176,20 @@ CONTROL_STATE_MASK = (
     | ControlState.SELECTED
     | ControlState.CHECKED
     | ControlState.MINIMIZED
+)
+
+# Controls with bounds of their own and no parent.
+ROOT_CONTROL_KINDS = frozenset(
+    (
+        ControlKind.MENU_BAR,
+        ControlKind.TEXT_AREA,
+        ControlKind.TEXT_GRID,
+        ControlKind.TABSET,
+        ControlKind.ITEM_VIEW,
+        ControlKind.TASKBAR,
+        ControlKind.FIELD,
+        ControlKind.DOCUMENT,
+    )
 )
 
 
@@ -477,12 +498,39 @@ class PolylineBody:
 
 
 @dataclass(frozen=True, slots=True)
+class ImageClip:
+    """The part of an IMAGE object's rectangle the renderer paints, in cells
+    relative to the object's origin (RETAINED-1 Section 11.3, ``CLIP``)."""
+
+    x: int
+    y: int
+    cols: int
+    rows: int
+
+    def __post_init__(self) -> None:
+        for name, minimum in (("x", 0), ("y", 0), ("cols", 1), ("rows", 1)):
+            object.__setattr__(
+                self,
+                name,
+                _integer(name, getattr(self, name), minimum=minimum, maximum=UINT32_MAX),
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class ImageBody:
-    """One renderer-neutral reference to an exact-owner immutable RGBA resource."""
+    """One renderer-neutral reference to an exact-owner immutable RGBA resource.
+
+    ``backdrop`` asks the renderer to paint its own opaque background over the
+    object's whole rectangle first, so nothing beneath shows through.  With a
+    ``clip``, the picture keeps the object's whole rectangle and the renderer
+    paints it, and any backdrop, only inside the clip.
+    """
 
     resource_id: int
     fit: ImageFit
     opacity: int
+    backdrop: bool = False
+    clip: ImageClip | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -504,6 +552,20 @@ class ImageBody:
             "opacity",
             _integer("opacity", self.opacity, minimum=0, maximum=0xFF),
         )
+        object.__setattr__(self, "backdrop", _boolean("backdrop", self.backdrop))
+        if self.clip is not None and not isinstance(self.clip, ImageClip):
+            raise TypeError("clip must be ImageClip or None")
+
+
+def validate_image_shape(body: ImageBody, *, bounds: ObjectBounds) -> None:
+    """An IMAGE clip lies within the object's rectangle; shared between the
+    wire and the immutable model."""
+
+    clip = body.clip
+    if clip is not None and (
+        clip.x + clip.cols > bounds.cell_cols or clip.y + clip.rows > bounds.cell_rows
+    ):
+        raise ValueError("an IMAGE clip lies outside the object's rectangle")
 
 
 @dataclass(frozen=True, slots=True)
@@ -781,6 +843,8 @@ class ObjectDefinition:
             raise TypeError("body is not a supported retained object body")
         if isinstance(self.body, StatusFieldBody):
             validate_status_field_shape(self.body, bounds=self.bounds)
+        if isinstance(self.body, ImageBody):
+            validate_image_shape(self.body, bounds=self.bounds)
         if isinstance(self.body, PaneBody):
             validate_pane_shape(
                 self.body, bounds=self.bounds, region_id=self.region_id,
@@ -802,7 +866,7 @@ def validate_control_shape(
     bounds: ObjectBounds | None,
     label: str,
     shortcut: str,
-    content: SemanticTextContent | ItemViewContent | FieldContent | None,
+    content: SemanticTextContent | ItemViewContent | FieldContent | DocumentContent | None,
 ) -> tuple[ControlKind, ControlState]:
     """Validate the common scene/wire shape of one semantic control.
 
@@ -833,9 +897,12 @@ def validate_control_shape(
     label_bytes = _control_text_bytes("label", label)
     shortcut_bytes = _control_text_bytes("shortcut", shortcut)
     if content is not None and not isinstance(
-        content, (SemanticTextContent, ItemViewContent, FieldContent)
+        content, (SemanticTextContent, ItemViewContent, FieldContent, DocumentContent)
     ):
-        raise TypeError("content must be SemanticTextContent, ItemViewContent, FieldContent, or None")
+        raise TypeError(
+            "content must be SemanticTextContent, ItemViewContent, FieldContent, "
+            "DocumentContent, or None"
+        )
 
     allowed = {
         ControlKind.MENU_BAR: ControlState.VISIBLE | ControlState.ENABLED,
@@ -872,6 +939,9 @@ def validate_control_shape(
         ),
         ControlKind.LAUNCHER: ControlState.VISIBLE | ControlState.ENABLED,
         ControlKind.FIELD: ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED,
+        ControlKind.DOCUMENT: (
+            ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
+        ),
     }[normalized_kind]
     if int(normalized_state) & ~int(allowed):
         raise ValueError(
@@ -886,16 +956,7 @@ def validate_control_shape(
             and normalized_state & ControlState.MINIMIZED):
         raise ValueError("a TASK cannot be selected and minimized")
 
-    root_kinds = {
-        ControlKind.MENU_BAR,
-        ControlKind.TEXT_AREA,
-        ControlKind.TEXT_GRID,
-        ControlKind.TABSET,
-        ControlKind.ITEM_VIEW,
-        ControlKind.TASKBAR,
-        ControlKind.FIELD,
-    }
-    if normalized_kind in root_kinds:
+    if normalized_kind in ROOT_CONTROL_KINDS:
         if parent_control_id or order or bounds is None:
             raise ValueError(
                 f"{normalized_kind.name} requires root order zero and positive bounds"
@@ -917,6 +978,14 @@ def validate_control_shape(
             if not isinstance(content, FieldContent):
                 raise ValueError("FIELD requires FDC1 content")
             content.validate_geometry(cols=bounds.cell_cols, rows=bounds.cell_rows, label=label)
+        elif normalized_kind is ControlKind.DOCUMENT:
+            if not isinstance(content, DocumentContent):
+                raise ValueError("DOCUMENT requires a document")
+            # SEMANTIC-CONTENT-1: the first block shows a row, and every
+            # later block starts above the root's bottom edge.
+            problem = document_viewport_problem(content, bounds.cell_cols, bounds.cell_rows)
+            if problem is not None:
+                raise ValueError(problem)
         elif normalized_kind is ControlKind.ITEM_VIEW:
             if not isinstance(content, ItemViewContent):
                 raise ValueError("ITEM_VIEW requires an item collection")
@@ -1008,7 +1077,7 @@ class ControlDefinition:
     bounds: ObjectBounds | None
     label: str
     shortcut: str
-    content: SemanticTextContent | ItemViewContent | FieldContent | None = None
+    content: SemanticTextContent | ItemViewContent | FieldContent | DocumentContent | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.owner, OwnerIdentity):
@@ -1375,6 +1444,11 @@ class RetainedSceneModel:
             raise SceneModelError(SceneErrorCode.BOUNDS, "control region is not visible")
         return owner_scene, definition
 
+    def active_control_kind(self, owner: OwnerIdentity, control_id: int) -> ControlKind:
+        """The kind of one exact live control in a visible region, or refuse."""
+
+        return self._active_control(owner, control_id)[1].kind
+
     def require_text_control(
         self,
         owner: OwnerIdentity,
@@ -1382,9 +1456,10 @@ class RetainedSceneModel:
         *,
         grid_allowed: bool,
         item_view_allowed: bool = False,
+        document_allowed: bool = False,
     ) -> ControlDefinition:
-        """Resolve one visible, enabled TEXT_AREA root, or also a TEXT_GRID
-        or ITEM_VIEW root when those are allowed."""
+        """Resolve one visible, enabled TEXT_AREA root, or also a TEXT_GRID,
+        ITEM_VIEW, or DOCUMENT root when those are allowed."""
 
         _owner_scene, definition = self._active_control(owner, control_id)
         kinds = (
@@ -1394,6 +1469,8 @@ class RetainedSceneModel:
         )
         if item_view_allowed:
             kinds += (ControlKind.ITEM_VIEW,)
+        if document_allowed:
+            kinds += (ControlKind.DOCUMENT,)
         if definition.kind not in kinds or definition.content is None:
             raise SceneModelError(
                 SceneErrorCode.STATE,
@@ -1458,6 +1535,56 @@ class RetainedSceneModel:
                 "grid position does not name a selectable content item",
             )
         return item
+
+    def require_document_link(
+        self,
+        owner: OwnerIdentity,
+        control_id: int,
+        *,
+        content_revision: int,
+        item_key: int,
+        scalar_offset: int,
+    ) -> DocumentBlock:
+        """Resolve one DOC1 position a FOLLOW may name: the start of a
+        character the root shows in a carried block, whose meaning is LINK,
+        in the control's current content revision.  Nothing here changes the
+        guest's view."""
+
+        _owner_scene, definition = self._active_control(owner, control_id)
+        if definition.kind is not ControlKind.DOCUMENT or not isinstance(
+            definition.content, DocumentContent
+        ):
+            raise SceneModelError(
+                SceneErrorCode.STATE,
+                "control kind does not accept a document position",
+            )
+        if not definition.visible or not definition.enabled:
+            raise SceneModelError(SceneErrorCode.STATE, "control is hidden or disabled")
+        content = definition.content
+        if content_revision != content.content_revision:
+            raise SceneModelError(
+                SceneErrorCode.STATE,
+                "position names a superseded content revision",
+            )
+        block = content.block(item_key)
+        if block is None:
+            raise SceneModelError(
+                SceneErrorCode.MISSING_ID,
+                "position names a block that is not carried",
+            )
+        assert definition.bounds is not None
+        if not shown_link(
+            content,
+            definition.bounds.cell_cols,
+            definition.bounds.cell_rows,
+            item_key,
+            scalar_offset,
+        ):
+            raise SceneModelError(
+                SceneErrorCode.STATE,
+                "a FOLLOW position does not lie on a link the root shows",
+            )
+        return block
 
     def require_item(
         self,
@@ -1800,6 +1927,7 @@ class RetainedSceneModel:
             ControlKind.TEXT_GRID,
             ControlKind.ITEM_VIEW,
             ControlKind.FIELD,
+            ControlKind.DOCUMENT,
         }:
             compatible = (
                 replace(
@@ -2444,7 +2572,7 @@ class RetainedSceneModel:
 
     @staticmethod
     def _control_object_slots(definition: ControlDefinition) -> int:
-        if isinstance(definition.content, FieldContent):
+        if isinstance(definition.content, (FieldContent, DocumentContent)):
             return definition.content.object_slots
         return 1 + (0 if definition.content is None else len(definition.content.items))
 
@@ -2668,6 +2796,11 @@ class RetainedSceneModel:
             and not features & RetainedFeature.CONTROL_ITEMS
         ):
             self._fail(SceneErrorCode.FEATURE, "CONTROL_ITEMS was not advertised")
+        if (
+            definition.kind is ControlKind.DOCUMENT
+            and not features & RetainedFeature.CONTROL_DOCUMENTS
+        ):
+            self._fail(SceneErrorCode.FEATURE, "CONTROL_DOCUMENTS was not advertised")
         if (definition.kind is ControlKind.TEXT_GRID
                 and isinstance(definition.content, SemanticTextContent)
                 and definition.content.requires_grid_cells
@@ -2703,15 +2836,7 @@ class RetainedSceneModel:
                 SceneErrorCode.GRAPH,
                 "control region must be defined before the dependent control",
             )
-        if definition.kind in {
-            ControlKind.MENU_BAR,
-            ControlKind.TEXT_AREA,
-            ControlKind.TEXT_GRID,
-            ControlKind.TABSET,
-            ControlKind.ITEM_VIEW,
-            ControlKind.TASKBAR,
-            ControlKind.FIELD,
-        }:
+        if definition.kind in ROOT_CONTROL_KINDS:
             return
         parent = owner_scene.controls.get(definition.parent_control_id)
         expected = {
@@ -2896,15 +3021,7 @@ class RetainedSceneModel:
                     self._fail(SceneErrorCode.GRAPH, "control refers to an absent region")
                 self._validate_control_policy(definition)
                 self._validate_control_dependencies(owner_scene, definition)
-                if definition.kind in {
-                    ControlKind.MENU_BAR,
-                    ControlKind.TEXT_AREA,
-                    ControlKind.TEXT_GRID,
-                    ControlKind.TABSET,
-                    ControlKind.ITEM_VIEW,
-                    ControlKind.TASKBAR,
-                    ControlKind.FIELD,
-                }:
+                if definition.kind in ROOT_CONTROL_KINDS:
                     continue
                 order_key = (definition.parent_control_id, definition.order)
                 if order_key in sibling_orders:
@@ -2991,6 +3108,7 @@ __all__ = [
     "HiddenTargetKind",
     "GlyphRunBody",
     "ImageBody",
+    "ImageClip",
     "ImageFit",
     "MeterBody",
     "ObjectBounds",
@@ -3004,6 +3122,7 @@ __all__ = [
     "PreparedOwnerRetirement",
     "PreparedSceneInstall",
     "RGBA",
+    "ROOT_CONTROL_KINDS",
     "ReadoutBody",
     "ReadoutFormat",
     "RebuildRequirement",
@@ -3023,6 +3142,7 @@ __all__ = [
     "TimestampMode",
     "UniformSamples",
     "validate_control_shape",
+    "validate_image_shape",
     "validate_pane_shape",
     "validate_status_field_shape",
     "WaveformBody",

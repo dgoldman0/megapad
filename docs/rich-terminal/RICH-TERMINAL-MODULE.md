@@ -68,7 +68,7 @@ The module owns:
   and lifecycle-bounded access to the accepted records;
 * the shared CELL/PRESENT transaction-ID, revision, sequence, byte, credit, and
   completion gate;
-* core OWNER_OPEN/OWNER_RESIZE/OWNER_DROP and immutable RGBA8 resource lifecycle
+* core OWNER_OPEN/OWNER_RESIZE/OWNER_DROP and immutable picture resource lifecycle
   publication, exact RET_RESULT reconciliation, and covering-CREDIT chunk
   settlement;
 * PRESENT construction for CELL_NONE/DELTA/REPLACE, fixed retained region
@@ -90,7 +90,8 @@ revision-bound `CONTROL_EVENT ACTIVATE`. With bit 9 `RET_CONTROL_COLLECTIONS`
 it also decodes the positioned `PLACE`, `EXTEND`, and `FOLLOW` kinds and
 `SCROLL`, and with bit 10 `RET_CONTROL_ITEMS` the item kinds `SELECT`,
 `OPEN`, `EXPAND`, `COLLAPSE`, and `CHECK`, whose tail has the position
-tail's shape with a zero offset, each at its one exact length. Their tails stay in the session event buffer, like
+tail's shape with a zero offset, each at its one exact length. `SCROLL` and
+`FOLLOW` on a bit-16 `DOCUMENT` decode as on a text area. Their tails stay in the session event buffer, like
 TEXT data, until the next `PT-SERVICE`; the typed readers above return zero on
 an event without that tail. This completes only the MegaPad guest
 transport boundary. Independent CONTROL high-water validation, shared
@@ -144,6 +145,9 @@ PT-RETAINED-AVAILABLE? ( session -- flag )
 PT-RETAINED-CAPS@      ( session -- a u )
 PT-RETAINED-FORMATS@   ( session -- a u )
 PT-OUTBOUND-MAX-PAYLOAD@ ( session -- bytes )
+PT-PIXELS-QUERY        ( query-id x y cols rows session -- status )
+PT-PIXELS-STATE@       ( session -- state )
+PT-PIXELS-ANSWER@      ( session -- a u )
 
 PT-COMPLETION-POLL  ( completion session -- status has-completion )
 
@@ -154,8 +158,9 @@ PT-OWNER-RESIZE     ( owner generation region-q resource-q object-q series-q
                       resource-byte-q utf8-byte-q sample-slot-q session
                       -- status )
 PT-OWNER-DROP       ( owner generation session -- status )
+PT-RESOURCE-FORMAT? ( format session -- flag )
 PT-RESOURCE-BEGIN   ( owner generation resource format width height flags
-                      byte-length sha3-a sha3-u session -- status )
+                      byte-length session -- status )
 PT-RESOURCE-CHUNK   ( owner generation resource offset data-a data-u session
                       -- status )
 PT-RESOURCE-COMMIT  ( owner generation resource session -- status )
@@ -195,9 +200,11 @@ PT-POLYLINE-REPLACE ( owner generation object region parent
                       session -- status )
 PT-IMAGE-DEFINE     ( owner generation object region parent
                       x y cols rows z visible resource fit opacity
+                      flags clip-x clip-y clip-cols clip-rows
                       session -- status )
 PT-IMAGE-REPLACE    ( owner generation object region parent
                       x y cols rows z visible resource fit opacity
+                      flags clip-x clip-y clip-cols clip-rows
                       session -- status )
 PT-GLYPH-RUN-DEFINE ( owner generation object region parent
                       x y cols rows z visible
@@ -478,9 +485,10 @@ than weakening that CELL rule. `PT-COMPLETION-POLL` returns one fixed 80-byte
 native descriptor containing completion kind, completed request type, status,
 detail, transaction ID, revision, owner tuple, item, and accepted bytes.
 OWNER_OPEN and OWNER_RESIZE always complete through RET_RESULT. A resize
-names the owner's complete new quota set, each field at least the current
-one; RET_NO_CAPACITY leaves the old reservation in force and is an ordinary
-answer, not a loss. OWNER_DROP and PRESENT complete
+names the owner's complete new quota set. Each field is at least the current
+one, except the resource count and bytes, which may drop to the resources in
+use so that an owner gives space back; RET_NO_CAPACITY leaves the old
+reservation in force and is an ordinary answer, not a loss. OWNER_DROP and PRESENT complete
 through TX_RESULT. RESOURCE_BEGIN, RESOURCE_COMMIT, RESOURCE_DROP, and
 RESOURCE_ABORT complete through RET_RESULT, as does a rejected RESOURCE_CHUNK.
 An accepted RESOURCE_CHUNK has no wire result: only cumulative CREDIT covering
@@ -505,25 +513,47 @@ negotiated. A crossed soft reset similarly holds result completion and its
 new-epoch acknowledgement in order; cumulative CREDIT and caller-requested
 close wait until that bounded settlement is complete.
 
-The resource API exposes only format `PT-RESOURCE-RGBA8`. BEGIN requires the
-exact 32-byte SHA3-256 span, positive negotiated dimensions, flags zero, and
-checked `width * height * 4 == byte-length`. CHUNK requires a nonempty,
-contiguous exact-offset span no larger than the advertised resource-chunk
-maximum or negotiated payload ceiling. Borrowed digest and chunk spans remain
-valid only for the call and must be disjoint from the session and TX scratch;
-invalid or blocked calls emit no bytes and make no local lifecycle progress.
+The resource API takes the picture formats `PT-RESOURCE-RGBA8`,
+`PT-RESOURCE-QOI`, `PT-RESOURCE-PNG` and `PT-RESOURCE-JPEG`, as the terminal
+advertises them; `PT-RESOURCE-FORMAT?` says whether it takes one. BEGIN
+requires an advertised format, positive negotiated dimensions, flags zero, a
+decoded size `width * height * 4` within the advertised resource bytes, and a
+byte length that is exactly that size for raw pixels and positive for a file.
+CHUNK requires a nonempty, contiguous exact-offset span no larger than the
+advertised resource-chunk maximum or negotiated payload ceiling. Borrowed chunk
+spans remain valid only for the call and must be disjoint from the session and
+TX scratch; invalid or blocked calls emit no bytes and make no local lifecycle
+progress.
 Only one exact upload tuple is tracked session-wide. Its declared length and
 covering-CREDIT-confirmed offset are protocol state inside the caller-sized
 session record, not a retained image allocation or fixed image-capacity policy.
+An open upload does not hold the transaction slot. `PT-TX-BEGIN` and
+`PT-PRESENT-BEGIN` may run between its frames and wait only for an unpolled
+result, which a chunk is until its covering CREDIT, while CHUNK, COMMIT, DROP,
+and ABORT are refused inside a transaction. Frames therefore keep reaching
+the screen during an upload, each waiting behind at most one chunk.
 
 `PT-RESOURCE-ABORT-CALLER-CANCEL`,
 `PT-RESOURCE-ABORT-RESET-REBUILD`, and
 `PT-RESOURCE-ABORT-LOCAL-SHUTDOWN` are the three wire reasons. If a soft reset
-crosses an open upload, PT first settles an in-flight chunk, then emits the
-exact old-epoch RESET_REBUILD abort from the tracked tuple and waits for its
-RET_RESULT and exposed completion to be polled. Only then may it publish the
+crosses an open upload, PT first aborts an open transaction or waits for the
+result of one already committed, and settles an in-flight chunk, then emits
+the exact old-epoch RESET_REBUILD abort from the tracked tuple and waits for
+its RET_RESULT and exposed completion to be polled. Only then may it publish the
 new-epoch RESET_ACK. The upper engine therefore does not acquire a second
 transport-cleanup state machine.
+
+`PT-PIXELS-QUERY` asks how many pixels a cell rectangle covers on the
+selected surface, under the same quiescence as an owner request: ACTIVE, no
+transaction, upload, or unpolled result. It is `PT-S-UNSUPPORTED` without
+RGBA_IMAGE and `PT-S-WOULD-BLOCK` while another question is unanswered. The
+session keeps the exact query, and an answer that does not echo it, arrives
+unasked, or pairs a zero with a nonzero dimension fails the session.
+`PT-PIXELS-STATE@` reports `PT-PIXELS-NONE`, `PT-PIXELS-PENDING`, or
+`PT-PIXELS-ANSWERED`; `PT-PIXELS-ANSWER@` returns the exact 40-byte PIXELS
+payload once answered. A soft reset, lost discovery, or close cancels an
+unanswered question. The query and answer live in the caller-sized session
+record, which grows by 72 bytes for them.
 
 `PT-PRESENT-BEGIN` derives transaction ID, base revision, geometry generation,
 and exact declared bytes, which include four bytes per cluster word of its CELL
@@ -710,6 +740,9 @@ target-dependent checks.
 
 Object booleans use `PT-OBJECT-HIDDEN` and `PT-OBJECT-VISIBLE`. Public typed
 constants also cover `PT-POLYLINE-CLOSED`, the three `PT-IMAGE-FIT-*` modes,
+the `PT-IMAGE-BACKDROP` and `PT-IMAGE-CLIP` image flags (with `PT-IMAGE-CLIP`
+the four clip values name a rectangle of positive extents within the object,
+and without it they are zero),
 the three `PT-READOUT-*` formats, horizontal/vertical and show-value meter
 options, the three `PT-STATUS-*` shapes, the two `PT-PLOT-*` flags, and
 `PT-WAVEFORM-DRAW-ZERO-LINE`; callers do not pass reserved wire fields.
@@ -917,10 +950,12 @@ and physical renderer carry that complete advertised family. Series, vector,
 and image remain separate optional families and are not implied by this pass.
 
 The guest CONTROL writer is now extended in place rather than split into a
-second encoder. It accepts retained mask `0x73f`, requires bit 8 whenever bit 9
-is present and bit 9 whenever bit 10 is, admits kinds 5 through 8 only for a
-negotiated bit-9 session, and admits kind 9, `ITEM_VIEW`, only for a bit-10
-session and with at least the 48-byte smallest ITM1 body.
+second encoder. It accepts retained mask `0x1FF3F`, requires bit 8 whenever
+bit 9 is present and bit 9 whenever bit 10 or bit 16 is, admits kinds 5
+through 8 only for a negotiated bit-9 session, admits kind 9, `ITEM_VIEW`,
+only for a bit-10 session and with at least the 56-byte smallest ITM1 body,
+and admits kind 14, `DOCUMENT`, only for a bit-16 session and with at least
+the 32-byte smallest DOC1 body.
 TEXT_AREA and TEXT_GRID require at least the fixed 72-byte STX1 header; the
 caller supplies the complete canonical STX1 body as one bounded span, while the
 terminal remains the authority for its item and graph validation. All three

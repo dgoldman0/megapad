@@ -23,8 +23,8 @@ RETAINED-1 has three deliberately different ownership layers:
    the revalidated live local-attachment set. That aggregate alone materializes
    on the wire as a nonzero `(owner_id, owner_generation)`, and every owner-bound
    frame repeats that tuple. The terminal never infers authority from current
-   focus, region, UIDL identity, local attachment token, object, resource
-   digest, or an unscoped item ID.
+   focus, region, UIDL identity, local attachment token, object, picture
+   content, or an unscoped item ID.
 
 The backend never collapses wire authority into implicit session ownership. The
 selected aggregate deliberately combines several local UCTX attachments under
@@ -81,7 +81,7 @@ UART readers or writers.
 | Hidden retained rebuild | Terminal on valid START commit | Matching CONTINUE commits only | Atomic REVEAL, replacement START, new resize, reset, close | Destroyed | Destroyed |
 | Immutable resource | Terminal after verified upload COMMIT | Never; references change transactionally | Unreferenced RESOURCE_DROP/owner drop/reset | Destroyed | Destroyed |
 | One resource upload | Terminal charges owner-wide usage and physical staging on accepted BEGIN | Ordered exact-tuple chunks, COMMIT, ABORT | Exact COMMIT/ABORT or exact-upload semantic rejection, reset, close | Aborted/destroyed | Destroyed |
-| Owner quota reservation | Terminal on OWNER_OPEN | Grown only by a granted OWNER_RESIZE; never shrunk in generation | Successful OWNER_DROP status 0/epoch end | Released | Released |
+| Owner quota reservation | Terminal on OWNER_OPEN | Changed only by a granted OWNER_RESIZE: resource count and bytes may drop to current usage, every other field only grows in generation | Successful OWNER_DROP status 0/epoch end | Released | Released |
 | Active scene quota usage | Terminal from successful DELTA/reveal within an accepted owner reservation | Exact active-target operations or atomic reveal | Exact active drop, replacement reveal, OWNER_DROP status 0, or epoch end | Released | Released |
 | Hidden scene quota usage | Terminal from successful START/CONTINUE within the same owner reservation | Exact hidden-target operations only | Reveal promotion, replacement START, reset/close, or OWNER_DROP status 0 | Released | Released |
 | Owner-wide resource usage | Terminal charges one count/declared bytes on accepted RESOURCE_BEGIN | Exact-upload completion/abort and exact RESOURCE_DROP | Exact-upload abort/rejection, exact RESOURCE_DROP, OWNER_DROP status 0, or epoch end | Released | Released |
@@ -192,8 +192,8 @@ The terminal performs checks in this order before owner-scoped mutation:
 7. quota/reference/content validation for the whole atomic operation.
 
 A tombstone is evidence only for rejecting stale generation and admitting a
-strictly newer generation. It is not a live authority record. A digest is not a
-resource authority. A globally unique application key is not a wire authority.
+strictly newer generation. It is not a live authority record. A globally
+unique application key is not a wire authority.
 An object reference is valid only when its target has the same exact owner
 generation unless the wire contract explicitly says otherwise; RETAINED-1
 defines no cross-owner references.
@@ -225,19 +225,22 @@ totals. Every sum is checked before mutation. This makes later admission depend
 on the owner reservation rather than unrelated owners becoming idle.
 
 The reservation ledger and usage ledgers are distinct. OWNER_OPEN increases the
-aggregate live-owner reservation sums, and a granted OWNER_RESIZE increases
-them by the growth it adds; those sums do not decrease when an item or resource
-is dropped and decrease only on successful OWNER_DROP status 0 or epoch
-retirement. Scene operations consume target-local usage, while resource
-operations consume owner-wide resource-store usage, within the owner's current
-reservation.
+aggregate live-owner reservation sums, and a granted OWNER_RESIZE changes them
+by the difference it makes. Those sums do not decrease when an item or
+resource is dropped. They decrease only when OWNER_RESIZE gives resource space
+back, on successful OWNER_DROP status 0, or at epoch retirement. Scene
+operations consume target-local usage, while resource operations consume
+owner-wide resource-store usage, within the owner's current reservation.
 
 When content outgrows its reservation, the backend may ask for more with
 OWNER_RESIZE before it publishes that content. The terminal answers RET_OK and
 installs the larger reservation, or RET_NO_CAPACITY and keeps the old one. On a
 refusal the part that did not fit stays on its CELL fallback, and both sides
 keep a small record of what was asked for and what is held, for host status,
-logs, and tests. Nothing about the refusal is drawn on screen. Upload/transaction staging also consumes bounded terminal physical
+logs, and tests. Nothing about the refusal is drawn on screen. When the backend
+drops resources it no longer shows, it may lower its resource count and bytes
+with OWNER_RESIZE, down to what it still uses, so that other owners of the same
+terminal can use that space. Upload/transaction staging also consumes bounded terminal physical
 storage, but that transient storage is not a quota reservation and cannot borrow
 wire authority from another owner's unused usage.
 
@@ -329,15 +332,21 @@ may exist only as bounded raw intent rather than normalized semantic input.
 
 A backend-neutral UIDL resource snapshot exposes a bounded pull source. It is
 not an APT provider API and application code cannot issue retained operations
-through it. The backend copies the immutable snapshot metadata and SHA3-256
-digest before RESOURCE_BEGIN. For each requested offset it obtains no more than
+through it. The backend copies the immutable snapshot metadata, the picture's
+format, size and byte length, before RESOURCE_BEGIN. For a format the terminal
+decodes the source yields the picture's file as it is; otherwise it yields raw
+pixels. For each requested offset it obtains no more than
 the negotiated chunk maximum into backend-owned staging, copies or synchronously
 emits exactly those bytes, and retains no returned source pointer. A source may
 not write directly into the PT transmit ring or call the backend.
 
 The backend allows one upload session-wide. It waits for successful BEGIN result,
-then for CREDIT covering each chunk, then for COMMIT result. It retains enough
-snapshot/digest/source state to abort exactly the active owner/generation/
+then for CREDIT covering each chunk, then for COMMIT result. Between those steps
+it may run complete transactions, so frames keep reaching the screen during an
+upload. It sends no resource frame while a transaction is open or its TX_RESULT
+is outstanding, and begins no transaction while a chunk awaits its covering
+CREDIT. It retains enough
+snapshot/source state to abort exactly the active owner/generation/
 resource. On source error it emits RESOURCE_ABORT if reserve and stream state
 permit. It does not publish an object reference until successful resource
 commit.
@@ -432,8 +441,8 @@ wire model and quotas remain quarantined and cannot accept or authorize work.
 Only coordinated hard reset/detach or a valid close boundary retires them.
 
 Close does not bypass authority cleanup. The backend stops new projection,
-quiesces every semantic source, finishes or aborts the one upload/transaction
-where the base protocol permits, services outstanding results, and then performs
+quiesces every semantic source, finishes or aborts any open transaction and
+then the one upload where the base protocol permits, services outstanding results, and then performs
 synchronized close. A timeout after binary ownership was acquired remains LOST
 until external reset.
 

@@ -1,7 +1,9 @@
-"""Backend-neutral AES block and GCM value operations.
+"""Backend-neutral AES block, GCM and CBC value operations.
 
-The hosted simulator needs the same byte-level AES/GCM results as MegaPad's
-architectural accelerator, without importing either backend.  This module is a
+The hosted simulator needs the same byte-level AES results as MegaPad's
+architectural accelerator, without importing either backend: the forward
+cipher for GCM and CBC encryption, and the inverse cipher for CBC
+decryption.  This module is a
 small deterministic value model: it has no MMIO, ownership, guest memory,
 latency, or transaction state.  It is deliberately not a constant-time host
 cryptography API and must not be used to protect host secrets.
@@ -35,6 +37,10 @@ _SBOX = bytes.fromhex(
     "8ca1890dbfe6426841992d0fb054bb16"
 )
 _RCON = bytes((0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36))
+_INV_SBOX = bytes(_SBOX.index(value) for value in range(256))
+# ShiftRows takes byte _SHIFT[i] of the state to byte i; InvShiftRows undoes it.
+_SHIFT = (0, 5, 10, 15, 4, 9, 14, 3, 8, 13, 2, 7, 12, 1, 6, 11)
+_INV_SHIFT = tuple(_SHIFT.index(index) for index in range(AES_BLOCK_BYTES))
 
 
 def _exact_bytes(value: bytes, length: int, *, label: str) -> bytes:
@@ -51,6 +57,18 @@ def _gm2(value: int) -> int:
 
 def _gm3(value: int) -> int:
     return _gm2(value) ^ value
+
+
+def _gm(value: int, factor: int) -> int:
+    """VALUE times FACTOR in GF(2^8), as InvMixColumns multiplies."""
+
+    product = 0
+    while factor:
+        if factor & 1:
+            product ^= value
+        value = _gm2(value)
+        factor >>= 1
+    return product
 
 
 def _expand_key(key: bytes) -> tuple[bytes, ...]:
@@ -90,7 +108,8 @@ def _expand_key(key: bytes) -> tuple[bytes, ...]:
 
 
 class AESBlockCipher:
-    """One immutable AES-128 or AES-256 encryption key schedule."""
+    """One immutable AES-128 or AES-256 key schedule, for the forward
+    cipher and the inverse cipher."""
 
     __slots__ = ("_round_keys",)
 
@@ -166,6 +185,34 @@ class AESBlockCipher:
         return bytes(
             value ^ key_byte
             for value, key_byte in zip(shifted, self._round_keys[-1])
+        )
+
+
+    def decrypt(self, block: bytes) -> bytes:
+        """Decrypt one exact 16-byte block with the inverse cipher
+        (FIPS 197 section 5.3)."""
+
+        block = _exact_bytes(block, AES_BLOCK_BYTES, label="AES block")
+        state = [
+            value ^ key_byte
+            for value, key_byte in zip(block, self._round_keys[-1])
+        ]
+        for round_key in reversed(self._round_keys[1:-1]):
+            state = [_INV_SBOX[state[_INV_SHIFT[index]]] for index in range(16)]
+            state = [value ^ key_byte for value, key_byte in zip(state, round_key)]
+            for column in range(4):
+                offset = column * 4
+                first, second, third, fourth = state[offset : offset + 4]
+                state[offset : offset + 4] = (
+                    _gm(first, 14) ^ _gm(second, 11) ^ _gm(third, 13) ^ _gm(fourth, 9),
+                    _gm(first, 9) ^ _gm(second, 14) ^ _gm(third, 11) ^ _gm(fourth, 13),
+                    _gm(first, 13) ^ _gm(second, 9) ^ _gm(third, 14) ^ _gm(fourth, 11),
+                    _gm(first, 11) ^ _gm(second, 13) ^ _gm(third, 9) ^ _gm(fourth, 14),
+                )
+        state = [_INV_SBOX[state[_INV_SHIFT[index]]] for index in range(16)]
+        return bytes(
+            value ^ key_byte
+            for value, key_byte in zip(state, self._round_keys[0])
         )
 
 

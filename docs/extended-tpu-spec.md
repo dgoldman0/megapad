@@ -313,22 +313,24 @@ These are **MMIO-mapped coprocessors**, not tile engine extensions. They
 share the MMIO bus alongside the existing UART, timer, etc. The CPU feeds
 them data via MMIO register writes and reads results back.
 
-### 4.1 AES-256/128-GCM
+### 4.1 AES-256/128, GCM and CBC
 
 The normative executable/native software ABI provides AES-256 and AES-128
-encryption/decryption in GCM (Galois/Counter Mode). The key size is selected
-via `AES_KEY_MODE`. The register image below describes that ABI; the current
+encryption/decryption in GCM (Galois/Counter Mode) and CBC (cipher block
+chaining). The key size is selected via `AES_KEY_MODE` and the block mode via
+`AES_MODE`. The register image below describes that ABI; the current
 integrated RTL mismatch is recorded after the table.
 
 | Register | Offset | R/W | Description |
 |----------|--------|-----|-------------|
 | `AES_KEY[0..31]` | 0x700..0x71F | W | 32 key bytes; all 32 must be written in either mode |
-| `AES_IV[0..11]` | 0x720..0x72B | W | 12-byte IV/nonce |
+| `AES_IV[0..15]` | 0x720..0x72F | W | GCM's 12-byte IV/nonce in 0x720..0x72B, or CBC's 16-byte IV |
 | `AES_AAD_LEN` | 0x730..0x733 | W32 LE | Additional-authenticated-data length in bytes |
 | `AES_DATA_LEN` | 0x734..0x737 | W32 LE | Plaintext/ciphertext length in bytes |
 | `AES_CMD` | 0x738 | W8 | Start: low bit 0 = encrypt, 1 = decrypt |
 | `AES_STATUS` | 0x739 | R8 | 0 = idle, 1 = active, 2 = done, 3 = authentication or transaction failure |
 | `AES_KEY_MODE` | 0x73A | W8 | Low bit 0 = AES-256 (default), 1 = AES-128 |
+| `AES_MODE` | 0x73B | RW8 | Low bit 0 = GCM (default), 1 = CBC |
 | `AES_DIN[0..15]` | 0x740..0x74F | W | Ordered 16-byte input window |
 | `AES_DOUT[0..15]` | 0x750..0x75F | R | 16-byte output window |
 | `AES_TAG[0..15]` | 0x760..0x76F | R/W | 16-byte GCM authentication tag |
@@ -342,14 +344,28 @@ data blocks through `AES_DIN`. `AES_STATUS` reaches 2 only after final GCM tag
 generation or successful comparison; malformed transactions and tag mismatch
 reach 3.
 
+In CBC mode software writes all 32 key bytes, the 16 IV bytes, and
+`AES_DATA_LEN`, a whole number of 16-byte blocks; `AES_AAD_LEN` stays 0 and
+there is no tag. Each block written to `AES_DIN` gives its block in
+`AES_DOUT`, chained from the IV: encryption XORs the block with the previous
+ciphertext block (the IV for the first) before the forward cipher, and
+decryption runs the inverse cipher and then XORs. `AES_STATUS` reaches 2 after
+the last block. A GCM transaction takes exactly IV bytes 0..11 and a CBC one
+exactly 0..15; any other set of written IV bytes, a CBC length that is not
+whole blocks, or a CBC AAD length reaches 3. Completion and failure clear the
+key, the IV, and both modes, so a transaction that does not choose CBC is
+GCM. PDF's AESV2 and AESV3 encryption use CBC.
+
 > **Integrated RTL discrepancy.** The current SoC selects
 > `0x700..0x77F`, supplies no access-size signal to `mp64_aes`, and the leaf
 > recognizes mostly 32-bit register starts plus isolated command, status, and
 > key-mode byte offsets rather than the executable callback at every byte. It
 > also publishes a busy/done/auth-fail bitfield and lacks the executable
 > AAD/length-finalization, tag-comparison, and fail-closed transaction behavior.
+> It has no CBC mode or `AES_MODE` register, and its GCM encryption runs
+> inverse-cipher rounds on the counter block, which GCM never uses.
 > It therefore does not currently implement the table above for unchanged BIOS
-> software. This is an unresolved implementation mismatch, not an alternative
+> software; the rebuild is tracked as `ROADMAP-v1.0.md` item 50. This is an unresolved implementation mismatch, not an alternative
 > normative ABI.
 
 **Historical, unqualified RTL performance target**: 1 block (16 bytes) per

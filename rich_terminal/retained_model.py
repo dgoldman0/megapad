@@ -34,10 +34,32 @@ class RetainedFeature(IntFlag):
     TASKBARS = 1 << 13
     FIELDS = 1 << 14
     GRID_CELLS = 1 << 15
+    CONTROL_DOCUMENTS = 1 << 16
 
 
 class ResourceFormat(IntEnum):
+    """The formats a picture resource is uploaded in (RETAINED-1 section 8).
+
+    The terminal decodes a file into RGBA8 pixels, which are the resource it
+    holds whatever format the upload used.  Format ``n`` is advertised by bit
+    ``n - 1`` of ``image_formats``.
+    """
+
     RGBA8 = 1
+    QOI = 2
+    PNG = 3
+    JPEG = 4
+
+    @property
+    def bit(self) -> int:
+        return 1 << (int(self) - 1)
+
+
+# Every picture format RETAINED-1 defines, as an ``image_formats`` set.
+IMAGE_FORMATS = 0
+for _format in ResourceFormat:
+    IMAGE_FORMATS |= _format.bit
+del _format
 
 
 _ALL_FEATURES = (
@@ -55,6 +77,7 @@ _ALL_FEATURES = (
     | RetainedFeature.TASKBARS
     | RetainedFeature.FIELDS
     | RetainedFeature.GRID_CELLS
+    | RetainedFeature.CONTROL_DOCUMENTS
 )
 
 
@@ -131,7 +154,7 @@ class RetainedPolicy:
     max_resource_chunk_bytes: int
     max_retained_transaction_bytes: int
     total_resource_bytes: int
-    image_format: int
+    image_formats: int
     max_image_width: int
     max_image_height: int
     max_path_points: int
@@ -166,7 +189,7 @@ class RetainedPolicy:
             "max_series",
             "max_operations_per_transaction",
             "max_resource_chunk_bytes",
-            "image_format",
+            "image_formats",
             "max_image_width",
             "max_image_height",
             "max_path_points",
@@ -247,8 +270,13 @@ class RetainedPolicy:
             "max_image_height",
         ):
             self._require_positive_exact(name, image)
-        if self.image_format != (1 if image else 0):
-            raise ValueError("image_format is inconsistent with RGBA_IMAGE")
+        if image:
+            if not self.image_formats & ResourceFormat.RGBA8.bit:
+                raise ValueError("RGBA_IMAGE requires raw RGBA8 among image_formats")
+            if self.image_formats & ~IMAGE_FORMATS:
+                raise ValueError("image_formats names a format RETAINED-1 does not define")
+        elif self.image_formats:
+            raise ValueError("image_formats must be zero without RGBA_IMAGE")
 
         vector = bool(features & RetainedFeature.VECTOR)
         self._require_positive_exact("max_path_points", vector)
@@ -273,6 +301,10 @@ class RetainedPolicy:
         # 64-byte item events fit CONTROL_COLLECTIONS's minima.
         if features & RetainedFeature.CONTROL_ITEMS and not control_collections:
             raise ValueError("CONTROL_ITEMS requires CONTROL_COLLECTIONS")
+        # Documents likewise: the smallest DOC1 body is 32 bytes, and SCROLL
+        # and FOLLOW fit CONTROL_COLLECTIONS's minima.
+        if features & RetainedFeature.CONTROL_DOCUMENTS and not control_collections:
+            raise ValueError("CONTROL_DOCUMENTS requires CONTROL_COLLECTIONS")
         glyph_runs = self.max_glyph_run_bytes > 0
         if glyph_runs and self.max_objects == 0:
             raise ValueError("glyph-run capacity requires object capacity")
@@ -326,13 +358,14 @@ class RetainedPolicy:
                 raise ValueError("maximum VECTOR object exceeds inbound payload")
             operation_payloads.append(vector_payload)
         if image:
-            if inbound < 80:
-                raise ValueError("RGBA_IMAGE requires an 80-byte inbound payload")
+            # An IMAGE with CLIP: the 64-byte object prefix and a 32-byte body.
+            if inbound < 96:
+                raise ValueError("RGBA_IMAGE requires a 96-byte inbound payload")
             if _checked_add(
                 "maximum resource chunk payload", 32, self.max_resource_chunk_bytes
             ) > inbound:
                 raise ValueError("maximum resource chunk exceeds inbound payload")
-            operation_payloads.append(80)
+            operation_payloads.append(96)
         if glyph_runs:
             glyph_run_payload = _checked_add(
                 "maximum GLYPH_RUN payload", 80, self.max_glyph_run_bytes
@@ -497,6 +530,10 @@ class OwnerQuotas:
 _QUOTA_FIELDS = (
     "regions", "resources", "objects", "series",
     "resource_bytes", "utf8_bytes", "sample_slots",
+)
+# Quotas that bound each scene target; OWNER_RESIZE never shrinks them.
+_GROW_ONLY_QUOTA_FIELDS = (
+    "regions", "objects", "series", "utf8_bytes", "sample_slots",
 )
 
 
@@ -716,13 +753,21 @@ class OwnerLedger:
         return self._prepared(self._make_state(updated, reservations), disposition)
 
     def prepare_resize(
-        self, identity: OwnerIdentity, quotas: OwnerQuotas
+        self,
+        identity: OwnerIdentity,
+        quotas: OwnerQuotas,
+        *,
+        resources_in_use: tuple[int, int] | None = None,
     ) -> PreparedOwnerLedgerInstall:
-        """Grow a live owner's reservation to ``quotas``.
+        """Change a live owner's reservation to ``quotas``.
 
-        Every field must be at least the current one. The request fails with
-        NO_CAPACITY, leaving the owner as it was, when the larger reservation
-        would not fit the caller's policy.
+        Region, object, series, UTF-8 and sample-slot quotas bound each scene
+        target, which active and hidden usage must each fit, so they may only
+        grow. The resource count and bytes may also drop, down to
+        ``resources_in_use``: the owner's committed resource count and bytes,
+        which only the caller's resource store knows. Without it they may only
+        grow too. The request fails with NO_CAPACITY, leaving the owner as it
+        was, when the new reservation would not fit the caller's policy.
         """
 
         self._validate_scope(identity)
@@ -732,9 +777,37 @@ class OwnerLedger:
         record = self.require_live(identity)
         current = record.quotas
         assert current is not None
-        if any(getattr(quotas, name) < getattr(current, name) for name in _QUOTA_FIELDS):
+        if any(
+            getattr(quotas, name) < getattr(current, name)
+            for name in _GROW_ONLY_QUOTA_FIELDS
+        ):
             raise OwnerLedgerError(
-                OwnerLedgerErrorCode.INVALID, "an owner reservation can only grow"
+                OwnerLedgerErrorCode.INVALID,
+                "only an owner's resource count and bytes can shrink",
+            )
+        if resources_in_use is None:
+            floor = (current.resources, current.resource_bytes)
+        else:
+            if not isinstance(resources_in_use, tuple) or len(resources_in_use) != 2:
+                raise TypeError("resources_in_use must be a count and byte pair")
+            floor = (
+                _integer(
+                    "resources in use",
+                    resources_in_use[0],
+                    minimum=0,
+                    maximum=UINT32_MAX,
+                ),
+                _integer(
+                    "resource bytes in use",
+                    resources_in_use[1],
+                    minimum=0,
+                    maximum=UINT64_MAX,
+                ),
+            )
+        if quotas.resources < floor[0] or quotas.resource_bytes < floor[1]:
+            raise OwnerLedgerError(
+                OwnerLedgerErrorCode.INVALID,
+                "a resource reservation cannot drop below the resources in use",
             )
         if quotas == current:
             return self._prepared(self._state, OwnerResizeDisposition.UNCHANGED)
@@ -755,8 +828,16 @@ class OwnerLedger:
         assert isinstance(prepared.disposition, OwnerOpenDisposition)
         return prepared.disposition
 
-    def resize(self, identity: OwnerIdentity, quotas: OwnerQuotas) -> OwnerResizeDisposition:
-        prepared = self.prepare_resize(identity, quotas)
+    def resize(
+        self,
+        identity: OwnerIdentity,
+        quotas: OwnerQuotas,
+        *,
+        resources_in_use: tuple[int, int] | None = None,
+    ) -> OwnerResizeDisposition:
+        prepared = self.prepare_resize(
+            identity, quotas, resources_in_use=resources_in_use
+        )
         self.install_prepared(prepared)
         assert isinstance(prepared.disposition, OwnerResizeDisposition)
         return prepared.disposition
@@ -958,6 +1039,7 @@ class OwnerLedger:
 
 
 __all__ = [
+    "IMAGE_FORMATS",
     "ItemHighWater",
     "ItemNamespace",
     "OwnerDropDisposition",

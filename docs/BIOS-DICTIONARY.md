@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The `bios.asm` dictionary link chain contains **546** entries.  The numbered
+The `bios.asm` dictionary link chain contains **550** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -786,12 +786,12 @@ saved and restored. Status values used here are 0 OK, 1 UNSUPPORTED,
 | 250 | `ICACHE-HITS` | `( -- n )` | | Push I-cache hit counter |
 | 251 | `ICACHE-MISSES` | `( -- n )` | | Push I-cache miss counter |
 
-### AES-256/128-GCM Engine (11 words)
+### AES-256/128 Engine, GCM and CBC (13 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
 | 252 | `AES-KEY!` | `( addr -- )` | | Load 256-bit key (32 bytes at addr) into AES engine |
-| 253 | `AES-IV!` | `( addr -- )` | | Load 96-bit IV (12 bytes at addr) into AES engine |
+| 253 | `AES-IV!` | `( addr -- )` | | Load GCM's 96-bit IV (12 bytes at addr) into AES engine |
 | 254 | `AES-AAD-LEN!` | `( n -- )` | | Set additional authenticated data length (bytes) |
 | 255 | `AES-DATA-LEN!` | `( n -- )` | | Set plaintext/ciphertext data length (bytes) |
 | 256 | `AES-CMD!` | `( cmd -- )` | | Start operation: low bit 0 = encrypt, 1 = decrypt |
@@ -801,13 +801,19 @@ saved and restored. Status values used here are 0 OK, 1 UNSUPPORTED,
 | 260 | `AES-DOUT@` | `( addr -- )` | | Read output data block (16 bytes) from engine |
 | 261 | `AES-TAG@` | `( addr -- )` | | Read 128-bit authentication tag (16 bytes) from engine |
 | 262 | `AES-TAG!` | `( addr -- )` | | Write expected tag (16 bytes) for decryption verification |
+| 547 | `AES-MODE!` | `( n -- )` | | Select the block mode: low bit 0 = GCM (the default), 1 = CBC |
+| 548 | `AES-CBC-IV!` | `( addr -- )` | | Load CBC's 16-byte IV (16 bytes at addr) into AES engine |
 
-The executable BIOS/native ABI places key mode at AES offset `+0x3A` inside
-the `+0x700..+0x76F` byte aperture. The native configuration check requires
-all 32 key bytes in either mode, although AES-128 uses the first 16. Integrated
-RTL currently differs in aperture, access shape, byte protocol, status,
-authentication, and qualified timing/interrupt behavior; see
-`docs/bios-forth.md` for the discrepancy record.
+The executable BIOS/native ABI places key mode at AES offset `+0x3A` and
+block mode at `+0x3B` inside the `+0x700..+0x76F` byte aperture. The native
+configuration check requires all 32 key bytes in either key mode, although
+AES-128 uses the first 16. A CBC transaction takes CBC's 16 IV bytes and a
+data length of whole 16-byte blocks, with no AAD and no tag; each block fed
+to `AES-DIN!` gives its block to `AES-DOUT@`. Completion or failure returns
+the engine to GCM. Integrated RTL currently differs in aperture, access
+shape, byte protocol, status, authentication, block modes, and qualified
+timing/interrupt behavior; see `docs/bios-forth.md` for the discrepancy
+record.
 
 ### Checked SHA-3 / SHAKE / raw Keccak (9 words)
 
@@ -862,9 +868,12 @@ saved length, or overflowing 64-bit bit-length addition.
 Every failure aborts and wipes. `FINAL` does not modify a non-context
 destination unless all checks and digest extraction succeed.
 
-### SHA-512 Streaming (4 append-only words) — ISA-native (EXT.CRYPTO `FB`)
+### SHA-512 and SHA-384 Streaming (6 append-only words) — ISA-native (EXT.CRYPTO `FB`)
 
-These words retain their append-only dictionary positions.
+These words retain their append-only dictionary positions. SHA-384 is
+SHA-512 from its own initial value, truncated to 48 bytes, so it shares the
+calling core's SHA-512 context, and `SHA512-UPDATE` and `SHA512-CLEAR` serve
+its transactions.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -872,14 +881,18 @@ These words retain their append-only dictionary positions.
 | `SHA512-UPDATE` | `( addr len -- status )` | Preflight and absorb a physical-memory span using a dedicated 128-byte block |
 | `SHA512-FINAL` | `( dst -- status )` | On success publish 64 big-endian digest bytes; erase context and stage on every path |
 | `SHA512-CLEAR` | `( -- status )` | Idempotently abort, release the SHA transaction, zeroize saved/visible state, and return 0 |
+| `SHA384-INIT` | `( -- status )` | Initialize the calling core's private SHA-512 context for SHA-384 |
+| `SHA384-FINAL` | `( dst -- status )` | As `SHA512-FINAL` for a `SHA384-INIT` transaction, publishing 48 big-endian digest bytes |
 
 Statuses are `0` OK, `1` STATE, `2` RANGE, `3` CONTEXT-ALIAS, and
 `4` LENGTH-OVERFLOW. Every failure aborts and wipes; failed `FINAL` does not
 publish to a non-context destination. SHA-512 input and output checks reject
 both the SHA-256 and SHA-512 context arenas. Before an empty UPDATE can
-succeed or FINAL can inspect its destination, the active marker must be
-exactly one, the partial offset must be below 128, the low bit length must be
-byte-aligned, and its modulo-128 byte position must equal that offset.
+succeed or FINAL can inspect its destination, the active marker must be 1
+(SHA-512) or 2 (SHA-384), the partial offset must be below 128, the low bit
+length must be byte-aligned, and its modulo-128 byte position must equal that
+offset. UPDATE takes either marker; each FINAL takes only its own, and the
+other's transaction is a STATE failure.
 
 ### Shared SHA-2 span qualification (1 append-only word)
 
@@ -1147,10 +1160,10 @@ machine reset.
 | Stride / 2D Addressing | 6 |
 | FP16 / BF16 Modes | 2 |
 | Instruction Cache | 5 |
-| AES-256/128-GCM Engine | 11 |
+| AES-256/128 Engine, GCM and CBC | 13 |
 | Checked SHA-3 / SHAKE / raw Keccak | 9 |
 | SHA-256 Streaming | 4 |
-| SHA-512 Streaming | 4 |
+| SHA-512 and SHA-384 Streaming | 6 |
 | TRNG | 3 |
 | Checked Entropy Boundaries | 2 |
 | Caller Span Boundary | 1 |
@@ -1162,7 +1175,7 @@ machine reset.
 | Dictionary Bounds and Fault Control | 5 |
 | Dictionary Acceleration Control | 4 |
 | Checked WOTS Chain | 1 |
-| **Catalogued subtotal** | **396** |
+| **Catalogued subtotal** | **400** |
 
 ### All Immediate Words (34)
 
@@ -1171,10 +1184,11 @@ machine reset.
 ### Newest Dictionary Chain Segment (last → earlier)
 
 The complete authoritative link chain is the `.dq` chain in `bios.asm`.
-The checked WOTS word closes the newest appended segment:
+The SHA-384 words close the newest appended segment:
 
 ```
-WOTS-CHAIN → LATEST! → DICT-ROLLBACK → DICT-INDEX-NOTIFY! → DICT-INDEX@
+SHA384-FINAL → SHA384-INIT → AES-CBC-IV! → AES-MODE!
+→ WOTS-CHAIN → LATEST! → DICT-ROLLBACK → DICT-INDEX-NOTIFY! → DICT-INDEX@
 → DICT-INDEX!
 → IDLE-MS → IDLE-UNTIL → FAULT-XT! → DICT-FAULT-XT! → DICT-LIMIT@ → DICT-BASE@ → DICT-BOUNDS-OFF → DICT-BOUNDS!
 → TACC-CLAIM? → TACC-STATUS@ → TACC-RELEASE → TACC-STORE → TACC-LOAD

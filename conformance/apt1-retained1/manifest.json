@@ -82,7 +82,7 @@
     "total_resource_bytes": 1048576,
     "bounds_format": 2,
     "color_format": 1,
-    "image_format": 1,
+    "image_formats": 3,
     "max_image_width": 256,
     "max_image_height": 256,
     "max_path_points": 256,
@@ -242,8 +242,8 @@
       "frame_count": 10,
       "invariant": "one crossed wrong-generation CHUNK preserves the real upload, then exact old-epoch RESOURCE_ABORT completes before ACK",
       "expected_credit_watermarks": [
-        92120,
-        92196
+        92088,
+        92164
       ],
       "expected_global_revision": 0
     },
@@ -259,12 +259,12 @@
         102994,
         103042,
         103146,
-        103266,
-        103342,
-        103418,
-        103482,
-        103746,
-        104026
+        103234,
+        103310,
+        103386,
+        103450,
+        103714,
+        103994
       ],
       "expected_global_revision": 3
     },
@@ -334,10 +334,10 @@
       "invariant": "wrong-resource COMMIT noninterference, in-use drop, bad and good abort, reference removal, and successful resource drop retain exact lifecycle boundaries",
       "expected_credit_watermarks": [
         125064,
-        125184,
-        125248,
-        125472,
-        125536
+        125152,
+        125216,
+        125440,
+        125504
       ],
       "expected_global_revision": 3
     },
@@ -350,27 +350,32 @@
       "frame_count": 6,
       "invariant": "a whole overrun chunk returns RET_INVALID, destroys upload state, and releases its reservation",
       "expected_credit_watermarks": [
-        110120,
-        110197
+        110088,
+        110165
       ],
       "expected_global_revision": 3,
       "expected_status": "RET_INVALID"
     },
     {
-      "name": "resource_digest_failure",
-      "file": "resource_digest_failure.hex",
-      "meta_file": "resource_digest_failure.meta.json",
-      "state_file": "resource_digest_failure.state.json",
-      "kind": "resource_upload_rejection",
-      "frame_count": 8,
-      "invariant": "digest mismatch returns RET_BAD_CONTENT with zero accepted bytes and no resource publication",
+      "name": "resource_file_decoding",
+      "file": "resource_file_decoding.hex",
+      "meta_file": "resource_file_decoding.meta.json",
+      "state_file": "resource_file_decoding.state.json",
+      "kind": "resource_file_decoding",
+      "frame_count": 24,
+      "invariant": "a QOI file that does not decode, or decodes to another size, returns RET_BAD_CONTENT; declared at its own size it publishes and charges its decoded size, which fits an owner quota its file length would exceed",
       "expected_credit_watermarks": [
-        120120,
-        120196,
-        120260
+        120088,
+        120173,
+        120237,
+        120325,
+        120429,
+        120493,
+        120581,
+        120685,
+        120749
       ],
-      "expected_global_revision": 3,
-      "expected_status": "RET_BAD_CONTENT"
+      "expected_global_revision": 3
     }
   ]
 }

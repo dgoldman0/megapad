@@ -81,6 +81,8 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
         and args.rich_terminal_policy is None
     ):
         raise ValueError("--retained-terminal-policy requires --rich-terminal-policy")
+    if args.terminal_link_pace is not None and args.rich_terminal_policy is None:
+        raise ValueError("--terminal-link-pace requires --rich-terminal-policy")
     storage_path = args.storage.resolve()
     if not storage_path.is_file():
         raise ValueError(f"storage image does not exist: {storage_path}")
@@ -92,6 +94,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
     if args.rich_terminal_policy is not None:
         rich_terminal = args.rich_terminal_policy.configuration(
             args.cols, args.rows, retained_policy=args.retained_terminal_policy,
+            link_pace=args.terminal_link_pace,
         )
     memory = create_one_core_address_space(
         bank0_size=args.ram_kib << 10,

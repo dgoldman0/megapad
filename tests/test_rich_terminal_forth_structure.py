@@ -58,16 +58,17 @@ def test_header_ready_and_caps_reserved_fields_are_zero() -> None:
 
 def test_frame_crc_prefers_checked_hardware_crc32c_without_stealing_owner() -> None:
     source = SOURCE.read_text(encoding="utf-8")
-    feed = _definition(source, "_PT-CRC-FEED?")
     hardware = _definition(source, "_PT-FRAME-CRC-HARDWARE?")
     frame_crc = _definition(source, "_PT-FRAME-CRC")
 
-    assert "OVER @ CRC-FEED ?DUP IF" in feed
-    assert "OVER C@ CRC-FEED-BYTE ?DUP IF" in feed
+    # KDOS's checked buffer feed returns another owner's status rather than
+    # taking its transaction; the module keeps no copy of it.
+    assert ": _CRC-BUF-CHECKED" not in source
+    assert "CRC-FEED " not in source and "CRC-FEED-BYTE" not in source
     assert "5 CRC-MODE! ?DUP IF 0 SWAP EXIT THEN" in hardware
     assert "0xFFFFFFFF CRC-INIT! ?DUP IF" in hardware
-    assert "_PT-CRC-A @ 36 _PT-CRC-FEED?" in hardware
-    assert "_PT-CRC-A @ _PT-HDR + _PT-CRC-U @ _PT-CRC-FEED?" in hardware
+    assert "_PT-CRC-A @ 36 _CRC-BUF-CHECKED" in hardware
+    assert "_PT-CRC-A @ _PT-HDR + _PT-CRC-U @ _CRC-BUF-CHECKED" in hardware
     assert hardware.count("CRC-FINAL@ DROP 0 R> EXIT") == 3
     assert "CRC-FINAL@ 0" in hardware
 
@@ -113,6 +114,7 @@ def test_transaction_frames_batch_until_an_atomic_protocol_boundary() -> None:
         "_PT-SEND-RET-QUERY",
         "_PT-SEND-FATAL-ERROR",
         "_PT-OWNER-QUOTA-REQUEST",
+        "PT-PIXELS-QUERY",
         "PT-OWNER-DROP",
         "PT-PRESENT-COMMIT",
         "_PT-COMMIT",
@@ -155,7 +157,7 @@ def test_control_discovery_uses_shared_object_and_utf8_capacity() -> None:
     assert "0x100    CONSTANT _PT-RET-CONTROLS" in source
     assert "0x200    CONSTANT _PT-RET-CONTROL-COLLECTIONS" in source
     assert "0x400    CONSTANT _PT-RET-CONTROL-ITEMS" in source
-    assert "0xFF3F   CONSTANT _PT-RET-FEATURE-MASK" in source
+    assert "0x1FF3F  CONSTANT _PT-RET-FEATURE-MASK" in source
     assert "0x8000   CONSTANT _PT-RET-GRID-CELLS" in source
     assert (
         "_PT-RV-FEATURES @ _PT-RET-GRID-CELLS AND\n"
@@ -258,7 +260,7 @@ def test_close_intent_is_one_bounded_writer_barrier() -> None:
     close = _definition(source, "PT-CLOSE")
     service = _definition(source, "PT-SERVICE")
 
-    assert "992 CONSTANT /PT-SESSION" in source
+    assert "1064 CONSTANT /PT-SESSION" in source
     assert ": _PT.S.CLOSE-PENDING?  ( s -- a ) 872 + ;" in source
     for field in (
         "_PT.S.AWAIT?",
@@ -874,7 +876,7 @@ def test_resource_lifecycle_exposes_one_generic_typed_abi() -> None:
     ):
         assert declaration in source
 
-    assert "992 CONSTANT /PT-SESSION" in source
+    assert "1064 CONSTANT /PT-SESSION" in source
     for accessor in (
         ": _PT.S.LIFE-ITEM       ( s -- a ) 880 + ;",
         ": _PT.S.LIFE-WATERMARK  ( s -- a ) 888 + ;",
@@ -890,7 +892,7 @@ def test_resource_lifecycle_exposes_one_generic_typed_abi() -> None:
 
     assert (
         "\\ Stack: owner generation resource format width height flags byte-length\n"
-        "\\        sha3-a sha3-u session -- status\n"
+        "\\        session -- status\n"
         ": PT-RESOURCE-BEGIN"
     ) in source
     assert (
@@ -920,13 +922,14 @@ def test_resource_begin_and_chunk_are_bounded_exact_wire_writers() -> None:
     begin_body = _definition(source, "_PT-RESOURCE-BEGIN-BODY")
     begin = _definition(source, "PT-RESOURCE-BEGIN")
     begin_scrub = _definition(source, "_PT-RESOURCE-BEGIN-SCRUB")
+    format_taken = _definition(source, "PT-RESOURCE-FORMAT?")
     chunk_fields = _definition(source, "_PT-RESOURCE-CHUNK-FIELDS?")
     chunk_body = _definition(source, "_PT-RESOURCE-CHUNK-BODY")
     chunk = _definition(source, "PT-RESOURCE-CHUNK")
     chunk_scrub = _definition(source, "_PT-RESOURCE-CHUNK-SCRUB")
 
-    # Borrowed digest and chunk bytes must be valid and disjoint from both
-    # storage regions that PT can overwrite while constructing the frame.
+    # Borrowed chunk bytes must be valid and disjoint from both storage
+    # regions that PT can overwrite while constructing the frame.
     assert "_PT-RANGE-VALID?" in source_safe
     assert source_safe.count("_PT-RANGES-OVERLAP?") == 2
     assert "/PT-SESSION" in source_safe
@@ -934,10 +937,14 @@ def test_resource_begin_and_chunk_are_bounded_exact_wire_writers() -> None:
     assert "_PT.S.TX-U @" in source_safe
     assert "_PT-F-TOTAL @ 0 FILL" in frame_begin
 
-    # RESOURCE_BEGIN has exact RGBA8 dimensions/length/hash semantics and
-    # consumes ordinary cumulative credit only after every bound is proven.
+    # RESOURCE_BEGIN declares a picture in a format the terminal advertises,
+    # bounds its decoded size, sends raw pixels at exactly that size or a
+    # file at its own positive length, and consumes ordinary cumulative
+    # credit only after every bound is proven.  It borrows no bytes.
+    assert "OVER 1- 4 U< 0= IF 2DROP FALSE EXIT THEN" in format_taken
+    assert "_PT.S.RET-FORMATS 8 + L@ SWAP 1- RSHIFT 1 AND 0<>" in format_taken
     for invariant in (
-        "_PT-RBG-FORMAT @ PT-RESOURCE-RGBA8 <>",
+        "_PT-RBG-FORMAT @ _PT-RBG-S @ PT-RESOURCE-FORMAT? 0=",
         "_PT-RBG-FLAGS @ 0<>",
         "_PT-RBG-WIDTH @ DUP 0= SWAP _PT-U32? 0= OR",
         "_PT-RBG-HEIGHT @ DUP 0= SWAP _PT-U32? 0= OR",
@@ -945,18 +952,19 @@ def test_resource_begin_and_chunk_are_bounded_exact_wire_writers() -> None:
         "_PT.S.RET-FORMATS 16 + L@ U>",
         "_PT-RBG-WIDTH @ _PT-RBG-HEIGHT @ _PT-UMUL?",
         "4 _PT-UMUL?",
-        "_PT-RBG-LENGTH @ <>",
         "_PT.S.RET-CAPS 56 + _PT-U64@ U>",
-        "_PT-RBG-DIGEST-U @ 32 <>",
-        "_PT-RESOURCE-SOURCE?",
+        "_PT-RBG-FORMAT @ PT-RESOURCE-RGBA8 = IF",
+        "_PT-RBG-LENGTH @ = EXIT",
+        "DROP _PT-RBG-LENGTH @ 0<>",
     ):
         assert invariant in begin_fields
+    assert "_PT-RESOURCE-SOURCE?" not in begin_fields
     assert "_PT.S.RET-CAPS 8 + _PT-U64@ 0x04 AND 0=" in begin_body
     assert "_PT-RETAINED-LIFECYCLE-STATE?" in begin_body
     assert "_PT-RESULT-BUSY?" in begin_body
     assert "_PT.S.UPLOAD? @ IF PT-S-WOULD-BLOCK EXIT THEN" in begin_body
-    assert "120 _PT-RBG-S @ _PT-RESOURCE-ORDINARY-ADMIT" in begin_body
-    assert "_PT-M-RESOURCE-BEGIN 80" in begin_body
+    assert "88 _PT-RBG-S @ _PT-RESOURCE-ORDINARY-ADMIT" in begin_body
+    assert "_PT-M-RESOURCE-BEGIN 48" in begin_body
     for store in (
         "_PT-RBG-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!",
         "_PT-RBG-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!",
@@ -966,16 +974,16 @@ def test_resource_begin_and_chunk_are_bounded_exact_wire_writers() -> None:
         "_PT-RBG-HEIGHT @ _PT-FRAME-PAYLOAD 32 + L!",
         "_PT-RBG-FLAGS @ _PT-FRAME-PAYLOAD 36 + L!",
         "_PT-RBG-LENGTH @ _PT-FRAME-PAYLOAD 40 + _PT-U64!",
-        "_PT-RBG-DIGEST-A @ 32 _PT-FRAME-PAYLOAD 48 + SWAP MOVE",
     ):
         assert store in begin_body
+    assert "MOVE" not in begin_body
     sent = begin_body.index("TRUE _PT-RBG-S @ _PT-FRAME-SEND")
     assert sent < begin_body.index("TRUE _PT-RBG-S @ _PT.S.UPLOAD? !")
     assert sent < begin_body.index("_PT-RESOURCE-LIFE!")
     assert "CATCH" in begin
     assert "_PT-RESOURCE-BEGIN-SCRUB" in begin
-    for pointer in ("_PT-RBG-DIGEST-A", "_PT-RBG-DIGEST-U", "_PT-RSA"):
-        assert f"0 {pointer} !" in begin_scrub
+    for argument in ("_PT-RBG-S", "_PT-RBG-OWNER", "_PT-RBG-LENGTH"):
+        assert f"0 {argument} !" in begin_scrub
 
     # RESOURCE_CHUNK is sequential and non-empty.  Its covering watermark is
     # initial credit plus the post-send cumulative byte count, not a per-frame
@@ -1448,7 +1456,10 @@ def test_remaining_object_family_exposes_only_typed_semantic_apis() -> None:
             f"{common} stroke-width red green blue alpha path-flags "
             "points-a points-u session -- status"
         ),
-        "IMAGE": f"{common} resource fit opacity session -- status",
+        "IMAGE": (
+            f"{common} resource fit opacity flags clip-x clip-y clip-cols "
+            "clip-rows session -- status"
+        ),
         "READOUT": (
             f"{common} fg-red fg-green fg-blue fg-alpha bg-red bg-green "
             "bg-blue bg-alpha format decimal-places initial-value scale "
@@ -1648,12 +1659,13 @@ def test_image_and_readout_have_typed_bodies_and_checked_sources() -> None:
 
     assert "3 _PT-OBJECT-COMMON!" in image
     assert "_PT-RET-RGBA-IMAGE? 0=" in image
-    assert "_PT.S.RET-FORMATS 8 + L@ PT-RESOURCE-RGBA8 <>" in image
+    assert "PT-RESOURCE-FORMAT?" not in image
     assert "_PT-IM-RESOURCE @ 0=" in image
     assert "PT-IMAGE-FIT-STRETCH U<" in image
     assert "PT-IMAGE-FIT-COVER U>" in image
     assert "_PT-IM-OPACITY @ _PT-U8? 0=" in image
-    assert "80 _PT-OBJECT-ADMIT" in image
+    # A clipped IMAGE carries its 16-byte clip after the 16-byte body.
+    assert "_PT-IM-FLAGS @ PT-IMAGE-CLIP AND IF 96 ELSE 80 THEN" in image
     for store in (
         "_PT-IM-RESOURCE @ _PT-FRAME-PAYLOAD 64 + _PT-U64!",
         "_PT-IM-FIT @ _PT-FRAME-PAYLOAD 72 + L!",
@@ -1955,6 +1967,33 @@ def test_object_mutations_use_exact_prefixes_and_shared_present_accounting() -> 
     assert queued < present_send.index("_PT.S.TX-RET-BYTES-DONE !")
 
 
+def test_transactions_begin_between_an_upload_s_frames() -> None:
+    """APT-1-RETAINED-1 section 8: an open upload does not hold the
+    transaction slot.  A begin waits only for an unpolled result, which a
+    chunk is until its covering CREDIT; resource frames stay outside
+    transactions."""
+
+    source = SOURCE.read_text(encoding="utf-8")
+    for word in ("_PT-BEGIN-TX", "PT-PRESENT-BEGIN"):
+        begin = _definition(source, word)
+        assert "_PT.S.UPLOAD?" not in begin, word
+        assert "_PT-RESULT-BUSY? IF PT-S-WOULD-BLOCK EXIT THEN" in begin, word
+        assert "_PT.S.TX-OPEN? @ IF PT-S-INVALID EXIT THEN" in begin, word
+    for word in ("_PT-RESOURCE-CHUNK-BODY", "_PT-RESOURCE-ITEM-WRITE",
+                 "PT-RESOURCE-ABORT"):
+        body = _definition(source, word)
+        assert "_PT.S.TX-OPEN? @ IF PT-S-INVALID EXIT THEN" in body, word
+        assert "_PT-RESULT-BUSY? IF PT-S-WOULD-BLOCK EXIT THEN" in body, word
+    # A reset aborts an open transaction before it is latched, and aborts
+    # the upload only once no transaction or result remains.
+    soft_reset = _definition(source, "_PT-DISPATCH-SOFT-RESET")
+    assert soft_reset.index("_PT-ABORT-OPEN-RAW") < soft_reset.index(
+        "TRUE OVER _PT.S.RESET-PENDING? !")
+    apply_reset = _definition(source, "_PT-APPLY-PENDING-RESET")
+    waits = apply_reset.index("_PT.S.TX-OPEN? @ OVER _PT.S.AWAIT? @ OR")
+    assert waits < apply_reset.index("_PT.S.UPLOAD? @ IF")
+
+
 def test_soft_reset_aborts_the_old_epoch_upload_before_reset_ack() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     apply_reset = _definition(source, "_PT-APPLY-PENDING-RESET")
@@ -2023,3 +2062,45 @@ def test_retained_resize_and_reset_barriers_preserve_the_wire_profile() -> None:
     assert "_PT.S.RESET-PENDING?" in service_credit
     assert "_PT.S.RESET-PENDING?" in settlement
     assert "_PT-PUBLISH-PENDING-CLOSE" in close
+
+
+def test_pixels_query_tracks_one_exact_question_in_the_session() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    query = _definition(source, "PT-PIXELS-QUERY")
+    dispatch = _definition(source, "_PT-DISPATCH-PIXELS")
+    router = _definition(source, "_PT-DISPATCH")
+    records_clear = _definition(source, "_PT-RET-RECORDS-CLEAR")
+    image = _definition(source, "_PT-IMAGE-WRITE")
+
+    for declaration in (
+        "0x8003 CONSTANT _PT-M-PIXELS-QUERY",
+        "0x8004 CONSTANT _PT-M-PIXELS",
+        "0x01 CONSTANT PT-IMAGE-BACKDROP",
+        ": _PT.S.PIXELS-STATE    ( s -- a ) 992 + ;",
+        ": _PT.S.PIXELS-QUERY    ( s -- a ) 1000 + ;",
+        ": _PT.S.PIXELS-ANSWER   ( s -- a ) 1024 + ;",
+    ):
+        assert declaration in source
+
+    # The question waits for the same quiescence as an owner request.
+    for guard in (
+        "_PT-RET-RGBA-IMAGE? 0= IF PT-S-UNSUPPORTED EXIT THEN",
+        "_PT-RETAINED-LIFECYCLE-STATE? 0= IF",
+        "_PT-RESULT-BUSY? IF PT-S-WOULD-BLOCK EXIT THEN",
+        "_PT.S.UPLOAD? @ IF PT-S-WOULD-BLOCK EXIT THEN",
+        "_PT.S.PIXELS-STATE @ PT-PIXELS-PENDING = IF",
+    ):
+        assert guard in query
+    assert "_PT-M-PIXELS-QUERY 24" in query
+    assert query.index("_PT.S.PIXELS-QUERY 24 MOVE") < query.index("_PT-FRAME-SEND")
+
+    # An answer must echo the one pending question exactly.
+    assert "_PT-RX-LEN @ 40 <> IF" in dispatch
+    assert "PT-PIXELS-PENDING <> IF" in dispatch
+    assert "_PT.S.PIXELS-ANSWER 40 MOVE" in dispatch
+    assert router.index("_PT-M-PIXELS = IF") < router.index("0x8000 AND IF")
+    assert "_PT-PIXELS-CLEAR" in records_clear
+
+    assert "_PT-IM-FLAGS @ PT-IMAGE-BACKDROP PT-IMAGE-CLIP OR INVERT AND IF" in image
+    assert "_PT-IMAGE-CLIP? 0= IF PT-S-INVALID EXIT THEN" in image
+    assert "_PT-IM-FLAGS @ _PT-FRAME-PAYLOAD 77 + C!" in image
