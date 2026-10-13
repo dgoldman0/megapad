@@ -3,9 +3,10 @@
 The extension and its Python owner are built from the same checkout and use
 one current internal interface. Rebuild the extension after changing this
 boundary with `python setup_simulator_accel.py build_ext --inplace --force`.
-The extension exports `SEMANTIC_API_VERSION = 2`; its Python owner checks this
+The extension exports `SEMANTIC_API_VERSION = 5`; its Python owner checks this
 version before admission. An explicit native request rejects older builds;
-automatic selection keeps the reference executor when the version mismatches.
+automatic selection keeps the reference executor and the Python dictionary
+when the version mismatches.
 
 `_megaforth_native.NativeProgram(regions, page_size, continuation_type,
 dense_regions=())` retains sparse ordinary regions as `(base, size, pages)`
@@ -235,3 +236,32 @@ diagnostics, and exact timer state before executing a fallback operation or
 publishing a host boundary. Native execution does not admit events, invent
 IDL wakes, read wall time, or reset a watchdog. Empty/unsupported native runs
 must fall through to the Python operation instead of being retried unchanged.
+
+## Native dictionary
+
+`_megaforth_native.NativeDictionary(start_address, active_limit, memory,
+regions, page_size, dense_regions, has_external, external_base,
+external_limit)` is the native backend's dictionary and side index. `memory`
+is the owning `SparseAddressSpace` or `None`; the region descriptors are the
+same ones `NativeProgram` receives and are validated by the shared
+`guest_memory.h`. `simulator/native_dictionary.py` is its only intended
+client and presents it through the Python `Dictionary` and
+`HostedDictionaryIndex` interfaces; the Python classes stay the reference.
+
+Records are kept in definition order and bound case-insensitively, newest
+first. `define(name, initial_body, immediate, kind, constant, directive,
+has_action, action_xt, action_ip, implementation)` publishes one header and
+returns `(index, header_address, xt, uid)`. The kind is one of the exported
+`KIND_*` values; Python implementation objects are kept for Python, and a
+created word's action is kept natively. `find`, `resolve`, `live` and `view`
+return a record's cached Python view, or its index when Python has not asked
+for it yet; the facade then builds the view from `record_info(index)` and
+stores it with `set_view`. `publish_rollback`, `rollback_to` and `set_latest`
+return the removed XTs so the facade can drop cached views.
+
+Guest bytes are written directly into the region pages, and a missing sparse
+page is created as a zeroed page-sized `bytearray`, as the Python write path
+does. A span outside one ordinary region goes through the `SparseAddressSpace`
+methods instead, so its checks and exceptions are unchanged. The side index
+keeps the BIOS slot layout, FNV-1a hash, probe order, publication order and
+flag transitions of `HostedDictionaryIndex`.
