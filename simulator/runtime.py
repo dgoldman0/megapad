@@ -3463,8 +3463,12 @@ class MegaForthRuntime:
                     erase_limit = candidate_limit
                     break
 
-        self.dictionary.rollback(checkpoint)
-        self.dictionary_index.rebuild()
+        if self.dictionary.rollback(checkpoint):
+            # Removing a word can uncover an older binding of its name, which
+            # only a rebuild restores.  With no word removed the bindings, and
+            # so the incrementally maintained index, are unchanged, and BIOS
+            # THEN likewise only clears the temporary bytes and restores HERE.
+            self.dictionary_index.rebuild()
         compiler.temporary_checkpoint = None
         if (
             erase_start is not None

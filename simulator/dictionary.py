@@ -473,8 +473,11 @@ class Dictionary:
             _seal=seal,
         )
 
-    def rollback(self, checkpoint: DictionaryCheckpoint) -> None:
-        """Remove definitions after a checkpoint and restore prior bindings."""
+    def rollback(self, checkpoint: DictionaryCheckpoint) -> int:
+        """Remove definitions after a checkpoint and restore prior bindings.
+
+        Returns how many definitions were removed.
+        """
 
         self._guard_mutation("roll back the dictionary")
         if not isinstance(checkpoint, DictionaryCheckpoint):
@@ -505,12 +508,14 @@ class Dictionary:
         elif seal.tail is not None:
             raise ValueError("invalid empty-dictionary checkpoint")
 
+        removed = len(self._definitions) - seal.depth
         self._publish_rollback(
             depth=seal.depth,
             here=seal.here,
             active_floor=seal.active_floor,
             active_limit=seal.active_limit,
         )
+        return removed
 
     def rollback_to(self, saved_here: int, saved_latest: int) -> None:
         """Restore one source-visible contiguous dictionary checkpoint.

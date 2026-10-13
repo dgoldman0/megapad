@@ -456,7 +456,9 @@ This state is runtime-global for the one admitted core and is not a concurrent
 evaluator contract. Ordinary interpret-mode `IF`/`ELSE`/`THEN` uses the native
 anonymous temporary-compilation lifetime: it persists across physical
 `EVALUATE` inputs, executes only at the outer `THEN`, clears its temporary
-bytes, restores `HERE`, and publishes no dictionary word. Bracketed
+bytes, restores `HERE`, and publishes no dictionary word. The side index is
+left as it is, and is rebuilt only when that rollback removes a word the
+body's own code defined. Bracketed
 conditional compilation is separate evaluator state: `[DEFINED]` and
 `[UNDEFINED]` test the newest dictionary binding, while false `[IF]` arms and
 the taken arm's `[ELSE]` skip raw, case-insensitive tokens with nested depth.

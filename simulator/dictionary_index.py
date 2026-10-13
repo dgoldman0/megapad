@@ -219,7 +219,8 @@ class HostedDictionaryIndex:
         )
 
     def _insert(self, word: Word, *, upsert: bool) -> bool:
-        slot, exact = self._probe(word.name)
+        name_hash = _uppercase_fnv1a32(word.name)
+        slot, exact = self._probe(word.name, name_hash)
         if slot is None:
             return False
         if exact:
@@ -227,7 +228,6 @@ class HostedDictionaryIndex:
                 self._memory.write64(slot, word.header_address)
             return True
 
-        name_hash = _uppercase_fnv1a32(word.name)
         metadata = name_hash | (len(word.name) << 32)
         # Match BIOS publication order: metadata first, entry pointer last.
         self._memory.write64(slot + 8, metadata)
@@ -241,9 +241,8 @@ class HostedDictionaryIndex:
         )
         return True
 
-    def _probe(self, name: bytes) -> tuple[int | None, bool]:
+    def _probe(self, name: bytes, name_hash: int) -> tuple[int | None, bool]:
         state = self._state
-        name_hash = _uppercase_fnv1a32(name)
         slot_index = name_hash & (state.slots - 1)
         for _ in range(state.slots):
             slot = state.base + slot_index * DICT_INDEX_SLOT_BYTES
