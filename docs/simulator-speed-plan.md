@@ -1,6 +1,7 @@
 # Simulator speed plan: boot compile, typing host work, guest work
 
-Status: agreed 2026-10-13 (see Decisions). Step 1a is in progress.
+Status: agreed 2026-10-13 (see Decisions). Step 1a is done (see Step 1a
+results); 1b is next.
 
 The hosted simulator with the native executor already runs guest Forth in
 C++, at about 80 million semantic steps per second. These measurements ask
@@ -192,3 +193,50 @@ Reviewed 2026-10-13:
    dictionary's host-side state moves into native code, as described in 1b.
 3. **Step 2.** Host snapshot and rich-terminal work plus native pair
    operations, as described above.
+
+## Step 1a results
+
+Step 1a is four changes. Each has its redundancy argument in its
+commit message, a boot fingerprint check and a pass of the simulator suite.
+
+| Change | Commit | Saving per paired run |
+| --- | --- | --- |
+| No index rebuild after an interpret `IF` that removed no word | `f38e1db7` | about 1.5 s |
+| `EVAL-STATUS` read only after tokens that may run guest code | `e0b1cbdd` | about 0.6–1.4 s |
+| The guard's return-stack snapshot through the native executor | `b90e5456` | about 0.8–2.3 s |
+| The loader's fixed cells without the checked path, and a shorter line scan | `3bcdf27e` | about 1.8–2.4 s |
+
+**Overall.** Four alternating boot compiles of main and of the end of 1a
+gave medians of 37.9 s for main and 27.3 s for 1a: about 10 s faster, or
+28%. Another project's tests were running on the host, so single runs
+varied by several seconds. The paired differences ranged from 6 to 13 s.
+
+**Desktop journey.** The physical Desktop journey passed on the end of 1a,
+with Akashic main: 55 acknowledged frames and 67 inputs, in 249 s
+including the image build, with a peak aggregate RSS of 529 MiB.
+
+**Equivalence with main.** After the boot compile, these are identical:
+
+- guest steps;
+- every definition, with its addresses and IR;
+- memory outside the dictionary index;
+- the index's set of entries;
+- the stack pointers.
+
+Only the index table's bytes differ: colliding names sit in other slots,
+because the table is no longer rebuilt newest-first after an interpret `IF`.
+
+**Found while measuring.** The boot compile is not deterministic across
+Python hash seeds. Two runs with random seeds differed in guest steps (16.2
+million against 10.2 million), in memory and in stack pointers. With a fixed
+seed, runs repeat exactly, and every comparison above pins it. The cause is
+not yet known. It is an existing defect, to be fixed on its own.
+
+**What remains.** About 27 s, still almost all Python:
+
+- the per-line protocol, meaning the nested guarded executions and the
+  prescan;
+- per-token parsing and lookup;
+- publication.
+
+Step 1b addresses these.
