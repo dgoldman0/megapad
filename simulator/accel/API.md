@@ -3,7 +3,7 @@
 The extension and its Python owner are built from the same checkout and use
 one current internal interface. Rebuild the extension after changing this
 boundary with `python setup_simulator_accel.py build_ext --inplace --force`.
-The extension exports `SEMANTIC_API_VERSION = 5`; its Python owner checks this
+The extension exports `SEMANTIC_API_VERSION = 6`; its Python owner checks this
 version before admission. An explicit native request rejects older builds;
 automatic selection keeps the reference executor and the Python dictionary
 when the version mismatches.
@@ -296,3 +296,23 @@ for the lines already committed. `compiler` crosses the boundary as
 `(name, location, compile_mode, temporary, operations, controls, pool)` and
 comes back with the name token's column after the location. `stats()` gives
 the lines evaluated natively and handed back.
+
+## Tile words
+
+`run` takes an optional `tile_state = (mode, source0, source1, destination)`
+with the TMODE register, TSRC0, TSRC1 and TDST. When it is given, the run
+admits `OP_TILE_MODE_SET` (`FP16-MODE` and `BF16-MODE`, with the mode in
+`a`), `OP_TILE_MODE_STORE` (`TMODE!`, keeping seven bits),
+`OP_TILE_SOURCE0_STORE`, `OP_TILE_SOURCE1_STORE`,
+`OP_TILE_DESTINATION_STORE` and `OP_TILE_BINARY` (`TADD`, `TSUB` or `TMUL`,
+as `TILE_ADD`, `TILE_SUBTRACT` or `TILE_MULTIPLY` in `a`), each costing the
+two ticks of an admitted primitive call. A binary operation declines before
+any effect unless the mode names a defined format and both 64-byte sources
+and the backed destination lie in ordinary memory outside the return
+stack; it reads both sources before writing, and computes with the same
+`tile_values` kernel the Python service uses. The result gains a last
+element, `(mode, source0, source1, destination, operations)` or `None`,
+which the owner publishes to the tile service and the Field ALU registers
+and to the tile-operation accountant before anything else observes them.
+The owner passes tile state only while the runtime keeps the tile service it
+started with, bound to this extension's own `tile_execute_values`.

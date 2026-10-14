@@ -53,7 +53,13 @@ enum Opcode : uint32_t {
     OP_SP_FETCH, OP_RP_FETCH,
     OP_SCALAR_FP, OP_FPCSR_FETCH, OP_FPCSR_STORE,
     OP_CALL_ROUTINE,
+    // Legacy tile engine words; their registers travel with each run.
+    OP_TILE_MODE_SET, OP_TILE_MODE_STORE, OP_TILE_SOURCE0_STORE,
+    OP_TILE_SOURCE1_STORE, OP_TILE_DESTINATION_STORE, OP_TILE_BINARY,
 };
+
+// TADD, TSUB and TMUL, in OP_TILE_BINARY's operand a.
+enum TileBinary : uint32_t { TILE_ADD, TILE_SUBTRACT, TILE_MULTIPLY };
 
 struct Instruction;
 using Plan = std::vector<Instruction>;
@@ -473,6 +479,14 @@ struct RunState {
     Cell cookie;
     Cell fpcsr;
     ContinuationChanges changed{returns.pointer};
+    // Tile registers: TMODE, TSRC0, TSRC1 and TDST, when this run admits the
+    // tile words, and the tile operations completed for the accountant.
+    bool tile = false;
+    Cell tile_mode = 0;
+    Cell tile_source0 = 0;
+    Cell tile_source1 = 0;
+    Cell tile_destination = 0;
+    Cell tile_operations = 0;
     Cell pointer_captures = 0;
     // The step allowance, and the cost of the operation being executed, for
     // callbacks that run inline within one operation.
@@ -633,7 +647,7 @@ public:
             if (operation.size() != 3)
                 throw py::value_error("operation must be (opcode, a, b)");
             const auto opcode = operation[0].cast<uint32_t>();
-            if (opcode > OP_CALL_ROUTINE)
+            if (opcode > OP_TILE_BINARY)
                 throw py::value_error("unknown native semantic opcode");
             plan.push_back(Instruction{opcode, OP_STOP, operation[1].cast<Cell>(),
                                       operation[2].cast<Cell>()});
@@ -781,7 +795,8 @@ public:
 
     py::tuple run(Cell xt, Cell ip, const std::array<Cell, 3>& data_state,
                   const py::tuple& return_state, const py::dict& continuations,
-                  Cell remaining_steps, Cell fpcsr, Cell machine_allowance) {
+                  Cell remaining_steps, Cell fpcsr, Cell machine_allowance,
+                  const py::object& tile_state) {
         if (return_state.size() != 4)
             throw py::value_error("return state must contain four cells");
         RunState state{xt, ip, 0,
@@ -794,10 +809,19 @@ public:
             state.cookie = return_state[3].cast<Cell>();
         } catch (const py::cast_error&) {
             return py::make_tuple(xt, ip, 0, state.data.pointer,
-                state.returns.pointer, return_state[3], py::list(), 0, fpcsr, py::none());
+                state.returns.pointer, return_state[3], py::list(), 0, fpcsr, py::none(),
+                tile_state);
         }
         state.machine_allowance = machine_allowance;
         state.step_limit = remaining_steps;
+        if (!tile_state.is_none()) {
+            const auto tile = tile_state.cast<std::array<Cell, 4>>();
+            state.tile = true;
+            state.tile_mode = tile[0];
+            state.tile_source0 = tile[1];
+            state.tile_source1 = tile[2];
+            state.tile_destination = tile[3];
+        }
         if (!state.data.valid() || !state.returns.valid() ||
             !(state.data.empty <= state.returns.floor ||
               state.returns.empty <= state.data.floor))
@@ -928,9 +952,46 @@ private:
             machine = py::make_tuple(state.machine_instructions, state.machine_calls,
                 state.machine_callbacks, state.machine_handoff, frames, callback);
         }
+        py::object tile = py::none();
+        if (state.tile)
+            tile = py::make_tuple(state.tile_mode, state.tile_source0, state.tile_source1,
+                                  state.tile_destination, state.tile_operations);
         return py::make_tuple(state.xt, state.ip, state.steps,
             state.data.pointer, state.returns.pointer, state.cookie, updates,
-            state.pointer_captures, state.fpcsr, machine);
+            state.pointer_captures, state.fpcsr, machine, tile);
+    }
+
+    // TADD, TSUB and TMUL as HostedTileService._binary performs them: the
+    // mode must name a defined format, both sources are read before the
+    // destination is written, and the value kernel is the one the Python
+    // service calls. Any span outside ordinary backed memory declines.
+    [[gnu::noinline]] static bool execute_tile_binary(const Instruction& operation,
+                                                      MemoryRun& memory, RunState& s,
+                                                      StackOperation& stack) {
+        namespace tile = megapad::tile_values;
+        if (!s.tile || (s.tile_mode & 0xF) > 7 || operation.a > TILE_MULTIPLY) return false;
+        if (!stack.inputs(0) || !stack.outputs(0)) return false;
+        ByteSpan left, right, destination;
+        if (!memory.resolve_bytes(s.tile_source0, 64, false, left) ||
+            !memory.resolve_bytes(s.tile_source1, 64, false, right) ||
+            !memory.resolve_bytes(s.tile_destination, 64, true, destination)) return false;
+        std::array<uint8_t, 64> first{}, second{};
+        left.read_into(first.data());
+        right.read_into(second.data());
+        const auto selected = operation.a == TILE_ADD ? tile::Operation::Add :
+            operation.a == TILE_SUBTRACT ? tile::Operation::Subtract :
+            tile::Operation::Multiply;
+        const auto mode = static_cast<unsigned>(s.tile_mode);
+        if (!tile::supported(selected, mode)) return false;
+        const auto outcome = tile::execute(selected, mode,
+            tile::ByteView{first.data(), first.size()},
+            tile::ByteView{second.data(), second.size()});
+        if (outcome.kind != tile::ResultKind::Bytes || outcome.size != 64) return false;
+        stack.commit();
+        destination.write_from(outcome.bytes.data());
+        ++s.tile_operations;
+        ++s.ip;
+        return true;
     }
 
     // Call a machine routine directly. Anything the fast path cannot admit
@@ -1448,6 +1509,24 @@ private:
             if (!stack.inputs(0)) return false;
             out[0] = s.fpcsr; produced = 1;
             break;
+        case OP_TILE_MODE_SET:
+            if (!s.tile || !stack.inputs(0) || !stack.outputs(0)) return false;
+            stack.commit();
+            s.tile_mode = operation.a & 0x7F;
+            ++s.ip;
+            return true;
+        case OP_TILE_MODE_STORE: case OP_TILE_SOURCE0_STORE: case OP_TILE_SOURCE1_STORE:
+        case OP_TILE_DESTINATION_STORE:
+            if (!s.tile || !stack.inputs(1) || !stack.outputs(0)) return false;
+            stack.commit();
+            if (opcode == OP_TILE_MODE_STORE) s.tile_mode = v[0] & 0x7F;
+            else if (opcode == OP_TILE_SOURCE0_STORE) s.tile_source0 = v[0];
+            else if (opcode == OP_TILE_SOURCE1_STORE) s.tile_source1 = v[0];
+            else s.tile_destination = v[0];
+            ++s.ip;
+            return true;
+        case OP_TILE_BINARY:
+            return execute_tile_binary(operation, memory, s, stack);
         case OP_FPCSR_STORE:
             if (!stack.inputs(1) || !stack.outputs(0)) return false;
             stack.commit();
@@ -1693,7 +1772,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
     megapad::tile_values::register_bindings(module);
     megapad::dictionary::register_bindings(module);
     megapad::walker::register_bindings(module);
-    module.attr("SEMANTIC_API_VERSION") = 5;
+    module.attr("SEMANTIC_API_VERSION") = 6;
     module.attr("MACHINE_STOPPED_CALL") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_CALL));
     module.attr("MACHINE_STOPPED_RESUME") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_RESUME));
     module.attr("MACHINE_CALLBACK") = py::int_(static_cast<uint32_t>(MACHINE_CALLBACK));
@@ -1710,7 +1789,8 @@ PYBIND11_MODULE(_megaforth_native, module) {
         .def("run", &NativeProgram::run, py::arg("xt"), py::arg("ip"),
              py::arg("data_state"), py::arg("return_state"),
              py::arg("continuations"), py::arg("remaining_steps"),
-             py::arg("fpcsr") = 0, py::arg("machine_allowance") = 0)
+             py::arg("fpcsr") = 0, py::arg("machine_allowance") = 0,
+             py::arg("tile_state") = py::none())
         .def("bind_routines", &NativeProgram::bind_routines, py::arg("entry"))
         .def("set_routine", &NativeProgram::set_routine, py::arg("index"), py::arg("image"),
              py::arg("inputs"), py::arg("outputs"), py::arg("rules"), py::arg("sites"))
@@ -1726,6 +1806,12 @@ PYBIND11_MODULE(_megaforth_native, module) {
     EXPORT_OPCODE(OP_PLUS_LOOP); EXPORT_OPCODE(OP_UNLOOP);
     EXPORT_OPCODE(OP_SCALAR_FP); EXPORT_OPCODE(OP_FPCSR_FETCH);
     EXPORT_OPCODE(OP_FPCSR_STORE); EXPORT_OPCODE(OP_CALL_ROUTINE);
+    EXPORT_OPCODE(OP_TILE_MODE_SET); EXPORT_OPCODE(OP_TILE_MODE_STORE);
+    EXPORT_OPCODE(OP_TILE_SOURCE0_STORE); EXPORT_OPCODE(OP_TILE_SOURCE1_STORE);
+    EXPORT_OPCODE(OP_TILE_DESTINATION_STORE); EXPORT_OPCODE(OP_TILE_BINARY);
+    module.attr("TILE_ADD") = py::int_(static_cast<uint32_t>(TILE_ADD));
+    module.attr("TILE_SUBTRACT") = py::int_(static_cast<uint32_t>(TILE_SUBTRACT));
+    module.attr("TILE_MULTIPLY") = py::int_(static_cast<uint32_t>(TILE_MULTIPLY));
     py::dict primitives;
 #define PRIMITIVE(word, name) EXPORT_OPCODE(name); primitives[py::bytes(word)] = py::int_(static_cast<uint32_t>(name))
     PRIMITIVE("DUP", OP_DUP); PRIMITIVE("DROP", OP_DROP); PRIMITIVE("SWAP", OP_SWAP);

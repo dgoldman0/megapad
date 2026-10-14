@@ -1,7 +1,8 @@
 # Simulator speed plan: boot compile, typing host work, guest work
 
 Status: agreed 2026-10-13 (see Decisions). Step 1a is done (see Step 1a
-results). Step 1b is designed and in progress.
+results). Step 1b's first three slices and step 1c are done; 1b's wider
+checked-line rule is next.
 
 The hosted simulator with the native executor already runs guest Forth in
 C++, at about 80 million semantic steps per second. These measurements ask
@@ -150,6 +151,14 @@ is a promise.
 - Decline before any tick or effect wherever Python would fault.
 
 This removes about 150,000 boot fallbacks, about 1 to 2 s.
+
+**1c result.** Done, together with `BF16-MODE` and `TMODE!`. The tile words
+run natively only while the runtime keeps the canonical tile service bound
+to this extension's own value kernel, so their results are the ones the
+Python service computes; any other binding leaves them in Python. Native
+executor entries during the `desktop-apt1` boot fall from 192,000 to
+39,000, the boot fingerprint is unchanged, and four alternating boot
+compiles gave medians of 4.7 s against 6.1 s before.
 
 ## Step 2: typing host work
 

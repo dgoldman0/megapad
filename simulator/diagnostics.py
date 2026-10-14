@@ -143,6 +143,16 @@ class HostedDiagnosticsService:
         if self._perf_enabled:
             self._perf_tileops = u64(self._perf_tileops + 1)
 
+    def account_tile_operations(self, count: int) -> None:
+        """Count an unobserved batch of completed tile operations.
+
+        The caller must flush the batch before observing or changing
+        diagnostic state, as for :meth:`account_work_many`.
+        """
+
+        if self._perf_enabled:
+            self._perf_tileops = u64(self._perf_tileops + count)
+
     def clone(self) -> HostedDiagnosticsService:
         """Return an independent copy suitable for one runtime instance."""
 

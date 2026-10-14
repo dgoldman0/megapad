@@ -22,7 +22,7 @@ from simulator.timer import HostedTimerService
 # Without a host quantum, native work still returns to the same dispatcher at
 # this interval. It bounds one native entry, not a guest-visible boundary.
 UNQUANTIZED_NATIVE_INTERVAL_STEPS = 8192
-SEMANTIC_API_VERSION = 5
+SEMANTIC_API_VERSION = 6
 
 
 def load_native_extension(*, required: bool):
@@ -106,6 +106,27 @@ class NativeExecutor:
             for word in runtime.dictionary.words
             if admit_core and isinstance(word.implementation, rt.PrimitiveDefinition)
             and word.name in scalar_operations
+        }
+        # The original BIOS tile words, while the runtime keeps the canonical
+        # tile service whose value math is this extension's own kernel. Their
+        # closures look the service up on each call, so each run checks it.
+        self.tile = runtime.tile
+        tile_operations = {
+            b"FP16-MODE": (extension.OP_TILE_MODE_SET, 4, 0),
+            b"BF16-MODE": (extension.OP_TILE_MODE_SET, 5, 0),
+            b"TMODE!": (extension.OP_TILE_MODE_STORE, 0, 0),
+            b"TSRC0!": (extension.OP_TILE_SOURCE0_STORE, 0, 0),
+            b"TSRC1!": (extension.OP_TILE_SOURCE1_STORE, 0, 0),
+            b"TDST!": (extension.OP_TILE_DESTINATION_STORE, 0, 0),
+            b"TADD": (extension.OP_TILE_BINARY, extension.TILE_ADD, 0),
+            b"TSUB": (extension.OP_TILE_BINARY, extension.TILE_SUBTRACT, 0),
+            b"TMUL": (extension.OP_TILE_BINARY, extension.TILE_MULTIPLY, 0),
+        }
+        self.tile_primitives = {
+            word.xt: (word, tile_operations[word.name])
+            for word in runtime.dictionary.words
+            if admit_core and isinstance(word.implementation, rt.PrimitiveDefinition)
+            and word.name in tile_operations
         }
         self.generation = runtime.dictionary.execution_generation
         self.plans = {}
@@ -243,6 +264,47 @@ class NativeExecutor:
         prefix = "skipped:" if skipped else "progress:" if steps else "empty:"
         self.exit_counts[prefix + reason] += 1
 
+    def _tile_state(self):
+        """The tile registers a native run may use, or None to leave tiles to Python.
+
+        The tile words run natively only through the service whose value
+        math is this extension's kernel, so results match the reference.
+        """
+
+        tile = self.tile
+        if (
+            not self.tile_primitives
+            or self.runtime.tile is not tile
+            or tile._native_values is not self.extension.tile_execute_values
+            or tile._native_value_executor() is None
+        ):
+            return None
+        registers = tile._registers._state(tile._core_id)
+        return (tile._mode, registers.operand_address, tile._source1,
+                registers.result_address)
+
+    def _settle_tile(self, state):
+        """Publish a native run's tile registers and completed operations."""
+
+        mode, source0, source1, destination, operations = state
+        tile = self.tile
+        tile._mode = mode
+        tile._source1 = source1
+        registers = tile._registers._state(tile._core_id)
+        registers.operand_address = source0
+        registers.result_address = destination
+        if operations:
+            account = tile._account_operation
+            diagnostics = self.runtime.diagnostics
+            if getattr(account, "__self__", None) is diagnostics and (
+                getattr(account, "__func__", None)
+                is HostedDiagnosticsService.account_tile_operation
+            ):
+                diagnostics.account_tile_operations(operations)
+            elif account is not None:
+                for _ in range(operations):
+                    account()
+
     def _admitted_context(self, context, meter):
         runtime = self.runtime
         callback = meter._on_tick
@@ -278,6 +340,9 @@ class NativeExecutor:
             scalar = self.scalar_primitives.get(target.xt)
             if scalar is not None and scalar[0] is target:
                 return scalar[1]
+            tile = self.tile_primitives.get(target.xt)
+            if tile is not None and tile[0] is target:
+                return tile[1]
         if isinstance(implementation, rt.ColonDefinition):
             if target.xt not in self.runtime._colon_accelerators:
                 pending.append(target)
@@ -393,6 +458,7 @@ class NativeExecutor:
                 return None
         data = context.data
         returns = context.returns
+        tile = self._tile_state()
         started = perf_counter_ns() if self.profile_enabled else 0
         result = self.program.run(
             current.xt, ip,
@@ -403,12 +469,15 @@ class NativeExecutor:
             allowance,
             self.scalar_float.fpcsr,
             machine_allowance,
+            tile,
         )
         (xt, resumed_ip, steps, data_pointer, return_pointer, cookie,
-         updates, pointer_captures, fpcsr, machine) = result
+         updates, pointer_captures, fpcsr, machine, tile_result) = result
         # Publish the completed prefix before clocks, profiling, fallback or
         # any host observer can see the native interval's boundary.
         self.scalar_float._fpcsr = fpcsr
+        if tile is not None:
+            self._settle_tile(tile_result)
         if self.profile_enabled:
             self.native_run_ns += perf_counter_ns() - started
             self._profile_exit(xt, resumed_ip, steps, allowance)
