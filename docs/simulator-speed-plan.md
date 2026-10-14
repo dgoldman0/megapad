@@ -2,8 +2,8 @@
 
 Status: agreed 2026-10-13 (see Decisions). Step 1 is done (see Step 1
 results): the boot compile fell from about 40 s to 2.5 s. Step 2 is done
-(see Step 2): a keystroke fell from 0.40 s to 0.37 s. Step 3 is under way
-(see Step 3).
+(see Step 2): a keystroke fell from 0.40 s to 0.37 s. Step 3 is under way:
+five of its design's seven parts are done (see Step 3).
 
 The hosted simulator with the native executor already runs guest Forth in
 C++, at about 80 million semantic steps per second. These measurements ask
@@ -240,8 +240,15 @@ change measurably, since stack-only steps are the native executor's cheapest.
 removal of provably repeated work, or a design change kept exact by checking it
 against the full path. It also records a measurement this plan did not have:
 each key resends six controls whose content did not change, about 15.8 KB of
-16.2 KB on the wire. It estimates 8 to 10 million guest steps per key once all
-seven parts land. The design awaits review.
+16.2 KB on the wire.
+
+Parts 1 to 4 and 7 were approved on 2026-10-14 and are done, on Akashic
+`feature/keystroke-speed`. Measured with Akashic's typing tool
+(`physical_typing_cadence.py --screen-profile`), a burst frame fell from 25.0
+to 22.8 million guest steps, and from 17.6 KB to 0.7 KB on the wire. Part 7
+also stops zero-filling a glyph slot for every cell of the screen on each key,
+which the simulator does not count as steps. Parts 5 and 6 need their own
+approval; the design estimates about 11 million steps a frame after both.
 
 ## Decisions
 
