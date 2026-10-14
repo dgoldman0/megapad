@@ -10,6 +10,13 @@
 
 namespace megapad::dictionary {
 
+namespace {
+// A Python handle on one published colon body, for lazy IR views.
+struct NativeColonBodyHandle {
+    std::shared_ptr<const ColonBody> body;
+};
+}  // namespace
+
 std::string uppercase(const std::string& name) {
     std::string key = name;
     for (char& byte : key) {
@@ -79,6 +86,25 @@ py::tuple NativeDictionary::define(const std::string& name, const std::string& i
                                    bool immediate, uint8_t kind, Cell constant,
                                    uint32_t directive, bool has_action, Cell action_xt,
                                    Cell action_ip, py::object implementation) {
+    return define_record(name, initial_body, immediate, kind, constant, directive,
+                         has_action, action_xt, action_ip, std::move(implementation),
+                         nullptr);
+}
+
+Cell NativeDictionary::define_native(const std::string& name, uint8_t kind, Cell constant,
+                                     const std::string& initial_body,
+                                     std::shared_ptr<const ColonBody> body) {
+    define_record(name, initial_body, false, kind, constant, 0, false, 0, 0,
+                  py::none(), std::move(body));
+    return records_.back().xt;
+}
+
+py::tuple NativeDictionary::define_record(const std::string& name,
+                                          const std::string& initial_body, bool immediate,
+                                          uint8_t kind, Cell constant, uint32_t directive,
+                                          bool has_action, Cell action_xt, Cell action_ip,
+                                          py::object implementation,
+                                          std::shared_ptr<const ColonBody> body) {
     require_name(name);
     const Cell allocation_size =
         HEADER_FIXED_BYTES + name.size() + SEMANTIC_CODE_SLOT_BYTES + initial_body.size();
@@ -131,6 +157,7 @@ py::tuple NativeDictionary::define(const std::string& name, const std::string& i
     record.action_ip = action_ip;
     record.uid = ++next_uid_;
     record.implementation = std::move(implementation);
+    record.body = std::move(body);
     bindings_[record.key].push_back(index);
     by_xt_[xt] = index;
     records_.push_back(std::move(record));
@@ -213,6 +240,11 @@ long NativeDictionary::lookup(const char* name, size_t length) const {
     return static_cast<long>(found->second.back());
 }
 
+long NativeDictionary::index_of_xt(Cell xt) const {
+    const auto found = by_xt_.find(xt);
+    return found == by_xt_.end() ? -1 : static_cast<long>(found->second);
+}
+
 py::object NativeDictionary::resolve(Cell xt) const {
     const auto found = by_xt_.find(xt);
     if (found == by_xt_.end()) {
@@ -239,9 +271,10 @@ py::list NativeDictionary::views() const {
 py::tuple NativeDictionary::record_info(size_t index) const {
     const Record& r = records_.at(index);
     py::object implementation = r.implementation ? r.implementation : py::object(py::none());
+    py::object body = r.body ? py::cast(NativeColonBodyHandle{r.body}) : py::object(py::none());
     return py::make_tuple(py::bytes(r.name), r.header_address, r.xt, r.immediate,
                           static_cast<int>(r.kind), r.constant, r.directive, r.has_action,
-                          r.action_xt, r.action_ip, r.uid, implementation);
+                          r.action_xt, r.action_ip, r.uid, implementation, body);
 }
 
 void NativeDictionary::set_view(size_t index, py::object view) {
@@ -455,6 +488,22 @@ Cell NativeDictionary::read64(Cell address) {
     return memory_.attr("read64")(address).cast<Cell>();
 }
 
+uint8_t NativeDictionary::read8(Cell address) {
+    if (guest_.contains(address, 1)) return guest_.read8(address);
+    return memory_.attr("read8")(address).cast<uint8_t>();
+}
+
+py::list ir_tuples(const ColonBody& body) {
+    py::list result;
+    for (const IROp& op : body.ops) {
+        py::object payload = py::none();
+        if (op.kind == IR_WRITE_OUTPUT || op.kind == IR_ABORT_IF)
+            payload = py::bytes(body.payloads.at(static_cast<size_t>(op.a)));
+        result.append(py::make_tuple(static_cast<int>(op.kind), op.a, op.b, payload));
+    }
+    return result;
+}
+
 void NativeDictionary::write64(Cell address, Cell value) {
     if (guest_.contains(address, 8)) {
         guest_.write64(address, value);
@@ -580,6 +629,10 @@ bool NativeDictionary::index_probe(const std::string& name, uint32_t hash, Cell&
 }
 
 void register_bindings(py::module_& module) {
+    py::class_<NativeColonBodyHandle>(module, "NativeColonBody")
+        .def("operations", [](const NativeColonBodyHandle& self) {
+            return ir_tuples(*self.body);
+        });
     py::class_<NativeDictionary>(module, "NativeDictionary")
         .def(py::init<Cell, Cell, py::object, const py::iterable&, Cell, const py::iterable&,
                       bool, Cell, Cell>(),
@@ -643,6 +696,17 @@ void register_bindings(py::module_& module) {
     module.attr("KIND_CREATED") = py::int_(static_cast<int>(KIND_CREATED));
     module.attr("KIND_DIRECTIVE") = py::int_(static_cast<int>(KIND_DIRECTIVE));
     module.attr("KIND_ROUTINE") = py::int_(static_cast<int>(KIND_ROUTINE));
+#define EXPORT_IR(name) module.attr(#name) = py::int_(static_cast<int>(name))
+    EXPORT_IR(IR_LITERAL); EXPORT_IR(IR_CALL); EXPORT_IR(IR_CALL_SELF);
+    EXPORT_IR(IR_STORE_VALUE); EXPORT_IR(IR_BRANCH); EXPORT_IR(IR_BRANCH_ZERO);
+    EXPORT_IR(IR_RETURN); EXPORT_IR(IR_IDLE); EXPORT_IR(IR_IDLE_UNTIL);
+    EXPORT_IR(IR_UART_READ); EXPORT_IR(IR_R_PUSH); EXPORT_IR(IR_R_POP);
+    EXPORT_IR(IR_R_PEEK); EXPORT_IR(IR_R_PUSH_PAIR); EXPORT_IR(IR_R_POP_PAIR);
+    EXPORT_IR(IR_R_PEEK_PAIR); EXPORT_IR(IR_STRING_LITERAL); EXPORT_IR(IR_DO);
+    EXPORT_IR(IR_QUESTION_DO); EXPORT_IR(IR_LOOP); EXPORT_IR(IR_PLUS_LOOP);
+    EXPORT_IR(IR_UNLOOP); EXPORT_IR(IR_INSTALL_DOES); EXPORT_IR(IR_RESTORE_DSP);
+    EXPORT_IR(IR_RESTORE_RSP); EXPORT_IR(IR_WRITE_OUTPUT); EXPORT_IR(IR_ABORT_IF);
+#undef EXPORT_IR
 }
 
 }  // namespace megapad::dictionary

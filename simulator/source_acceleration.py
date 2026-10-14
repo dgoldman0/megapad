@@ -34,6 +34,11 @@ from simulator.runtime import (
 )
 from simulator.source import SourceCursor
 
+# The native walker's answers: the loop ended, or Python runs the next whole
+# iteration. simulator.native_walker returns these same objects.
+WALK_DONE = "done"
+WALK_ITERATION = "iteration"
+
 
 _SCAN_CHUNK_BYTES = 4096
 _FIRST_SCAN_CHUNK_BYTES = 256
@@ -258,6 +263,7 @@ def install_kdos_source_accelerators(
 
     installed: list[bytes] = []
     skipped: list[bytes] = []
+    primitives = _checked_line_primitives(runtime)
     for spec in _SPECS:
         word = runtime.find(spec.name)
         if (
@@ -273,11 +279,13 @@ def install_kdos_source_accelerators(
                 applicable, callback = _build_checked_line_accelerator(
                     runtime,
                     word,
+                    primitives,
                 )
             elif spec.name == b"SOURCE-EVALUATE-CHECKED":
                 applicable, callback = _build_checked_source_accelerator(
                     runtime,
                     word,
+                    primitives,
                 )
             elif spec.name == b"_LD-STATUS-THROW":
                 applicable, callback = _build_zero_status_translator()
@@ -287,7 +295,11 @@ def install_kdos_source_accelerators(
                     word,
                 )
             elif spec.name == b"_LD-WALK":
-                applicable, callback = _build_loader_walk_accelerator(runtime, word)
+                applicable, callback = _build_loader_walk_accelerator(
+                    runtime,
+                    word,
+                    primitives,
+                )
             elif spec.name == b"_PS-LINE-LEN":
                 applicable, callback = _build_line_length_accelerator(runtime)
             else:  # pragma: no cover - the closed spec table makes this impossible.
@@ -306,16 +318,11 @@ def install_kdos_source_accelerators(
     return SourceAccelerationReport(tuple(installed), tuple(skipped))
 
 
-def _build_checked_line_accelerator(
+def _checked_line_primitives(
     runtime: MegaForthRuntime,
-    word: Word,
-):
-    evaluate = _require_literal_word(runtime, word, 3, b"EVALUATE")
-    if not isinstance(evaluate.implementation, PrimitiveDefinition):
-        raise ValueError("KDOS EVALUATE-CHECKED does not bind primitive EVALUATE")
-    eval_status = _require_call(runtime, word, 22, b"EVAL-STATUS").body_address
-    eval_status_cell = GuestCell(runtime.memory, eval_status)
-    compiler_state = runtime._require_bios_evaluator().compiler_state
+) -> tuple[frozenset[Word], dict[Word, int]]:
+    """The initial primitives a checked line may run while interpreting."""
+
     interpret_primitives = frozenset(
         primitive
         for name in _INTERPRET_SAFE_PRIMITIVE_NAMES
@@ -326,6 +333,21 @@ def _build_checked_line_accelerator(
         for name in _DEFINING_PRIMITIVE_BODY_BYTES
         if (primitive := _current_initial_primitive(runtime, name)) is not None
     }
+    return interpret_primitives, defining_primitives
+
+
+def _build_checked_line_accelerator(
+    runtime: MegaForthRuntime,
+    word: Word,
+    primitives: tuple[frozenset[Word], dict[Word, int]],
+):
+    evaluate = _require_literal_word(runtime, word, 3, b"EVALUATE")
+    if not isinstance(evaluate.implementation, PrimitiveDefinition):
+        raise ValueError("KDOS EVALUATE-CHECKED does not bind primitive EVALUATE")
+    eval_status = _require_call(runtime, word, 22, b"EVAL-STATUS").body_address
+    eval_status_cell = GuestCell(runtime.memory, eval_status)
+    compiler_state = runtime._require_bios_evaluator().compiler_state
+    interpret_primitives, defining_primitives = primitives
 
     def applicable(context: ExecutionContext) -> bool:
         if context.data.depth() < 2:
@@ -413,6 +435,7 @@ def _build_crc_buffer_accelerator(
 def _build_checked_source_accelerator(
     runtime: MegaForthRuntime,
     word: Word,
+    primitives: tuple[frozenset[Word], dict[Word, int]],
 ):
     measure = _require_call(runtime, word, 18, b"_SEC-MEASURE")
     if normalized_colon_digest(runtime, measure) != _SEC_MEASURE_DIGEST:
@@ -435,6 +458,14 @@ def _build_checked_source_accelerator(
     eval_len_cell = GuestCell(runtime.memory, eval_len)
     line_cell = GuestCell(runtime.memory, line)
     eval_line_cell = GuestCell(runtime.memory, eval_line)
+    walker = _native_walker(
+        runtime,
+        loader=False,
+        cells=(rem, cur, line, raw_len, eval_len, eval_line),
+        evaluate_checked=evaluator,
+        status_throw=None,
+        primitives=primitives,
+    )
 
     def applicable(context: ExecutionContext) -> bool:
         if context.data.depth() < 2:
@@ -442,6 +473,24 @@ def _build_checked_source_accelerator(
         length = context.data.peek()
         address = context.data.peek(1)
         return s64(length) <= 0 or _ordinary_span(runtime, address, length)
+
+    def measure() -> tuple[int, int]:
+        line_number = u64(line_cell.read() + 1)
+        line_cell.write(line_number)
+        eval_line_cell.write(line_number)
+
+        current = cur_cell.read()
+        remaining = rem_cell.read()
+        measured = _line_length(runtime, current, remaining)
+        raw_len_cell.write(measured)
+        eval_len_cell.write(measured)
+        evaluated = measured
+        if s64(evaluated) > 0 and runtime.memory.read8(
+            u64(current + evaluated - 1)
+        ) == 13:
+            evaluated = u64(evaluated - 1)
+            eval_len_cell.write(evaluated)
+        return current, evaluated
 
     def callback(context: ExecutionContext) -> None:
         length = context.data.pop()
@@ -451,21 +500,12 @@ def _build_checked_source_accelerator(
         line_cell.write(0)
 
         while s64(rem_cell.read()) > 0:
-            line_number = u64(line_cell.read() + 1)
-            line_cell.write(line_number)
-            eval_line_cell.write(line_number)
-
-            current = cur_cell.read()
-            remaining = rem_cell.read()
-            measured = _line_length(runtime, current, remaining)
-            raw_len_cell.write(measured)
-            eval_len_cell.write(measured)
-            evaluated = measured
-            if s64(evaluated) > 0 and runtime.memory.read8(
-                u64(current + evaluated - 1)
-            ) == 13:
-                evaluated = u64(evaluated - 1)
-                eval_len_cell.write(evaluated)
+            # The native walker runs every line it admits, and stops at the
+            # first that needs this loop, measured but not yet evaluated.
+            line = WALK_ITERATION if walker is None else walker.walk(context)
+            if line is WALK_DONE:
+                break
+            current, evaluated = measure() if line is WALK_ITERATION else line
 
             if s64(evaluated) > 0:
                 context.data.push(current)
@@ -498,6 +538,7 @@ def _build_checked_source_accelerator(
 def _build_loader_walk_accelerator(
     runtime: MegaForthRuntime,
     word: Word,
+    primitives: tuple[frozenset[Word], dict[Word, int]],
 ):
     evaluator = _require_call(runtime, word, 65, b"EVALUATE-CHECKED")
     status_throw = _require_call(runtime, word, 66, b"_LD-STATUS-THROW")
@@ -517,6 +558,14 @@ def _build_loader_walk_accelerator(
     line_len_cell = GuestCell(runtime.memory, line_len)
     line_cell = GuestCell(runtime.memory, line)
     eval_line_cell = GuestCell(runtime.memory, eval_line)
+    walker = _native_walker(
+        runtime,
+        loader=True,
+        cells=(size, cur, line, line_len, 0, eval_line),
+        evaluate_checked=evaluator,
+        status_throw=status_throw,
+        primitives=primitives,
+    )
 
     def applicable(_context: ExecutionContext) -> bool:
         remaining = size_cell.read()
@@ -527,24 +576,31 @@ def _build_loader_walk_accelerator(
             remaining,
         )
 
+    def measure() -> tuple[int, int]:
+        line_number = u64(line_cell.read() + 1)
+        line_cell.write(line_number)
+        eval_line_cell.write(line_number)
+
+        current = cur_cell.read()
+        remaining = size_cell.read()
+        measured = _line_length(runtime, current, remaining)
+        line_len_cell.write(measured)
+        evaluated = measured
+        if s64(evaluated) > 0 and runtime.memory.read8(
+            u64(current + evaluated - 1)
+        ) == 13:
+            evaluated = u64(evaluated - 1)
+        return current, evaluated
+
     def callback(context: ExecutionContext) -> None:
         cur_cell.write(buffer_cell.read())
         line_cell.write(0)
 
         while s64(size_cell.read()) > 0:
-            line_number = u64(line_cell.read() + 1)
-            line_cell.write(line_number)
-            eval_line_cell.write(line_number)
-
-            current = cur_cell.read()
-            remaining = size_cell.read()
-            measured = _line_length(runtime, current, remaining)
-            line_len_cell.write(measured)
-            evaluated = measured
-            if s64(evaluated) > 0 and runtime.memory.read8(
-                u64(current + evaluated - 1)
-            ) == 13:
-                evaluated = u64(evaluated - 1)
+            line = WALK_ITERATION if walker is None else walker.walk(context)
+            if line is WALK_DONE:
+                break
+            current, evaluated = measure() if line is WALK_ITERATION else line
 
             if s64(evaluated) > 0:
                 context.data.push(current)
@@ -583,6 +639,24 @@ def _build_line_length_accelerator(runtime: MegaForthRuntime):
         context.data.push(_line_length(runtime, address, remaining))
 
     return applicable, callback
+
+
+def _native_walker(runtime: MegaForthRuntime, **binding):
+    """The native line walker for one loader overlay, when the backend has one."""
+
+    from simulator.native_dictionary import NativeDictionary
+
+    if not isinstance(runtime.dictionary, NativeDictionary):
+        return None
+    from simulator.native_walker import NativeSourceWalker
+
+    interpret_primitives, defining_primitives = binding.pop("primitives")
+    return NativeSourceWalker(
+        runtime,
+        interpret_primitives=interpret_primitives,
+        defining_primitives=defining_primitives,
+        **binding,
+    )
 
 
 def _line_length(

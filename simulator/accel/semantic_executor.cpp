@@ -8,6 +8,10 @@
 #include "guest_memory.h"
 #include "dictionary.h"
 
+namespace megapad::walker {
+void register_bindings(pybind11::module_& module);
+}
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -1688,6 +1692,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
     megapad::keccak::register_bindings(module);
     megapad::tile_values::register_bindings(module);
     megapad::dictionary::register_bindings(module);
+    megapad::walker::register_bindings(module);
     module.attr("SEMANTIC_API_VERSION") = 5;
     module.attr("MACHINE_STOPPED_CALL") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_CALL));
     module.attr("MACHINE_STOPPED_RESUME") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_RESUME));

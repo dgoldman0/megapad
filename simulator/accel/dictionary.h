@@ -15,6 +15,7 @@
 #include <pybind11/pybind11.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -42,6 +43,54 @@ enum Kind : uint8_t {
     KIND_ROUTINE,
 };
 
+// Semantic IR as simulator/ir.py defines it. Operands are the IR fields;
+// WRITE_OUTPUT and ABORT_IF keep their payload index in `a`.
+enum IRKind : uint8_t {
+    IR_LITERAL,
+    IR_CALL,
+    IR_CALL_SELF,
+    IR_STORE_VALUE,
+    IR_BRANCH,
+    IR_BRANCH_ZERO,
+    IR_RETURN,
+    IR_IDLE,
+    IR_IDLE_UNTIL,
+    IR_UART_READ,
+    IR_R_PUSH,
+    IR_R_POP,
+    IR_R_PEEK,
+    IR_R_PUSH_PAIR,
+    IR_R_POP_PAIR,
+    IR_R_PEEK_PAIR,
+    IR_STRING_LITERAL,
+    IR_DO,
+    IR_QUESTION_DO,
+    IR_LOOP,
+    IR_PLUS_LOOP,
+    IR_UNLOOP,
+    IR_INSTALL_DOES,
+    IR_RESTORE_DSP,
+    IR_RESTORE_RSP,
+    IR_WRITE_OUTPUT,
+    IR_ABORT_IF,
+    IR_KIND_COUNT,
+};
+
+struct IROp {
+    uint8_t kind;
+    Cell a;
+    Cell b;
+};
+
+// The compiled body of a colon definition the native evaluator published.
+// Shared so a Python view can still read it after its record is removed.
+struct ColonBody {
+    std::vector<IROp> ops;
+    std::vector<std::string> payloads;
+};
+
+py::list ir_tuples(const ColonBody& body);
+
 struct Record {
     std::string name;
     std::string key;
@@ -60,6 +109,8 @@ struct Record {
     py::object implementation;
     // The cached Python Word view, created on first Python access.
     py::object view;
+    // The native IR of a colon definition the native evaluator compiled.
+    std::shared_ptr<const ColonBody> body;
 
     Cell body_address() const { return xt + SEMANTIC_CODE_SLOT_BYTES; }
 };
@@ -111,6 +162,11 @@ public:
                      bool immediate, uint8_t kind, Cell constant, uint32_t directive,
                      bool has_action, Cell action_xt, Cell action_ip,
                      py::object implementation);
+    // Publish a definition the native evaluator compiled or created. The
+    // caller has already proven growth; the Python view is built on demand.
+    Cell define_native(const std::string& name, uint8_t kind, Cell constant,
+                       const std::string& initial_body,
+                       std::shared_ptr<const ColonBody> body);
     void allot(int64_t delta);
     void move_here(Cell target, Cell floor, Cell limit);
     void store_and_advance(Cell value, unsigned width, bool is_integer);
@@ -151,6 +207,19 @@ public:
 
     // Lookup for native callers: the newest live record, or -1.
     long lookup(const char* name, size_t length) const;
+    long index_of_xt(Cell xt) const;
+    Cell header_limit() const { return header_limit_; }
+    Cell index_count() const { return index_.count; }
+    Cell notify_count() const { return notify_count_; }
+    Cell notify_xt() const { return notify_xt_; }
+
+    // Guest access shared with the native evaluator.
+    guest::GuestMemory& guest() { return guest_; }
+    void read_bytes(Cell address, uint8_t* out, Cell length);
+    void write_bytes(Cell address, const uint8_t* data, Cell length);
+    Cell read64(Cell address);
+    void write64(Cell address, Cell value);
+    uint8_t read8(Cell address);
 
 private:
     Cell checked_advance(Cell width, const char* operation) const;
@@ -159,12 +228,11 @@ private:
     void revoke_allocations(const std::vector<Cell>& xts);
     void prepare_body_write(Cell address, Cell limit);
 
-    // Guest access. A span outside the ordinary regions keeps Python's
-    // checked SparseAddressSpace path, including its exceptions.
-    void read_bytes(Cell address, uint8_t* out, Cell length);
-    void write_bytes(Cell address, const uint8_t* data, Cell length);
-    Cell read64(Cell address);
-    void write64(Cell address, Cell value);
+    py::tuple define_record(const std::string& name, const std::string& initial_body,
+                            bool immediate, uint8_t kind, Cell constant, uint32_t directive,
+                            bool has_action, Cell action_xt, Cell action_ip,
+                            py::object implementation,
+                            std::shared_ptr<const ColonBody> body);
 
     bool index_insert(const std::string& name, Cell header_address, bool upsert);
     bool index_probe(const std::string& name, uint32_t hash, Cell& slot, bool& exact);

@@ -446,6 +446,14 @@ rollback, dictionary checkpoints, release, and filesystem-visible effects are
 not host substitutes. This is neither a compiled-Forth cache nor a second
 loader API.
 
+With the native backend, the `SOURCE-EVALUATE-CHECKED` and `_LD-WALK` overlays
+run their loop in a native line walker. It evaluates exactly the lines the
+checked-line overlay would take on its fast path, reproducing every effect of
+that path: the walker and evaluator cells, the data-stack writes, the
+continuation cookies and the semantic steps. It hands every other line back
+to the overlay's ordinary path, so the contract below is unchanged. See
+`docs/simulator-native-evaluator.md`.
+
 One admitted overlay invocation contributes one semantic-work/Timer step, and
 each nested real evaluator dispatch contributes its ordinary steps. The
 removed byte-walker operations deliberately no longer advance hosted semantic

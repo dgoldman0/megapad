@@ -1,8 +1,9 @@
 # Native dictionary and source evaluator
 
 Status: step 1b of the [simulator speed plan](simulator-speed-plan.md),
-2026-10-13. Slice 1, the native dictionary and side index, is implemented;
-slices 2 to 4 are designed. Each slice updates this document when it lands.
+2026-10-13. Slices 1 and 2, the native dictionary and the native line walker,
+are implemented; slices 3 and 4 are designed. Each slice updates this
+document when it lands.
 
 The hosted simulator compiles about 210,000 lines of KDOS and Akashic source
 at every boot. After step 1a this takes about 27 s, and almost all of it is
@@ -123,8 +124,10 @@ instead of looping in Python. The walker runs the overlay's loop: line
 counting, `EVAL-LINE`, the LF scan, CR stripping, and the walker's guest cells.
 For each line it either evaluates the line itself or returns to Python with
 the line measured and not yet evaluated. Python then evaluates that line on
-its existing path and calls the walker again for the rest. `EVALUATE-FINISH`
-stays in Python.
+its existing path and calls the walker again for the rest. When the walker
+cannot even measure a line natively, because its span is not inside one
+ordinary region, it returns before writing anything and Python runs that
+whole iteration. `EVALUATE-FINISH` stays in Python.
 
 Hand-back is per line, not per token. The checked-line overlay decides per
 line whether the line takes the fast path or the complete KDOS `CATCH` path,
@@ -147,6 +150,7 @@ A line is evaluated natively only when both hold:
      `VALUE`, or an embedded NUL in a compiled `S"`;
    - a data-stack underflow or overflow, or division by zero, in an
      interpreted primitive;
+   - a `VALUE` read that overlaps a stack cell the line has written;
    - interpreted `."`, or the BIOS `PROVIDED` directive;
    - an open interpret-mode `IF` or `[IF]` skip;
    - an armed index notification that this line could make due;
@@ -234,10 +238,17 @@ Each slice keeps both backends green and is committed on its own.
    `desktop-apt1` boot fingerprint matches 1a's exactly, including the side
    index's bytes, and three alternating boots each gave medians of 26.5 s
    against 26.1 s for 1a, which is within the host's noise.
-2. **Native line walker** for both overlays, with lazy Python IR views and
-   compiler hand-over. Differential tests evaluate source both ways and
-   compare complete fingerprints. The boot fingerprint matches slice 1's.
-   Expected: the bookkeeping rows above, about 18 of the 27 s, mostly go.
+2. **Native line walker.** Done, for both overlays, with lazy Python IR
+   views and compiler hand-over. `tests/simulator/test_native_walker.py`
+   runs the same source through both overlay loops on two native runtimes
+   and compares all guest memory, the dictionary with its IR, stacks,
+   cookies, steps, the open definition, diagnostics and UART output, and
+   asserts how many lines each side evaluated. In the `desktop-apt1` boot
+   the walker evaluates 194,979 lines, exactly the lines the Python rule
+   admits, and hands 9,343 to Python. The boot fingerprint matches 1a's in
+   every field, including all 48,922 definitions' IR and the side index's
+   bytes. Three alternating boot compiles gave medians of 5.8 s against
+   28.1 s for 1a.
 3. **Native plans** from native IR, surviving forward publication.
 4. **Wider admission** in both evaluators. The boot fingerprint now matches
    the Python backend's boot with the same rule.

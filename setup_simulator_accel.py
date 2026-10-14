@@ -34,6 +34,7 @@ setup(
     ext_modules=[Extension(
         "_megaforth_native", [
             "simulator/accel/semantic_executor.cpp", "simulator/accel/dictionary.cpp",
+            "simulator/accel/line_walker.cpp",
             "shared/accel/scalar_fp.cpp", "shared/accel/keccak.cpp",
             "shared/accel/tile_values.cpp",
         ],

@@ -265,3 +265,33 @@ does. A span outside one ordinary region goes through the `SparseAddressSpace`
 methods instead, so its checks and exceptions are unchanged. The side index
 keeps the BIOS slot layout, FNV-1a hash, probe order, publication order and
 flag transitions of `HostedDictionaryIndex`.
+
+Natively published colon definitions keep their IR in the record as
+`IR_*` operations, `(kind, a, b)` with `WRITE_OUTPUT` and `ABORT_IF` payloads
+held separately. `record_info` returns a `NativeColonBody` handle for such a
+record; its `operations()` gives `(kind, a, b, payload)` tuples, from which
+the facade builds the Python IR only when Python first reads it.
+
+## Native line walker
+
+`_megaforth_native.NativeLineWalker(dictionary, directive_values, primitives,
+protocol, cells, evaluator_cells, evaluate_checked_xt, status_throw_xt,
+bootstrap_base, bank0_base, bank0_limit)` runs one loader overlay's loop:
+`WALK_SOURCE` for `SOURCE-EVALUATE-CHECKED` or `WALK_LOADER` for `_LD-WALK`.
+`simulator/native_walker.py` is its only intended client. `directive_values`
+maps every `DirectiveKind` name to its value; `primitives` binds the admitted
+interpret-time and defining primitives by XT, and the walker captures each
+record's identity at construction.
+
+`walk(data_state, return_state, frames_depth, compiler, blocked, allowance,
+dictionary_base, dictionary_limit, base_address)` returns `(outcome, current,
+evaluated, data_pointer, return_pointer, cookie, steps, compiler,
+cleared_token)`. Outcome 0 ends the overlay's loop, 1 hands back one measured
+line still to be evaluated, and 2 asks Python to run the next whole
+iteration. The caller settles the stack pointers, cookie counter and steps,
+and takes back the open definition, exactly as after a native execution
+interval; after an exception, `take_error_state()` returns the same tuple
+for the lines already committed. `compiler` crosses the boundary as
+`(name, location, compile_mode, temporary, operations, controls, pool)` and
+comes back with the name token's column after the location. `stats()` gives
+the lines evaluated natively and handed back.

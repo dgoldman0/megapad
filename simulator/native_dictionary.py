@@ -30,6 +30,7 @@ from simulator.dictionary import (
     _address,
     _name_bytes,
 )
+from simulator import ir
 from simulator.dictionary_index import DictionaryIndexState
 from simulator.memory import AddressClass, SparseAddressSpace
 from simulator.runtime import (
@@ -81,6 +82,114 @@ class NativeCreatedDefinition(CreatedDefinition):
             # Not an action the native code can interpret: it only knows
             # that the word is no longer a plain created word.
             self._native.set_action(self._xt, self._uid, True, 0, 0)
+
+
+class NativeColonDefinition(ColonDefinition):
+    """A natively compiled colon body whose Python IR is built on first use."""
+
+    __slots__ = ("_body", "_operations")
+
+    @classmethod
+    def _bind(cls, body: Any) -> "NativeColonDefinition":
+        self = object.__new__(cls)
+        object.__setattr__(self, "_body", body)
+        object.__setattr__(self, "_operations", None)
+        return self
+
+    @property
+    def operations(self) -> tuple[ir.Operation, ...]:
+        operations = self._operations
+        if operations is None:
+            operations = tuple(
+                operation_from_native(kind, a, b, payload)
+                for kind, a, b, payload in self._body.operations()
+            )
+            object.__setattr__(self, "_operations", operations)
+        return operations
+
+
+_FROM_NATIVE: dict[int, Callable[[int, int, Any], ir.Operation]] = {}
+_TO_NATIVE: dict[type, Callable[[Any], tuple[int, int, int, Any]]] = {}
+
+
+def _ir_tables() -> None:
+    native = _extension()
+    _FROM_NATIVE.update({
+        native.IR_LITERAL: lambda a, b, p: ir.Literal(a),
+        native.IR_CALL: lambda a, b, p: ir.Call(a),
+        native.IR_CALL_SELF: lambda a, b, p: ir.CallSelf(),
+        native.IR_STORE_VALUE: lambda a, b, p: ir.StoreValue(a),
+        native.IR_BRANCH: lambda a, b, p: ir.Branch(a),
+        native.IR_BRANCH_ZERO: lambda a, b, p: ir.BranchZero(a),
+        native.IR_RETURN: lambda a, b, p: ir.Return(),
+        native.IR_IDLE: lambda a, b, p: ir.Idle(),
+        native.IR_IDLE_UNTIL: lambda a, b, p: ir.IdleUntil(),
+        native.IR_UART_READ: lambda a, b, p: ir.UartReadAttempt(),
+        native.IR_R_PUSH: lambda a, b, p: ir.RPush(),
+        native.IR_R_POP: lambda a, b, p: ir.RPop(),
+        native.IR_R_PEEK: lambda a, b, p: ir.RPeek(),
+        native.IR_R_PUSH_PAIR: lambda a, b, p: ir.RPushPair(),
+        native.IR_R_POP_PAIR: lambda a, b, p: ir.RPopPair(),
+        native.IR_R_PEEK_PAIR: lambda a, b, p: ir.RPeekPair(),
+        native.IR_STRING_LITERAL: lambda a, b, p: ir.PushStringLiteral(a, b),
+        native.IR_DO: lambda a, b, p: ir.Do(),
+        native.IR_QUESTION_DO: lambda a, b, p: ir.QuestionDo(a),
+        native.IR_LOOP: lambda a, b, p: ir.Loop(a),
+        native.IR_PLUS_LOOP: lambda a, b, p: ir.PlusLoop(a),
+        native.IR_UNLOOP: lambda a, b, p: ir.Unloop(),
+        native.IR_INSTALL_DOES: lambda a, b, p: ir.InstallDoes(a),
+        native.IR_RESTORE_DSP: lambda a, b, p: ir.RestoreDataStackPointer(),
+        native.IR_RESTORE_RSP: lambda a, b, p: ir.RestoreReturnStackPointer(),
+        native.IR_WRITE_OUTPUT: lambda a, b, p: ir.WriteOutput(p),
+        native.IR_ABORT_IF: lambda a, b, p: ir.AbortIf(p),
+    })
+    _TO_NATIVE.update({
+        ir.Literal: lambda op: (native.IR_LITERAL, op.value, 0, None),
+        ir.Call: lambda op: (native.IR_CALL, op.xt, 0, None),
+        ir.CallSelf: lambda op: (native.IR_CALL_SELF, 0, 0, None),
+        ir.StoreValue: lambda op: (native.IR_STORE_VALUE, op.address, 0, None),
+        ir.Branch: lambda op: (native.IR_BRANCH, op.target, 0, None),
+        ir.BranchZero: lambda op: (native.IR_BRANCH_ZERO, op.target, 0, None),
+        ir.Return: lambda op: (native.IR_RETURN, 0, 0, None),
+        ir.Idle: lambda op: (native.IR_IDLE, 0, 0, None),
+        ir.IdleUntil: lambda op: (native.IR_IDLE_UNTIL, 0, 0, None),
+        ir.UartReadAttempt: lambda op: (native.IR_UART_READ, 0, 0, None),
+        ir.RPush: lambda op: (native.IR_R_PUSH, 0, 0, None),
+        ir.RPop: lambda op: (native.IR_R_POP, 0, 0, None),
+        ir.RPeek: lambda op: (native.IR_R_PEEK, 0, 0, None),
+        ir.RPushPair: lambda op: (native.IR_R_PUSH_PAIR, 0, 0, None),
+        ir.RPopPair: lambda op: (native.IR_R_POP_PAIR, 0, 0, None),
+        ir.RPeekPair: lambda op: (native.IR_R_PEEK_PAIR, 0, 0, None),
+        ir.PushStringLiteral: lambda op: (
+            native.IR_STRING_LITERAL, op.offset, op.length, None
+        ),
+        ir.Do: lambda op: (native.IR_DO, 0, 0, None),
+        ir.QuestionDo: lambda op: (native.IR_QUESTION_DO, op.target, 0, None),
+        ir.Loop: lambda op: (native.IR_LOOP, op.target, 0, None),
+        ir.PlusLoop: lambda op: (native.IR_PLUS_LOOP, op.target, 0, None),
+        ir.Unloop: lambda op: (native.IR_UNLOOP, 0, 0, None),
+        ir.InstallDoes: lambda op: (native.IR_INSTALL_DOES, op.entry_ip, 0, None),
+        ir.RestoreDataStackPointer: lambda op: (native.IR_RESTORE_DSP, 0, 0, None),
+        ir.RestoreReturnStackPointer: lambda op: (native.IR_RESTORE_RSP, 0, 0, None),
+        ir.WriteOutput: lambda op: (native.IR_WRITE_OUTPUT, 0, 0, op.payload),
+        ir.AbortIf: lambda op: (native.IR_ABORT_IF, 0, 0, op.payload),
+    })
+
+
+def operation_from_native(kind: int, a: int, b: int, payload: Any) -> ir.Operation:
+    """Build one semantic operation from its native ``(kind, a, b, payload)``."""
+
+    if not _FROM_NATIVE:
+        _ir_tables()
+    return _FROM_NATIVE[kind](a, b, payload)
+
+
+def operation_to_native(operation: ir.Operation) -> tuple[int, int, int, Any]:
+    """Return one semantic operation as native ``(kind, a, b, payload)``."""
+
+    if not _TO_NATIVE:
+        _ir_tables()
+    return _TO_NATIVE[type(operation)](operation)
 
 
 def _classify(implementation: Any) -> tuple[int, int, int, bool, int, int, Any]:
@@ -552,10 +661,12 @@ class NativeDictionary:
     def _make_view(self, index: int) -> Word:
         (
             name, header_address, xt, immediate, kind, constant, directive,
-            has_action, action_xt, action_ip, uid, implementation,
+            has_action, action_xt, action_ip, uid, implementation, body,
         ) = self._native.record_info(index)
         native = _extension()
-        if kind == native.KIND_CREATED:
+        if body is not None:
+            implementation = NativeColonDefinition._bind(body)
+        elif kind == native.KIND_CREATED:
             implementation = NativeCreatedDefinition._bind(
                 self._native,
                 xt,
@@ -647,7 +758,10 @@ def _require_cell(value: int, *, label: str) -> None:
 
 
 __all__ = [
+    "NativeColonDefinition",
     "NativeCreatedDefinition",
     "NativeDictionary",
     "NativeDictionaryIndex",
+    "operation_from_native",
+    "operation_to_native",
 ]
