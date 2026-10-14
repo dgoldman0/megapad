@@ -8,8 +8,10 @@ pygame = pytest.importorskip("pygame")
 
 from display import VirtualTerminal
 from rich_terminal.appearance import FLOWING_APPEARANCE, REFERENCE_APPEARANCE
-from rich_terminal.pygame_view import FieldHitTarget, composite_draw_plane_result
-from rich_terminal.retained_scene import ControlState, ObjectBounds
+from rich_terminal.pygame_view import (
+    FieldHitTarget, TextHitTarget, TextPosition, composite_draw_plane_result, resolve_pointer,
+)
+from rich_terminal.retained_scene import ControlKind, ControlState, ObjectBounds
 from rich_terminal.retained_view import FieldDraw, RetainedDrawPlane, RetainedRegionDraw
 from rich_terminal.semantic_fields import FieldChoice, FieldContent, FieldFlag, FieldKind, FieldRect
 from session_viewer import compose_terminal_frame_changes, compose_terminal_frame_result
@@ -51,7 +53,7 @@ def _paint(field, font, appearance, surface=None):
 
 
 @pytest.mark.parametrize("appearance", [REFERENCE_APPEARANCE, FLOWING_APPEARANCE])
-@pytest.mark.parametrize("kind", list(FieldKind))
+@pytest.mark.parametrize("kind", [FieldKind.INTEGER, FieldKind.CHOICE])
 def test_only_value_slot_is_activatable_and_numeric_choice_slots_adjust(font, appearance, kind):
     result = _paint(_field(kind), font, appearance)
     assert len(result.hit_targets) == 1
@@ -59,10 +61,32 @@ def test_only_value_slot_is_activatable_and_numeric_choice_slots_adjust(font, ap
     assert isinstance(target, FieldHitTarget)
     assert (target.rect.left, target.rect.top, target.rect.width, target.rect.height) == (104, 24, 64, 12)
     assert target.content_revision == 1
-    assert target.adjustable == (kind is not FieldKind.TEXT)
+    assert target.adjustable
     assert result.hit_test(30, 30) is None
     assert result.hit_test(97, 30) is None
     assert result.hit_test(110, 30) == target
+
+
+def _text_target(result):
+    targets = [entry for entry in result.hit_entries if isinstance(entry, TextHitTarget)]
+    assert len(targets) == 1
+    return targets[0]
+
+
+@pytest.mark.parametrize("appearance", [REFERENCE_APPEARANCE, FLOWING_APPEARANCE])
+def test_a_text_value_slot_names_positions_instead_of_activating(font, appearance):
+    result = _paint(_field(FieldKind.TEXT), font, appearance)
+    assert not result.hit_targets
+    target = _text_target(result)
+    assert target.kind is ControlKind.FIELD
+    assert (target.rect.left, target.rect.top, target.rect.width, target.rect.height) == (104, 24, 64, 12)
+    assert (target.viewport_column, target.viewport_columns, target.rows) == (0, 8, ((0, 0, "Voice"),))
+    # Cells are 8 pixels wide: a point on the third character names offset 2,
+    # and a point past the value's end names its end.
+    assert target.position_at(104 + 2 * 8 + 3, 30) == TextPosition(0, 2)
+    assert target.position_at(104 + 7 * 8, 30) == TextPosition(0, 5)
+    assert resolve_pointer(result.hit_entries, 110, 30, cell_width=8, cell_height=12) == target
+    assert resolve_pointer(result.hit_entries, 30, 30, cell_width=8, cell_height=12) is None
 
 
 @pytest.mark.parametrize("flags,state", [(FieldFlag.READ_ONLY, ACTIVE), (FieldFlag(0), ControlState.VISIBLE)])
@@ -114,8 +138,8 @@ def test_signed_coordinate_field_and_input_clip_stay_surface_bounded(font):
                            FieldRect((1 << 31) - 1, 0, 8, 1), text="Edge")
     field = FieldDraw(1, ACTIVE, 0, 0, ObjectBounds(-(1 << 31), 2, (1 << 32) - 1, 1), "", content)
     result = _paint(field, font, FLOWING_APPEARANCE)
-    assert result.hit_targets[0].rect.left == 0
-    assert result.hit_targets[0].rect.width == 56
+    assert _text_target(result).rect.left == 0
+    assert _text_target(result).rect.width == 56
     assert result.surface.get_at((20, 50))[:3] == (63, 22, 97)
 
 

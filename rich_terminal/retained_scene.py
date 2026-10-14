@@ -1393,6 +1393,45 @@ class PreparedOwnerRetirement:
     _resource_state: ResourceStoreState
 
 
+def control_beneath_modal(
+    state: "SceneModelState",
+    owner_scene: "OwnerScene",
+    definition: ControlDefinition,
+    region: RegionDefinition,
+) -> bool:
+    """Whether a visible MODAL region above this control's region has a
+    barrier that meets the control's root bounds, which makes the control
+    inactive (RETAINED-1 section 9).  The scene's event checks and the draw
+    projection share this one rule."""
+
+    root = definition
+    while root.parent_control_id:
+        parent = owner_scene.controls.get(root.parent_control_id)
+        if parent is None:
+            break
+        root = parent
+    if root.bounds is None:
+        return False
+    left = region.logical_x + root.bounds.cell_x
+    top = region.logical_y + root.bounds.cell_y
+    right = left + root.bounds.cell_cols
+    bottom = top + root.bounds.cell_rows
+    order = (region.z_order, owner_scene.owner.owner_id, region.region_id)
+    for other in state.active.owners.values():
+        for modal in other.regions.values():
+            if not modal.modal or not modal.visible:
+                continue
+            if (modal.z_order, other.owner.owner_id, modal.region_id) <= order:
+                continue
+            barrier = modal.barrier(state.geometry)
+            if barrier is None:
+                continue
+            b_left, b_top, b_right, b_bottom = barrier
+            if left < b_right and b_left < right and top < b_bottom and b_top < bottom:
+                return True
+    return False
+
+
 class RetainedSceneModel:
     """Active/hidden retained targets sharing one update authority."""
 
@@ -1500,47 +1539,10 @@ class RetainedSceneModel:
         region = owner_scene.regions.get(definition.region_id)
         if region is None or not region.visible:
             raise SceneModelError(SceneErrorCode.BOUNDS, "control region is not visible")
-        if self._beneath_modal(state, owner_scene, definition, region):
+        if control_beneath_modal(state, owner_scene, definition, region):
             raise SceneModelError(
                 SceneErrorCode.STATE, "control is inactive beneath an open modal region")
         return owner_scene, definition
-
-    @staticmethod
-    def _beneath_modal(
-        state: SceneModelState,
-        owner_scene: OwnerScene,
-        definition: ControlDefinition,
-        region: RegionDefinition,
-    ) -> bool:
-        """Whether a visible MODAL region above this control's region has a
-        barrier that meets the control's root bounds (RETAINED-1 section 9)."""
-
-        root = definition
-        while root.parent_control_id:
-            parent = owner_scene.controls.get(root.parent_control_id)
-            if parent is None:
-                break
-            root = parent
-        if root.bounds is None:
-            return False
-        left = region.logical_x + root.bounds.cell_x
-        top = region.logical_y + root.bounds.cell_y
-        right = left + root.bounds.cell_cols
-        bottom = top + root.bounds.cell_rows
-        order = (region.z_order, owner_scene.owner.owner_id, region.region_id)
-        for other in state.active.owners.values():
-            for modal in other.regions.values():
-                if not modal.modal or not modal.visible:
-                    continue
-                if (modal.z_order, other.owner.owner_id, modal.region_id) <= order:
-                    continue
-                barrier = modal.barrier(state.geometry)
-                if barrier is None:
-                    continue
-                b_left, b_top, b_right, b_bottom = barrier
-                if left < b_right and b_left < right and top < b_bottom and b_top < bottom:
-                    return True
-        return False
 
     def active_control_kind(self, owner: OwnerIdentity, control_id: int) -> ControlKind:
         """The kind of one exact live control in a visible region, or refuse."""
@@ -3268,7 +3270,9 @@ __all__ = [
     "ControlDefinition",
     "ControlKind",
     "ControlState",
+    "control_beneath_modal",
     "ExplicitSamples",
+    "LABELED_ROOT_KINDS",
     "GroupBody",
     "GLYPH_RUN_ATTRIBUTE_MASK",
     "HiddenTargetKind",
