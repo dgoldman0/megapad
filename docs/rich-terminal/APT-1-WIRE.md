@@ -530,8 +530,9 @@ While RETAINED-1 is active, `POINTER` addresses only CELL and residual content,
 never a control the renderer lays out itself. The terminal starts a pointer
 gesture only at a position where the exact current, physically presented and
 acknowledged composite shows no such control: outside the visible root bounds
-of every `MENU_BAR`, `TABSET`, `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW`, and
-`DOCUMENT`, and outside every open menu popup. Once a press starts a gesture there, the terminal reports that
+of every `MENU_BAR`, `TABSET`, `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW`,
+`DOCUMENT`, `TASKBAR`, `FIELD`, `DIALOG`, and `BUTTON`, and outside every open
+menu popup. Once a press starts a gesture there, the terminal reports that
 gesture's moves and its release at the cells under the pointer, even where the
 pointer crosses a control, until no button is held. A wheel event follows the
 same position rule on its own. A terminal need not report motion while no
@@ -575,9 +576,9 @@ kind-specific tail
 
 | Kind | Name | Tail | Exact payload | Target kinds |
 | ---: | --- | --- | ---: | --- |
-| 1 | `ACTIVATE` | none | 40 bytes | `MENU`, `MENU_ITEM`, `TAB` |
-| 2 | `PLACE` | position | 64 bytes | `TEXT_AREA`, `TEXT_GRID` |
-| 3 | `EXTEND` | position | 64 bytes | `TEXT_AREA` |
+| 1 | `ACTIVATE` | none | 40 bytes | `MENU`, `MENU_ITEM`, `TAB`, `TASK`, `LAUNCHER`, INTEGER or CHOICE `FIELD`, `BUTTON` |
+| 2 | `PLACE` | position | 64 bytes | `TEXT_AREA`, `TEXT_GRID`, TEXT `FIELD` |
+| 3 | `EXTEND` | position | 64 bytes | `TEXT_AREA`, TEXT `FIELD` |
 | 4 | `SCROLL` | scroll | 48 bytes | `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW`, `DOCUMENT` |
 | 5 | `FOLLOW` | position | 64 bytes | `TEXT_AREA`, `DOCUMENT` |
 | 6 | `SELECT` | item | 64 bytes | `ITEM_VIEW` |
@@ -585,6 +586,7 @@ kind-specific tail
 | 8 | `EXPAND` | item | 64 bytes | `ITEM_VIEW` |
 | 9 | `COLLAPSE` | item | 64 bytes | `ITEM_VIEW` |
 | 10 | `CHECK` | item | 64 bytes | `ITEM_VIEW` |
+| 11 | `ADJUST` | adjust | 56 bytes | INTEGER or CHOICE `FIELD` |
 
 The position tail is `<QQII>`:
 
@@ -606,15 +608,23 @@ u32 reserved               = 0
 
 The scroll tail is `<hhI>`: signed horizontal wheel detents, signed vertical
 wheel detents, and a zero u32. At least one detent count is nonzero; positive
-X is right and positive Y is down, as in `POINTER`. `TAB`, `PLACE`, `EXTEND`,
-`SCROLL`, and `FOLLOW` require feature bit 9 `RET_CONTROL_COLLECTIONS`, and
-SEMANTIC-CONTENT-1 defines what their positions mean. `FOLLOW` asks the
+X is right and positive Y is down, as in `POINTER`. The adjust tail is `<Qq>`:
+the field's positive u64 content revision and a nonzero signed i64 count of
+adjustment steps. `TAB` activation, and `PLACE`, `EXTEND`, `SCROLL`, and
+`FOLLOW` on text areas, grids, item views, and documents, require feature bit
+9 `RET_CONTROL_COLLECTIONS`, and SEMANTIC-CONTENT-1 defines what their
+positions mean. `FOLLOW` asks the
 client to follow the link at its position; the client decides what that
 does. `SELECT`, `OPEN`, `EXPAND`, `COLLAPSE`, `CHECK`, and `SCROLL` on an
 `ITEM_VIEW` also require feature bit 10 `RET_CONTROL_ITEMS`, and
 SEMANTIC-CONTENT-1 defines what they ask of the client. `SCROLL` and
 `FOLLOW` on a `DOCUMENT` also require feature bit 16
-`RET_CONTROL_DOCUMENTS`. All other event-kind
+`RET_CONTROL_DOCUMENTS`. `ACTIVATE` on `TASK` and `LAUNCHER` requires
+feature bit 13 `RET_TASKBARS`. `ACTIVATE` and `ADJUST` on an INTEGER or
+CHOICE `FIELD`, and `PLACE` and `EXTEND` on a TEXT `FIELD`, require feature
+bit 14 `RET_FIELDS`; RETAINED-1 Section 9.2 defines a field's positions and
+adjustments. `ACTIVATE` on a `BUTTON` requires feature bit 17
+`RET_DIALOGS`. All other event-kind
 values are invalid. Modifier bits are Shift 0, Ctrl 1, Alt 2, Super 3, Caps
 Lock 4, and Num Lock 5; all other bits are zero. The identity is normalized
 routing and freshness data, not application authority. The terminal may emit
@@ -790,9 +800,14 @@ remain outside the CELL-1 implementation gate. The optional additive contract
 TEXT_AREA/TEXT_GRID/TABSET/TAB kinds, their STX1 content body, and the
 `PLACE`, `EXTEND`, `SCROLL`, and `FOLLOW` event kinds; and feature bit 10
 `RET_CONTROL_ITEMS` gates the ITEM_VIEW kind, its ITM1 content body, and the
-`SELECT`, `OPEN`, `EXPAND`, `COLLAPSE`, and `CHECK` event kinds; and feature
-bit 16 `RET_CONTROL_DOCUMENTS` gates the DOCUMENT kind, its DOC1 content body,
-and `SCROLL` and `FOLLOW` on it.
+`SELECT`, `OPEN`, `EXPAND`, `COLLAPSE`, and `CHECK` event kinds; feature
+bit 13 `RET_TASKBARS` gates the TASKBAR/TASK/LAUNCHER kinds and activation of
+their entries; feature bit 14 `RET_FIELDS` gates the FIELD kind, its FDC1
+content body, the `ADJUST` event kind, and the field events listed above;
+feature bit 16 `RET_CONTROL_DOCUMENTS` gates the DOCUMENT kind, its DOC1
+content body, and `SCROLL` and `FOLLOW` on it; and feature bit 17
+`RET_DIALOGS` gates the DIALOG and BUTTON kinds, their DLG1 and BTN1 content
+bodies, button activation, and the `MODAL` region flag.
 `4003`–`4FFF` remains reserved. Every other reserved ID keeps
 the behavior defined here; in particular, a sender may not infer a payload
 from its range. CELL-1 alone still defines no semantic controls. A complete
@@ -808,13 +823,14 @@ byte count, shortcut byte count, and semantic-content byte count; label bytes,
 shortcut bytes, and then the optional content body follow without padding. The
 all-zero rectangle is canonical absence. REPLACE resends that complete record
 with the kind-specific immutable and mutable field rules. DROP is exact
-`<QQQ>`. RETAINED-1 Section 9.1 and the MegaPad-owned
+`<QQQ>`. RETAINED-1 Sections 9.1 to 9.4 and the MegaPad-owned
 `docs/rich-terminal/SEMANTIC-CONTENT-1.md` contract define the canonical menu,
-text, grid, tab, item view, and document graph, content, replacement, and
-state rules.
+text, grid, tab, item view, document, taskbar, field, dialog, and button
+graph, content, replacement, and state rules.
 Controls have an independent ID high-water but share each owner's existing
-object-count and aggregate UTF-8 quotas. One CONTROL record and each
-stable-keyed STX1 or ITM1 item or DOC1 block consume one object-count slot. Negotiated inbound
+object-count and aggregate UTF-8 quotas. One CONTROL record, each
+stable-keyed STX1 or ITM1 item or DOC1 block, and each FDC1 choice consume
+one object-count slot. Negotiated inbound
 payload and transaction bounds are the only additional size limits; no fixed
 control, semantic-item, or control-string maximum is introduced.
 

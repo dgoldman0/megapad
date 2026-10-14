@@ -24,9 +24,9 @@ semantics. `RET_CONTROLS` therefore carries renderer-neutral control identity,
 hierarchy, state, ordering, optional bounds, labels, shortcuts, and
 revision-bound activation while leaving representation to the selected
 renderer. `RET_CONTROL_COLLECTIONS` adds text-area, logical-grid, and tab
-semantics, `RET_CONTROL_ITEMS` adds item views, and `RET_CONTROL_DOCUMENTS`
-adds documents, through that same namespace rather than an applet or
-renderer API.
+semantics, `RET_CONTROL_ITEMS` adds item views, `RET_CONTROL_DOCUMENTS`
+adds documents, and `RET_DIALOGS` adds dialogs, notices, buttons, and modal
+regions, through that same namespace rather than an applet or renderer API.
 Another trusted system renderer may use the same engine without creating
 another protocol or session. No applet is a direct protocol consumer or
 determines this profile's semantics or limits.
@@ -241,8 +241,9 @@ Feature bits are:
 | 14 | `RET_FIELDS` | typed FIELD controls with explicit label/value slots |
 | 15 | `RET_GRID_CELLS` | typed NUMBER, FORMULA, and ERROR roles in TEXT_GRID |
 | 16 | `RET_CONTROL_DOCUMENTS` | the document CONTROL kind and its input |
+| 17 | `RET_DIALOGS` | modal regions, the dialog and button CONTROL kinds, and button activation |
 
-Bits 17 through 63 are zero. `RET_CORE` is mandatory for every supporting
+Bits 18 through 63 are zero. `RET_CORE` is mandatory for every supporting
 terminal. Every other advertised feature depends on `RET_CORE`. `RET_SERIES`
 also requires `RET_INSTRUMENT`, because its visible consumers are `PLOT` and
 `WAVEFORM`. `RET_CADENCE` may be advertised independently of SERIES.
@@ -266,6 +267,15 @@ choices consume the existing object reservation; its outer label and content
 text consume aggregate UTF-8 capacity. Its smallest payload is 176 bytes and
 its complete transaction floor is 376 bytes. The caller must explicitly enable
 the family only on a complete supported display path.
+
+`RET_DIALOGS` requires `RET_CONTROLS`, independently of the collection, item,
+taskbar, and field families. It adds no capacity field. Each DIALOG and BUTTON
+consumes one slot of the existing object reservation, and a dialog's title and
+message and a button's label and shortcut consume aggregate UTF-8 capacity.
+Its smallest payload is 136 bytes, a DIALOG with no title and no message, and
+its complete transaction floor is 336 bytes. A modal region is an ordinary
+region and consumes the existing region reservation. The caller must
+explicitly enable the family only on a complete supported display path.
 
 `RET_GRID_CELLS` requires `RET_CONTROL_COLLECTIONS` and extends only the role
 values accepted in TEXT_GRID STX1 content. It adds no format field, payload
@@ -403,7 +413,11 @@ smallest body and its 64-byte item events fit those minima. Nor does
 `SCROLL` and `FOLLOW`. `RET_FIELDS`
 requires at least 176 inbound payload bytes for CONTROL plus FDC1, 376 complete
 transaction bytes, and 56 outbound payload bytes for ADJUST. The existing CORE
-outbound minimum of 64 remains in force and already covers that event. A client must
+outbound minimum of 64 remains in force and already covers that event and the
+64-byte `PLACE` and `EXTEND` a TEXT field takes. `RET_DIALOGS` requires at
+least 136 inbound payload bytes for CONTROL plus the smallest DLG1 body and
+336 complete transaction bytes; its only event, `ACTIVATE`, fits the CORE
+outbound minimum. A client must
 treat an inconsistent reply pair as the deterministic unsupported-profile
 outcome.
 
@@ -1045,8 +1059,9 @@ u32 flags
 `logical_cols` and `logical_rows` are positive. The logical rectangle may be
 partially or wholly outside the selected surface; exact origin-plus-extent
 addition is performed in a wider integer domain and does not impose an i32
-endpoint ceiling. Flags bit 0 is initial visibility and bit 1 enables the
-independent physical clip; other bits are zero. When bit 1 is clear, all four
+endpoint ceiling. Flags bit 0 is initial visibility, bit 1 enables the
+independent physical clip, and bit 2, `MODAL`, which requires `RET_DIALOGS`,
+makes the region a modal scope as described below; other bits are zero. When bit 1 is clear, all four
 clip fields are canonically zero. When bit 1 is set, the all-zero clip is the
 sole fully-clipped encoding. Otherwise both clip extents are positive, the clip
 lies within the selected surface, and it lies within the intersection of that
@@ -1066,28 +1081,48 @@ existing exact-owner region and is its complete definition. `REGION_DROP
 <QQQ>` names owner, generation, and ID. Commit validates that no surviving
 object or control refers to a dropped region. Overlapping regions render by
 signed region z-order, then owner ID, then region ID in ascending back-to-front
-order.
+order. Within one region, objects and control roots render in ascending signed
+z-order; at equal z-order objects render before control roots, and IDs break
+the remaining ties in ascending order. A control's descendants render with
+their root, except that an open menu popup renders after every other draw of
+its region.
 
 The selected renderer's immutable hit map follows that same painter order.
 Each visible region contributes an occlusion barrier for its logical rectangle
 intersected with its physical clip and the selected surface, followed by that
 region's control targets. Reverse hit-testing first selects a control in the
 top region or stops at its barrier, so an empty region or one containing only
-non-control draws cannot click through to a lower region. Non-control draws
+non-control draws cannot click through to a lower region. Within a region, the
+topmost control surface under a point takes it, so a control drawn over part
+of another, such as a button inside a dialog, receives the points it covers.
+Non-control draws
 remain pointer-transparent relative to controls in the same region: the
 current generic OBJECT vocabulary carries neither object input policy nor
 per-pixel opacity semantics, and changing that rule requires an explicit
 renderer-neutral semantic extension rather than pixel inference.
 
+A visible `MODAL` region is a modal scope. Its barrier already keeps every
+point it covers from the regions beneath it. In addition, every control of a
+region beneath it whose root bounds meet that barrier is inactive while the
+modal region is visible: the terminal emits no `CONTROL_EVENT` for it, and the
+renderer may show it as inactive, for example dimmed, without hiding it,
+moving it, or changing its committed state. A client places a prompt or a
+dialog in a modal region whose rectangle covers the part of the screen the
+prompt or dialog holds modal, such as its application's pane, and places the
+prompt's or dialog's own controls in that region. A barrier point that none of
+the modal region's controls covers still shows CELL or residual content, and
+a raw pointer gesture may start there as below; the client decides what such
+input means while its modal scope is open.
+
 A region barrier point that no control surface covers shows CELL or residual
 content, so a pointer gesture may start there and reach the client as raw
 `POINTER` at that cell (APT-1 Section 12). The visible root bounds of every
 `MENU_BAR`, `TABSET`, `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW`, `DOCUMENT`,
-`TASKBAR`, and `FIELD`, and every open menu popup, are control surfaces laid
-out by the renderer: a point on one never starts a raw gesture. It resolves
-to an activatable target, to a `TEXT_AREA`/`TEXT_GRID` position, an
-`ITEM_VIEW` item, or a `DOCUMENT` link under SEMANTIC-CONTENT-1, or to
-nothing.
+`TASKBAR`, `FIELD`, `DIALOG`, and `BUTTON`, and every open menu popup, are
+control surfaces laid out by the renderer: a point on one never starts a raw
+gesture. It resolves to an activatable target, to a `TEXT_AREA`/`TEXT_GRID`
+position, an `ITEM_VIEW` item, or a `DOCUMENT` link under SEMANTIC-CONTENT-1,
+to a TEXT `FIELD` position under Section 9.2, or to nothing.
 
 Regions are stamped with PRESENT_BEGIN `geometry_generation`. A resize makes
 the active retained plane hidden and layout-rebuild-required. A layout reveal
@@ -1098,8 +1133,8 @@ is invalid until every surviving region is stamped with the new generation.
 `RET_CONTROLS` defines the independent CONTROL identity namespace and its menu
 kinds; `RET_CONTROL_COLLECTIONS` adds text, grid, and tab kinds,
 `RET_CONTROL_ITEMS` the item view, `RET_TASKBARS` taskbar roots and entries,
-`RET_FIELDS` typed fields, and `RET_CONTROL_DOCUMENTS` the document,
-in that same namespace. `CONTROL_DEFINE` and `CONTROL_REPLACE` have the exact
+`RET_FIELDS` typed fields, `RET_CONTROL_DOCUMENTS` the document, and
+`RET_DIALOGS` dialogs and buttons, in that same namespace. `CONTROL_DEFINE` and `CONTROL_REPLACE` have the exact
 80-byte prefix `<QQQHHiQQIiiIIIII>`, followed immediately by `label_bytes`
 bytes, `shortcut_bytes` bytes, and `content_bytes` bytes with no padding:
 
@@ -1149,9 +1184,12 @@ Control kinds are:
 | 12 | `LAUNCHER` (requires `RET_TASKBARS`) |
 | 13 | `FIELD` (requires `RET_FIELDS`) |
 | 14 | `DOCUMENT` (requires `RET_CONTROL_DOCUMENTS`) |
+| 15 | `DIALOG` (requires `RET_DIALOGS`) |
+| 16 | `BUTTON` (requires `RET_DIALOGS`) |
 
 Menu controls, `TABSET`, `TAB`, `TASKBAR`, `TASK`, and `LAUNCHER` require
-`content_bytes = 0`. `TEXT_AREA`
+`content_bytes = 0`. `DIALOG` requires the canonical DLG1 content of Section
+9.3 and `BUTTON` the canonical BTN1 content of Section 9.4. `TEXT_AREA`
 and `TEXT_GRID` require one canonical STX1 text collection, `ITEM_VIEW`
 one canonical ITM1 item collection, and `DOCUMENT` one canonical DOC1
 document. Their exact header, item, block, graph, state,
@@ -1245,15 +1283,40 @@ typography to those slots, and claims the entire visible taskbar root as a
 control surface. Empty gaps and disabled entries do not become raw POINTER
 targets. App titles or CELL glyphs never supply inferred task identity.
 
+Dialogs and buttons are roots:
+
+* `DIALOG` and `BUTTON` have `parent_control_id = 0`, `order = 0`, present
+  positive bounds, and a caller-selected signed `z_order`. Neither has
+  children.
+* A `DIALOG`'s label is its optional title and its shortcut is empty. It
+  permits only `VISIBLE`. A `BUTTON` has a nonempty label and an optional
+  shortcut, and permits `VISIBLE`, `ENABLED`, and `SELECTED`, which marks the
+  button that has the keyboard.
+* Both strings of both kinds are strict UTF-8 scalar text and exclude C0,
+  DEL/C1, U+2028, and U+2029.
+
+A dialog's contents are other roots of the same owner, generation, and region
+whose bounds lie inside the dialog's bounds and whose `z_order` is greater
+than the dialog's: its buttons, and any fields, item views, or other controls
+the client puts inside it. A renderer that presents a dialog other than
+visually, such as by speech, presents those contents as part of it. The
+renderer draws the dialog's own frame, title, and message, and the contents
+draw over it in painter order. A dialog with the DLG1 `NOTICE` flag is a
+notice: a transient message that the client shows and later drops on its
+own, usually with no contents. The guest decides what activating a button
+means; the terminal emits `ACTIVATE` and never closes a dialog, changes its
+contents, or changes a button's state itself.
+
 `CONTROL_DEFINE` requires a nonzero ID strictly greater than the owner's prior
 CONTROL high-water. That high-water is independent of the OBJECT high-water;
 equal numeric IDs in the two namespaces are distinct. `CONTROL_REPLACE`
 requires an existing exact-target control and resends its complete wire record.
 Menu, TABSET, and TASKBAR records remain state-only replacements; TAB, TASK,
-and LAUNCHER may replace state, label, and shortcut; TEXT_AREA, TEXT_GRID,
-ITEM_VIEW, DOCUMENT, and FIELD may replace state and their complete content. Changed
+and LAUNCHER may replace state, label, and shortcut; BUTTON may replace state,
+label, shortcut, and its BTN1 content; TEXT_AREA, TEXT_GRID,
+ITEM_VIEW, DOCUMENT, FIELD, and DIALOG may replace state and their complete content. Changed
 content requires a strictly newer content revision; state-only changes preserve
-the current content revision. FIELD labels remain fixed for their identity. Every identity, kind,
+the current content revision. FIELD labels and DIALOG titles remain fixed for their identity. Every identity, kind,
 authority, hierarchy, order, bounds, and geometry field remains exact. The
 proposed value still undergoes normal control policy, dependency, quota, and
 final-graph validation.
@@ -1303,9 +1366,9 @@ resulting authoritative state in a later transaction.
 
 | Kind | Name | Exact payload | Target kinds | Feature |
 |---:|---|---:|---|---|
-| 1 | `ACTIVATE` | 40 bytes | `MENU`, `MENU_ITEM`, `TAB`, `TASK`, `LAUNCHER`, `FIELD` | 8; `TAB` also 9; task entries also 13; FIELD also 14 |
-| 2 | `PLACE` | 64 bytes | `TEXT_AREA`, `TEXT_GRID` | 8 and 9 |
-| 3 | `EXTEND` | 64 bytes | `TEXT_AREA` | 8 and 9 |
+| 1 | `ACTIVATE` | 40 bytes | `MENU`, `MENU_ITEM`, `TAB`, `TASK`, `LAUNCHER`, writable INTEGER or CHOICE `FIELD`, `BUTTON` | 8; `TAB` also 9; task entries also 13; FIELD also 14; BUTTON also 17 |
+| 2 | `PLACE` | 64 bytes | `TEXT_AREA`, `TEXT_GRID`, writable TEXT `FIELD` | 8 and 9; FIELD 8 and 14 |
+| 3 | `EXTEND` | 64 bytes | `TEXT_AREA`, writable TEXT `FIELD` | 8 and 9; FIELD 8 and 14 |
 | 4 | `SCROLL` | 48 bytes | `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW`, `DOCUMENT` | 8 and 9; `ITEM_VIEW` also 10; `DOCUMENT` also 16 |
 | 5 | `FOLLOW` | 64 bytes | `TEXT_AREA`, `DOCUMENT` | 8 and 9; `DOCUMENT` also 16 |
 | 6 | `SELECT` | 64 bytes | `ITEM_VIEW` | 8, 9, and 10 |
@@ -1330,15 +1393,18 @@ the retained field value in response to this intent. All other kind values,
 lengths, and nonzero reserved fields are
 invalid. Modifier bits are the APT-1 KEY modifier bits and all other bits are
 zero. SEMANTIC-CONTENT-1 defines how a position names STX1 or DOC1 content
-and an item names ITM1 content.
+and an item names ITM1 content, and Section 9.2 how a position names a TEXT
+field's value.
 
 The terminal may emit an event only for the exact active owner generation and
 control ID of a target kind listed for it, when the complete current control
-and all of its ancestors are effectively visible and enabled. `MENU_BAR`,
-`MENU_SEPARATOR`, `TABSET`, and `TASKBAR` never emit `CONTROL_EVENT`. FIELD
-activation requires writable content; ADJUST additionally requires INTEGER or
-CHOICE content and the exact current `content_revision`. TEXT fields accept
-ACTIVATE to request guest-owned editing, without a host-local text edit buffer.
+and all of its ancestors are effectively visible and enabled, and no visible
+`MODAL` region above its region makes it inactive (Section 9). `MENU_BAR`,
+`MENU_SEPARATOR`, `TABSET`, `TASKBAR`, and `DIALOG` never emit
+`CONTROL_EVENT`. FIELD events require writable content. `ACTIVATE` and
+`ADJUST` require INTEGER or CHOICE content, and `ADJUST` also the exact
+current `content_revision`; `PLACE` and `EXTEND` require TEXT content. A
+BUTTON activates when it is effectively visible and enabled.
 
 The event's `model_revision` is exactly the current global revision of the
 complete composite containing the hit-tested control, after that same revision
@@ -1369,7 +1435,7 @@ The content starts with exact `<IHHQIIiiIIiiIIqqqqII>` (96 bytes):
 | 4 | version = 1 | u16 |
 | 6 | kind: INTEGER=1, CHOICE=2, TEXT=3 | u16 |
 | 8 | content revision, positive | u64 |
-| 16 | flags: READ_ONLY bit 0; other bits zero | u32 |
+| 16 | flags: READ_ONLY bit 0, MASKED bit 1; other bits zero | u32 |
 | 20 | reserved = 0 | u32 |
 | 24 | label x, y, columns, rows | i32, i32, u32, u32 |
 | 40 | value x, y, columns, rows | i32, i32, u32, u32 |
@@ -1404,32 +1470,140 @@ unique, and wire order is semantic choice order. Duplicate display labels are
 valid because choice identity is the signed value. Display text is the label
 of the current value; it must not use the value as an array index.
 
-TEXT requires zero value, minimum, maximum, step, and choice count. Its exact
-UTF-8 value follows the header; empty text is valid. Its display text is that
-committed string. Host input can request activation; guest producers retain
-control of text entry and replacement.
+TEXT requires zero value, minimum, maximum, step, and choice count. The header
+is followed by the 16-byte edit record `<IIII>`: u32 caret, u32 anchor, u32
+scroll, and u32 placeholder byte count. Then come the exact UTF-8 value, whose
+length is the header's trailing text byte count, and the exact placeholder
+bytes. An empty value and an empty placeholder are valid. The value is the
+text as it stands, which the guest may still be editing.
 
-Outer FIELD labels, choice labels, and TEXT values are clean single-line
+The value is one paragraph of automatic direction (`APT-1-TEXT.md` Section
+7.1), laid out as SEMANTIC-CONTENT-1 lays out a TEXT_AREA row: its characters
+take their cells in visual order, a value that resolves to LTR starts at the
+value slot's left edge, and one that resolves to RTL is mirrored and starts at
+its right edge. `scroll` counts cells from the value's start edge, as a
+TEXT_AREA's column origin does, and is at most the value's width in cells
+(`APT-1-TEXT.md` Section 4). The caret and the anchor are Unicode-scalar
+offsets into the value, each at most its scalar count. The client places them
+on character boundaries; a renderer treats an offset inside a character as
+that character's start. An anchor equal to the caret means there is no
+selection. While the field is `SELECTED`, which for a TEXT field means it has
+the keyboard, and is not READ_ONLY, the renderer shows the caret and any
+selection between anchor and caret as `APT-1-TEXT.md` Section 9.2 says;
+otherwise it shows neither. While the value is empty, the renderer shows the
+placeholder in the value slot, laid out like a value with no scroll, in a look
+distinct from a value. A placeholder is never a value and has no positions.
+
+MASKED is valid only on TEXT. It says the value stands for a secret: the
+guest sends one mask character for each character of the secret, never the
+secret itself, and the caret, anchor, and scroll count those mask characters.
+A renderer shows the value as sent and must not offer to copy it.
+
+The host never edits a TEXT value. A primary press on the value slot of a
+writable TEXT field sends `PLACE`, and a press with Shift held, or motion with
+the primary button held after a `PLACE` on the same field, sends `EXTEND`.
+Their position tail carries the field's FDC1 content revision, item key zero,
+and the scalar offset that `APT-1-TEXT.md` Section 9.1 gives for the point in
+the terminal's layout of the value at its scroll: the start of the character
+drawn under the point, the value's end for a point past its content on its
+end side, and offset zero for an empty value. During such motion a point
+outside the value slot is first clamped to the slot's nearest edge. A press on
+the label slot or on a gap emits nothing. The client revalidates the event as
+for any position and routes it to the widget whose state the field carries,
+which focuses the field if needed, moves its caret, or for `EXTEND` its caret
+while keeping or starting its selection, and publishes the result in a later
+transaction. Keys and text reach the guest through the ordinary input path.
+
+Outer FIELD labels, choice labels, TEXT values, and placeholders are clean single-line
 Unicode-scalar UTF-8. C0 (`U+0000..001F`), DEL and C1 (`U+007F..009F`), and
 `U+2028` and `U+2029` are forbidden. Each exact byte count is independently
 checked; no padding or trailing bytes are valid. The sum of outer label and
-all content text bytes consumes aggregate UTF-8 quota. One root plus every
+all content text bytes, placeholders included, consumes aggregate UTF-8 quota.
+One root plus every
 choice consumes object quota, including hidden or read-only controls. Numeric
 display formatting adds no stored guest UTF-8 bytes. There are no family-local
 text or choice limits beyond the wire widths and enclosing negotiated quotas.
 
 READ_ONLY controls remain displayable and may retain descriptive selection,
-but cannot emit ACTIVATE or ADJUST. Host interaction reports intent without
-changing any committed value, choice, flags, or selection. A producer handles
+but cannot emit ACTIVATE, ADJUST, PLACE, or EXTEND. Host interaction reports intent without
+changing any committed value, choice, flags, caret, or selection. A producer handles
 ADJUST using its own clamp, wrap, or refusal policy, and publishes complete
 newer FDC1 content when the value changes. A stale content revision cannot be
 reinterpreted against a newer choice list or numeric constraint set.
 
-Unsupported FDC1 versions, kinds or flags, noncanonical unused fields,
+Unsupported FDC1 versions, kinds or flags, MASKED on a field that is not TEXT,
+a caret, anchor, or scroll out of range, noncanonical unused fields,
 malformed strings, and invalid geometry reject the entire transaction.
 Feature discovery remains optional, with complete CELL fallback when FIELDS
 is unavailable or unrecognized. Supporting a codec does not automatically
 enlarge an existing product's advertised policy.
+
+### 9.3 Dialog content (DLG1)
+
+DIALOG content starts with the exact 56-byte header `<IHHQIIiiIIiiII>`, and
+the exact message bytes follow it with no padding:
+
+| Offset | Field | Type |
+|---:|---|---|
+| 0 | tag = `0x31474C44` (`DLG1`) | u32 |
+| 4 | version = 1 | u16 |
+| 6 | flags: NOTICE bit 0; other bits zero | u16 |
+| 8 | content revision, positive | u64 |
+| 16 | severity | u32 |
+| 20 | message byte count | u32 |
+| 24 | title x, y, columns, rows | i32, i32, u32, u32 |
+| 40 | message x, y, columns, rows | i32, i32, u32, u32 |
+
+Severity is `NEUTRAL=0`, `INFO=1`, `SUCCESS=2`, `WARNING=3`, or `ERROR=4`, as
+for STATUS_FIELD (Section 11.11); other values are reserved. Severity and
+NOTICE are guest-authored metadata, and the renderer chooses their look.
+
+Both rectangles are relative to the root's origin, with exact endpoint
+arithmetic. The title rectangle has positive extents exactly when the CONTROL
+label is nonempty, and the message rectangle exactly when the message is
+nonempty; an absent rectangle is canonical all-zero. Each present rectangle
+lies fully inside the root, and the two do not overlap. Touching edges are
+valid.
+
+The message is clean Unicode-scalar UTF-8 whose lines are separated by U+000A
+LINE FEED. It contains no other C0 scalar, no DEL or C1, and neither U+2028
+nor U+2029. A message with `n` line feeds has `n + 1` lines, at most the
+message rectangle's rows, and an empty line is valid. The client breaks the
+message into lines; the renderer never rewraps or joins them. Line `i` is
+shown on row `i` of the message rectangle, counted from its top, as one
+paragraph of automatic direction aligned to its start edge, and the title is
+shown in the title rectangle the same way. Both are logical text laid out as
+renderer-laid-out labels are (`APT-1-TEXT.md` Section 10), and a line or title
+wider than its rectangle is clipped at its end side.
+
+The renderer draws the dialog's frame and background over its root, its title
+and message in their rectangles, and nothing else; the dialog's contents draw
+over it (Section 9.1). Title and message bytes consume aggregate UTF-8 quota.
+Changed severity, flags, message, or rectangles require complete newer DLG1
+content with a strictly newer content revision. Unsupported versions, flags,
+or severities, malformed text, more lines than message rows, noncanonical
+unused fields, and invalid geometry reject the entire transaction.
+
+### 9.4 Button content (BTN1)
+
+BUTTON content is the exact 8-byte `<IHH>`:
+
+| Offset | Field | Type |
+|---:|---|---|
+| 0 | tag = `0x314E5442` (`BTN1`) | u32 |
+| 4 | version = 1 | u16 |
+| 6 | flags: DEFAULT bit 0, CANCEL bit 1, DESTRUCTIVE bit 2; other bits zero | u16 |
+
+DEFAULT marks the button that the guest's ordinary confirming key, such as
+Enter, chooses, and CANCEL the one its ordinary cancelling key, such as
+Escape, chooses. DESTRUCTIVE marks a button whose action discards or deletes
+something, and excludes DEFAULT. The flags are guest-authored metadata for
+the renderer's look; the terminal never applies keys against them. The label
+is shown inside the root as one paragraph of automatic direction, laid out as
+a renderer-laid-out label and clipped at its end side, and the shortcut, when
+present, the same way. A press on an effectively visible and enabled button
+sends `ACTIVATE`, and a press on a disabled one emits nothing. Unsupported
+versions or flags and DESTRUCTIVE with DEFAULT reject the entire transaction.
 
 ## 10. Generic objects
 
@@ -2216,6 +2390,12 @@ Implementations must share byte-exact vectors for:
   hierarchy/kind/state/bounds/string rejection, independent CONTROL high-water,
   shared object/UTF-8 quota exhaustion, and refusal to emit activation before
   the exact visible/enabled view revision is selected-sink acknowledged;
+- TEXT field edit records, placeholders, and MASKED values with their
+  range and canonical-field refusals, and `PLACE` and `EXTEND` positions in
+  LTR, RTL, scrolled, and empty values;
+- DLG1 and BTN1 bodies with their geometry, line, and flag refusals; a modal
+  region whose controls stay active while every control beneath it emits
+  nothing; and a button inside a dialog taking the points it covers;
 - explicit/uniform series append, ring eviction, replace, and timestamp errors;
 - resize layout hiding/reveal and reset CELL-first replay, including a valid
   crossed CELL/PRESENT COMMIT and crossed OWNER_DROP each settled by old-epoch

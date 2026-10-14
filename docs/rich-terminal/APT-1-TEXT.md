@@ -211,10 +211,15 @@ its two endpoints. In mixed-direction text its cells need not be contiguous.
 - **`GLYPH_RUN` text** is visual-order display text taken from cells. The
   renderer segments it by Section 3 and gives each character `W(c)` slots,
   left to right. It applies no reordering, mirroring, or joining.
-- **Renderer-laid-out labels**, such as menu, tab, and shortcut text and
-  READOUT units, are logical text. The renderer lays each one out as one AUTO
-  paragraph using Sections 3, 7, and 8. Their widths are the renderer's,
-  since such labels may use proportional fonts.
+- **Renderer-laid-out labels**, such as menu, tab, button, and shortcut text,
+  dialog titles and message lines, and READOUT units, are logical text. The
+  renderer lays each one out as one AUTO paragraph using Sections 3, 7, and 8.
+  Their widths are the renderer's, since such labels may use proportional
+  fonts.
+- **TEXT field values and placeholders** (`APT-1-RETAINED-1.md` Section 9.2)
+  are logical text laid out like one STX1 text-area row, in cells, so the
+  client and the terminal agree on the value's width, its scroll, and the
+  positions the caret and a press name.
 - **STX1 text** is logical text. `SEMANTIC-CONTENT-1.md` defines its
   paragraph direction, its columns in cells, and how rows are laid out.
 - **ITM1 fields and column labels** are logical text laid out like STX1

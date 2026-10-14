@@ -633,7 +633,9 @@ Unicode-scalar boundary within that item. The terminal computes a position
 from its own presentation of the content and emits an event only for a
 visible, effectively enabled root. `READ_ONLY` content admits all four kinds,
 because they move the caret, selection, or viewport, or follow a link, and
-never change the text.
+never change the text. `PLACE` and `EXTEND` also name positions in a TEXT
+`FIELD`; that use needs feature bit 14 instead of 9, and
+`APT-1-RETAINED-1.md` Section 9.2 defines it.
 
 `PLACE` puts the caret in a text area or selects a grid item:
 
