@@ -34,7 +34,8 @@ enum Opcode : uint32_t {
     OP_LITERAL, OP_BRANCH, OP_BRANCH_ZERO, OP_CALL, OP_RETURN,
     OP_STORE_VALUE, OP_STRING_LITERAL,
     OP_R_PUSH, OP_R_POP, OP_R_PEEK,
-    OP_DO, OP_QUESTION_DO, OP_LOOP, OP_PLUS_LOOP, OP_UNLOOP, OP_ABORT_IF,
+    OP_DO, OP_QUESTION_DO, OP_LOOP, OP_PLUS_LOOP, OP_UNLOOP,
+    OP_R_PUSH_PAIR, OP_R_POP_PAIR, OP_R_PEEK_PAIR, OP_ABORT_IF,
     OP_PUSH_CELL, OP_FETCH_VALUE,
     OP_DUP, OP_DROP, OP_SWAP, OP_OVER, OP_NIP, OP_TUCK, OP_ROT, OP_MINUS_ROT,
     OP_TWO_DUP, OP_TWO_DROP, OP_TWO_OVER, OP_TWO_SWAP, OP_QUESTION_DUP, OP_PICK,
@@ -542,7 +543,7 @@ static bool inline_callback(uint32_t opcode) noexcept {
     case OP_CALL: case OP_RETURN: case OP_STORE_VALUE: case OP_STRING_LITERAL:
     case OP_R_PUSH: case OP_R_POP: case OP_R_PEEK:
     case OP_DO: case OP_QUESTION_DO: case OP_LOOP: case OP_PLUS_LOOP: case OP_UNLOOP:
-    case OP_ABORT_IF:
+    case OP_R_PUSH_PAIR: case OP_R_POP_PAIR: case OP_R_PEEK_PAIR: case OP_ABORT_IF:
     case OP_I: case OP_J: case OP_EXECUTE: case OP_RP_FETCH: case OP_CALL_ROUTINE:
         return false;
     default:
@@ -1498,6 +1499,34 @@ private:
             ++s.ip;
             return true;
         }
+        case OP_R_PUSH_PAIR: {
+            // 2>R: the deeper data cell goes deeper on the return stack. Both
+            // stacks are preflighted before either changes, so a failure
+            // leaves Python the exact reference fault.
+            if (!stack.inputs(2) || !stack.outputs(0)) return false;
+            StackOperation returns(memory, s.returns);
+            if (!returns.inputs(0) || !returns.outputs(2)) return false;
+            returns.result[0] = v[1];
+            returns.result[1] = v[0];
+            erase_return_pair_types(s, s.returns.pointer - 16, s.returns.pointer - 8);
+            returns.commit();
+            stack.commit();
+            ++s.ip;
+            return true;
+        }
+        case OP_R_POP_PAIR: case OP_R_PEEK_PAIR: {
+            // 2R> and 2R@ take two user cells, never a continuation or a
+            // machine return, and push the deeper one first.
+            std::array<Cell, 4> cells{};
+            if (!stack.inputs(0) || !stack.outputs(2) ||
+                !user_return_cells(memory, s, continuations, 2, cells)) return false;
+            out[0] = cells[1];
+            out[1] = cells[0];
+            if (opcode == OP_R_POP_PAIR) s.returns.pointer += 16;
+            stack.commit();
+            ++s.ip;
+            return true;
+        }
         case OP_LOOP: case OP_PLUS_LOOP: case OP_UNLOOP: {
             const bool plus = opcode == OP_PLUS_LOOP;
             if (!stack.inputs(plus ? 1 : 0) || !stack.outputs(0)) return false;
@@ -1806,7 +1835,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
     megapad::tile_values::register_bindings(module);
     megapad::dictionary::register_bindings(module);
     megapad::walker::register_bindings(module);
-    module.attr("SEMANTIC_API_VERSION") = 9;
+    module.attr("SEMANTIC_API_VERSION") = 10;
     module.attr("MACHINE_STOPPED_CALL") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_CALL));
     module.attr("MACHINE_STOPPED_RESUME") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_RESUME));
     module.attr("MACHINE_CALLBACK") = py::int_(static_cast<uint32_t>(MACHINE_CALLBACK));
@@ -1840,6 +1869,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
     EXPORT_OPCODE(OP_R_PUSH); EXPORT_OPCODE(OP_R_POP); EXPORT_OPCODE(OP_R_PEEK);
     EXPORT_OPCODE(OP_DO); EXPORT_OPCODE(OP_QUESTION_DO); EXPORT_OPCODE(OP_LOOP);
     EXPORT_OPCODE(OP_PLUS_LOOP); EXPORT_OPCODE(OP_UNLOOP); EXPORT_OPCODE(OP_ABORT_IF);
+    EXPORT_OPCODE(OP_R_PUSH_PAIR); EXPORT_OPCODE(OP_R_POP_PAIR); EXPORT_OPCODE(OP_R_PEEK_PAIR);
     EXPORT_OPCODE(OP_SCALAR_FP); EXPORT_OPCODE(OP_FPCSR_FETCH);
     EXPORT_OPCODE(OP_FPCSR_STORE); EXPORT_OPCODE(OP_CALL_ROUTINE);
     EXPORT_OPCODE(OP_TILE_MODE_SET); EXPORT_OPCODE(OP_TILE_MODE_STORE);

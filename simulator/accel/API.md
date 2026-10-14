@@ -3,7 +3,7 @@
 The extension and its Python owner are built from the same checkout and use
 one current internal interface. Rebuild the extension after changing this
 boundary with `python setup_simulator_accel.py build_ext --inplace --force`.
-The extension exports `SEMANTIC_API_VERSION = 9`; its Python owner checks this
+The extension exports `SEMANTIC_API_VERSION = 10`; its Python owner checks this
 version before admission. An explicit native request rejects older builds;
 automatic selection keeps the reference executor and the Python dictionary
 when the version mismatches.
@@ -152,9 +152,11 @@ Native colon calls write exact opaque continuation cookies into the shared
 return-stack bytes. Native returns can also consume preexisting ordinary
 continuations, read lazily from the same dictionary and verified against shared
 bytes and the exact `continuation_type`. Root/fault returns and stale metadata
-return to Python before mutation. `>R`, `R>`, and `R@` use the single ordered
-return stack; exposed continuations are never mistaken for user cells or loop
-indices. Counted loops use fixed-position limit/index pairs and preserve
+return to Python before mutation. `>R`, `R>`, `R@` and the pair words `2>R`,
+`2R>` and `2R@` use the single ordered return stack; exposed continuations are
+never mistaken for user cells or loop indices. A pair word moves or copies both
+cells in one operation, and stops before any effect unless both top return
+cells are user cells, so Python raises the reference error. Counted loops use fixed-position limit/index pairs and preserve
 modular equality termination, retained bytes, and type deletion on both
 new frame slots. Identity-bound `I` and `J` never search past a continuation.
 Identity-bound `EXECUTE` can enter an already installed colon plan, consuming
@@ -178,15 +180,15 @@ stack capacity. Untouched slots remain distinct from explicit type deletions;
 all changed inactive slots are exported for subsequent `RP!`. Allocation for
 paired loop slots finishes before either type changes.
 
-Native still excludes pair return-stack operations,
-stack-pointer restoration, other dynamic execution, services other than the
+Native still excludes stack-pointer restoration, other dynamic execution, services other than the
 identity-bound scalar FP operations described below, and any
 ordinary memory access intersecting the return-stack backing interval.
 
 `OP_LITERAL`, `OP_BRANCH`, `OP_BRANCH_ZERO`, `OP_CALL`, `OP_RETURN`,
 `OP_STORE_VALUE`, `OP_STRING_LITERAL`, `OP_R_PUSH`, `OP_R_POP`, `OP_R_PEEK`,
-`OP_DO`, `OP_QUESTION_DO`, `OP_LOOP`, `OP_PLUS_LOOP`, `OP_UNLOOP` and
-`OP_ABORT_IF` cost one semantic step. `OP_ABORT_IF` is the test of a compiled
+`OP_DO`, `OP_QUESTION_DO`, `OP_LOOP`, `OP_PLUS_LOOP`, `OP_UNLOOP`,
+`OP_R_PUSH_PAIR`, `OP_R_POP_PAIR`, `OP_R_PEEK_PAIR` and `OP_ABORT_IF` cost
+one semantic step. `OP_ABORT_IF` is the test of a compiled
 `ABORT"`: it consumes a zero flag and continues, and stops before any effect
 on a true one, so Python performs the abort. Compiled calls to the original
 `EVAL-STATUS`, `EVAL-LINE`, `EVAL-COLUMN`, `EVAL-DEPTH` and `EVAL-THROW`

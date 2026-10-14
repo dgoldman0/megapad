@@ -22,7 +22,7 @@ from simulator.timer import HostedTimerService
 # Without a host quantum, native work still returns to the same dispatcher at
 # this interval. It bounds one native entry, not a guest-visible boundary.
 UNQUANTIZED_NATIVE_INTERVAL_STEPS = 8192
-SEMANTIC_API_VERSION = 9
+SEMANTIC_API_VERSION = 10
 
 
 def load_native_extension(*, required: bool):
@@ -440,6 +440,12 @@ class NativeExecutor:
                     item = (op.OP_STORE_VALUE, instruction.address, 0)
                 elif isinstance(instruction, ir.AbortIf):
                     item = (op.OP_ABORT_IF, 0, 0)
+                elif isinstance(instruction, ir.RPushPair):
+                    item = (op.OP_R_PUSH_PAIR, 0, 0)
+                elif isinstance(instruction, ir.RPopPair):
+                    item = (op.OP_R_POP_PAIR, 0, 0)
+                elif isinstance(instruction, ir.RPeekPair):
+                    item = (op.OP_R_PEEK_PAIR, 0, 0)
                 elif isinstance(instruction, ir.PushStringLiteral):
                     item = (op.OP_STRING_LITERAL,
                             word.body_address + instruction.offset,

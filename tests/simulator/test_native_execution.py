@@ -1126,3 +1126,28 @@ def test_abort_quote_test_runs_natively_and_aborts_through_python(flag):
     else:
         assert result["error"] is None
         assert result["data"] == (5, 6)
+
+
+def test_pair_return_words_run_natively_in_reference_order(monkeypatch):
+    monkeypatch.setenv("MEGAFORTH_NATIVE_PROFILE", "1")
+    runtimes = _runtimes(
+        b": RUN 1 2 2>R 3 2R@ 2R> 10 20 2>R 2R@ 2DROP 2R> ;"
+    )
+    result = _compare(runtimes, "RUN")
+    assert result["error"] is None
+    assert result["data"] == (3, 1, 2, 1, 2, 10, 20)
+    exits = runtimes[1].native_execution_stats["profile"]["exits"]
+    assert not [key for key in exits if "Pair" in key]
+
+
+def test_pair_return_words_observe_a_raw_loop_frame():
+    runtimes = _runtimes(b": RUN 0 5 2 DO 2R@ + + LOOP ;")
+    result = _compare(runtimes, "RUN")
+    assert result["error"] is None
+
+
+@pytest.mark.parametrize("source", (b": RUN 2R> ;", b": RUN 2R@ ;", b": RUN 1 2>R ;"))
+def test_pair_return_words_fail_like_the_reference(source):
+    runtimes = _runtimes(source)
+    result = _compare(runtimes, "RUN", require_native=False)
+    assert result["error"] is not None
