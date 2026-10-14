@@ -235,6 +235,14 @@ disjoint `MSPAN-OVERLAP?` takes 46 steps instead of 92. A keystroke fell
 from 29.27 to 27.51 million guest steps (6%). Simulator wall time did not
 change measurably, since stack-only steps are the native executor's cheapest.
 
+**Design for the rest.** Akashic `docs/rich-terminal/KEYSTROKE-FRAME-WORK.md`
+(Akashic `28d118d2`) proposes seven parts, each labeled as a behavior change, a
+removal of provably repeated work, or a design change kept exact by checking it
+against the full path. It also records a measurement this plan did not have:
+each key resends six controls whose content did not change, about 15.8 KB of
+16.2 KB on the wire. It estimates 8 to 10 million guest steps per key once all
+seven parts land. The design awaits review.
+
 ## Decisions
 
 Reviewed 2026-10-13:
