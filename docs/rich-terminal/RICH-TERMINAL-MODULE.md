@@ -633,11 +633,18 @@ flags, explicit root-relative label/value rectangles, numeric value/range/
 step, choice count, and text byte count. `PT-FIELD-INTEGER` (1) requires an
 inclusive range containing the value and a positive step. `PT-FIELD-CHOICE`
 (2) requires unique signed values with nonempty labels and a declared current
-value; range and step are zero. `PT-FIELD-TEXT` (3) carries exact UTF-8 text
-and zero numeric fields. `PT-FIELD-F-READ-ONLY` is the sole flag. Label bounds
-are all-zero exactly when the CONTROL label is empty; otherwise both label
-and value slots are positive, contained in the root, and disjoint. FDC1
-strings and the FIELD label exclude C0/C1, DEL, U+2028, and U+2029.
+value; range and step are zero. `PT-FIELD-TEXT` (3) has zero numeric fields
+and a 16-byte edit record after the header (caret, anchor, scroll, and
+placeholder bytes), followed by the exact UTF-8 value and then the
+placeholder. PT checks the record's exact length and that the caret and
+anchor lie within the value's scalars; the scroll's bound is the value's
+width in cells, which the terminal's text rules check.
+`PT-FIELD-F-READ-ONLY` and `PT-FIELD-F-MASKED` are the flags, and MASKED is
+valid only on TEXT: a masked value holds one mask character for each
+character of the secret, never the secret. Label bounds are all-zero exactly
+when the CONTROL label is empty; otherwise both label and value slots are
+positive, contained in the root, and disjoint. FDC1 strings, placeholders,
+and the FIELD label exclude C0/C1, DEL, U+2028, and U+2029.
 
 PT validates the complete borrowed FDC1 span, including reserved fields,
 canonical lengths, choice uniqueness, geometry, and string content, before
@@ -646,9 +653,30 @@ choice detection rescans preceding records within the bounded input. Existing
 span-alias checks and terminal owner quotas apply, and temporary content
 pointers are cleared before return.
 
+`PT-CONTROL-DIALOG` (15) and `PT-CONTROL-BUTTON` (16) use the same writers
+and require `RET_DIALOGS` (bit 17), which `PT-RET-DIALOGS?` reports; it
+depends on CONTROLS, and discovery requires a 136-byte inbound payload and a
+336-byte retained transaction. Both are positive roots with parent and order
+zero. A dialog has an optional title as its label, an empty shortcut, only
+the VISIBLE state, and an exact DLG1 body: tag, version 1, the
+`PT-DIALOG-F-NOTICE` flag, a positive revision, a severity from 0 to 4, its
+message length, a title slot present exactly when the title is, and a
+message slot present exactly when the message is, both inside the root and
+apart. The message is UTF-8 whose lines are separated by line feeds, with no
+other C0 and no DEL, C1, U+2028, or U+2029, and no more lines than its slot
+has rows. A button has a nonempty label, an optional shortcut,
+VISIBLE/ENABLED/SELECTED, and an exact 8-byte BTN1 body of
+`PT-BUTTON-F-DEFAULT`, `PT-BUTTON-F-CANCEL`, and `PT-BUTTON-F-DESTRUCTIVE`,
+never destructive and default. `PT-REGION-F-MODAL` (region flag bit 2) makes
+a region a modal scope; the region writers pass flags through and the
+terminal checks them.
+
 `PT-CONTROL-ADJUST` (11) is the existing CONTROL_EVENT prefix plus a 16-byte
 tail containing content revision and a nonzero signed step count. It is
-gated by FIELDS independently of collections. `PT-CONTROL-EVENT-ADJUSTMENT@`
+gated by FIELDS independently of collections. PLACE and EXTEND, which also
+name positions in a TEXT field's value with item key zero, are admitted
+under FIELDS as well as under the collections; FOLLOW, SCROLL, and the item
+events still need a nonzero key and their families. `PT-CONTROL-EVENT-ADJUSTMENT@`
 returns that signed count only for an ADJUST descriptor with the exact tail;
 `PT-CONTROL-EVENT-CONTENT-REVISION@` accepts ADJUST's 16-byte tail and the
 existing positioned/item 24-byte tails. Other event types, wrong kinds, and
