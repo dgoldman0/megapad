@@ -1,8 +1,7 @@
 # Simulator speed plan: boot compile, typing host work, guest work
 
-Status: agreed 2026-10-13 (see Decisions). Step 1a is done (see Step 1a
-results). Step 1b's first three slices and step 1c are done; 1b's wider
-checked-line rule is next.
+Status: agreed 2026-10-13 (see Decisions). Step 1 is done (see Step 1
+results): the boot compile fell from about 40 s to 2.5 s. Step 2 is next.
 
 The hosted simulator with the native executor already runs guest Forth in
 C++, at about 80 million semantic steps per second. These measurements ask
@@ -116,8 +115,8 @@ faster loader.
 The two loader overlays pass whole runs of lines to a native line walker. It
 evaluates each line the checked-line rule admits, and hands any other line
 back to Python whole, because that rule chooses the per-line protocol for the
-whole line. The work lands in four slices: the dictionary, the walker, plans
-that survive publication, and a wider checked-line rule.
+whole line. The work landed in three slices: the dictionary, the walker,
+and plans that survive publication.
 
 The rules:
 
@@ -251,3 +250,35 @@ not yet known. It is an existing defect, to be fixed on its own.
 - publication.
 
 Step 1b addresses these.
+
+## Step 1 results
+
+Boot compile medians of the `desktop-apt1` image, each from alternating runs
+against the change before it, with `PYTHONHASHSEED` pinned:
+
+| Change | Commit | Boot compile |
+| --- | --- | --- |
+| Before step 1 | `79ac6745` | about 38 s |
+| 1a: measured Python redundancy | `3bcdf27e` | 27.3 s |
+| 1b slice 1: native dictionary and side index | `cf2c0155` | 26.5 s |
+| 1b slice 2: native line walker | `13ea0f10` | 5.8 s |
+| 1b slice 3: plans that survive publication | `06b5731a` | 6.0 s, on a busier host |
+| 1c: native tile words | `c37f7310` | 4.7 s |
+| Plans for overlaid words | `102ff674` | 3.1 s |
+| The tile guard once per run | `998dc617` | 2.7 s |
+| Evaluator cell words and the `ABORT"` test | `092f2d97` | 2.5 s |
+
+The host was shared with another project's tests, so a row compares only
+with the one above it, measured in the same session. Every change kept the
+boot fingerprint identical to step 1a's: guest steps, every definition and
+its IR, all memory, the side index and the stack pointers.
+
+The physical Desktop journey passed at slice 2 (225 s) and with the
+overlaid plans (204 s, against 249 s at 1a).
+
+**What remains of the boot compile.** About half of the 2.5 s is the 9,343
+lines the checked-line rule does not admit, mostly the guest words they run,
+such as `CMP-CELL:`, `PROVIDED`, `DEFER` and `REQUIRE`. The native walker
+takes about 0.4 s for its 195,000 lines. Most native-run stops are now
+structural: root returns and `EXECUTE` of a primitive. The most frequent
+remaining primitive stops are the dictionary emitters `C,` and `,`.

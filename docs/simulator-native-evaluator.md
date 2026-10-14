@@ -1,9 +1,8 @@
 # Native dictionary and source evaluator
 
 Status: step 1b of the [simulator speed plan](simulator-speed-plan.md),
-2026-10-13. Slices 1 to 3 are implemented: the native dictionary, the native
-line walker and plans that survive publication. Slice 4 is designed. Each
-slice updates this document when it lands.
+done on 2026-10-13 in three slices: the native dictionary, the native line
+walker, and plans that survive publication.
 
 The hosted simulator compiles about 210,000 lines of KDOS and Akashic source
 at every boot. After step 1a this takes about 27 s, and almost all of it is
@@ -217,17 +216,6 @@ dictionaries now advance the generation only when a definition is removed,
 a body is reclaimed or the head is rebound. `DOES>`, overlay installation and
 closing a hybrid runtime keep invalidating plans explicitly.
 
-## Wider admission
-
-Most of the remaining Python lines are `CREATE` followed by `ALLOT`, `,` or
-`C,`, several `VARIABLE`s on one line, `'` before `CONSTANT` or `IS`, and
-data tables of `,`. None of these can run arbitrary guest code once growth and
-stack room are proven. Widening the checked-line rule to admit them changes
-the Python reference and the native walker together, and the differential
-gate still compares them. Admitted lines skip the `CATCH` wrapper, so the
-semantic step count falls. The contract already treats that as an
-optimization property of admitted overlays.
-
 ## Slices and gates
 
 Each slice keeps both backends green and is committed on its own.
@@ -254,19 +242,18 @@ Each slice keeps both backends green and is committed on its own.
    unchanged and the boot ends with 659 plans instead of 116. Four
    alternating boot compiles gave medians of 6.0 s against 6.6 s for slice
    2, on a busier host than slice 2's own measurement.
-4. **Wider admission** in both evaluators. The boot fingerprint now matches
-   the Python backend's boot with the same rule.
-
-After slices 2 and 4, the boot compile is measured with alternating runs as
-in step 1a, and the physical Desktop journey runs as the regression gate.
-`make test-simulator` and `make test-simulator-native` run after every slice.
+Each slice's boot compile was measured with alternating runs as in step 1a.
+`make test-simulator` and `make test-simulator-native` ran after every slice,
+and the physical Desktop journey passed after slices 2 and 3.
 
 ## Not changing
 
 - Source is still evaluated at every boot. This is not a compiled-Forth cache.
-- The KDOS boot source loop in `image_bootstrap.py` stays in Python. It is
-  about 0.4 s.
-- The `CATCH` path for lines that run guest code stays in Python.
+- The KDOS boot source loop in `image_bootstrap.py` stays in Python. After
+  step 1 it costs about 0.15 s.
+- Lines the checked-line rule does not admit keep the KDOS `CATCH` path and
+  the Python evaluator. Their remaining cost is mostly the guest words they
+  run, not their evaluation.
 - The rules in `simulator-contract.md` §4 still hold: at most 255 bytes per
   `EVALUATE`, the sticky first failure, the temporary `IF` lifetime,
   transaction rollback, and identity-bound overlays that fall back to the
