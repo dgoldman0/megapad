@@ -3,7 +3,7 @@
 The extension and its Python owner are built from the same checkout and use
 one current internal interface. Rebuild the extension after changing this
 boundary with `python setup_simulator_accel.py build_ext --inplace --force`.
-The extension exports `SEMANTIC_API_VERSION = 8`; its Python owner checks this
+The extension exports `SEMANTIC_API_VERSION = 9`; its Python owner checks this
 version before admission. An explicit native request rejects older builds;
 automatic selection keeps the reference executor and the Python dictionary
 when the version mismatches.
@@ -185,8 +185,12 @@ ordinary memory access intersecting the return-stack backing interval.
 
 `OP_LITERAL`, `OP_BRANCH`, `OP_BRANCH_ZERO`, `OP_CALL`, `OP_RETURN`,
 `OP_STORE_VALUE`, `OP_STRING_LITERAL`, `OP_R_PUSH`, `OP_R_POP`, `OP_R_PEEK`,
-`OP_DO`, `OP_QUESTION_DO`, `OP_LOOP`, `OP_PLUS_LOOP`, and `OP_UNLOOP`
-cost one semantic step. `OP_PUSH_CELL`
+`OP_DO`, `OP_QUESTION_DO`, `OP_LOOP`, `OP_PLUS_LOOP`, `OP_UNLOOP` and
+`OP_ABORT_IF` cost one semantic step. `OP_ABORT_IF` is the test of a compiled
+`ABORT"`: it consumes a zero flag and continues, and stops before any effect
+on a true one, so Python performs the abort. Compiled calls to the original
+`EVAL-STATUS`, `EVAL-LINE`, `EVAL-COLUMN`, `EVAL-DEPTH` and `EVAL-THROW`
+plan as `OP_PUSH_CELL` of the fixed cell each pushes. `OP_PUSH_CELL`
 (constant or plain created-body address), `OP_FETCH_VALUE`, and admitted
 primitive-call operations cost two. `OP_STOP` is uncharged. `a` holds the
 literal, branch IP, called XT, or data address where applicable;

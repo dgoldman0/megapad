@@ -1101,3 +1101,28 @@ def test_dynamic_execute_admission_keeps_original_word_binding_after_shadowing()
     for runtime in runtimes:
         runtime.main_context.data.clear()
     assert _compare(runtimes, "SHADOW", inputs=(token,))["data"] == (99,)
+
+
+def test_evaluator_cell_words_compile_to_their_fixed_cells():
+    runtimes = _runtimes(
+        b": RUN EVAL-STATUS EVAL-LINE EVAL-COLUMN EVAL-DEPTH EVAL-THROW ;"
+    )
+    result = _compare(runtimes, "RUN")
+    evaluator = runtimes[0]._require_bios_evaluator()
+    assert result["data"] == (
+        evaluator.status_address, evaluator.line_address,
+        evaluator.column_address, evaluator.depth_address,
+        evaluator.throw_address,
+    )
+
+
+@pytest.mark.parametrize("flag", (0, 1))
+def test_abort_quote_test_runs_natively_and_aborts_through_python(flag):
+    runtimes = _runtimes(b': RUN 5 SWAP ABORT" stopped" 6 ;')
+    result = _compare(runtimes, "RUN", inputs=(flag,), require_native=flag == 0)
+    if flag:
+        assert result["error"] is not None
+        assert result["uart"].endswith(b"stopped")
+    else:
+        assert result["error"] is None
+        assert result["data"] == (5, 6)

@@ -22,7 +22,7 @@ from simulator.timer import HostedTimerService
 # Without a host quantum, native work still returns to the same dispatcher at
 # this interval. It bounds one native entry, not a guest-visible boundary.
 UNQUANTIZED_NATIVE_INTERVAL_STEPS = 8192
-SEMANTIC_API_VERSION = 8
+SEMANTIC_API_VERSION = 9
 
 
 def load_native_extension(*, required: bool):
@@ -128,6 +128,25 @@ class NativeExecutor:
             if admit_core and isinstance(word.implementation, rt.PrimitiveDefinition)
             and word.name in tile_operations
         }
+        # The original BIOS evaluator words push their own fixed body cells,
+        # bound before any source runs, so a compiled call is a constant push.
+        self.cell_primitives = {}
+        evaluator = runtime._bios_evaluator
+        if admit_core and evaluator is not None:
+            for name, address in (
+                (b"EVAL-STATUS", evaluator.status_address),
+                (b"EVAL-LINE", evaluator.line_address),
+                (b"EVAL-COLUMN", evaluator.column_address),
+                (b"EVAL-DEPTH", evaluator.depth_address),
+                (b"EVAL-THROW", evaluator.throw_address),
+            ):
+                word = runtime.dictionary.find(name)
+                if (word is not None
+                        and isinstance(word.implementation, rt.PrimitiveDefinition)
+                        and word.body_address == address):
+                    self.cell_primitives[word.xt] = (
+                        word, (extension.OP_PUSH_CELL, address, 0)
+                    )
         # The service's identity guard is not free, so the program calls it
         # only in a run that reaches a tile word, once.
         tile = self.tile
@@ -348,6 +367,9 @@ class NativeExecutor:
             tile = self.tile_primitives.get(target.xt)
             if tile is not None and tile[0] is target:
                 return tile[1]
+            cell = self.cell_primitives.get(target.xt)
+            if cell is not None and cell[0] is target:
+                return cell[1]
         if isinstance(implementation, rt.ColonDefinition):
             if target.xt not in self.runtime._colon_accelerators:
                 pending.append(target)
@@ -416,6 +438,8 @@ class NativeExecutor:
                     item = (op.OP_UNLOOP, 0, 0)
                 elif isinstance(instruction, ir.StoreValue):
                     item = (op.OP_STORE_VALUE, instruction.address, 0)
+                elif isinstance(instruction, ir.AbortIf):
+                    item = (op.OP_ABORT_IF, 0, 0)
                 elif isinstance(instruction, ir.PushStringLiteral):
                     item = (op.OP_STRING_LITERAL,
                             word.body_address + instruction.offset,
@@ -431,7 +455,7 @@ class NativeExecutor:
             # primitive/constant call also includes its execution tick.
             self.entry_costs[word.xt] = bytes(
                 0 if operation[0] == op.OP_STOP else
-                1 if op.OP_LITERAL <= operation[0] <= op.OP_UNLOOP else 2
+                1 if op.OP_LITERAL <= operation[0] <= op.OP_ABORT_IF else 2
                 for operation in operations
             )
 

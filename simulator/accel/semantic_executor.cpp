@@ -34,7 +34,7 @@ enum Opcode : uint32_t {
     OP_LITERAL, OP_BRANCH, OP_BRANCH_ZERO, OP_CALL, OP_RETURN,
     OP_STORE_VALUE, OP_STRING_LITERAL,
     OP_R_PUSH, OP_R_POP, OP_R_PEEK,
-    OP_DO, OP_QUESTION_DO, OP_LOOP, OP_PLUS_LOOP, OP_UNLOOP,
+    OP_DO, OP_QUESTION_DO, OP_LOOP, OP_PLUS_LOOP, OP_UNLOOP, OP_ABORT_IF,
     OP_PUSH_CELL, OP_FETCH_VALUE,
     OP_DUP, OP_DROP, OP_SWAP, OP_OVER, OP_NIP, OP_TUCK, OP_ROT, OP_MINUS_ROT,
     OP_TWO_DUP, OP_TWO_DROP, OP_TWO_OVER, OP_TWO_SWAP, OP_QUESTION_DUP, OP_PICK,
@@ -542,6 +542,7 @@ static bool inline_callback(uint32_t opcode) noexcept {
     case OP_CALL: case OP_RETURN: case OP_STORE_VALUE: case OP_STRING_LITERAL:
     case OP_R_PUSH: case OP_R_POP: case OP_R_PEEK:
     case OP_DO: case OP_QUESTION_DO: case OP_LOOP: case OP_PLUS_LOOP: case OP_UNLOOP:
+    case OP_ABORT_IF:
     case OP_I: case OP_J: case OP_EXECUTE: case OP_RP_FETCH: case OP_CALL_ROUTINE:
         return false;
     default:
@@ -558,7 +559,7 @@ static Cell magnitude(Cell value) noexcept {
 }
 
 static unsigned cost(uint32_t opcode) noexcept {
-    return opcode >= OP_LITERAL && opcode <= OP_UNLOOP ? 1 : 2;
+    return opcode >= OP_LITERAL && opcode <= OP_ABORT_IF ? 1 : 2;
 }
 
 // Preflight all stack operands and all output storage before the operation.
@@ -1534,6 +1535,12 @@ private:
             if (!stack.inputs(0)) return false;
             out[0] = s.fpcsr; produced = 1;
             break;
+        case OP_ABORT_IF:
+            // A true flag aborts, which Python performs from this boundary.
+            if (!stack.inputs(1) || !stack.outputs(0) || v[0] != 0) return false;
+            stack.commit();
+            ++s.ip;
+            return true;
         case OP_TILE_MODE_SET:
             if (!tile_admitted(s) || !stack.inputs(0) || !stack.outputs(0)) return false;
             stack.commit();
@@ -1799,7 +1806,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
     megapad::tile_values::register_bindings(module);
     megapad::dictionary::register_bindings(module);
     megapad::walker::register_bindings(module);
-    module.attr("SEMANTIC_API_VERSION") = 8;
+    module.attr("SEMANTIC_API_VERSION") = 9;
     module.attr("MACHINE_STOPPED_CALL") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_CALL));
     module.attr("MACHINE_STOPPED_RESUME") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_RESUME));
     module.attr("MACHINE_CALLBACK") = py::int_(static_cast<uint32_t>(MACHINE_CALLBACK));
@@ -1832,7 +1839,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
     EXPORT_OPCODE(OP_STRING_LITERAL); EXPORT_OPCODE(OP_PUSH_CELL); EXPORT_OPCODE(OP_FETCH_VALUE);
     EXPORT_OPCODE(OP_R_PUSH); EXPORT_OPCODE(OP_R_POP); EXPORT_OPCODE(OP_R_PEEK);
     EXPORT_OPCODE(OP_DO); EXPORT_OPCODE(OP_QUESTION_DO); EXPORT_OPCODE(OP_LOOP);
-    EXPORT_OPCODE(OP_PLUS_LOOP); EXPORT_OPCODE(OP_UNLOOP);
+    EXPORT_OPCODE(OP_PLUS_LOOP); EXPORT_OPCODE(OP_UNLOOP); EXPORT_OPCODE(OP_ABORT_IF);
     EXPORT_OPCODE(OP_SCALAR_FP); EXPORT_OPCODE(OP_FPCSR_FETCH);
     EXPORT_OPCODE(OP_FPCSR_STORE); EXPORT_OPCODE(OP_CALL_ROUTINE);
     EXPORT_OPCODE(OP_TILE_MODE_SET); EXPORT_OPCODE(OP_TILE_MODE_STORE);
