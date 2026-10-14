@@ -59,8 +59,9 @@ replacement, transition copying, or hybrid execution is introduced here.
 
 `install(xt, operations)` installs a plan of `(opcode, a, b)` triples, one per
 original IR operation, so branch targets and returned IPs remain original IR
-indices. `clear()` drops all plans. The Python owner invalidates plans for
-dictionary publication/rollback and mutable execution bindings. Opcode
+indices. `clear()` drops all plans. The Python owner invalidates plans when
+the dictionary removes a definition or reclaims a body, and for mutable
+execution bindings; publishing a new definition leaves them valid. Opcode
 constants are exported with the `OP_` prefix.
 
 Installation also recognizes literal/constant arithmetic, address pushes

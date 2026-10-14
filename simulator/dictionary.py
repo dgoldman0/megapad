@@ -166,7 +166,13 @@ class Dictionary:
 
     @property
     def execution_generation(self) -> int:
-        """Invalidate execution plans after definition publication or removal."""
+        """Invalidate execution plans after a definition or body is removed.
+
+        Publishing a new definition changes no existing word's behavior:
+        it has a fresh XT, and plans bind their targets by XT.  Removal,
+        reclaimed bodies and rebinding the head do change what plans may
+        call, so only they advance the generation.
+        """
 
         return self._execution_generation
 
@@ -306,7 +312,6 @@ class Dictionary:
             )
         self._header_limit = max(self._header_limit, word.body_address)
         self._here = allocation_limit
-        self._execution_generation += 1
         return word
 
     def definition_size(

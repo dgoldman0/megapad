@@ -169,7 +169,8 @@ py::tuple NativeDictionary::define_record(const std::string& name,
     }
     header_limit_ = std::max(header_limit_, xt + SEMANTIC_CODE_SLOT_BYTES);
     here_ = allocation_limit;
-    ++generation_;
+    // A new definition has a fresh XT and changes no existing word, so plans
+    // stay valid; only removals and reclaimed bodies advance the generation.
     return py::make_tuple(index, header_address, xt, records_.back().uid);
 }
 

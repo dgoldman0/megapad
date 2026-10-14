@@ -322,7 +322,7 @@ class NativeDictionary:
 
     @property
     def execution_generation(self) -> int:
-        """Invalidate execution plans after definition publication or removal."""
+        """Invalidate execution plans after a definition or body is removed."""
 
         return self._native.execution_generation
 

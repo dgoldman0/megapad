@@ -116,7 +116,7 @@ The two loader overlays pass whole runs of lines to a native line walker. It
 evaluates each line the checked-line rule admits, and hands any other line
 back to Python whole, because that rule chooses the per-line protocol for the
 whole line. The work lands in four slices: the dictionary, the walker, plans
-built from native IR, and a wider checked-line rule.
+that survive publication, and a wider checked-line rule.
 
 The rules:
 

@@ -87,7 +87,8 @@ def test_unrelated_publication_shadowing_and_raw_stores_preserve_allocation() ->
     shadow = dictionary.define("code", initial_body=b"new image")
     memory.write_bytes(word.body_address, b"other image")
 
-    assert dictionary.execution_generation == generation + 2
+    # A new definition, even a shadowing one, changes no planned word.
+    assert dictionary.execution_generation == generation
     assert dictionary.find("CODE") is shadow
     assert dictionary.resolve(word.xt) is word
     assert memory.read_bytes(word.body_address, 11) == b"other image"

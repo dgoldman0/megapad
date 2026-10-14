@@ -1,9 +1,9 @@
 # Native dictionary and source evaluator
 
 Status: step 1b of the [simulator speed plan](simulator-speed-plan.md),
-2026-10-13. Slices 1 and 2, the native dictionary and the native line walker,
-are implemented; slices 3 and 4 are designed. Each slice updates this
-document when it lands.
+2026-10-13. Slices 1 to 3 are implemented: the native dictionary, the native
+line walker and plans that survive publication. Slice 4 is designed. Each
+slice updates this document when it lands.
 
 The hosted simulator compiles about 210,000 lines of KDOS and Akashic source
 at every boot. After step 1a this takes about 27 s, and almost all of it is
@@ -206,15 +206,16 @@ every definition with its IR, the side index, the evaluator cells and UART
 output. Host-only counters may differ: dispatch root identifiers, and
 continuation metadata for return-stack slots that are no longer live.
 
-## Native plans from native IR
+## Plans that survive publication
 
-The executor still builds plans from Python IR, which would force IR views
-for every executed word. Once the IR is native, plans are built from it
-directly in C++.
-
-Forward publication then stops invalidating plans: a new definition changes
-no existing word's IR, and plans bind targets by XT. Removal, body
-revocation, `DOES>` and overlay installation keep invalidating them.
+Publishing a definition used to advance the dictionary's execution
+generation, which discards every native plan. During boot that rebuilt the
+plans of whatever ran next after each of the 49,000 definitions. A new
+definition changes no existing word: it has a fresh XT, its overlap proof
+rules out reusing a live one, and plans bind their targets by XT. So both
+dictionaries now advance the generation only when a definition is removed,
+a body is reclaimed or the head is rebound. `DOES>`, overlay installation and
+closing a hybrid runtime keep invalidating plans explicitly.
 
 ## Wider admission
 
@@ -249,7 +250,10 @@ Each slice keeps both backends green and is committed on its own.
    every field, including all 48,922 definitions' IR and the side index's
    bytes. Three alternating boot compiles gave medians of 5.8 s against
    28.1 s for 1a.
-3. **Native plans** from native IR, surviving forward publication.
+3. **Plans that survive publication.** Done. The boot fingerprint is
+   unchanged and the boot ends with 659 plans instead of 116. Four
+   alternating boot compiles gave medians of 6.0 s against 6.6 s for slice
+   2, on a busier host than slice 2's own measurement.
 4. **Wider admission** in both evaluators. The boot fingerprint now matches
    the Python backend's boot with the same rule.
 
