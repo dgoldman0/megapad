@@ -1,7 +1,8 @@
 # Simulator speed plan: boot compile, typing host work, guest work
 
 Status: agreed 2026-10-13 (see Decisions). Step 1 is done (see Step 1
-results): the boot compile fell from about 40 s to 2.5 s. Step 2 is next.
+results): the boot compile fell from about 40 s to 2.5 s. Step 2 is done
+(see Step 2): a keystroke fell from 0.40 s to 0.37 s. Step 3 is next.
 
 The hosted simulator with the native executor already runs guest Forth in
 C++, at about 80 million semantic steps per second. These measurements ask
@@ -65,23 +66,17 @@ about 850,000 tokens and 49,000 definitions. The time divides into four parts:
 | `AbortIf` | about 65 |
 
 The frame CRC is not a typing cost: about 17 KiB per keystroke, about 2 ms.
-A profile of the simulator thread during typing alone says where its Python
-time goes:
-
-| Share | Work |
-| --- | --- |
-| About a third | building full-screen text snapshots, about 30 per keystroke, each joining 23,520 cells |
-| About a quarter | rich-terminal host processing and enum flag operations |
-| About a sixth | guest fallbacks |
-| The rest | native entry overhead |
+The simulator thread's Python time goes to rich-terminal host processing,
+guest fallbacks and native entry overhead.
 
 **Method.** `cProfile` distorts the live session too much. Boot ran four
 times slower, and the rich terminal's negotiation failed on its real-time
 deadlines. So the live figures come from two sources: the executor's own
 counters (`MEGAFORTH_NATIVE_PROFILE=1`: `native_run_ns`, `settlement_ns` and
 the exit counts), and per-thread CPU clocks. `cProfile` was used only for
-the boot compile and for the simulator thread during typing. Unprivileged
-`perf` is disabled on the development host.
+the boot compile. For typing, a stack sampler that records each thread
+separately says where the Python time goes. Unprivileged `perf` is disabled
+on the development host.
 
 ## Step 1: boot compile
 
@@ -171,21 +166,34 @@ medians of 3.1 s against 3.9 s before.
 
 ## Step 2: typing host work
 
-- **Screen text snapshots.** Stop building full-screen text snapshots on the
-  simulator thread where nothing reads them, or build them only for the rows
-  that changed.
-- **Rich-terminal host processing.** Trim it, starting with the enum flag
-  operations on its hot path.
-- **Native pair operations.** Give the native executor `2>R`, `2R>` and `2R@`.
-  Its existing return-stack operations already provide the building blocks.
+Two changes, measured while typing in Pad:
 
-Together these address most of the 0.11 s of simulator-thread Python per
-keystroke. Typing would go from about 0.57 s to perhaps 0.45 s per
-keystroke; the rest is guest work.
+- **Native pair operations** (`2060a7e9`). `2>R`, `2R>` and `2R@` run in the
+  native executor. They were the largest cause of native stops, about 1,260
+  per keystroke.
+- **The control state table built once** (`740fa27d`). The rich terminal's
+  control validator rebuilt a constant table on every call, about 220 times
+  per keystroke. A call now takes 3.9 µs instead of 17.5 µs, which saves
+  about 3 ms per keystroke.
 
-This replaces the earlier idea of making the tile words and the CRC native
-for typing. The per-phase counts show that the tile words run at boot, and
-that the CRC costs about 2 ms per keystroke.
+| Per keystroke | After step 1 | With native pair operations |
+| --- | --- | --- |
+| Wall time | 0.403 s | 0.374 s |
+| Simulator-thread CPU | 0.345 s | 0.322 s |
+| Native execution | 0.268 s | 0.255 s |
+| Native stops | 4,591 | 2,090 |
+
+**What remains on the host.** About 0.07 s of simulator-thread Python per
+keystroke. About half is rich-terminal host processing: decoding and
+validating each retained operation the guest sends, then validating the
+control graph again when each frame is projected. That validation is the
+terminal's input checking, and the second pass is not shown to be
+redundant, so it stays. The benchmark's main thread adds about 0.05 s: its
+own polling of the screen text, which is harness work, and the viewer's
+drawing.
+
+The rest of a keystroke is guest work: 0.255 s of native execution for
+about 29 million steps. That is step 3.
 
 ## Step 3: guest work per keystroke
 
@@ -201,8 +209,8 @@ Reviewed 2026-10-13:
 1. **Order.** 1a lands and is measured before 1b starts.
 2. **Dictionary authority.** The native evaluator owns publication, and the
    dictionary's host-side state moves into native code, as described in 1b.
-3. **Step 2.** Host snapshot and rich-terminal work plus native pair
-   operations, as described above.
+3. **Step 2.** Rich-terminal host work and native pair operations, as
+   described above.
 
 ## Step 1a results
 
