@@ -26,10 +26,11 @@ from rich_terminal.retained_wire import PresentBegin
 
 PRESENTS_FILE = "presents.jsonl"
 GUEST_WORDS_FILE = "guest-words.jsonl"
-# The most frequent call chains kept for each interval; every word's own
-# total is kept in full.
-_CHAINS_KEPT = 40
-_CHAIN_DEPTH = 8
+# The most frequent call chains kept for each interval, and how many words
+# of each, innermost first; every word's own total is kept in full. A
+# deeper profile asks for more, or for all (None).
+CHAINS_KEPT = 40
+CHAIN_DEPTH = 8
 
 
 class ScreenChangeProfile:
@@ -41,6 +42,8 @@ class ScreenChangeProfile:
         *,
         interval_ns: int = 100_000_000,
         clock: Callable[[], int] = time.monotonic_ns,
+        chains_kept: int | None = CHAINS_KEPT,
+        chain_depth: int | None = CHAIN_DEPTH,
     ) -> None:
         if isinstance(interval_ns, bool) or not isinstance(interval_ns, int):
             raise TypeError("interval_ns must be an integer")
@@ -48,6 +51,15 @@ class ScreenChangeProfile:
             raise ValueError("interval_ns must be positive")
         if not callable(clock):
             raise TypeError("clock must be callable")
+        for name, value in (("chains_kept", chains_kept), ("chain_depth", chain_depth)):
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an integer or None")
+            if value <= 0:
+                raise ValueError(f"{name} must be positive")
+        self._chains_kept = chains_kept
+        self._chain_depth = chain_depth
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         self._presents = (directory / PRESENTS_FILE).open("a", encoding="utf-8")
@@ -88,7 +100,7 @@ class ScreenChangeProfile:
             self._leaf[chain[0]] += steps
             for word in set(chain):
                 self._inclusive[word] += steps
-            self._chains[" < ".join(chain[:_CHAIN_DEPTH])] += steps
+            self._chains[" < ".join(chain[:self._chain_depth])] += steps
         now = self._clock()
         if now - self._start_ns >= self._interval_ns:
             self._write_interval(now)
@@ -111,7 +123,7 @@ class ScreenChangeProfile:
                 "samples": self._samples,
                 "inclusive": dict(self._inclusive),
                 "leaf": dict(self._leaf),
-                "chains": dict(self._chains.most_common(_CHAINS_KEPT)),
+                "chains": dict(self._chains.most_common(self._chains_kept)),
             }
             self._words.write(json.dumps(record) + "\n")
             self._words.flush()
