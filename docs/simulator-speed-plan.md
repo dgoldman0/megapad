@@ -254,8 +254,17 @@ boundary keeps what it last admitted and skips rechecking unchanged glyph runs
 and controls. The frame build (the producer's work in a frame) fell from 19.6
 to 16.7 million steps. Total steps per frame are not a fair comparison across
 runs, because Desk paints once per key and a slower host folds more keys into
-each frame. Part 6 is under review: a full call-tree profile (this branch's
-`MEGAPAD_PROFILE_CHAINS`) shows its estimate was too high.
+each frame. A full call-tree profile (this branch's `MEGAPAD_PROFILE_CHAINS`)
+then showed part 6's estimate was too high, and part 6 was redirected to the
+repeats the call tree shows. Four of its items are done: the shell checks its
+batch's structure once, the glyph planner appends plain ASCII cells without
+its general path, the shell's storage proof and the batch's span check stop
+repeating work, and emission skips glyph families equal to the acknowledged
+ones. The frame build fell from 16.7 to 14.9 million steps, and to about 11.8
+million without the documents' snapshot, which moves by up to 0.8 million with
+unrelated layout changes. The last item, keeping acknowledged identities, would
+save at most about 0.5 million and needs a rule change, so it awaits a
+decision.
 
 ## Decisions
 
