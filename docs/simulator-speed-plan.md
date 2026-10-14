@@ -160,6 +160,16 @@ executor entries during the `desktop-apt1` boot fall from 192,000 to
 39,000, the boot fingerprint is unchanged, and four alternating boot
 compiles gave medians of 4.7 s against 6.1 s before.
 
+**Overlaid words' bodies.** Found while profiling after 1c: a word with a
+Python execution overlay got no native plan, so whenever its overlay
+declined, every operation of its body made a zero-progress native call and
+then ran in Python. That is KDOS `EVALUATE-CHECKED`'s `CATCH` body on each of
+the 9,343 boot lines the checked-line rule does not admit. Such words now
+get plans that Python enters after the overlay declines, while calls and
+native `EXECUTE` still stop so the overlay keeps every entry decision. The
+boot fingerprint is unchanged, and four alternating boot compiles gave
+medians of 3.1 s against 3.9 s before.
+
 ## Step 2: typing host work
 
 - **Screen text snapshots.** Stop building full-screen text snapshots on the

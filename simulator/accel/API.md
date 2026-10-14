@@ -3,7 +3,7 @@
 The extension and its Python owner are built from the same checkout and use
 one current internal interface. Rebuild the extension after changing this
 boundary with `python setup_simulator_accel.py build_ext --inplace --force`.
-The extension exports `SEMANTIC_API_VERSION = 6`; its Python owner checks this
+The extension exports `SEMANTIC_API_VERSION = 7`; its Python owner checks this
 version before admission. An explicit native request rejects older builds;
 automatic selection keeps the reference executor and the Python dictionary
 when the version mismatches.
@@ -57,9 +57,13 @@ written sparse pages, or all configured dense pages rounded up separately
 per region. Clients serialize writes and execution; no GIL release, backing
 replacement, transition copying, or hybrid execution is introduced here.
 
-`install(xt, operations)` installs a plan of `(opcode, a, b)` triples, one per
-original IR operation, so branch targets and returned IPs remain original IR
-indices. `clear()` drops all plans. The Python owner invalidates plans when
+`install(xt, operations, overlaid=False)` installs a plan of `(opcode, a, b)`
+triples, one per original IR operation, so branch targets and returned IPs
+remain original IR indices. An overlaid plan belongs to a word with a Python
+execution overlay: Python may enter it after the overlay declines, and a
+return may resume inside it, but a native `EXECUTE` never enters it, and
+calls to such a word compile to stops, so every entry meets the overlay
+first. `clear()` drops all plans. The Python owner invalidates plans when
 the dictionary removes a definition or reclaims a body, and for mutable
 execution bindings; publishing a new definition leaves them valid. Opcode
 constants are exported with the `OP_` prefix.

@@ -22,7 +22,7 @@ from simulator.timer import HostedTimerService
 # Without a host quantum, native work still returns to the same dispatcher at
 # this interval. It bounds one native entry, not a guest-visible boundary.
 UNQUANTIZED_NATIVE_INTERVAL_STEPS = 8192
-SEMANTIC_API_VERSION = 6
+SEMANTIC_API_VERSION = 7
 
 
 def load_native_extension(*, required: bool):
@@ -373,8 +373,6 @@ class NativeExecutor:
                 continue
             if not isinstance(word.implementation, rt.ColonDefinition):
                 continue
-            if word.xt in runtime._colon_accelerators:
-                continue
             # Mark before following recursive calls. Plans keep exact original
             # instruction indices; unsupported operations remain explicit stops.
             self.plans[word.xt] = word
@@ -418,7 +416,11 @@ class NativeExecutor:
                             word.body_address + instruction.offset,
                             instruction.length)
                 operations.append(item)
-            self.program.install(word.xt, operations)
+            # A word with an execution overlay is planned too, for Python to
+            # enter after the overlay declines; calls to it stay stops.
+            self.program.install(
+                word.xt, operations, word.xt in runtime._colon_accelerators
+            )
             # Zero marks a Python-owned operation. Other entries match the
             # native cost(): an IR operation costs one tick, while a compiled
             # primitive/constant call also includes its execution tick.

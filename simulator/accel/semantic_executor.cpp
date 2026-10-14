@@ -19,6 +19,7 @@ void register_bindings(pybind11::module_& module);
 #include <limits>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -638,7 +639,10 @@ public:
         : page_size_(page_size), continuation_type_(std::move(continuation_type)),
           regions_(megapad::guest::build_regions(regions, page_size, dense_regions)) {}
 
-    void install(Cell xt, const py::iterable& operations) {
+    // An overlaid plan belongs to a word with a Python execution overlay. It
+    // runs only where Python enters it, after the overlay declined; a native
+    // EXECUTE never enters it, so the overlay keeps every entry decision.
+    void install(Cell xt, const py::iterable& operations, bool overlaid) {
         if (xt == 0)
             throw py::value_error("plan execution token must be nonzero");
         std::vector<Instruction> plan;
@@ -673,9 +677,14 @@ public:
             }
         }
         plans_.insert_or_assign(xt, std::move(plan));
+        if (overlaid) overlaid_.insert(xt);
+        else overlaid_.erase(xt);
     }
 
-    void clear() { plans_.clear(); }
+    void clear() {
+        plans_.clear();
+        overlaid_.clear();
+    }
 
     // Bind the hybrid runner's call capsule, or None to unbind. Routine
     // indexes are installed afterwards with set_routine().
@@ -1376,7 +1385,7 @@ private:
             Plan* target = operation.target;
             if (target == nullptr || operation.a != target_xt) {
                 const auto found = plans_.find(target_xt);
-                if (found == plans_.end()) return false;
+                if (found == plans_.end() || overlaid_.count(target_xt) != 0) return false;
                 target = &found->second;
                 operation.a = target_xt;
                 operation.target = target;
@@ -1760,6 +1769,7 @@ private:
     py::object continuation_type_;
     std::vector<Region> regions_;
     std::unordered_map<Cell, Plan> plans_;
+    std::unordered_set<Cell> overlaid_;
     const megapad::hybrid::RoutineCall* routine_call_ = nullptr;
     py::object routine_entry_;
     std::vector<NativeRoutine> routines_;
@@ -1772,7 +1782,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
     megapad::tile_values::register_bindings(module);
     megapad::dictionary::register_bindings(module);
     megapad::walker::register_bindings(module);
-    module.attr("SEMANTIC_API_VERSION") = 6;
+    module.attr("SEMANTIC_API_VERSION") = 7;
     module.attr("MACHINE_STOPPED_CALL") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_CALL));
     module.attr("MACHINE_STOPPED_RESUME") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_RESUME));
     module.attr("MACHINE_CALLBACK") = py::int_(static_cast<uint32_t>(MACHINE_CALLBACK));
@@ -1782,7 +1792,8 @@ PYBIND11_MODULE(_megaforth_native, module) {
         .def(py::init<const py::iterable&, Cell, py::object, const py::iterable&>(),
              py::arg("regions"), py::arg("page_size"), py::arg("continuation_type"),
              py::arg("dense_regions") = py::tuple())
-        .def("install", &NativeProgram::install, py::arg("xt"), py::arg("operations"))
+        .def("install", &NativeProgram::install, py::arg("xt"), py::arg("operations"),
+             py::arg("overlaid") = false)
         .def("clear", &NativeProgram::clear)
         .def("snapshot_stack", &NativeProgram::snapshot_stack,
              py::arg("bounds"), py::arg("continuations") = py::none())
