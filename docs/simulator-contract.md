@@ -446,6 +446,14 @@ rollback, dictionary checkpoints, release, and filesystem-visible effects are
 not host substitutes. This is neither a compiled-Forth cache nor a second
 loader API.
 
+With the native backend, the `SOURCE-EVALUATE-CHECKED` and `_LD-WALK` overlays
+run their loop in a native line walker. It evaluates exactly the lines the
+checked-line overlay would take on its fast path, reproducing every effect of
+that path: the walker and evaluator cells, the data-stack writes, the
+continuation cookies and the semantic steps. It hands every other line back
+to the overlay's ordinary path, so the contract below is unchanged. See
+`docs/simulator-native-evaluator.md`.
+
 One admitted overlay invocation contributes one semantic-work/Timer step, and
 each nested real evaluator dispatch contributes its ordinary steps. The
 removed byte-walker operations deliberately no longer advance hosted semantic
@@ -456,7 +464,9 @@ This state is runtime-global for the one admitted core and is not a concurrent
 evaluator contract. Ordinary interpret-mode `IF`/`ELSE`/`THEN` uses the native
 anonymous temporary-compilation lifetime: it persists across physical
 `EVALUATE` inputs, executes only at the outer `THEN`, clears its temporary
-bytes, restores `HERE`, and publishes no dictionary word. Bracketed
+bytes, restores `HERE`, and publishes no dictionary word. The side index is
+left as it is, and is rebuilt only when that rollback removes a word the
+body's own code defined. Bracketed
 conditional compilation is separate evaluator state: `[DEFINED]` and
 `[UNDEFINED]` test the newest dictionary binding, while false `[IF]` arms and
 the taken arm's `[ELSE]` skip raw, case-insensitive tokens with nested depth.

@@ -166,7 +166,13 @@ class Dictionary:
 
     @property
     def execution_generation(self) -> int:
-        """Invalidate execution plans after definition publication or removal."""
+        """Invalidate execution plans after a definition or body is removed.
+
+        Publishing a new definition changes no existing word's behavior:
+        it has a fresh XT, and plans bind their targets by XT.  Removal,
+        reclaimed bodies and rebinding the head do change what plans may
+        call, so only they advance the generation.
+        """
 
         return self._execution_generation
 
@@ -306,7 +312,6 @@ class Dictionary:
             )
         self._header_limit = max(self._header_limit, word.body_address)
         self._here = allocation_limit
-        self._execution_generation += 1
         return word
 
     def definition_size(
@@ -445,6 +450,13 @@ class Dictionary:
         bindings = self._bindings.get(_binding_key(name))
         return bindings[-1] if bindings else None
 
+    def live_word(self, xt: int) -> Word | None:
+        """Return the live word for an execution token, or ``None``."""
+
+        if type(xt) is not int:
+            return None
+        return self._by_xt.get(xt)
+
     def resolve(self, xt: int) -> Word:
         """Resolve a live execution token or raise ``KeyError``."""
 
@@ -473,8 +485,11 @@ class Dictionary:
             _seal=seal,
         )
 
-    def rollback(self, checkpoint: DictionaryCheckpoint) -> None:
-        """Remove definitions after a checkpoint and restore prior bindings."""
+    def rollback(self, checkpoint: DictionaryCheckpoint) -> int:
+        """Remove definitions after a checkpoint and restore prior bindings.
+
+        Returns how many definitions were removed.
+        """
 
         self._guard_mutation("roll back the dictionary")
         if not isinstance(checkpoint, DictionaryCheckpoint):
@@ -505,12 +520,14 @@ class Dictionary:
         elif seal.tail is not None:
             raise ValueError("invalid empty-dictionary checkpoint")
 
+        removed = len(self._definitions) - seal.depth
         self._publish_rollback(
             depth=seal.depth,
             here=seal.here,
             active_floor=seal.active_floor,
             active_limit=seal.active_limit,
         )
+        return removed
 
     def rollback_to(self, saved_here: int, saved_latest: int) -> None:
         """Restore one source-visible contiguous dictionary checkpoint.

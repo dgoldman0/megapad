@@ -349,7 +349,7 @@ class HybridRuntime:
         """The live word a callback site is bound to, or None until it is used."""
 
         word = routine.targets[index]
-        if word is None or self.semantic.dictionary._by_xt.get(word.xt) is not word:
+        if word is None or self.semantic.dictionary.live_word(word.xt) is not word:
             return None
         return word
 
@@ -492,7 +492,7 @@ class HybridRuntime:
         """The site's Forth word, bound by name when first needed."""
 
         word = routine.targets[index]
-        if word is None or self.semantic.dictionary._by_xt.get(word.xt) is not word:
+        if word is None or self.semantic.dictionary.live_word(word.xt) is not word:
             name = routine.declaration.callbacks[index].target
             word = self.semantic.find(name)
             if word is None:

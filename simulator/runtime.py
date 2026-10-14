@@ -70,7 +70,7 @@ from simulator.ir import (
     WriteOutput,
 )
 from simulator.kem import HostedKEMService
-from simulator.memory import MMIO_BASE, AddressClass, SparseAddressSpace
+from simulator.memory import MMIO_BASE, AddressClass, GuestCell, SparseAddressSpace
 from simulator.ntt import HostedNTTService
 from simulator.platform import (
     HOSTED_CRYPTO_CAPABILITIES,
@@ -508,6 +508,11 @@ class _BiosEvaluatorState:
     token_length: int = 0
     compiler_state: _CompilerState = field(default_factory=_CompilerState)
     frames: list[_BiosEvaluationFrame] = field(default_factory=list)
+    status_cell: GuestCell | None = None
+    line_cell: GuestCell | None = None
+    column_cell: GuestCell | None = None
+    depth_cell: GuestCell | None = None
+    throw_cell: GuestCell | None = None
 
 
 class _StepMeter:
@@ -787,15 +792,40 @@ class MegaForthRuntime:
         self._next_suspension_sequence = 1
         self._next_wake_sequence = 1
         self._suspended_execution: _SuspendedExecution | None = None
-        self.dictionary = Dictionary(
-            start_address=dictionary_start,
-            memory=self.memory,
-            mutation_guard=self._require_no_suspension,
-        )
-        self.dictionary_index = HostedDictionaryIndex(
-            self.memory,
-            self.dictionary,
-        )
+        native_extension = None
+        if selected_backend != "python":
+            from simulator.native_execution import load_native_extension
+
+            native_extension = load_native_extension(
+                required=selected_backend == "native",
+            )
+        if native_extension is not None and type(self.memory) is SparseAddressSpace:
+            # The native backend's dictionary metadata lives in native code;
+            # the Python Dictionary remains the reference implementation.
+            from simulator.native_dictionary import (
+                NativeDictionary,
+                NativeDictionaryIndex,
+            )
+
+            self.dictionary = NativeDictionary(
+                start_address=dictionary_start,
+                memory=self.memory,
+                mutation_guard=self._require_no_suspension,
+            )
+            self.dictionary_index = NativeDictionaryIndex(
+                self.memory,
+                self.dictionary,
+            )
+        else:
+            self.dictionary = Dictionary(
+                start_address=dictionary_start,
+                memory=self.memory,
+                mutation_guard=self._require_no_suspension,
+            )
+            self.dictionary_index = HostedDictionaryIndex(
+                self.memory,
+                self.dictionary,
+            )
         bank0 = next(
             (
                 region
@@ -840,6 +870,7 @@ class MegaForthRuntime:
         )
         self._bootstrap_numeric_base = 10
         self._numeric_base_address: int | None = None
+        self._numeric_base_cell: GuestCell | None = None
         # These are the source-visible optional user-dictionary bounds, not
         # Dictionary's ordinary containing-memory ceiling.  Bank-0 source
         # starts with the BIOS interval disabled, represented by two zeros.
@@ -885,12 +916,11 @@ class MegaForthRuntime:
             0,
         )
         self.dictionary.protect_current_prefix_from_numeric_rollback()
-        if selected_backend != "python":
+        if native_extension is not None:
             from simulator.native_execution import NativeExecutor
 
-            self._native_execution = NativeExecutor.create(
-                self, required=selected_backend == "native",
-                admit_core=install_core_words,
+            self._native_execution = NativeExecutor(
+                self, native_extension, admit_core=install_core_words,
             )
             if self._native_execution is not None:
                 self.scalar_float._native_execute = (
@@ -987,7 +1017,7 @@ class MegaForthRuntime:
 
         if self._numeric_base_address is None:
             return self._bootstrap_numeric_base
-        return self.memory.read64(self._numeric_base_address)
+        return self._numeric_base_cell.read()
 
     @property
     def dictionary_base(self) -> int:
@@ -1345,7 +1375,7 @@ class MegaForthRuntime:
         if self._numeric_base_address is None:
             self._bootstrap_numeric_base = value
         else:
-            self.memory.write64(self._numeric_base_address, value)
+            self._numeric_base_cell.write(value)
 
     def set_mpu_base(self, base: int) -> None:
         """Store one wrapped cell in the non-enforcing MPU base register."""
@@ -1367,6 +1397,7 @@ class MegaForthRuntime:
             raise RuntimeError("numeric BASE is already bound")
         self.memory.write64(address, self._bootstrap_numeric_base)
         self._numeric_base_address = address
+        self._numeric_base_cell = GuestCell(self.memory, address)
 
     def bind_bios_evaluator(
         self,
@@ -1410,6 +1441,11 @@ class MegaForthRuntime:
             depth_address=depth_address,
             throw_address=throw_address,
             token_address=token_address,
+            status_cell=GuestCell(self.memory, status_address),
+            line_cell=GuestCell(self.memory, line_address),
+            column_cell=GuestCell(self.memory, column_address),
+            depth_cell=GuestCell(self.memory, depth_address),
+            throw_cell=GuestCell(self.memory, throw_address),
         )
 
     def bios_evaluate(self, context: ExecutionContext) -> None:
@@ -1435,7 +1471,7 @@ class MegaForthRuntime:
 
         self.bios_evaluate(context)
         evaluator = self._require_bios_evaluator()
-        context.data.push(self.memory.read64(evaluator.status_address))
+        context.data.push(evaluator.status_cell.read())
 
     def bios_evaluate_finish(self, context: ExecutionContext) -> None:
         """Report whether the persistent guest compiler is completely idle."""
@@ -1451,7 +1487,7 @@ class MegaForthRuntime:
             or source_state.conditional_skip is not None
         ) else 0
         if status:
-            self.memory.write64(evaluator.status_address, status)
+            evaluator.status_cell.write(status)
         context.data.push(status)
 
     def bios_evaluator_reset(self) -> None:
@@ -1479,7 +1515,7 @@ class MegaForthRuntime:
         if target_cell > depth:
             return
         del evaluator.frames[target_cell:]
-        self.memory.write64(evaluator.depth_address, target_cell)
+        evaluator.depth_cell.write(target_cell)
 
     def bios_eval_status(self, context: ExecutionContext) -> None:
         """Push the mutable ``EVAL-STATUS`` diagnostic cell address."""
@@ -1528,7 +1564,7 @@ class MegaForthRuntime:
         if depth == 0:
             self._clear_bios_evaluator_diagnostics(evaluator)
 
-        if depth and self.memory.read64(evaluator.status_address) != 0:
+        if depth and evaluator.status_cell.read() != 0:
             context.data.pop()
             context.data.pop()
             return
@@ -1536,8 +1572,8 @@ class MegaForthRuntime:
         if depth >= _BIOS_EVALUATE_MAX_DEPTH:
             context.data.pop()
             context.data.pop()
-            self.memory.write64(evaluator.status_address, 3)
-            self.memory.write64(evaluator.column_address, 0)
+            evaluator.status_cell.write(3)
+            evaluator.column_cell.write(0)
             evaluator.token_length = 0
             self.write_uart_bytes(b"EVALUATE depth limit exceeded\n")
             return
@@ -1545,8 +1581,8 @@ class MegaForthRuntime:
         length = context.data.pop()
         address = context.data.pop()
         if length > _BIOS_EVALUATE_MAX_BYTES:
-            self.memory.write64(evaluator.status_address, 2)
-            self.memory.write64(evaluator.column_address, 0)
+            evaluator.status_cell.write(2)
+            evaluator.column_cell.write(0)
             evaluator.token_length = 0
             self.write_uart_bytes(b"EVALUATE input exceeds 255 bytes\n")
             return
@@ -1555,7 +1591,7 @@ class MegaForthRuntime:
         cursor = SourceCursor(source, source_name="<EVALUATE>")
         frame = _BiosEvaluationFrame(context)
         evaluator.frames.append(frame)
-        self.memory.write64(evaluator.depth_address, len(evaluator.frames))
+        evaluator.depth_cell.write(len(evaluator.frames))
         meter, _starting_steps = self._meter_for_public_call(None)
         state = _EvaluationState(
             context,
@@ -1584,8 +1620,8 @@ class MegaForthRuntime:
         token = error.token
         if len(token) > _BIOS_EVALUATE_MAX_BYTES:
             raise AssertionError("evaluator token exceeds its admitted input")
-        self.memory.write64(evaluator.status_address, 1)
-        self.memory.write64(evaluator.column_address, error.location.column)
+        evaluator.status_cell.write(1)
+        evaluator.column_cell.write(error.location.column)
         self.memory.write_bytes(evaluator.token_address, token)
         evaluator.token_length = len(token)
         self.write_uart_bytes(token + b" ? (not found)\n")
@@ -1594,16 +1630,16 @@ class MegaForthRuntime:
         self,
         evaluator: _BiosEvaluatorState,
     ) -> None:
-        self.memory.write64(evaluator.status_address, 0)
-        self.memory.write64(evaluator.column_address, 0)
-        self.memory.write64(evaluator.throw_address, 0)
+        evaluator.status_cell.write(0)
+        evaluator.column_cell.write(0)
+        evaluator.throw_cell.write(0)
         evaluator.token_length = 0
 
     def _validated_bios_evaluator_depth(
         self,
         evaluator: _BiosEvaluatorState,
     ) -> int:
-        depth = self.memory.read64(evaluator.depth_address)
+        depth = evaluator.depth_cell.read()
         if depth != len(evaluator.frames):
             self._fail_closed_bios_evaluator(evaluator)
             raise ExecutionError(
@@ -1620,7 +1656,7 @@ class MegaForthRuntime:
             self._fail_closed_bios_evaluator(evaluator)
             raise ExecutionError("hosted EVALUATE frame stack is corrupted")
         evaluator.frames.pop()
-        self.memory.write64(evaluator.depth_address, len(evaluator.frames))
+        evaluator.depth_cell.write(len(evaluator.frames))
 
     def _fail_closed_bios_evaluator(
         self,
@@ -1632,7 +1668,7 @@ class MegaForthRuntime:
         evaluator.compiler_state.conditional_skip = None
         if compiler is not None and compiler.temporary:
             self._discard_temporary_compiler(compiler)
-        self.memory.write64(evaluator.depth_address, 0)
+        evaluator.depth_cell.write(0)
 
     def _fail_closed_active_bios_evaluator(self) -> None:
         evaluator = self._bios_evaluator
@@ -2863,12 +2899,15 @@ class MegaForthRuntime:
                     return
                 state.token_count += 1
                 if state.conditional_skip is None:
-                    self._evaluate_token(token, state)
+                    may_run_guest = self._evaluate_token(token, state)
                 else:
                     self._skip_conditional_token(token, state)
-                if state.bios_evaluator:
+                    may_run_guest = True
+                # A nonzero status ends the line.  Only guest code can set it
+                # without raising, so a token that ran none leaves it zero.
+                if state.bios_evaluator and may_run_guest:
                     evaluator = self._require_bios_evaluator()
-                    if self.memory.read64(evaluator.status_address) != 0:
+                    if evaluator.status_cell.read() != 0:
                         return
         finally:
             active = self._active_input_states.pop()
@@ -2902,10 +2941,12 @@ class MegaForthRuntime:
         if skip.depth == 0:
             state.conditional_skip = None
 
-    def _evaluate_token(self, token: bytes, state: _EvaluationState) -> None:
+    def _evaluate_token(self, token: bytes, state: _EvaluationState) -> bool:
+        """Evaluate one token; true when it may have run guest code."""
+
         if token.startswith(b"\\"):
             state.cursor.skip_backslash_comment()
-            return
+            return False
 
         try:
             word = self.dictionary.find(token)
@@ -2934,7 +2975,7 @@ class MegaForthRuntime:
                 )
             else:
                 self._apply_directive(word.implementation.kind, state)
-            return
+            return True
 
         if word is not None:
             if (
@@ -2943,9 +2984,9 @@ class MegaForthRuntime:
                 and not word.immediate
             ):
                 state.compiler.operations.append(Call(word.xt))
-            else:
-                self._execute_guarded(word, state.context, state.meter)
-            return
+                return False
+            self._execute_guarded(word, state.context, state.meter)
+            return True
 
         number = self._parse_number(token)
         if number is not None:
@@ -2953,7 +2994,7 @@ class MegaForthRuntime:
                 state.compiler.operations.append(Literal(number))
             else:
                 state.context.data.push(number)
-            return
+            return False
 
         location = self._token_location(state)
         if state.bios_evaluator:
@@ -3463,8 +3504,12 @@ class MegaForthRuntime:
                     erase_limit = candidate_limit
                     break
 
-        self.dictionary.rollback(checkpoint)
-        self.dictionary_index.rebuild()
+        if self.dictionary.rollback(checkpoint):
+            # Removing a word can uncover an older binding of its name, which
+            # only a rebuild restores.  With no word removed the bindings, and
+            # so the incrementally maintained index, are unchanged, and BIOS
+            # THEN likewise only clears the temporary bytes and restores HERE.
+            self.dictionary_index.rebuild()
         compiler.temporary_checkpoint = None
         if (
             erase_start is not None
@@ -3498,7 +3543,7 @@ class MegaForthRuntime:
         """Execute atomically with respect to internal return-stack state."""
 
         context._require_reusable()
-        return_snapshot = context.returns.snapshot()
+        return_snapshot = self._stack_snapshot(context.returns)
         capture_checkpoint = context.returns.pointer_capture_checkpoint()
         root_id = self._allocate_dispatch_root_id()
         frame = _DispatchFrame(context, meter, root_id)

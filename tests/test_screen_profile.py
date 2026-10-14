@@ -70,6 +70,35 @@ def test_guest_steps_are_charged_to_each_word_once_an_interval(tmp_path) -> None
         1_250, 1_260, 2, {"ROOT": 2})
 
 
+def test_a_deeper_profile_keeps_more_and_longer_chains(tmp_path) -> None:
+    clock = _Clock()
+    profile = ScreenChangeProfile(tmp_path, interval_ns=100, clock=clock,
+                                  chains_kept=None, chain_depth=None)
+    chain = [f"W{i}" for i in range(12)]
+    for index in range(50):
+        profile.sample_guest([f"LEAF{index}", *chain], 1)
+    profile.close()
+    record, = _lines(tmp_path / GUEST_WORDS_FILE)
+    assert len(record["chains"]) == 50
+    assert all(len(chain.split(" < ")) == 13 for chain in record["chains"])
+    # The defaults keep forty chains of eight words.
+    short = ScreenChangeProfile(tmp_path / "short", interval_ns=100, clock=clock)
+    for index in range(50):
+        short.sample_guest([f"LEAF{index}", *chain], 1)
+    short.close()
+    record, = _lines(tmp_path / "short" / GUEST_WORDS_FILE)
+    assert len(record["chains"]) == 40
+    assert all(len(chain.split(" < ")) == 8 for chain in record["chains"])
+
+
+@pytest.mark.parametrize("limit", (0, -1, True, 1.5))
+def test_chain_limits_must_be_positive_integers(tmp_path, limit) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        ScreenChangeProfile(tmp_path, chains_kept=limit)
+    with pytest.raises((TypeError, ValueError)):
+        ScreenChangeProfile(tmp_path, chain_depth=limit)
+
+
 @pytest.mark.parametrize(("interval", "error"), ((0, ValueError), (True, TypeError)))
 def test_an_interval_must_be_a_positive_integer(tmp_path, interval, error) -> None:
     with pytest.raises(error):

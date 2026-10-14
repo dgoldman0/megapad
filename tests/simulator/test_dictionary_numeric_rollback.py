@@ -6,6 +6,9 @@ from simulator.dictionary import Dictionary, Word
 from simulator.memory import SparseAddressSpace
 
 
+pytestmark = pytest.mark.usefixtures("dictionary_backend")
+
+
 def _assert_two_words_live(
     dictionary: Dictionary,
     original: Word,

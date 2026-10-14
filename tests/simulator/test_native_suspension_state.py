@@ -65,8 +65,16 @@ def test_interned_callsite_values_keep_fresh_raw_cookies_and_invalidation():
     assert isinstance(first, Continuation)
     assert all(frame is first for frame, _ in observations)
     assert len({cookie for _, cookie in observations}) == 4
-    # A dictionary generation change drops interned values with native plans.
-    runtime.evaluate(b": NEW-WORD 17 ;")
+    # Publishing a word changes no planned word, so plans and their interned
+    # values survive it.
+    runtime.evaluate(b": KEPT-WORD 17 ;")
+    observations.clear()
+    runtime.execute("RUN", step_budget=100)
+    assert len(observations) == 4
+    assert all(frame is first for frame, _ in observations)
+    # Removing a word changes the generation, which drops interned values
+    # with the native plans.
+    runtime.evaluate(b"HERE LATEST : NEW-WORD 17 ; DICT-ROLLBACK")
     observations.clear()
     runtime.execute("RUN", step_budget=100)
     assert len(observations) == 4

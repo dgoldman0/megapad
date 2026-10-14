@@ -33,10 +33,13 @@ setup(
     version="0.1.0",
     ext_modules=[Extension(
         "_megaforth_native", [
-            "simulator/accel/semantic_executor.cpp", "shared/accel/scalar_fp.cpp", "shared/accel/keccak.cpp",
+            "simulator/accel/semantic_executor.cpp", "simulator/accel/dictionary.cpp",
+            "simulator/accel/line_walker.cpp",
+            "shared/accel/scalar_fp.cpp", "shared/accel/keccak.cpp",
             "shared/accel/tile_values.cpp",
         ],
-        depends=["shared/accel/scalar_fp.h", "shared/accel/scalar_fp_bindings.h",
+        depends=["simulator/accel/guest_memory.h", "simulator/accel/dictionary.h",
+                 "shared/accel/scalar_fp.h", "shared/accel/scalar_fp_bindings.h",
                  "shared/accel/keccak.h", "shared/accel/keccak_bindings.h",
                  "shared/accel/tile_values.h", "shared/accel/tile_values_bindings.h",
                  "shared/accel/tile_guard_bindings.h", "shared/accel/routine_call.h"],

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import time
 from dataclasses import dataclass
@@ -133,11 +134,29 @@ def build_argument_parser(
         help=(
             "for diagnosis, write each PRESENT the guest sends and the guest "
             "steps spent under each word into DIR (presents.jsonl, "
-            "guest-words.jsonl); changes nothing the guest or terminal does"
+            "guest-words.jsonl); changes nothing the guest or terminal does. "
+            "MEGAPAD_PROFILE_CHAINS and MEGAPAD_PROFILE_CHAIN_DEPTH, when set, "
+            "keep that many call chains an interval and words a chain "
+            "(0 for all)"
         ),
     )
     parser.add_argument("--paused", action="store_true")
     return parser
+
+
+def _profile_chain_limits() -> dict:
+    """The profile's call-chain limits from the environment; 0 keeps all."""
+
+    limits = {}
+    for key, name in (("chains_kept", "MEGAPAD_PROFILE_CHAINS"),
+                      ("chain_depth", "MEGAPAD_PROFILE_CHAIN_DEPTH")):
+        value = os.environ.get(name)
+        if value is not None:
+            count = int(value)
+            if count < 0:
+                raise ValueError(f"{name} must not be negative")
+            limits[key] = count or None
+    return limits
 
 
 def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
@@ -203,7 +222,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
         screen_profile=(
             None
             if args.profile_dir is None
-            else ScreenChangeProfile(args.profile_dir)
+            else ScreenChangeProfile(args.profile_dir, **_profile_chain_limits())
         ),
     )
     machine = SimulatorSharedMachine(session)

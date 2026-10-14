@@ -14,6 +14,9 @@ from simulator.dictionary import (
 from simulator.memory import EXTERNAL_BASE, SparseAddressSpace
 
 
+pytestmark = pytest.mark.usefixtures("dictionary_backend")
+
+
 def test_definition_uses_native_no_padding_header_geometry() -> None:
     dictionary = Dictionary(start_address=0x2000)
 

@@ -825,6 +825,7 @@ def test_known_python_boundaries_do_not_make_empty_native_round_trips(monkeypatc
     class ObservedProgram:
         install = program.install
         clear = program.clear
+        snapshot_stack = program.snapshot_stack
 
         @staticmethod
         def run(xt, ip, *args):
@@ -955,8 +956,9 @@ def test_native_prefix_stops_before_a_fault_continuation_without_consuming_it():
 
     result = program.run(1, 0, (0, 2048, 2048), returns, continuations,
                          20, fpcsr=0x91)
-    # No machine routine ran, so there is no machine record.
-    assert result == (1, 1, 1, 2040, slot, 1, [], 0, 0x91, None)
+    # No machine routine ran and no tile state was passed, so there is
+    # neither a machine record nor tile state.
+    assert result == (1, 1, 1, 2040, slot, 1, [], 0, 0x91, None, None)
     assert int.from_bytes(page[2040:2048], "little") == 17
     assert int.from_bytes(page[slot:slot + 8], "little") == raw
     assert continuations == {slot: (frame, raw)}
@@ -966,7 +968,7 @@ def test_native_prefix_stops_before_a_fault_continuation_without_consuming_it():
     # Neither its backing bytes nor its typed metadata may be retired.
     before = bytes(page)
     assert program.run(1, 1, (0, 2048, 2040), returns, continuations,
-                       20, fpcsr=0x91) == (1, 1, 0, 2040, slot, 1, [], 0, 0x91, None)
+                       20, fpcsr=0x91) == (1, 1, 0, 2040, slot, 1, [], 0, 0x91, None, None)
     assert bytes(page) == before
     assert continuations[slot][0] is frame
 
@@ -1099,3 +1101,53 @@ def test_dynamic_execute_admission_keeps_original_word_binding_after_shadowing()
     for runtime in runtimes:
         runtime.main_context.data.clear()
     assert _compare(runtimes, "SHADOW", inputs=(token,))["data"] == (99,)
+
+
+def test_evaluator_cell_words_compile_to_their_fixed_cells():
+    runtimes = _runtimes(
+        b": RUN EVAL-STATUS EVAL-LINE EVAL-COLUMN EVAL-DEPTH EVAL-THROW ;"
+    )
+    result = _compare(runtimes, "RUN")
+    evaluator = runtimes[0]._require_bios_evaluator()
+    assert result["data"] == (
+        evaluator.status_address, evaluator.line_address,
+        evaluator.column_address, evaluator.depth_address,
+        evaluator.throw_address,
+    )
+
+
+@pytest.mark.parametrize("flag", (0, 1))
+def test_abort_quote_test_runs_natively_and_aborts_through_python(flag):
+    runtimes = _runtimes(b': RUN 5 SWAP ABORT" stopped" 6 ;')
+    result = _compare(runtimes, "RUN", inputs=(flag,), require_native=flag == 0)
+    if flag:
+        assert result["error"] is not None
+        assert result["uart"].endswith(b"stopped")
+    else:
+        assert result["error"] is None
+        assert result["data"] == (5, 6)
+
+
+def test_pair_return_words_run_natively_in_reference_order(monkeypatch):
+    monkeypatch.setenv("MEGAFORTH_NATIVE_PROFILE", "1")
+    runtimes = _runtimes(
+        b": RUN 1 2 2>R 3 2R@ 2R> 10 20 2>R 2R@ 2DROP 2R> ;"
+    )
+    result = _compare(runtimes, "RUN")
+    assert result["error"] is None
+    assert result["data"] == (3, 1, 2, 1, 2, 10, 20)
+    exits = runtimes[1].native_execution_stats["profile"]["exits"]
+    assert not [key for key in exits if "Pair" in key]
+
+
+def test_pair_return_words_observe_a_raw_loop_frame():
+    runtimes = _runtimes(b": RUN 0 5 2 DO 2R@ + + LOOP ;")
+    result = _compare(runtimes, "RUN")
+    assert result["error"] is None
+
+
+@pytest.mark.parametrize("source", (b": RUN 2R> ;", b": RUN 2R@ ;", b": RUN 1 2>R ;"))
+def test_pair_return_words_fail_like_the_reference(source):
+    runtimes = _runtimes(source)
+    result = _compare(runtimes, "RUN", require_native=False)
+    assert result["error"] is not None

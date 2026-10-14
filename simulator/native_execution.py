@@ -22,34 +22,44 @@ from simulator.timer import HostedTimerService
 # Without a host quantum, native work still returns to the same dispatcher at
 # this interval. It bounds one native entry, not a guest-visible boundary.
 UNQUANTIZED_NATIVE_INTERVAL_STEPS = 8192
-SEMANTIC_API_VERSION = 4
+SEMANTIC_API_VERSION = 10
+
+
+def load_native_extension(*, required: bool):
+    """Return the matching ``_megaforth_native`` build, or None when optional."""
+
+    try:
+        import _megaforth_native as extension
+    except ImportError:
+        if required:
+            raise RuntimeError(
+                "native semantic execution requires _megaforth_native; "
+                "run python setup_simulator_accel.py build_ext --inplace"
+            ) from None
+        return None
+    if (getattr(extension, "SEMANTIC_API_VERSION", None) != SEMANTIC_API_VERSION
+            or not hasattr(extension, "scalar_fp_execute")
+            or not hasattr(extension, "keccak_f1600")
+            or getattr(extension, "TILE_VALUES_API_VERSION", None) != 1
+            or not callable(getattr(extension, "tile_execute_values", None))
+            or not callable(getattr(extension, "tile_values_supported", None))
+            or getattr(extension, "TILE_GUARD_API_VERSION", None) != 1
+            or not callable(getattr(extension, "TileIdentityGuard", None))
+            or not callable(getattr(extension, "NativeDictionary", None))):
+        if required:
+            raise RuntimeError(
+                "native semantic execution requires a matching "
+                "_megaforth_native build; run make build"
+            )
+        return None
+    return extension
 
 
 class NativeExecutor:
     @classmethod
     def create(cls, runtime, *, required: bool, admit_core: bool):
-        try:
-            import _megaforth_native as extension
-        except ImportError:
-            if required:
-                raise RuntimeError(
-                    "native semantic execution requires _megaforth_native; "
-                    "run python setup_simulator_accel.py build_ext --inplace"
-                ) from None
-            return None
-        if (getattr(extension, "SEMANTIC_API_VERSION", None) != SEMANTIC_API_VERSION
-                or not hasattr(extension, "scalar_fp_execute")
-                or not hasattr(extension, "keccak_f1600")
-                or getattr(extension, "TILE_VALUES_API_VERSION", None) != 1
-                or not callable(getattr(extension, "tile_execute_values", None))
-                or not callable(getattr(extension, "tile_values_supported", None))
-                or getattr(extension, "TILE_GUARD_API_VERSION", None) != 1
-                or not callable(getattr(extension, "TileIdentityGuard", None))):
-            if required:
-                raise RuntimeError(
-                    "native semantic execution requires a matching "
-                    "_megaforth_native build; run make build"
-                )
+        extension = load_native_extension(required=required)
+        if extension is None:
             return None
         return cls(runtime, extension, admit_core=admit_core)
 
@@ -97,6 +107,50 @@ class NativeExecutor:
             if admit_core and isinstance(word.implementation, rt.PrimitiveDefinition)
             and word.name in scalar_operations
         }
+        # The original BIOS tile words, while the runtime keeps the canonical
+        # tile service whose value math is this extension's own kernel. Their
+        # closures look the service up on each call, so each run checks it.
+        self.tile = runtime.tile
+        tile_operations = {
+            b"FP16-MODE": (extension.OP_TILE_MODE_SET, 4, 0),
+            b"BF16-MODE": (extension.OP_TILE_MODE_SET, 5, 0),
+            b"TMODE!": (extension.OP_TILE_MODE_STORE, 0, 0),
+            b"TSRC0!": (extension.OP_TILE_SOURCE0_STORE, 0, 0),
+            b"TSRC1!": (extension.OP_TILE_SOURCE1_STORE, 0, 0),
+            b"TDST!": (extension.OP_TILE_DESTINATION_STORE, 0, 0),
+            b"TADD": (extension.OP_TILE_BINARY, extension.TILE_ADD, 0),
+            b"TSUB": (extension.OP_TILE_BINARY, extension.TILE_SUBTRACT, 0),
+            b"TMUL": (extension.OP_TILE_BINARY, extension.TILE_MULTIPLY, 0),
+        }
+        self.tile_primitives = {
+            word.xt: (word, tile_operations[word.name])
+            for word in runtime.dictionary.words
+            if admit_core and isinstance(word.implementation, rt.PrimitiveDefinition)
+            and word.name in tile_operations
+        }
+        # The original BIOS evaluator words push their own fixed body cells,
+        # bound before any source runs, so a compiled call is a constant push.
+        self.cell_primitives = {}
+        evaluator = runtime._bios_evaluator
+        if admit_core and evaluator is not None:
+            for name, address in (
+                (b"EVAL-STATUS", evaluator.status_address),
+                (b"EVAL-LINE", evaluator.line_address),
+                (b"EVAL-COLUMN", evaluator.column_address),
+                (b"EVAL-DEPTH", evaluator.depth_address),
+                (b"EVAL-THROW", evaluator.throw_address),
+            ):
+                word = runtime.dictionary.find(name)
+                if (word is not None
+                        and isinstance(word.implementation, rt.PrimitiveDefinition)
+                        and word.body_address == address):
+                    self.cell_primitives[word.xt] = (
+                        word, (extension.OP_PUSH_CELL, address, 0)
+                    )
+        # The service's identity guard is not free, so the program calls it
+        # only in a run that reaches a tile word, once.
+        tile = self.tile
+        self.program.bind_tile_guard(lambda: tile._native_value_executor() is not None)
         self.generation = runtime.dictionary.execution_generation
         self.plans = {}
         self.entry_costs = {}
@@ -227,11 +281,53 @@ class NativeExecutor:
                 instruction = operations[ip]
                 reason = type(instruction).__name__
                 if isinstance(instruction, ir.Call):
-                    target = self.runtime.dictionary._by_xt.get(instruction.xt)
+                    target = self.runtime.dictionary.live_word(instruction.xt)
                     if target is not None:
                         reason += ":" + target.name.decode("ascii", errors="replace")
         prefix = "skipped:" if skipped else "progress:" if steps else "empty:"
         self.exit_counts[prefix + reason] += 1
+
+    def _tile_state(self):
+        """The tile registers a native run may use, or None to leave tiles to Python.
+
+        The tile words run natively only through the service whose value
+        math is this extension's kernel, so results match the reference.
+        The program confirms the service's identity guard before the first
+        tile word it runs.
+        """
+
+        tile = self.tile
+        if (
+            not self.tile_primitives
+            or self.runtime.tile is not tile
+            or tile._native_values is not self.extension.tile_execute_values
+        ):
+            return None
+        registers = tile._registers._state(tile._core_id)
+        return (tile._mode, registers.operand_address, tile._source1,
+                registers.result_address)
+
+    def _settle_tile(self, state):
+        """Publish a native run's tile registers and completed operations."""
+
+        mode, source0, source1, destination, operations = state
+        tile = self.tile
+        tile._mode = mode
+        tile._source1 = source1
+        registers = tile._registers._state(tile._core_id)
+        registers.operand_address = source0
+        registers.result_address = destination
+        if operations:
+            account = tile._account_operation
+            diagnostics = self.runtime.diagnostics
+            if getattr(account, "__self__", None) is diagnostics and (
+                getattr(account, "__func__", None)
+                is HostedDiagnosticsService.account_tile_operation
+            ):
+                diagnostics.account_tile_operations(operations)
+            elif account is not None:
+                for _ in range(operations):
+                    account()
 
     def _admitted_context(self, context, meter):
         runtime = self.runtime
@@ -268,6 +364,12 @@ class NativeExecutor:
             scalar = self.scalar_primitives.get(target.xt)
             if scalar is not None and scalar[0] is target:
                 return scalar[1]
+            tile = self.tile_primitives.get(target.xt)
+            if tile is not None and tile[0] is target:
+                return tile[1]
+            cell = self.cell_primitives.get(target.xt)
+            if cell is not None and cell[0] is target:
+                return cell[1]
         if isinstance(implementation, rt.ColonDefinition):
             if target.xt not in self.runtime._colon_accelerators:
                 pending.append(target)
@@ -294,11 +396,9 @@ class NativeExecutor:
             word = pending.pop()
             if word.xt in self.plans:
                 continue
-            if runtime.dictionary._by_xt.get(word.xt) is not word:
+            if runtime.dictionary.live_word(word.xt) is not word:
                 continue
             if not isinstance(word.implementation, rt.ColonDefinition):
-                continue
-            if word.xt in runtime._colon_accelerators:
                 continue
             # Mark before following recursive calls. Plans keep exact original
             # instruction indices; unsupported operations remain explicit stops.
@@ -310,7 +410,7 @@ class NativeExecutor:
                     item = (op.OP_LITERAL, instruction.value, 0)
                 elif isinstance(instruction, (ir.Call, ir.CallSelf)):
                     target = word if isinstance(instruction, ir.CallSelf) else (
-                        runtime.dictionary._by_xt.get(instruction.xt)
+                        runtime.dictionary.live_word(instruction.xt)
                     )
                     if target is not None:
                         item = self._call(target, pending)
@@ -338,18 +438,30 @@ class NativeExecutor:
                     item = (op.OP_UNLOOP, 0, 0)
                 elif isinstance(instruction, ir.StoreValue):
                     item = (op.OP_STORE_VALUE, instruction.address, 0)
+                elif isinstance(instruction, ir.AbortIf):
+                    item = (op.OP_ABORT_IF, 0, 0)
+                elif isinstance(instruction, ir.RPushPair):
+                    item = (op.OP_R_PUSH_PAIR, 0, 0)
+                elif isinstance(instruction, ir.RPopPair):
+                    item = (op.OP_R_POP_PAIR, 0, 0)
+                elif isinstance(instruction, ir.RPeekPair):
+                    item = (op.OP_R_PEEK_PAIR, 0, 0)
                 elif isinstance(instruction, ir.PushStringLiteral):
                     item = (op.OP_STRING_LITERAL,
                             word.body_address + instruction.offset,
                             instruction.length)
                 operations.append(item)
-            self.program.install(word.xt, operations)
+            # A word with an execution overlay is planned too, for Python to
+            # enter after the overlay declines; calls to it stay stops.
+            self.program.install(
+                word.xt, operations, word.xt in runtime._colon_accelerators
+            )
             # Zero marks a Python-owned operation. Other entries match the
             # native cost(): an IR operation costs one tick, while a compiled
             # primitive/constant call also includes its execution tick.
             self.entry_costs[word.xt] = bytes(
                 0 if operation[0] == op.OP_STOP else
-                1 if op.OP_LITERAL <= operation[0] <= op.OP_UNLOOP else 2
+                1 if op.OP_LITERAL <= operation[0] <= op.OP_ABORT_IF else 2
                 for operation in operations
             )
 
@@ -383,6 +495,7 @@ class NativeExecutor:
                 return None
         data = context.data
         returns = context.returns
+        tile = self._tile_state()
         started = perf_counter_ns() if self.profile_enabled else 0
         result = self.program.run(
             current.xt, ip,
@@ -393,12 +506,15 @@ class NativeExecutor:
             allowance,
             self.scalar_float.fpcsr,
             machine_allowance,
+            tile,
         )
         (xt, resumed_ip, steps, data_pointer, return_pointer, cookie,
-         updates, pointer_captures, fpcsr, machine) = result
+         updates, pointer_captures, fpcsr, machine, tile_result) = result
         # Publish the completed prefix before clocks, profiling, fallback or
         # any host observer can see the native interval's boundary.
         self.scalar_float._fpcsr = fpcsr
+        if tile is not None:
+            self._settle_tile(tile_result)
         if self.profile_enabled:
             self.native_run_ns += perf_counter_ns() - started
             self._profile_exit(xt, resumed_ip, steps, allowance)

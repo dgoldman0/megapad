@@ -3,9 +3,10 @@
 The extension and its Python owner are built from the same checkout and use
 one current internal interface. Rebuild the extension after changing this
 boundary with `python setup_simulator_accel.py build_ext --inplace --force`.
-The extension exports `SEMANTIC_API_VERSION = 2`; its Python owner checks this
+The extension exports `SEMANTIC_API_VERSION = 10`; its Python owner checks this
 version before admission. An explicit native request rejects older builds;
-automatic selection keeps the reference executor when the version mismatches.
+automatic selection keeps the reference executor and the Python dictionary
+when the version mismatches.
 
 `_megaforth_native.NativeProgram(regions, page_size, continuation_type,
 dense_regions=())` retains sparse ordinary regions as `(base, size, pages)`
@@ -56,10 +57,15 @@ written sparse pages, or all configured dense pages rounded up separately
 per region. Clients serialize writes and execution; no GIL release, backing
 replacement, transition copying, or hybrid execution is introduced here.
 
-`install(xt, operations)` installs a plan of `(opcode, a, b)` triples, one per
-original IR operation, so branch targets and returned IPs remain original IR
-indices. `clear()` drops all plans. The Python owner invalidates plans for
-dictionary publication/rollback and mutable execution bindings. Opcode
+`install(xt, operations, overlaid=False)` installs a plan of `(opcode, a, b)`
+triples, one per original IR operation, so branch targets and returned IPs
+remain original IR indices. An overlaid plan belongs to a word with a Python
+execution overlay: Python may enter it after the overlay declines, and a
+return may resume inside it, but a native `EXECUTE` never enters it, and
+calls to such a word compile to stops, so every entry meets the overlay
+first. `clear()` drops all plans. The Python owner invalidates plans when
+the dictionary removes a definition or reclaims a body, and for mutable
+execution bindings; publishing a new definition leaves them valid. Opcode
 constants are exported with the `OP_` prefix.
 
 Installation also recognizes literal/constant arithmetic, address pushes
@@ -146,9 +152,11 @@ Native colon calls write exact opaque continuation cookies into the shared
 return-stack bytes. Native returns can also consume preexisting ordinary
 continuations, read lazily from the same dictionary and verified against shared
 bytes and the exact `continuation_type`. Root/fault returns and stale metadata
-return to Python before mutation. `>R`, `R>`, and `R@` use the single ordered
-return stack; exposed continuations are never mistaken for user cells or loop
-indices. Counted loops use fixed-position limit/index pairs and preserve
+return to Python before mutation. `>R`, `R>`, `R@` and the pair words `2>R`,
+`2R>` and `2R@` use the single ordered return stack; exposed continuations are
+never mistaken for user cells or loop indices. A pair word moves or copies both
+cells in one operation, and stops before any effect unless both top return
+cells are user cells, so Python raises the reference error. Counted loops use fixed-position limit/index pairs and preserve
 modular equality termination, retained bytes, and type deletion on both
 new frame slots. Identity-bound `I` and `J` never search past a continuation.
 Identity-bound `EXECUTE` can enter an already installed colon plan, consuming
@@ -172,15 +180,19 @@ stack capacity. Untouched slots remain distinct from explicit type deletions;
 all changed inactive slots are exported for subsequent `RP!`. Allocation for
 paired loop slots finishes before either type changes.
 
-Native still excludes pair return-stack operations,
-stack-pointer restoration, other dynamic execution, services other than the
+Native still excludes stack-pointer restoration, other dynamic execution, services other than the
 identity-bound scalar FP operations described below, and any
 ordinary memory access intersecting the return-stack backing interval.
 
 `OP_LITERAL`, `OP_BRANCH`, `OP_BRANCH_ZERO`, `OP_CALL`, `OP_RETURN`,
 `OP_STORE_VALUE`, `OP_STRING_LITERAL`, `OP_R_PUSH`, `OP_R_POP`, `OP_R_PEEK`,
-`OP_DO`, `OP_QUESTION_DO`, `OP_LOOP`, `OP_PLUS_LOOP`, and `OP_UNLOOP`
-cost one semantic step. `OP_PUSH_CELL`
+`OP_DO`, `OP_QUESTION_DO`, `OP_LOOP`, `OP_PLUS_LOOP`, `OP_UNLOOP`,
+`OP_R_PUSH_PAIR`, `OP_R_POP_PAIR`, `OP_R_PEEK_PAIR` and `OP_ABORT_IF` cost
+one semantic step. `OP_ABORT_IF` is the test of a compiled
+`ABORT"`: it consumes a zero flag and continues, and stops before any effect
+on a true one, so Python performs the abort. Compiled calls to the original
+`EVAL-STATUS`, `EVAL-LINE`, `EVAL-COLUMN`, `EVAL-DEPTH` and `EVAL-THROW`
+plan as `OP_PUSH_CELL` of the fixed cell each pushes. `OP_PUSH_CELL`
 (constant or plain created-body address), `OP_FETCH_VALUE`, and admitted
 primitive-call operations cost two. `OP_STOP` is uncharged. `a` holds the
 literal, branch IP, called XT, or data address where applicable;
@@ -235,3 +247,85 @@ diagnostics, and exact timer state before executing a fallback operation or
 publishing a host boundary. Native execution does not admit events, invent
 IDL wakes, read wall time, or reset a watchdog. Empty/unsupported native runs
 must fall through to the Python operation instead of being retried unchanged.
+
+## Native dictionary
+
+`_megaforth_native.NativeDictionary(start_address, active_limit, memory,
+regions, page_size, dense_regions, has_external, external_base,
+external_limit)` is the native backend's dictionary and side index. `memory`
+is the owning `SparseAddressSpace` or `None`; the region descriptors are the
+same ones `NativeProgram` receives and are validated by the shared
+`guest_memory.h`. `simulator/native_dictionary.py` is its only intended
+client and presents it through the Python `Dictionary` and
+`HostedDictionaryIndex` interfaces; the Python classes stay the reference.
+
+Records are kept in definition order and bound case-insensitively, newest
+first. `define(name, initial_body, immediate, kind, constant, directive,
+has_action, action_xt, action_ip, implementation)` publishes one header and
+returns `(index, header_address, xt, uid)`. The kind is one of the exported
+`KIND_*` values; Python implementation objects are kept for Python, and a
+created word's action is kept natively. `find`, `resolve`, `live` and `view`
+return a record's cached Python view, or its index when Python has not asked
+for it yet; the facade then builds the view from `record_info(index)` and
+stores it with `set_view`. `publish_rollback`, `rollback_to` and `set_latest`
+return the removed XTs so the facade can drop cached views.
+
+Guest bytes are written directly into the region pages, and a missing sparse
+page is created as a zeroed page-sized `bytearray`, as the Python write path
+does. A span outside one ordinary region goes through the `SparseAddressSpace`
+methods instead, so its checks and exceptions are unchanged. The side index
+keeps the BIOS slot layout, FNV-1a hash, probe order, publication order and
+flag transitions of `HostedDictionaryIndex`.
+
+Natively published colon definitions keep their IR in the record as
+`IR_*` operations, `(kind, a, b)` with `WRITE_OUTPUT` and `ABORT_IF` payloads
+held separately. `record_info` returns a `NativeColonBody` handle for such a
+record; its `operations()` gives `(kind, a, b, payload)` tuples, from which
+the facade builds the Python IR only when Python first reads it.
+
+## Native line walker
+
+`_megaforth_native.NativeLineWalker(dictionary, directive_values, primitives,
+protocol, cells, evaluator_cells, evaluate_checked_xt, status_throw_xt,
+bootstrap_base, bank0_base, bank0_limit)` runs one loader overlay's loop:
+`WALK_SOURCE` for `SOURCE-EVALUATE-CHECKED` or `WALK_LOADER` for `_LD-WALK`.
+`simulator/native_walker.py` is its only intended client. `directive_values`
+maps every `DirectiveKind` name to its value; `primitives` binds the admitted
+interpret-time and defining primitives by XT, and the walker captures each
+record's identity at construction.
+
+`walk(data_state, return_state, frames_depth, compiler, blocked, allowance,
+dictionary_base, dictionary_limit, base_address)` returns `(outcome, current,
+evaluated, data_pointer, return_pointer, cookie, steps, compiler,
+cleared_token)`. Outcome 0 ends the overlay's loop, 1 hands back one measured
+line still to be evaluated, and 2 asks Python to run the next whole
+iteration. The caller settles the stack pointers, cookie counter and steps,
+and takes back the open definition, exactly as after a native execution
+interval; after an exception, `take_error_state()` returns the same tuple
+for the lines already committed. `compiler` crosses the boundary as
+`(name, location, compile_mode, temporary, operations, controls, pool)` and
+comes back with the name token's column after the location. `stats()` gives
+the lines evaluated natively and handed back.
+
+## Tile words
+
+`run` takes an optional `tile_state = (mode, source0, source1, destination)`
+with the TMODE register, TSRC0, TSRC1 and TDST. When it is given, the run
+admits `OP_TILE_MODE_SET` (`FP16-MODE` and `BF16-MODE`, with the mode in
+`a`), `OP_TILE_MODE_STORE` (`TMODE!`, keeping seven bits),
+`OP_TILE_SOURCE0_STORE`, `OP_TILE_SOURCE1_STORE`,
+`OP_TILE_DESTINATION_STORE` and `OP_TILE_BINARY` (`TADD`, `TSUB` or `TMUL`,
+as `TILE_ADD`, `TILE_SUBTRACT` or `TILE_MULTIPLY` in `a`), each costing the
+two ticks of an admitted primitive call. A binary operation declines before
+any effect unless the mode names a defined format and both 64-byte sources
+and the backed destination lie in ordinary memory outside the return
+stack; it reads both sources before writing, and computes with the same
+`tile_values` kernel the Python service uses. The result gains a last
+element, `(mode, source0, source1, destination, operations)` or `None`,
+which the owner publishes to the tile service and the Field ALU registers
+and to the tile-operation accountant before anything else observes them.
+The owner passes tile state only while the runtime keeps the tile service it
+started with, bound to this extension's own `tile_execute_values`. It also
+binds the service's identity guard with `bind_tile_guard(callable)`; the
+program calls it once, at the first tile word of a run, and leaves every tile
+word of that run to Python when it returns false.

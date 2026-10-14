@@ -344,6 +344,42 @@ class _QualifiedOrdinarySpan:
         )
 
 
+class GuestCell:
+    """One 64-bit guest cell at a fixed address.
+
+    A cell in ordinary memory is qualified once, then read and written
+    straight through its region: the same bytes the checked general path
+    touches, without repeating its address, region and type checks on every
+    access.  Any other cell, such as one in the MMIO aperture, keeps the
+    checked path.
+    """
+
+    __slots__ = ("address", "_memory", "_span")
+
+    def __init__(self, memory: "SparseAddressSpace", address: int) -> None:
+        self.address = address
+        self._memory = memory
+        try:
+            self._span: _QualifiedOrdinarySpan | None = (
+                memory._qualify_ordinary_span(address, 8)
+            )
+        except (ValueError, MemoryAccessError):
+            self._span = None
+
+    def read(self) -> int:
+        span = self._span
+        if span is None:
+            return self._memory.read64(self.address)
+        return span.read64(self.address)
+
+    def write(self, value: int) -> None:
+        span = self._span
+        if span is None:
+            self._memory.write64(self.address, value)
+        else:
+            span.write64(self.address, _require_integer(value, label="stored value"))
+
+
 @dataclass(frozen=True, slots=True)
 class _ResolvedSpan:
     kind: AddressClass
