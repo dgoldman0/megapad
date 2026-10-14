@@ -3,7 +3,7 @@
 Status: agreed 2026-10-13 (see Decisions). Step 1 is done (see Step 1
 results): the boot compile fell from about 40 s to 2.5 s. Step 2 is done
 (see Step 2): a keystroke fell from 0.40 s to 0.37 s. Step 3 is under way:
-five of its design's seven parts are done (see Step 3).
+six of its design's seven parts are done (see Step 3).
 
 The hosted simulator with the native executor already runs guest Forth in
 C++, at about 80 million semantic steps per second. These measurements ask
@@ -247,8 +247,15 @@ Parts 1 to 4 and 7 were approved on 2026-10-14 and are done, on Akashic
 (`physical_typing_cadence.py --screen-profile`), a burst frame fell from 25.0
 to 22.8 million guest steps, and from 17.6 KB to 0.7 KB on the wire. Part 7
 also stops zero-filling a glyph slot for every cell of the screen on each key,
-which the simulator does not count as steps. Parts 5 and 6 need their own
-approval; the design estimates about 11 million steps a frame after both.
+which the simulator does not count as steps.
+
+Parts 5 and 6 were approved the same day. Part 5 is done: each admission
+boundary keeps what it last admitted and skips rechecking unchanged glyph runs
+and controls. The frame build (the producer's work in a frame) fell from 19.6
+to 16.7 million steps. Total steps per frame are not a fair comparison across
+runs, because Desk paints once per key and a slower host folds more keys into
+each frame. Part 6 is under review: a full call-tree profile (this branch's
+`MEGAPAD_PROFILE_CHAINS`) shows its estimate was too high.
 
 ## Decisions
 
