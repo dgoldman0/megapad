@@ -19,6 +19,7 @@ from .output_coordinator import CompositeTerminalView
 from .retained_model import OwnerIdentity, ResourceFormat
 from .retained_resources import RGBAResource
 from .retained_scene import (
+    CONTROL_ALLOWED_STATES,
     CONTROL_STATE_MASK,
     GLYPH_RUN_ATTRIBUTE_MASK,
     ROOT_CONTROL_KINDS,
@@ -88,49 +89,6 @@ def _boolean(name: str, value) -> bool:
     return value
 
 
-_CONTROL_ALLOWED_STATES = {
-    ControlKind.MENU_BAR: ControlState.VISIBLE | ControlState.ENABLED,
-    ControlKind.MENU: (
-        ControlState.VISIBLE
-        | ControlState.ENABLED
-        | ControlState.OPEN
-        | ControlState.SELECTED
-    ),
-    ControlKind.MENU_ITEM: (
-        ControlState.VISIBLE
-        | ControlState.ENABLED
-        | ControlState.SELECTED
-        | ControlState.CHECKED
-    ),
-    ControlKind.MENU_SEPARATOR: ControlState.VISIBLE,
-    ControlKind.TEXT_AREA: (
-        ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
-    ),
-    ControlKind.TEXT_GRID: (
-        ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
-    ),
-    ControlKind.TABSET: ControlState.VISIBLE | ControlState.ENABLED,
-    ControlKind.TASKBAR: ControlState.VISIBLE | ControlState.ENABLED,
-    ControlKind.TASK: (
-        ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
-        | ControlState.MINIMIZED
-    ),
-    ControlKind.LAUNCHER: ControlState.VISIBLE | ControlState.ENABLED,
-    ControlKind.TAB: (
-        ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
-    ),
-    ControlKind.FIELD: (
-        ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
-    ),
-    ControlKind.ITEM_VIEW: (
-        ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
-    ),
-    ControlKind.DOCUMENT: (
-        ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
-    ),
-}
-
-
 def _control_state(
     name: str,
     value,
@@ -149,7 +107,7 @@ def _control_state(
     state = ControlState(state_bits)
     if int(state) & ~int(CONTROL_STATE_MASK):
         raise ValueError(f"{name} contains reserved CONTROL-1 bits")
-    if int(state) & ~int(_CONTROL_ALLOWED_STATES[kind]):
+    if int(state) & ~int(CONTROL_ALLOWED_STATES[kind]):
         raise ValueError(f"{name} contains bits not defined for {kind.name}")
     if state & (ControlState.OPEN | ControlState.SELECTED) and not (
         state & ControlState.VISIBLE and state & ControlState.ENABLED

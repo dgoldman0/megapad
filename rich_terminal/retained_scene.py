@@ -192,6 +192,47 @@ ROOT_CONTROL_KINDS = frozenset(
     )
 )
 
+# The state bits each control kind may carry.
+CONTROL_ALLOWED_STATES = {
+    ControlKind.MENU_BAR: ControlState.VISIBLE | ControlState.ENABLED,
+    ControlKind.MENU: (
+        ControlState.VISIBLE
+        | ControlState.ENABLED
+        | ControlState.OPEN
+        | ControlState.SELECTED
+    ),
+    ControlKind.MENU_ITEM: (
+        ControlState.VISIBLE
+        | ControlState.ENABLED
+        | ControlState.SELECTED
+        | ControlState.CHECKED
+    ),
+    ControlKind.MENU_SEPARATOR: ControlState.VISIBLE,
+    ControlKind.TEXT_AREA: (
+        ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
+    ),
+    ControlKind.TEXT_GRID: (
+        ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
+    ),
+    ControlKind.TABSET: ControlState.VISIBLE | ControlState.ENABLED,
+    ControlKind.TAB: (
+        ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
+    ),
+    ControlKind.ITEM_VIEW: (
+        ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
+    ),
+    ControlKind.TASKBAR: ControlState.VISIBLE | ControlState.ENABLED,
+    ControlKind.TASK: (
+        ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
+        | ControlState.MINIMIZED
+    ),
+    ControlKind.LAUNCHER: ControlState.VISIBLE | ControlState.ENABLED,
+    ControlKind.FIELD: ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED,
+    ControlKind.DOCUMENT: (
+        ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
+    ),
+}
+
 
 class ReadoutFormat(IntEnum):
     INTEGER = 0
@@ -904,46 +945,7 @@ def validate_control_shape(
             "DocumentContent, or None"
         )
 
-    allowed = {
-        ControlKind.MENU_BAR: ControlState.VISIBLE | ControlState.ENABLED,
-        ControlKind.MENU: (
-            ControlState.VISIBLE
-            | ControlState.ENABLED
-            | ControlState.OPEN
-            | ControlState.SELECTED
-        ),
-        ControlKind.MENU_ITEM: (
-            ControlState.VISIBLE
-            | ControlState.ENABLED
-            | ControlState.SELECTED
-            | ControlState.CHECKED
-        ),
-        ControlKind.MENU_SEPARATOR: ControlState.VISIBLE,
-        ControlKind.TEXT_AREA: (
-            ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
-        ),
-        ControlKind.TEXT_GRID: (
-            ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
-        ),
-        ControlKind.TABSET: ControlState.VISIBLE | ControlState.ENABLED,
-        ControlKind.TAB: (
-            ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
-        ),
-        ControlKind.ITEM_VIEW: (
-            ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
-        ),
-        ControlKind.TASKBAR: ControlState.VISIBLE | ControlState.ENABLED,
-        ControlKind.TASK: (
-            ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
-            | ControlState.MINIMIZED
-        ),
-        ControlKind.LAUNCHER: ControlState.VISIBLE | ControlState.ENABLED,
-        ControlKind.FIELD: ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED,
-        ControlKind.DOCUMENT: (
-            ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
-        ),
-    }[normalized_kind]
-    if int(normalized_state) & ~int(allowed):
+    if int(normalized_state) & ~int(CONTROL_ALLOWED_STATES[normalized_kind]):
         raise ValueError(
             f"state contains bits not defined for {normalized_kind.name}"
         )
@@ -3098,6 +3100,7 @@ class RetainedSceneModel:
 
 __all__ = [
     "CommitDisposition",
+    "CONTROL_ALLOWED_STATES",
     "CONTROL_STATE_MASK",
     "ControlDefinition",
     "ControlKind",
