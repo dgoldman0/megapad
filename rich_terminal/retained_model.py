@@ -35,6 +35,7 @@ class RetainedFeature(IntFlag):
     FIELDS = 1 << 14
     GRID_CELLS = 1 << 15
     CONTROL_DOCUMENTS = 1 << 16
+    DIALOGS = 1 << 17
 
 
 class ResourceFormat(IntEnum):
@@ -78,6 +79,7 @@ _ALL_FEATURES = (
     | RetainedFeature.FIELDS
     | RetainedFeature.GRID_CELLS
     | RetainedFeature.CONTROL_DOCUMENTS
+    | RetainedFeature.DIALOGS
 )
 
 
@@ -297,6 +299,9 @@ class RetainedPolicy:
             raise ValueError("FIELDS requires CONTROLS")
         if features & RetainedFeature.TASKBARS and not controls:
             raise ValueError("TASKBARS requires CONTROLS")
+        dialogs = bool(features & RetainedFeature.DIALOGS)
+        if dialogs and not controls:
+            raise ValueError("DIALOGS requires CONTROLS")
         # Item views need no larger minimum: the smallest ITM1 body and the
         # 64-byte item events fit CONTROL_COLLECTIONS's minima.
         if features & RetainedFeature.CONTROL_ITEMS and not control_collections:
@@ -381,6 +386,11 @@ class RetainedPolicy:
             if inbound < 176:
                 raise ValueError("FIELDS requires a 176-byte inbound payload")
             operation_payloads.append(176)
+        if dialogs:
+            # The 80-byte CONTROL prefix and the 56-byte smallest DLG1 body.
+            if inbound < 136:
+                raise ValueError("DIALOGS requires a 136-byte inbound payload")
+            operation_payloads.append(136)
         if panes:
             if inbound < 104:
                 raise ValueError("PANES requires a 104-byte inbound payload")

@@ -666,7 +666,7 @@ def test_region_definition_codec_enforces_exact_scalar_and_flag_contract():
     assert definition.clipped
 
     payload = bytearray(encode_region_definition(definition))
-    payload[-4:] = (0x4).to_bytes(4, "little")
+    payload[-4:] = (0x8).to_bytes(4, "little")  # bit 2 is MODAL; bit 3 is reserved
     with pytest.raises(RetainedWireError) as reserved:
         decode_region_definition(payload)
     assert reserved.value.code is RetainedWireErrorCode.RESERVED

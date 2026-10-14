@@ -48,7 +48,8 @@ from .semantic_content import (
     SemanticTextState,
 )
 from .semantic_items import ItemRole, ItemViewContent, ViewItem, card_row_count
-from .semantic_fields import FieldContent
+from .semantic_fields import FieldContent, FieldKind
+from .semantic_dialogs import ButtonContent, DialogContent
 from .semantic_documents import (
     DocumentBlock,
     DocumentContent,
@@ -156,6 +157,8 @@ class ControlKind(IntEnum):
     LAUNCHER = 12
     FIELD = 13
     DOCUMENT = 14
+    DIALOG = 15
+    BUTTON = 16
 
 
 class ControlState(IntFlag):
@@ -189,6 +192,8 @@ ROOT_CONTROL_KINDS = frozenset(
         ControlKind.TASKBAR,
         ControlKind.FIELD,
         ControlKind.DOCUMENT,
+        ControlKind.DIALOG,
+        ControlKind.BUTTON,
     )
 )
 
@@ -231,7 +236,17 @@ CONTROL_ALLOWED_STATES = {
     ControlKind.DOCUMENT: (
         ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
     ),
+    ControlKind.DIALOG: ControlState.VISIBLE,
+    ControlKind.BUTTON: (
+        ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
+    ),
 }
+
+# Root kinds whose CONTROL label is part of their meaning: a field's outer
+# label, a dialog's title, and a button's label.
+LABELED_ROOT_KINDS = frozenset(
+    (ControlKind.FIELD, ControlKind.DIALOG, ControlKind.BUTTON)
+)
 
 
 class ReadoutFormat(IntEnum):
@@ -367,6 +382,7 @@ class RegionDefinition:
     visible: bool
     clipped: bool
     geometry_generation: int
+    modal: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.owner, OwnerIdentity):
@@ -391,6 +407,7 @@ class RegionDefinition:
             )
         object.__setattr__(self, "visible", _boolean("visible", self.visible))
         object.__setattr__(self, "clipped", _boolean("clipped", self.clipped))
+        object.__setattr__(self, "modal", _boolean("modal", self.modal))
         clip = (self.clip_x, self.clip_y, self.clip_cols, self.clip_rows)
         if not self.clipped and any(clip):
             raise ValueError("an unclipped region must carry the zero clip rectangle")
@@ -400,6 +417,25 @@ class RegionDefinition:
     @property
     def logical_right(self) -> int:
         return self.logical_x + self.logical_cols
+
+    def barrier(self, geometry: TerminalGeometry) -> tuple[int, int, int, int] | None:
+        """The occlusion barrier as ``(left, top, right, bottom)`` surface
+        cells: the logical rectangle cut by the physical clip and the
+        surface, or None when nothing of it is on the surface."""
+
+        if self.clipped:
+            if self.clip_cols == 0:
+                return None
+            left, top = self.clip_x, self.clip_y
+            right, bottom = left + self.clip_cols, top + self.clip_rows
+        else:
+            left, top = self.logical_x, self.logical_y
+            right, bottom = self.logical_right, self.logical_bottom
+        left, top = max(0, left), max(0, top)
+        right, bottom = min(geometry.cols, right), min(geometry.rows, bottom)
+        if left >= right or top >= bottom:
+            return None
+        return left, top, right, bottom
 
     @property
     def logical_bottom(self) -> int:
@@ -907,7 +943,8 @@ def validate_control_shape(
     bounds: ObjectBounds | None,
     label: str,
     shortcut: str,
-    content: SemanticTextContent | ItemViewContent | FieldContent | DocumentContent | None,
+    content: (SemanticTextContent | ItemViewContent | FieldContent | DocumentContent
+              | DialogContent | ButtonContent | None),
 ) -> tuple[ControlKind, ControlState]:
     """Validate the common scene/wire shape of one semantic control.
 
@@ -938,11 +975,12 @@ def validate_control_shape(
     label_bytes = _control_text_bytes("label", label)
     shortcut_bytes = _control_text_bytes("shortcut", shortcut)
     if content is not None and not isinstance(
-        content, (SemanticTextContent, ItemViewContent, FieldContent, DocumentContent)
+        content, (SemanticTextContent, ItemViewContent, FieldContent, DocumentContent,
+                  DialogContent, ButtonContent)
     ):
         raise TypeError(
             "content must be SemanticTextContent, ItemViewContent, FieldContent, "
-            "DocumentContent, or None"
+            "DocumentContent, DialogContent, ButtonContent, or None"
         )
 
     if int(normalized_state) & ~int(CONTROL_ALLOWED_STATES[normalized_kind]):
@@ -963,7 +1001,8 @@ def validate_control_shape(
             raise ValueError(
                 f"{normalized_kind.name} requires root order zero and positive bounds"
             )
-        if shortcut_bytes or (label_bytes and normalized_kind is not ControlKind.FIELD):
+        if (shortcut_bytes and normalized_kind is not ControlKind.BUTTON) or (
+                label_bytes and normalized_kind not in LABELED_ROOT_KINDS):
             raise ValueError(
                 f"{normalized_kind.name} carries no label or shortcut"
             )
@@ -980,6 +1019,22 @@ def validate_control_shape(
             if not isinstance(content, FieldContent):
                 raise ValueError("FIELD requires FDC1 content")
             content.validate_geometry(cols=bounds.cell_cols, rows=bounds.cell_rows, label=label)
+        elif normalized_kind in (ControlKind.DIALOG, ControlKind.BUTTON):
+            if any(0x7F <= ord(character) <= 0x9F or character in "\u2028\u2029"
+                   for text in (label, shortcut) for character in text):
+                raise ValueError(
+                    f"{normalized_kind.name} text contains a control or line-separator character"
+                )
+            if normalized_kind is ControlKind.DIALOG:
+                if not isinstance(content, DialogContent):
+                    raise ValueError("DIALOG requires DLG1 content")
+                content.validate_geometry(
+                    cols=bounds.cell_cols, rows=bounds.cell_rows, title=label)
+            else:
+                if not isinstance(content, ButtonContent):
+                    raise ValueError("BUTTON requires BTN1 content")
+                if not label_bytes:
+                    raise ValueError("BUTTON requires a nonempty label")
         elif normalized_kind is ControlKind.DOCUMENT:
             if not isinstance(content, DocumentContent):
                 raise ValueError("DOCUMENT requires a document")
@@ -1079,7 +1134,8 @@ class ControlDefinition:
     bounds: ObjectBounds | None
     label: str
     shortcut: str
-    content: SemanticTextContent | ItemViewContent | FieldContent | DocumentContent | None = None
+    content: (SemanticTextContent | ItemViewContent | FieldContent | DocumentContent
+              | DialogContent | ButtonContent | None) = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.owner, OwnerIdentity):
@@ -1444,7 +1500,47 @@ class RetainedSceneModel:
         region = owner_scene.regions.get(definition.region_id)
         if region is None or not region.visible:
             raise SceneModelError(SceneErrorCode.BOUNDS, "control region is not visible")
+        if self._beneath_modal(state, owner_scene, definition, region):
+            raise SceneModelError(
+                SceneErrorCode.STATE, "control is inactive beneath an open modal region")
         return owner_scene, definition
+
+    @staticmethod
+    def _beneath_modal(
+        state: SceneModelState,
+        owner_scene: OwnerScene,
+        definition: ControlDefinition,
+        region: RegionDefinition,
+    ) -> bool:
+        """Whether a visible MODAL region above this control's region has a
+        barrier that meets the control's root bounds (RETAINED-1 section 9)."""
+
+        root = definition
+        while root.parent_control_id:
+            parent = owner_scene.controls.get(root.parent_control_id)
+            if parent is None:
+                break
+            root = parent
+        if root.bounds is None:
+            return False
+        left = region.logical_x + root.bounds.cell_x
+        top = region.logical_y + root.bounds.cell_y
+        right = left + root.bounds.cell_cols
+        bottom = top + root.bounds.cell_rows
+        order = (region.z_order, owner_scene.owner.owner_id, region.region_id)
+        for other in state.active.owners.values():
+            for modal in other.regions.values():
+                if not modal.modal or not modal.visible:
+                    continue
+                if (modal.z_order, other.owner.owner_id, modal.region_id) <= order:
+                    continue
+                barrier = modal.barrier(state.geometry)
+                if barrier is None:
+                    continue
+                b_left, b_top, b_right, b_bottom = barrier
+                if left < b_right and b_left < right and top < b_bottom and b_top < bottom:
+                    return True
+        return False
 
     def active_control_kind(self, owner: OwnerIdentity, control_id: int) -> ControlKind:
         """The kind of one exact live control in a visible region, or refuse."""
@@ -1645,6 +1741,7 @@ class RetainedSceneModel:
     def require_field_control(
         self, owner: OwnerIdentity, control_id: int, *,
         content_revision: int | None = None, adjustable: bool = False,
+        activatable: bool = False,
     ) -> ControlDefinition:
         """Resolve one writable visible field at its committed content revision."""
 
@@ -1672,7 +1769,33 @@ class RetainedSceneModel:
                 raise SceneModelError(SceneErrorCode.STATE, "ADJUST requires an exact content revision")
             if not content.is_adjustable:
                 raise SceneModelError(SceneErrorCode.STATE, "FIELD kind does not accept ADJUST")
+        if activatable and not content.is_activatable:
+            raise SceneModelError(SceneErrorCode.STATE, "a TEXT FIELD does not accept ACTIVATE")
         return definition
+
+    def require_field_position(
+        self, owner: OwnerIdentity, control_id: int, *,
+        content_revision: int, item_key: int, scalar_offset: int,
+    ) -> FieldContent:
+        """Resolve one PLACE or EXTEND position in a writable TEXT field's
+        value at its current content revision (RETAINED-1 section 9.2).
+        Nothing here changes the guest's caret or selection."""
+
+        definition = self.require_field_control(
+            owner, control_id, content_revision=content_revision)
+        content = definition.content
+        assert isinstance(content, FieldContent)
+        if content.kind is not FieldKind.TEXT:
+            raise SceneModelError(SceneErrorCode.STATE, "only a TEXT FIELD takes a position")
+        if item_key != 0:
+            raise SceneModelError(SceneErrorCode.STATE, "a FIELD position names item key zero")
+        try:
+            offset = _integer("scalar_offset", scalar_offset, minimum=0, maximum=UINT32_MAX)
+        except (TypeError, ValueError) as exc:
+            raise SceneModelError(SceneErrorCode.STATE, str(exc)) from exc
+        if offset > len(content.text):
+            raise SceneModelError(SceneErrorCode.STATE, "a FIELD position lies past its value")
+        return content
 
     def require_interactable_control(
         self,
@@ -1683,7 +1806,13 @@ class RetainedSceneModel:
 
         owner_scene, definition = self._active_control(owner, control_id)
         if definition.kind is ControlKind.FIELD:
-            return self.require_field_control(owner, control_id)
+            return self.require_field_control(owner, control_id, activatable=True)
+        if definition.kind is ControlKind.BUTTON:
+            if not self._owners.policy.features & RetainedFeature.DIALOGS:
+                raise SceneModelError(SceneErrorCode.FEATURE, "DIALOGS was not advertised")
+            if not definition.visible or not definition.enabled:
+                raise SceneModelError(SceneErrorCode.STATE, "control is hidden or disabled")
+            return definition
         if definition.kind in (ControlKind.TASK, ControlKind.LAUNCHER):
             parent = owner_scene.controls.get(definition.parent_control_id)
             if (parent is None or parent.kind is not ControlKind.TASKBAR
@@ -1795,11 +1924,16 @@ class RetainedSceneModel:
             operation_count=0,
         )
 
+    def _validate_region_policy(self, region: RegionDefinition) -> None:
+        if region.modal and not self._owners.policy.features & RetainedFeature.DIALOGS:
+            self._fail(SceneErrorCode.FEATURE, "a MODAL region requires DIALOGS")
+
     def define_region(self, region: RegionDefinition) -> None:
         staging = self._require_mutable_staging()
         if not isinstance(region, RegionDefinition):
             self._fail(SceneErrorCode.STATE, "region must be RegionDefinition")
         self._require_owner(region.owner)
+        self._validate_region_policy(region)
         try:
             region.validate_geometry(staging.geometry)
         except SceneModelError as exc:
@@ -1818,6 +1952,7 @@ class RetainedSceneModel:
         if not isinstance(region, RegionDefinition):
             self._fail(SceneErrorCode.STATE, "region must be RegionDefinition")
         self._require_owner(region.owner)
+        self._validate_region_policy(region)
         try:
             region.validate_geometry(staging.geometry)
         except SceneModelError as exc:
@@ -1930,6 +2065,7 @@ class RetainedSceneModel:
             ControlKind.ITEM_VIEW,
             ControlKind.FIELD,
             ControlKind.DOCUMENT,
+            ControlKind.DIALOG,
         }:
             compatible = (
                 replace(
@@ -1954,6 +2090,20 @@ class RetainedSceneModel:
                     SceneErrorCode.STATE,
                     "changed semantic content requires a newer content revision",
                 )
+        elif definition.kind is ControlKind.BUTTON:
+            compatible = (
+                replace(
+                    definition,
+                    state=current.state,
+                    label=current.label,
+                    shortcut=current.shortcut,
+                    content=current.content,
+                )
+                == current
+            )
+            failure = (
+                "BUTTON replacement may change only state, label, shortcut, and its flags"
+            )
         else:  # TAB, TASK, LAUNCHER
             compatible = (
                 replace(
@@ -2574,7 +2724,8 @@ class RetainedSceneModel:
 
     @staticmethod
     def _control_object_slots(definition: ControlDefinition) -> int:
-        if isinstance(definition.content, (FieldContent, DocumentContent)):
+        if isinstance(definition.content,
+                      (FieldContent, DocumentContent, DialogContent, ButtonContent)):
             return definition.content.object_slots
         return 1 + (0 if definition.content is None else len(definition.content.items))
 
@@ -2817,6 +2968,18 @@ class RetainedSceneModel:
             if (payload > policy.client_to_terminal_max_payload
                     or 200 + payload > policy.max_retained_transaction_bytes):
                 self._fail(SceneErrorCode.QUOTA, "FIELD content exceeds payload or transaction capacity")
+        if definition.kind in (ControlKind.DIALOG, ControlKind.BUTTON):
+            if not features & RetainedFeature.DIALOGS:
+                self._fail(SceneErrorCode.FEATURE, "DIALOGS was not advertised")
+            assert isinstance(definition.content, (DialogContent, ButtonContent))
+            policy = self._owners.policy
+            payload = (80 + len(definition.label.encode("utf-8"))
+                       + len(definition.shortcut.encode("utf-8"))
+                       + definition.content.wire_bytes)
+            if (payload > policy.client_to_terminal_max_payload
+                    or 200 + payload > policy.max_retained_transaction_bytes):
+                self._fail(SceneErrorCode.QUOTA,
+                           f"{definition.kind.name} exceeds payload or transaction capacity")
         if definition.kind in {
             ControlKind.TASKBAR, ControlKind.TASK, ControlKind.LAUNCHER,
         }:

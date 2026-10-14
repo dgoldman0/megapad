@@ -1225,20 +1225,6 @@ class RichTerminalCore:
             wheel_y=wheel_y,
             adjustment=adjustment,
         )
-        if (
-            event.event_kind not in (ControlEventKind.ACTIVATE, ControlEventKind.ADJUST)
-            and not policy.features & RetainedFeature.CONTROL_COLLECTIONS
-        ):
-            raise TerminalSessionError(
-                "positioned control input requires active RET_CONTROL_COLLECTIONS"
-            )
-        if (event.event_kind is ControlEventKind.ADJUST
-                and not policy.features & RetainedFeature.FIELDS):
-            raise TerminalSessionError("field input requires active RET_FIELDS")
-        items_active = bool(policy.features & RetainedFeature.CONTROL_ITEMS)
-        if event.names_item and not items_active:
-            raise TerminalSessionError("item input requires active RET_CONTROL_ITEMS")
-        documents_active = bool(policy.features & RetainedFeature.CONTROL_DOCUMENTS)
         owner = OwnerIdentity(
             session_id=session_id,
             presentation_epoch=clock.presentation_epoch,
@@ -1246,9 +1232,43 @@ class RichTerminalCore:
             owner_generation=event.owner_generation,
         )
         scene = self._require_retained_model()
+        # PLACE and EXTEND on a TEXT FIELD belong to RET_FIELDS, not to the
+        # collection family (RETAINED-1 section 9.2).
+        field_position = False
+        if event.event_kind in (ControlEventKind.PLACE, ControlEventKind.EXTEND):
+            try:
+                field_position = (
+                    scene.active_control_kind(owner, event.control_id) is ControlKind.FIELD
+                )
+            except SceneModelError as exc:
+                raise TerminalSessionError(
+                    f"semantic control target is not interactable: {exc}"
+                ) from exc
+        if (
+            event.event_kind not in (ControlEventKind.ACTIVATE, ControlEventKind.ADJUST)
+            and not field_position
+            and not policy.features & RetainedFeature.CONTROL_COLLECTIONS
+        ):
+            raise TerminalSessionError(
+                "positioned control input requires active RET_CONTROL_COLLECTIONS"
+            )
+        if ((event.event_kind is ControlEventKind.ADJUST or field_position)
+                and not policy.features & RetainedFeature.FIELDS):
+            raise TerminalSessionError("field input requires active RET_FIELDS")
+        items_active = bool(policy.features & RetainedFeature.CONTROL_ITEMS)
+        if event.names_item and not items_active:
+            raise TerminalSessionError("item input requires active RET_CONTROL_ITEMS")
+        documents_active = bool(policy.features & RetainedFeature.CONTROL_DOCUMENTS)
         try:
             if event.event_kind is ControlEventKind.ACTIVATE:
                 scene.require_interactable_control(owner, event.control_id)
+            elif field_position:
+                scene.require_field_position(
+                    owner, event.control_id,
+                    content_revision=event.content_revision,
+                    item_key=event.item_key,
+                    scalar_offset=event.scalar_offset,
+                )
             elif event.event_kind is ControlEventKind.ADJUST:
                 scene.require_field_control(
                     owner, event.control_id,
@@ -2967,6 +2987,7 @@ class RichTerminalCore:
                     visible=operation.visible,
                     clipped=operation.clipped,
                     geometry_generation=begin.geometry_generation,
+                    modal=operation.modal,
                 )
                 if message_type is RetainedMessageType.REGION_DEFINE:
                     model.define_region(region)

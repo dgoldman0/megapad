@@ -146,7 +146,7 @@ class TestGridCellsForth(_KDOSTestBase):
             '  S" GCCAPS " TYPE GC-S _PT-RET-CAPS-VALID? .',
             "  0x8101 GC-CAPS 8 + _PT-U64! GC-S _PT-RET-CAPS-VALID? .",
             "  0x8201 GC-CAPS 8 + _PT-U64! GC-S _PT-RET-CAPS-VALID? .",
-            "  0x28301 GC-CAPS 8 + _PT-U64! GC-S _PT-RET-CAPS-VALID? .",
+            "  0x48301 GC-CAPS 8 + _PT-U64! GC-S _PT-RET-CAPS-VALID? .",
             "  0x301 GC-CAPS 8 + _PT-U64! GC-S _PT-RET-CAPS-VALID? .",
             "  DEPTH . TX-FLUSH ;", "GC-CAP-RUN BYE",
         ]

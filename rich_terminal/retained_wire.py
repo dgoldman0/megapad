@@ -66,6 +66,14 @@ from .semantic_items import (
 )
 
 from .semantic_fields import FieldContent, encode_field_content, decode_field_content
+from .semantic_dialogs import (
+    ButtonContent,
+    DialogContent,
+    decode_button_content,
+    decode_dialog_content,
+    encode_button_content,
+    encode_dialog_content,
+)
 from .semantic_documents import (
     DocumentContent,
     decode_document_content,
@@ -73,7 +81,7 @@ from .semantic_documents import (
 )
 
 RET1_TAG = 0x31544552
-_RETAINED_FEATURE_MASK = 0x1FF3F
+_RETAINED_FEATURE_MASK = 0x3FF3F
 
 _RET_QUERY = struct.Struct("<II")
 _RET_CAPS = struct.Struct("<IHHQIIIIIIIIQQ")
@@ -486,6 +494,8 @@ class RetainedCaps:
             and not features & RetainedFeature.CONTROL_COLLECTIONS
         ):
             raise ValueError("CONTROL_DOCUMENTS requires CONTROL_COLLECTIONS")
+        if features & RetainedFeature.DIALOGS and not features & RetainedFeature.CONTROLS:
+            raise ValueError("DIALOGS requires CONTROLS")
         object.__setattr__(self, "features", features)
         for name in (
             "max_owner_records",
@@ -1030,7 +1040,7 @@ class RegionWireDefinition:
             ("clip_cols", 0, UINT32_MAX),
             ("clip_rows", 0, UINT32_MAX),
             ("z_order", -(1 << 31), (1 << 31) - 1),
-            ("flags", 0, 0x3),
+            ("flags", 0, 0x7),
         ):
             object.__setattr__(
                 self,
@@ -1055,6 +1065,10 @@ class RegionWireDefinition:
     @property
     def clipped(self) -> bool:
         return bool(self.flags & 0x2)
+
+    @property
+    def modal(self) -> bool:
+        return bool(self.flags & 0x4)
 
 
 ObjectWireBody = (
@@ -1120,7 +1134,8 @@ class ControlWireDefinition:
     bounds: ObjectBounds | None
     label: str
     shortcut: str
-    content: SemanticTextContent | ItemViewContent | FieldContent | DocumentContent | None = None
+    content: (SemanticTextContent | ItemViewContent | FieldContent | DocumentContent
+              | DialogContent | ButtonContent | None) = None
 
     def __post_init__(self) -> None:
         for name, minimum in (
@@ -1177,11 +1192,12 @@ class ControlWireDefinition:
 class ControlEvent:
     """Revision-bound semantic intent emitted by the terminal.
 
-    ``PLACE``, ``EXTEND``, and ``FOLLOW`` name one STX1 position by content
-    revision, item key, and scalar offset; the item events name one ITM1
-    item by content revision and item key; ``SCROLL`` carries signed wheel
-    detents.  Fields a kind does not carry must be zero, so every value has
-    one wire form.
+    ``PLACE``, ``EXTEND``, and ``FOLLOW`` name one STX1 or DOC1 position by
+    content revision, item key, and scalar offset, and ``PLACE`` and
+    ``EXTEND`` also a TEXT FIELD position with item key zero; the item
+    events name one ITM1 item by content revision and item key; ``SCROLL``
+    carries signed wheel detents.  Fields a kind does not carry must be
+    zero, so every value has one wire form.
     """
 
     owner_id: int
@@ -1229,14 +1245,18 @@ class ControlEvent:
             ("content_revision", UINT64_MAX),
             ("item_key", UINT64_MAX),
         ):
+            carried = keyed or (adjust and name == "content_revision")
+            # A position in a TEXT FIELD's value names item key zero
+            # (RETAINED-1 section 9.2); every other carried key is nonzero.
+            least = 0 if positioned and name == "item_key" else 1
             object.__setattr__(
                 self,
                 name,
                 _integer(
                     name,
                     getattr(self, name),
-                    minimum=1 if keyed or (adjust and name == "content_revision") else 0,
-                    maximum=maximum if keyed or (adjust and name == "content_revision") else 0,
+                    minimum=least if carried else 0,
+                    maximum=maximum if carried else 0,
                 ),
             )
         object.__setattr__(
@@ -1819,7 +1839,7 @@ def encode_region_definition(definition: RegionWireDefinition) -> bytes:
 def decode_region_definition(payload) -> RegionWireDefinition:
     raw = _payload(payload, _REGION_DEFINITION.size, "REGION definition")
     values = _REGION_DEFINITION.unpack(raw)
-    if values[-1] & ~0x3:
+    if values[-1] & ~0x7:
         raise RetainedWireError(
             RetainedWireErrorCode.RESERVED,
             "REGION definition flags contain reserved bits",
@@ -2408,6 +2428,10 @@ def encode_control_definition(definition: ControlWireDefinition) -> bytes:
         content = encode_item_view_content(definition.content)
     elif isinstance(definition.content, DocumentContent):
         content = encode_document_content(definition.content)
+    elif isinstance(definition.content, DialogContent):
+        content = encode_dialog_content(definition.content)
+    elif isinstance(definition.content, ButtonContent):
+        content = encode_button_content(definition.content)
     else:
         content = encode_semantic_text_content(definition.content)
     content_bytes = _integer(
@@ -2492,6 +2516,10 @@ def decode_control_definition(payload) -> ControlWireDefinition:
             content = decode_item_view_content(body)
         elif kind is ControlKind.DOCUMENT:
             content = decode_document_content(body)
+        elif kind is ControlKind.DIALOG:
+            content = decode_dialog_content(body)
+        elif kind is ControlKind.BUTTON:
+            content = decode_button_content(body)
         else:
             content = decode_semantic_text_content(body)
     except SemanticContentError as exc:

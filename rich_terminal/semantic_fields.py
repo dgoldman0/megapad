@@ -1,9 +1,12 @@
 """Immutable typed values and explicit cell slots for semantic FIELD controls.
 
-FDC1 carries committed guest state. Host-side editing, input acknowledgement,
-and the CONTROL identity/envelope belong to their existing outer protocols.
-There is no family-local item or text limit: wire widths and enclosing frame,
-transaction, owner object, and aggregate UTF-8 limits bound this content.
+FDC1 carries guest state. A TEXT field also carries the guest's edit state,
+its caret, selection anchor, scroll, and placeholder, so a renderer can show
+typing that the guest does; the host never edits a value. Input
+acknowledgement and the CONTROL identity/envelope belong to their existing
+outer protocols. There is no family-local item or text limit: wire widths and
+enclosing frame, transaction, owner object, and aggregate UTF-8 limits bound
+this content.
 """
 
 from __future__ import annotations
@@ -14,17 +17,19 @@ from enum import IntEnum, IntFlag
 
 from .apt1 import UINT32_MAX, UINT64_MAX
 from .semantic_content import SemanticContentError, SemanticContentErrorCode, _integer
+from .text_rules import string_width
 
 
 FIELD_CONTENT_TAG = 0x31434446  # little-endian FDC1
 FIELD_CONTENT_VERSION = 1
-FIELD_FLAG_MASK = 1
+FIELD_FLAG_MASK = 3
 INT32_MIN = -(1 << 31)
 INT32_MAX = (1 << 31) - 1
 INT64_MIN = -(1 << 63)
 INT64_MAX = (1 << 63) - 1
 _HEADER = struct.Struct("<IHHQIIiiIIiiIIqqqqII")
 _CHOICE = struct.Struct("<qII")
+_EDIT = struct.Struct("<IIII")
 
 
 class FieldKind(IntEnum):
@@ -35,6 +40,7 @@ class FieldKind(IntEnum):
 
 class FieldFlag(IntFlag):
     READ_ONLY = 1
+    MASKED = 2
 
 
 def _clean_text(name: str, value: str) -> bytes:
@@ -123,6 +129,10 @@ class FieldContent:
     step: int = 0
     choices: tuple[FieldChoice, ...] = ()
     text: str = ""
+    caret: int = 0
+    anchor: int = 0
+    scroll: int = 0
+    placeholder: str = ""
     _utf8_bytes: int = field(init=False, repr=False, compare=False)
     _display_text: str = field(init=False, repr=False, compare=False)
 
@@ -150,6 +160,14 @@ class FieldContent:
             raise ValueError("choice count exceeds u32")
         object.__setattr__(self, "choices", choices)
         text_bytes = len(_clean_text("field text", self.text))
+        placeholder_bytes = len(_clean_text("field placeholder", self.placeholder))
+        for name in ("caret", "anchor", "scroll"):
+            object.__setattr__(self, name, _integer(
+                name, getattr(self, name), minimum=0, maximum=UINT32_MAX))
+        if kind is not FieldKind.TEXT and (
+                flags & FieldFlag.MASKED or self.caret or self.anchor or self.scroll
+                or self.placeholder):
+            raise ValueError("only TEXT fields carry MASKED, an edit record, or a placeholder")
         if kind is FieldKind.INTEGER:
             if not self.minimum <= self.value <= self.maximum:
                 raise ValueError("integer field value must lie in its inclusive range")
@@ -170,7 +188,13 @@ class FieldContent:
         else:
             if self.value or self.minimum or self.maximum or self.step or choices:
                 raise ValueError("text fields require zero numeric values and no choices")
-        aggregate = text_bytes + sum(choice.utf8_bytes for choice in choices)
+            scalars = len(self.text)
+            if self.caret > scalars or self.anchor > scalars:
+                raise ValueError("a TEXT field caret and anchor must lie within its value")
+            if self.scroll > string_width(self.text):
+                raise ValueError("a TEXT field scroll must not pass its value's width")
+        aggregate = (text_bytes + placeholder_bytes
+                     + sum(choice.utf8_bytes for choice in choices))
         if aggregate > UINT64_MAX:
             raise ValueError("aggregate field UTF-8 bytes exceed u64")
         object.__setattr__(self, "_utf8_bytes", aggregate)
@@ -188,8 +212,26 @@ class FieldContent:
         return bool(self.flags & FieldFlag.READ_ONLY)
 
     @property
+    def masked(self) -> bool:
+        return bool(self.flags & FieldFlag.MASKED)
+
+    @property
     def is_adjustable(self) -> bool:
         return not self.read_only and self.kind in (FieldKind.INTEGER, FieldKind.CHOICE)
+
+    @property
+    def is_activatable(self) -> bool:
+        """ACTIVATE asks the guest to edit an INTEGER or CHOICE value."""
+        return self.is_adjustable
+
+    @property
+    def is_placeable(self) -> bool:
+        """PLACE and EXTEND name positions in a writable TEXT value."""
+        return not self.read_only and self.kind is FieldKind.TEXT
+
+    @property
+    def has_selection(self) -> bool:
+        return self.kind is FieldKind.TEXT and self.anchor != self.caret
 
     @property
     def utf8_bytes(self) -> int:
@@ -206,7 +248,8 @@ class FieldContent:
 
     @property
     def wire_bytes(self) -> int:
-        return _HEADER.size + _CHOICE.size * len(self.choices) + self._utf8_bytes
+        edit = _EDIT.size if self.kind is FieldKind.TEXT else 0
+        return _HEADER.size + edit + _CHOICE.size * len(self.choices) + self._utf8_bytes
 
     def validate_geometry(self, *, cols: int, rows: int, label: str) -> None:
         """Check slots against the enclosing CONTROL bounds and label."""
@@ -238,6 +281,11 @@ def encode_field_content(content: FieldContent) -> bytes:
         content.value, content.minimum, content.maximum, content.step,
         len(content.choices), len(text),
     ))
+    if content.kind is FieldKind.TEXT:
+        placeholder = content.placeholder.encode("utf-8", "strict")
+        encoded += _EDIT.pack(content.caret, content.anchor, content.scroll,
+                              len(placeholder))
+        return bytes(encoded + text + placeholder)
     for choice in content.choices:
         label = choice.label.encode("utf-8", "strict")
         encoded += _CHOICE.pack(choice.value, len(label), 0)
@@ -274,6 +322,26 @@ def decode_field_content(payload) -> FieldContent:
                                    "FIELD content flags or reserved field is noncanonical")
     choice_count, text_bytes = fields[-2:]
     offset = _HEADER.size
+    if kind == FieldKind.TEXT:
+        if len(raw) - offset < _EDIT.size:
+            raise SemanticContentError(SemanticContentErrorCode.PAYLOAD,
+                                       "FIELD edit record is truncated")
+        caret, anchor, scroll, placeholder_bytes = _EDIT.unpack_from(raw, offset)
+        offset += _EDIT.size
+        if choice_count or text_bytes > len(raw) - offset or (
+                placeholder_bytes != len(raw) - offset - text_bytes):
+            raise SemanticContentError(SemanticContentErrorCode.PAYLOAD,
+                                       "FIELD text lengths or trailing bytes are noncanonical")
+        value_end = offset + text_bytes
+        try:
+            return FieldContent(
+                revision, kind, flags, FieldRect(*fields[6:10]), FieldRect(*fields[10:14]),
+                *fields[14:18], (), _decode_text(raw[offset:value_end], "field text"),
+                caret, anchor, scroll, _decode_text(raw[value_end:], "field placeholder"))
+        except SemanticContentError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise SemanticContentError(SemanticContentErrorCode.CONSISTENCY, str(exc)) from exc
     if choice_count > (len(raw) - offset) // _CHOICE.size:
         raise SemanticContentError(SemanticContentErrorCode.PAYLOAD,
                                    "FIELD choice records are truncated")

@@ -89,10 +89,18 @@ PROVIDED rich-terminal.f
 12 CONSTANT PT-CONTROL-LAUNCHER
 13 CONSTANT PT-CONTROL-FIELD
 14 CONSTANT PT-CONTROL-DOCUMENT
+15 CONSTANT PT-CONTROL-DIALOG
+16 CONSTANT PT-CONTROL-BUTTON
 1 CONSTANT PT-FIELD-INTEGER
 2 CONSTANT PT-FIELD-CHOICE
 3 CONSTANT PT-FIELD-TEXT
 0x01 CONSTANT PT-FIELD-F-READ-ONLY
+0x02 CONSTANT PT-FIELD-F-MASKED
+0x01 CONSTANT PT-DIALOG-F-NOTICE
+0x01 CONSTANT PT-BUTTON-F-DEFAULT
+0x02 CONSTANT PT-BUTTON-F-CANCEL
+0x04 CONSTANT PT-BUTTON-F-DESTRUCTIVE
+0x04 CONSTANT PT-REGION-F-MODAL
 1 CONSTANT PT-TEXT-ROLE-CONTENT
 2 CONSTANT PT-TEXT-ROLE-ROW-HEADER
 3 CONSTANT PT-TEXT-ROLE-COLUMN-HEADER
@@ -297,7 +305,8 @@ PROVIDED rich-terminal.f
 0x4000   CONSTANT _PT-RET-FIELDS
 0x8000   CONSTANT _PT-RET-GRID-CELLS
 0x10000  CONSTANT _PT-RET-CONTROL-DOCUMENTS
-0x1FF3F  CONSTANT _PT-RET-FEATURE-MASK
+0x20000  CONSTANT _PT-RET-DIALOGS
+0x3FF3F  CONSTANT _PT-RET-FEATURE-MASK
 250      CONSTANT _PT-TIMEOUT-MS
 3        CONSTANT _PT-PROBE-LIMIT
 256      CONSTANT _PT-SERVICE-BYTES
@@ -788,6 +797,10 @@ VARIABLE _PT-U64-A
 : PT-RET-GRID-CELLS?  ( s -- flag )
     DUP PT-RETAINED-AVAILABLE? 0= IF DROP FALSE EXIT THEN
     _PT.S.RET-CAPS 8 + _PT-U64@ _PT-RET-GRID-CELLS AND 0<> ;
+
+: PT-RET-DIALOGS?  ( s -- flag )
+    DUP PT-RETAINED-AVAILABLE? 0= IF DROP FALSE EXIT THEN
+    _PT.S.RET-CAPS 8 + _PT-U64@ _PT-RET-DIALOGS AND 0<> ;
 
 : _PT-I32@  ( a -- n )
     L@ DUP 0x80000000 AND IF 0xFFFFFFFF00000000 OR THEN ;
@@ -2272,6 +2285,8 @@ VARIABLE _PT-RV-TOTAL
     _PT-RV-FEATURES @ _PT-RET-CONTROLS AND 0= AND IF FALSE EXIT THEN
     _PT-RV-FEATURES @ _PT-RET-GRID-CELLS AND
     _PT-RV-FEATURES @ _PT-RET-CONTROL-COLLECTIONS AND 0= AND IF FALSE EXIT THEN
+    _PT-RV-FEATURES @ _PT-RET-DIALOGS AND
+    _PT-RV-FEATURES @ _PT-RET-CONTROLS AND 0= AND IF FALSE EXIT THEN
 
     _PT-RV-P @ 16 + L@ 0= _PT-RV-P @ 20 + L@ 0= OR IF FALSE EXIT THEN
     _PT-RV-P @ 20 + L@ _PT-RV-P @ 16 + L@ U> IF FALSE EXIT THEN
@@ -2332,6 +2347,12 @@ VARIABLE _PT-RV-TOTAL
         _PT-RV-S @ _PT.S.CLIENT-MAX-PAY @ 56 U< IF FALSE EXIT THEN
         _PT-RV-S @ _PT.S.TX-U @ 216 U< IF FALSE EXIT THEN
         _PT-RV-RETMAX @ 376 U< IF FALSE EXIT THEN
+    THEN
+    \ The smallest DIALOG is the CONTROL prefix and a 56-byte DLG1 header.
+    _PT-RV-FEATURES @ _PT-RET-DIALOGS AND IF
+        _PT-RV-S @ _PT.S.PEER-MAX-PAY @ 136 U< IF FALSE EXIT THEN
+        _PT-RV-S @ _PT.S.TX-U @ 176 U< IF FALSE EXIT THEN
+        _PT-RV-RETMAX @ 336 U< IF FALSE EXIT THEN
     THEN
 
     12 _PT-RV-S @ _PT.S.COLS @ 8 * +
@@ -2664,6 +2685,9 @@ VARIABLE _PT-RSZ-BASE
     PT-CONTROL-SCROLL = IF 48 EXIT THEN
     0 ;
 
+: _PT-CONTROL-FIELD-POSITION?  ( kind -- flag )
+    DUP PT-CONTROL-PLACE = SWAP PT-CONTROL-EXTEND = OR ;
+
 : _PT-CONTROL-TAIL-VALID?  ( kind -- flag )
     DUP PT-CONTROL-ACTIVATE = IF DROP TRUE EXIT THEN
     DUP PT-CONTROL-ADJUST = IF
@@ -2675,8 +2699,10 @@ VARIABLE _PT-RSZ-BASE
         _PT-RX-P @ 44 + L@ 0=
         _PT-RX-P @ 40 + W@ _PT-RX-P @ 42 + W@ OR 0<> AND EXIT
     THEN
+    \ A TEXT FIELD position names item key zero; every other key is nonzero.
     _PT-RX-P @ 40 + _PT-U64@ 0<>
-    _PT-RX-P @ 48 + _PT-U64@ 0<> AND
+    _PT-RX-P @ 48 + _PT-U64@ 0<>
+    2 PICK _PT-CONTROL-FIELD-POSITION? OR AND
     _PT-RX-P @ 60 + L@ 0= AND
     \ An item tail's offset field is reserved too.
     SWAP _PT-CONTROL-ITEM-EVENT? IF _PT-RX-P @ 56 + L@ 0= AND THEN ;
@@ -2703,8 +2729,14 @@ VARIABLE _PT-RSZ-BASE
                 6 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
             THEN
         ELSE
+            \ PLACE and EXTEND also name positions in a TEXT FIELD, which
+            \ RET_FIELDS admits without the collection family.
             _PT-RX-P @ 24 + W@ PT-CONTROL-ACTIVATE <> IF
-                DUP _PT-RET-CONTROL-COLLECTIONS? 0= IF
+                DUP _PT-RET-CONTROL-COLLECTIONS?
+                _PT-RX-P @ 24 + W@ _PT-CONTROL-FIELD-POSITION? IF
+                    OVER _PT-RET-FIELDS? OR
+                THEN
+                0= IF
                     6 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
                 THEN
             THEN
@@ -6070,6 +6102,27 @@ VARIABLE _PT-CT-TU
 : _PT-CT-TASKBAR-KIND?  ( kind -- flag )
     PT-CONTROL-TASKBAR PT-CONTROL-LAUNCHER 1+ WITHIN ;
 
+: _PT-CT-DIALOG-KIND?  ( kind -- flag )
+    PT-CONTROL-DIALOG PT-CONTROL-BUTTON 1+ WITHIN ;
+
+\ No C1 control or Unicode line or paragraph separator in the span at
+\ _PT-CT-TA and _PT-CT-TU, which is already valid UTF-8.
+: _PT-CT-SEPARATORS?  ( -- flag )
+    _PT-CT-TU @ 0 ?DO
+        _PT-CT-TA @ I + C@ DUP 0xC2 = I 1+ _PT-CT-TU @ U< AND IF
+            _PT-CT-TA @ I 1+ + C@ 0x80 0xA0 WITHIN IF
+                DROP FALSE UNLOOP EXIT
+            THEN
+        THEN
+        0xE2 = I 2 + _PT-CT-TU @ U< AND IF
+            _PT-CT-TA @ I 1+ + C@ 0x80 =
+            _PT-CT-TA @ I 2 + + C@ 0xA8 0xAA WITHIN AND IF
+                FALSE UNLOOP EXIT
+            THEN
+        THEN
+    LOOP
+    TRUE ;
+
 : _PT-CT-TEXT?  ( a u -- flag )
     2DUP _PT-CT-SOURCE? 0= IF 2DROP FALSE EXIT THEN
     _PT-CT-TU ! _PT-CT-TA !
@@ -6080,23 +6133,13 @@ VARIABLE _PT-CT-TU
             FALSE UNLOOP EXIT
         THEN
     LOOP
-    \ The additive taskbar family also excludes C1 and Unicode line or
-    \ paragraph separators.  Earlier control families retain their contract.
+    \ The taskbar, field, dialog, and button families also exclude C1 and
+    \ Unicode line or paragraph separators.  Earlier control families retain
+    \ their contract.
     _PT-CT-KIND @ _PT-CT-TASKBAR-KIND?
-    _PT-CT-KIND @ PT-CONTROL-FIELD = OR IF
-        _PT-CT-TU @ 0 ?DO
-            _PT-CT-TA @ I + C@ DUP 0xC2 = I 1+ _PT-CT-TU @ U< AND IF
-                _PT-CT-TA @ I 1+ + C@ 0x80 0xA0 WITHIN IF
-                    DROP FALSE UNLOOP EXIT
-                THEN
-            THEN
-            0xE2 = I 2 + _PT-CT-TU @ U< AND IF
-                _PT-CT-TA @ I 1+ + C@ 0x80 =
-                _PT-CT-TA @ I 2 + + C@ 0xA8 0xAA WITHIN AND IF
-                    FALSE UNLOOP EXIT
-                THEN
-            THEN
-        LOOP
+    _PT-CT-KIND @ PT-CONTROL-FIELD = OR
+    _PT-CT-KIND @ _PT-CT-DIALOG-KIND? OR IF
+        _PT-CT-SEPARATORS? EXIT
     THEN
     TRUE ;
 
@@ -6155,13 +6198,12 @@ VARIABLE _PT-FD-RECT
     _PT-FD-RECT @ 4 + _PT-I32@ _PT-FD-RECT @ 12 + L@ +
         _PT-CT-ROWS @ U> OR 0= ;
 
-: _PT-FD-GEOMETRY?  ( -- flag )
-    _PT-FD-A @ 40 + _PT-FD-RECT? 0= IF FALSE EXIT THEN
-    _PT-CT-LABEL-U @ 0= IF
-        _PT-FD-A @ 24 + _PT-U64@ _PT-FD-A @ 32 + _PT-U64@ OR 0= EXIT
-    THEN
-    _PT-FD-A @ 24 + _PT-FD-RECT? 0= IF FALSE EXIT THEN
-    \ At least one separating edge is required; touching edges are allowed.
+: _PT-FD-RECT-ABSENT?  ( a -- flag )
+    DUP _PT-U64@ SWAP 8 + _PT-U64@ OR 0= ;
+
+\ The two slots at offsets 24 and 40, which FDC1 and DLG1 share, have at
+\ least one separating edge; touching edges are allowed.
+: _PT-FD-APART?  ( -- flag )
     _PT-FD-A @ 24 + _PT-I32@ _PT-FD-A @ 32 + L@ +
         _PT-FD-A @ 40 + _PT-I32@ _PT-U<=
     _PT-FD-A @ 40 + _PT-I32@ _PT-FD-A @ 48 + L@ +
@@ -6170,6 +6212,39 @@ VARIABLE _PT-FD-RECT
         _PT-FD-A @ 44 + _PT-I32@ _PT-U<= OR
     _PT-FD-A @ 44 + _PT-I32@ _PT-FD-A @ 52 + L@ +
         _PT-FD-A @ 28 + _PT-I32@ _PT-U<= OR ;
+
+: _PT-FD-GEOMETRY?  ( -- flag )
+    _PT-FD-A @ 40 + _PT-FD-RECT? 0= IF FALSE EXIT THEN
+    _PT-CT-LABEL-U @ 0= IF _PT-FD-A @ 24 + _PT-FD-RECT-ABSENT? EXIT THEN
+    _PT-FD-A @ 24 + _PT-FD-RECT? 0= IF FALSE EXIT THEN
+    _PT-FD-APART? ;
+
+\ Unicode scalars in one validated UTF-8 span: its non-continuation bytes.
+: _PT-FD-SCALARS  ( a u -- n )
+    0 ROT ROT 0 ?DO
+        DUP I + C@ 0xC0 AND 0x80 <> IF SWAP 1+ SWAP THEN
+    LOOP DROP ;
+
+\ A TEXT field's 16-byte edit record follows the header: caret, anchor,
+\ scroll, and placeholder bytes; then the value and the placeholder.  The
+\ caret and anchor lie within the value's scalars.  The scroll's bound is
+\ the value's width in cells, which only the terminal's text rules know.
+: _PT-FD-TEXT?  ( -- flag )
+    _PT-FD-A @ 56 + _PT-U64@ _PT-FD-A @ 88 + L@ OR IF FALSE EXIT THEN
+    _PT-CT-CONTENT-U @ 112 U< IF FALSE EXIT THEN
+    _PT-FD-A @ 92 + L@ _PT-FD-A @ 108 + L@ _PT-UADD? 0= IF DROP FALSE EXIT THEN
+    112 _PT-UADD? 0= IF DROP FALSE EXIT THEN
+    _PT-CT-CONTENT-U @ <> IF FALSE EXIT THEN
+    _PT-FD-A @ 92 + L@ DUP IF
+        _PT-FD-A @ 112 + SWAP _PT-CT-TEXT? 0= IF FALSE EXIT THEN
+    ELSE DROP THEN
+    _PT-FD-A @ 108 + L@ DUP IF
+        _PT-FD-A @ 112 + _PT-FD-A @ 92 + L@ + SWAP _PT-CT-TEXT?
+        0= IF FALSE EXIT THEN
+    ELSE DROP THEN
+    _PT-FD-A @ 112 + _PT-FD-A @ 92 + L@ _PT-FD-SCALARS
+    DUP _PT-FD-A @ 96 + L@ U< IF DROP FALSE EXIT THEN
+    _PT-FD-A @ 100 + L@ U< 0= ;
 
 : _PT-FD-CHOICES?  ( -- flag )
     _PT-FD-A @ 88 + L@ DUP _PT-FD-LEFT ! 0= IF FALSE EXIT THEN
@@ -6203,8 +6278,11 @@ VARIABLE _PT-FD-RECT
     _PT-FD-A @ 4 + W@ 1 <> IF FALSE EXIT THEN
     _PT-FD-A @ 6 + W@ DUP 1 U< SWAP 3 U> OR IF FALSE EXIT THEN
     _PT-FD-A @ 8 + _PT-U64@ 0= IF FALSE EXIT THEN
-    _PT-FD-A @ 16 + L@ PT-FIELD-F-READ-ONLY INVERT AND
+    _PT-FD-A @ 16 + L@
+        PT-FIELD-F-READ-ONLY PT-FIELD-F-MASKED OR INVERT AND
     _PT-FD-A @ 20 + L@ OR IF FALSE EXIT THEN
+    _PT-FD-A @ 16 + L@ PT-FIELD-F-MASKED AND
+    _PT-FD-A @ 6 + W@ PT-FIELD-TEXT <> AND IF FALSE EXIT THEN
     _PT-FD-GEOMETRY? 0= IF FALSE EXIT THEN
     _PT-FD-A @ 6 + W@ PT-FIELD-INTEGER = IF
         _PT-CT-CONTENT-U @ 96 <> IF FALSE EXIT THEN
@@ -6223,11 +6301,56 @@ VARIABLE _PT-FD-RECT
         _PT-FD-A @ 92 + L@ IF FALSE EXIT THEN
         _PT-FD-CHOICES? EXIT
     THEN
-    _PT-FD-A @ 56 + _PT-U64@ _PT-FD-A @ 88 + L@ OR IF FALSE EXIT THEN
-    _PT-FD-A @ 92 + L@ _PT-CT-CONTENT-U @ 96 - <> IF FALSE EXIT THEN
-    _PT-FD-A @ 92 + L@ DUP IF
-        _PT-FD-A @ 96 + SWAP _PT-CT-TEXT?
-    ELSE DROP TRUE THEN ;
+    _PT-FD-TEXT? ;
+
+\ DLG1 shares FDC1's slot layout: a title slot at 24, present exactly when
+\ the CONTROL label is, and a message slot at 40, present exactly when the
+\ message is.  The message is clean UTF-8 whose lines are separated by line
+\ feeds, and it has no more lines than its slot has rows.
+VARIABLE _PT-DL-LINES
+
+: _PT-DL-MESSAGE?  ( a u -- flag )
+    2DUP _PT-CT-SOURCE? 0= IF 2DROP FALSE EXIT THEN
+    _PT-CT-TU ! _PT-CT-TA !
+    _PT-CT-TA @ _PT-CT-TU @ _PT-UTF8? 0= IF FALSE EXIT THEN
+    1 _PT-DL-LINES !
+    _PT-CT-TU @ 0 ?DO
+        _PT-CT-TA @ I + C@
+        DUP 10 = IF 1 _PT-DL-LINES +! THEN
+        DUP 32 U< OVER 10 <> AND SWAP 127 = OR IF FALSE UNLOOP EXIT THEN
+    LOOP
+    _PT-CT-SEPARATORS? ;
+
+: _PT-DL-CONTENT?  ( -- flag )
+    _PT-CT-CONTENT-A @ _PT-FD-A !
+    _PT-CT-CONTENT-U @ 56 U< IF FALSE EXIT THEN
+    _PT-FD-A @ L@ 0x31474C44 <> IF FALSE EXIT THEN
+    _PT-FD-A @ 4 + W@ 1 <> IF FALSE EXIT THEN
+    _PT-FD-A @ 6 + W@ PT-DIALOG-F-NOTICE INVERT AND IF FALSE EXIT THEN
+    _PT-FD-A @ 8 + _PT-U64@ 0= IF FALSE EXIT THEN
+    _PT-FD-A @ 16 + L@ 4 U> IF FALSE EXIT THEN
+    _PT-FD-A @ 20 + L@ _PT-CT-CONTENT-U @ 56 - <> IF FALSE EXIT THEN
+    _PT-CT-LABEL-U @ IF
+        _PT-FD-A @ 24 + _PT-FD-RECT? 0= IF FALSE EXIT THEN
+    ELSE
+        _PT-FD-A @ 24 + _PT-FD-RECT-ABSENT? 0= IF FALSE EXIT THEN
+    THEN
+    _PT-FD-A @ 20 + L@ 0= IF _PT-FD-A @ 40 + _PT-FD-RECT-ABSENT? EXIT THEN
+    _PT-FD-A @ 40 + _PT-FD-RECT? 0= IF FALSE EXIT THEN
+    _PT-CT-LABEL-U @ IF _PT-FD-APART? 0= IF FALSE EXIT THEN THEN
+    _PT-FD-A @ 56 + _PT-FD-A @ 20 + L@ _PT-DL-MESSAGE? 0= IF FALSE EXIT THEN
+    _PT-DL-LINES @ _PT-FD-A @ 52 + L@ U> 0= ;
+
+\ BTN1 is exactly its tag, version 1, and role flags; a destructive button
+\ is never the default.
+: _PT-BT-CONTENT?  ( -- flag )
+    _PT-CT-CONTENT-U @ 8 <> IF FALSE EXIT THEN
+    _PT-CT-CONTENT-A @ L@ 0x314E5442 <> IF FALSE EXIT THEN
+    _PT-CT-CONTENT-A @ 4 + W@ 1 <> IF FALSE EXIT THEN
+    _PT-CT-CONTENT-A @ 6 + W@
+    DUP 7 INVERT AND IF DROP FALSE EXIT THEN
+    DUP PT-BUTTON-F-DESTRUCTIVE AND 0<>
+    SWAP PT-BUTTON-F-DEFAULT AND 0<> AND 0= ;
 
 : _PT-CT-KIND?  ( -- flag )
     _PT-CT-KIND @ PT-CONTROL-MENU-BAR = IF
@@ -6325,6 +6448,21 @@ VARIABLE _PT-FD-RECT
         _PT-CT-STATE @ 0x0B INVERT AND IF FALSE EXIT THEN
         _PT-CT-ROOT-BOUNDS? EXIT
     THEN
+    \ A dialog's label is its optional title; it is only ever VISIBLE.
+    _PT-CT-KIND @ PT-CONTROL-DIALOG = IF
+        _PT-CT-PARENT @ _PT-CT-ORDER @ OR IF FALSE EXIT THEN
+        _PT-CT-SHORTCUT-U @ IF FALSE EXIT THEN
+        _PT-CT-CONTENT-U @ 56 U< IF FALSE EXIT THEN
+        _PT-CT-STATE @ PT-CONTROL-F-VISIBLE INVERT AND IF FALSE EXIT THEN
+        _PT-CT-ROOT-BOUNDS? EXIT
+    THEN
+    _PT-CT-KIND @ PT-CONTROL-BUTTON = IF
+        _PT-CT-PARENT @ _PT-CT-ORDER @ OR IF FALSE EXIT THEN
+        _PT-CT-LABEL-U @ 0= IF FALSE EXIT THEN
+        _PT-CT-CONTENT-U @ 8 <> IF FALSE EXIT THEN
+        _PT-CT-STATE @ 0x0B INVERT AND IF FALSE EXIT THEN
+        _PT-CT-ROOT-BOUNDS? EXIT
+    THEN
     FALSE ;
 
 : _PT-CT-FIELDS?  ( -- flag )
@@ -6358,7 +6496,10 @@ VARIABLE _PT-FD-RECT
         FALSE EXIT
     THEN
     _PT-CT-SPANS-DISJOINT? 0= IF FALSE EXIT THEN
-    _PT-CT-KIND @ PT-CONTROL-FIELD = IF _PT-FD-CONTENT? ELSE TRUE THEN ;
+    _PT-CT-KIND @ PT-CONTROL-FIELD = IF _PT-FD-CONTENT? EXIT THEN
+    _PT-CT-KIND @ PT-CONTROL-DIALOG = IF _PT-DL-CONTENT? EXIT THEN
+    _PT-CT-KIND @ PT-CONTROL-BUTTON = IF _PT-BT-CONTENT? EXIT THEN
+    TRUE ;
 
 VARIABLE _PT-GC-A
 VARIABLE _PT-GC-END
@@ -6446,6 +6587,9 @@ VARIABLE _PT-GC-TYPED?
     _PT-CT-KIND @ PT-CONTROL-FIELD = IF
         _PT-CT-S @ _PT-RET-FIELDS? 0= IF PT-S-UNSUPPORTED EXIT THEN
     THEN
+    _PT-CT-KIND @ _PT-CT-DIALOG-KIND? IF
+        _PT-CT-S @ PT-RET-DIALOGS? 0= IF PT-S-UNSUPPORTED EXIT THEN
+    THEN
     _PT-CT-TYPE @ DUP _PT-M-CONTROL-DEFINE =
     SWAP _PT-M-CONTROL-REPLACE = OR 0= IF PT-S-INVALID EXIT THEN
     _PT-CT-FIELDS? 0= IF PT-S-INVALID EXIT THEN
@@ -6471,6 +6615,7 @@ VARIABLE _PT-GC-TYPED?
     0 _PT-CT-PAYLOAD-U ! 0 _PT-CT-TA ! 0 _PT-CT-TU !
     0 _PT-FD-A ! 0 _PT-FD-END ! 0 _PT-FD-P ! 0 _PT-FD-PREV !
     0 _PT-FD-RECT ! 0 _PT-FD-LABEL-U ! 0 _PT-FD-LEFT ! 0 _PT-FD-FOUND !
+    0 _PT-DL-LINES !
     0 _PT-GC-A ! 0 _PT-GC-END ! 0 _PT-GC-P !
     0 _PT-GC-LEFT ! 0 _PT-GC-TYPED? !
     0 _PT-RA ! 0 _PT-RU ! 0 _PT-RB ! 0 _PT-RV !

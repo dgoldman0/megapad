@@ -17,7 +17,10 @@ FIELD_BODIES = (
     FIELD_HEADER.pack(0x31434446, 1, 1, 7, 0, 0, 0, 0, 4, 1, 5, 0, 7, 1, -2, -10, 10, 3, 0, 0),
     FIELD_HEADER.pack(0x31434446, 1, 2, 8, 0, 0, 0, 0, 4, 1, 5, 0, 7, 1, 42, 0, 0, 0, 2, 0)
     + struct.pack("<qII", -7, 3, 0) + b"Off" + struct.pack("<qII", 42, 2, 0) + b"On",
-    FIELD_HEADER.pack(0x31434446, 1, 3, 9, 0, 0, 0, 0, 4, 1, 5, 0, 7, 1, 0, 0, 0, 0, 0, 3) + "hé".encode(),
+    # A MASKED TEXT field: header, the edit record (caret 2, anchor 1, scroll
+    # 0, and a 4-byte placeholder), the value, then the placeholder.
+    FIELD_HEADER.pack(0x31434446, 1, 3, 9, 2, 0, 0, 0, 4, 1, 5, 0, 7, 1, 0, 0, 0, 0, 0, 3)
+    + struct.pack("<IIII", 2, 1, 0, 4) + "hé".encode() + b"Name",
     FIELD_HEADER.pack(0x31434446, 1, 1, 10, 1, 0, 0, 0, 0, 0, 0, 0, 12, 1, 8, -10, 10, 3, 0, 0),
 )
 
@@ -138,10 +141,13 @@ class TestFieldForth(_KDOSTestBase):
             (1, "132 FH-CONTENT-U !"),
             (2, "1 FH-CONTENT 56 + _PT-U64!"),
             (2, "1 FH-CONTENT 88 + L!"), (2, "2 FH-CONTENT 92 + L!"),
-            (2, "10 FH-CONTENT 96 + C!"),
-            (2, "194 FH-CONTENT 96 + C! 133 FH-CONTENT 97 + C!"),
-            (2, "226 FH-CONTENT 96 + C! 128 FH-CONTENT 97 + C! 168 FH-CONTENT 98 + C!"),
-            (2, "194 FH-CONTENT 98 + C!"),
+            (2, "10 FH-CONTENT 112 + C!"),
+            (2, "194 FH-CONTENT 112 + C! 133 FH-CONTENT 113 + C!"),
+            (2, "226 FH-CONTENT 112 + C! 128 FH-CONTENT 113 + C! 168 FH-CONTENT 114 + C!"),
+            (2, "194 FH-CONTENT 114 + C!"),
+            (2, "3 FH-CONTENT 96 + L!"), (2, "3 FH-CONTENT 100 + L!"),
+            (2, "5 FH-CONTENT 108 + L!"), (2, "10 FH-CONTENT 115 + C!"),
+            (2, "111 FH-CONTENT-U !"), (2, "4 FH-CONTENT 16 + L!"),
             (3, "1 FH-CONTENT 24 + L!"),
         ]
         lines += [f"  FH-CASE-{case} {mutation} FH-TRY" for case, mutation in invalid]

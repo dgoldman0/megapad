@@ -264,11 +264,15 @@ def _with(payload: bytes, offset: int, replacement: bytes) -> bytes:
             encode_control_event(_event(ControlEventKind.ACTIVATE)) + bytes(24),
             CONTROLS | CONTROL_COLLECTIONS,
         ),
-        # Tail reserved bytes, a zero content revision or item key, and a
-        # scroll without detents are not canonical.
+        # Tail reserved bytes, a zero content revision, a zero item key on
+        # a FOLLOW (only PLACE and EXTEND name a TEXT field's key zero), and
+        # a scroll without detents are not canonical.
         (_with(_place_bytes(), 60, b"\x01"), CONTROLS | CONTROL_COLLECTIONS),
         (_with(_place_bytes(), 40, bytes(8)), CONTROLS | CONTROL_COLLECTIONS),
-        (_with(_place_bytes(), 48, bytes(8)), CONTROLS | CONTROL_COLLECTIONS),
+        (
+            _with(_with(_place_bytes(), 24, (5).to_bytes(2, "little")), 48, bytes(8)),
+            CONTROLS | CONTROL_COLLECTIONS,
+        ),
         (
             _with(
                 encode_control_event(_event(ControlEventKind.SCROLL, wheel_y=1)),
@@ -330,3 +334,30 @@ def test_item_events_round_trip_through_the_guest_parser(runtime):
             9,
             0,
         )
+
+
+def test_text_field_positions_with_item_key_zero_need_only_fields(runtime):
+    """A TEXT field's PLACE and EXTEND name item key zero (RETAINED-1
+    section 9.2), and RET_FIELDS admits them without the collections."""
+
+    fields = CONTROLS | 0x4000
+    for kind in (ControlEventKind.PLACE, ControlEventKind.EXTEND):
+        report = _dispatch(
+            runtime,
+            encode_control_event(
+                _event(kind, content_revision=41, item_key=0, scalar_offset=3)
+            ),
+            features=fields,
+        )
+        assert (report["dispatch"], report["has"]) == (0, -1)
+        assert report["kind"] == int(kind)
+        assert (report["content_revision"], report["item_key"], report["offset"]) == (
+            41, 0, 3,
+        )
+    # FOLLOW and SCROLL still need the collection family.
+    for payload in (
+        _with(_place_bytes(), 24, (5).to_bytes(2, "little")),
+        encode_control_event(_event(ControlEventKind.SCROLL, wheel_y=1)),
+    ):
+        report = _dispatch(runtime, payload, features=fields)
+        assert (report["dispatch"], report["has"]) == (2, 0)

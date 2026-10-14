@@ -442,7 +442,8 @@ def test_positioned_and_scroll_control_events_have_exact_tails() -> None:
         (ControlEventKind.ACTIVATE, {"wheel_y": 1}),
         (ControlEventKind.PLACE, {"content_revision": 1, "item_key": 1, "wheel_y": 1}),
         (ControlEventKind.SCROLL, {"wheel_y": 1, "scalar_offset": 1}),
-        (ControlEventKind.EXTEND, {"content_revision": 1}),
+        # Item key zero names a TEXT field's value; a revision is still needed.
+        (ControlEventKind.EXTEND, {"item_key": 1}),
     ):
         with pytest.raises(ValueError):
             ControlEvent(7, 3, 11, kind, 0, 99, **fields)

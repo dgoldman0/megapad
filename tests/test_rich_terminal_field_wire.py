@@ -53,7 +53,7 @@ def test_fields_require_controls_without_enabling_collection_families():
     with pytest.raises(ValueError, match="transaction maximum"):
         replace(policy, max_retained_transaction_bytes=375)
     with pytest.raises(ValueError, match="reserved"):
-        replace(caps, features=FEATURES | (1 << 17))
+        replace(caps, features=FEATURES | (1 << 18))
 
 
 @pytest.mark.parametrize("field_content", [content(), choices(), text_content()])
@@ -68,11 +68,16 @@ def test_field_prefix_contains_fixed_geometry_and_exact_typed_content(field_cont
     assert decode_control_replace(expected) == value
 
 
-def test_empty_label_and_text_have_exact_176_byte_payload():
+def test_empty_label_and_text_have_exact_192_byte_payload():
+    # The 80-byte prefix, the 96-byte FDC1 header, and a TEXT field's 16-byte
+    # edit record; the smallest FIELD, an INTEGER, stays at 176 bytes.
     value = definition(label="", content=text_content(text="", label_bounds=FieldRect(0, 0, 0, 0),
                                                        value_bounds=FieldRect(0, 0, 20, 1)))
-    assert len(encode_control_definition(value)) == 176
+    assert len(encode_control_definition(value)) == 192
     assert decode_control_definition(encode_control_definition(value)) == value
+    smallest = definition(label="", content=content(label_bounds=FieldRect(0, 0, 0, 0),
+                                                    value_bounds=FieldRect(0, 0, 20, 1)))
+    assert len(encode_control_definition(smallest)) == 176
 
 
 @pytest.mark.parametrize("offset,fmt,value", [

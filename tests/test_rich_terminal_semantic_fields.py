@@ -41,6 +41,11 @@ def header(kind=1, revision=7, flags=0, value=3, minimum=-10, maximum=10, step=2
                        value, minimum, maximum, step, choice_count, text_bytes)
 
 
+def edit(caret=0, anchor=0, scroll=0, placeholder_bytes=0):
+    """The 16-byte TEXT edit record that follows the header."""
+    return struct.pack("<IIII", caret, anchor, scroll, placeholder_bytes)
+
+
 def test_independent_integer_header_has_exact_96_byte_layout():
     assert len(header()) == 96
     assert encode_field_content(integer()) == header()
@@ -60,7 +65,8 @@ def test_choice_records_preserve_signed_values_order_and_utf8_byte_lengths():
 
 def test_text_has_exact_trailing_utf8_and_zero_numeric_fields():
     raw = "e\u0301 ✓".encode()
-    expected = header(kind=3, value=0, minimum=0, maximum=0, step=0, text_bytes=len(raw)) + raw
+    expected = (header(kind=3, value=0, minimum=0, maximum=0, step=0, text_bytes=len(raw))
+                + edit() + raw)
     assert encode_field_content(text()) == expected
     assert decode_field_content(expected) == text()
     assert text().text_bytes == len(raw)
@@ -203,7 +209,8 @@ def test_touching_and_vertically_separated_slots_do_not_overlap():
     (4, "<H", 2, SemanticContentErrorCode.ENUM),
     (6, "<H", 4, SemanticContentErrorCode.ENUM),
     (8, "<Q", 0, SemanticContentErrorCode.CONSISTENCY),
-    (16, "<I", 2, SemanticContentErrorCode.RESERVED),
+    (16, "<I", 4, SemanticContentErrorCode.RESERVED),
+    (16, "<I", 2, SemanticContentErrorCode.CONSISTENCY),  # MASKED on INTEGER
     (20, "<I", 1, SemanticContentErrorCode.RESERVED),
     (32, "<I", 0, SemanticContentErrorCode.CONSISTENCY),
     (52, "<I", 0, SemanticContentErrorCode.CONSISTENCY),
@@ -235,7 +242,10 @@ def test_malformed_choice_records_are_rejected(offset, fmt, value):
 @pytest.mark.parametrize("tail", [b"\xff", b"\xed\xa0\x80", b"\x00", b"\xc2\x85", b"\xe2\x80\xa8"])
 def test_wire_text_and_choice_labels_use_strict_scalar_decoding(tail):
     for raw in (
-        header(kind=3, value=0, minimum=0, maximum=0, step=0, text_bytes=len(tail)) + tail,
+        header(kind=3, value=0, minimum=0, maximum=0, step=0, text_bytes=len(tail))
+        + edit() + tail,
+        header(kind=3, value=0, minimum=0, maximum=0, step=0)
+        + edit(placeholder_bytes=len(tail)) + tail,
         header(kind=2, value=1, minimum=0, maximum=0, step=0, choice_count=1)
         + struct.pack("<qII", 1, len(tail), 0) + tail,
     ):
@@ -266,3 +276,53 @@ def test_display_text_uses_declared_value_kind_and_choice_identity():
     assert choice().display_text == "茶"
     assert choice(value=14).display_text == "Long"
     assert text().display_text == "e\u0301 ✓"
+
+
+def test_text_edit_record_carries_caret_anchor_scroll_and_placeholder():
+    value = "e\u0301 ✓ 漢字"
+    content = text(text=value, caret=7, anchor=2, scroll=3, placeholder="name")
+    raw = value.encode()
+    expected = (header(kind=3, value=0, minimum=0, maximum=0, step=0, text_bytes=len(raw))
+                + edit(7, 2, 3, 4) + raw + b"name")
+    assert encode_field_content(content) == expected
+    assert decode_field_content(expected) == content
+    assert content.has_selection and not text().has_selection
+    assert content.utf8_bytes == len(raw) + 4
+    assert content.wire_bytes == len(expected)
+    assert content.is_placeable and not content.is_activatable
+
+
+def test_masked_text_is_valid_only_on_text_and_carries_mask_characters():
+    masked = text(flags=FieldFlag.MASKED, text="\u2022" * 5, caret=5, anchor=5)
+    assert masked.masked
+    assert decode_field_content(encode_field_content(masked)) == masked
+    for factory in (integer, choice):
+        with pytest.raises(ValueError, match="only TEXT"):
+            factory(flags=FieldFlag.MASKED)
+    with pytest.raises(ValueError, match="only TEXT"):
+        integer(placeholder="x")
+    with pytest.raises(ValueError, match="only TEXT"):
+        choice(caret=1)
+
+
+@pytest.mark.parametrize("changes", [
+    dict(caret=5), dict(anchor=5),   # "e\u0301 ✓" has four scalars
+    dict(scroll=4),                  # in three cells: the mark joins its letter
+    dict(text="漢", scroll=3),       # a wide character is two cells
+])
+def test_text_edit_positions_must_lie_within_the_value(changes):
+    with pytest.raises(ValueError):
+        text(**changes)
+    assert text(caret=4, anchor=0, scroll=3)
+    assert text(text="漢", scroll=2)
+
+
+@pytest.mark.parametrize("malformed", [
+    lambda raw: raw[:96 + 15],                            # edit record cut short
+    lambda raw: raw[:96] + edit(placeholder_bytes=9) + raw[112:],  # placeholder overruns
+    lambda raw: raw + b"x",                               # trailing byte
+])
+def test_text_edit_record_lengths_are_exact(malformed):
+    raw = encode_field_content(text(placeholder="ab"))
+    with pytest.raises(SemanticContentError):
+        decode_field_content(malformed(raw))

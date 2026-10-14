@@ -91,7 +91,7 @@ def _visible_core(content=None, *, state=VISIBLE_ENABLED):
     return core, encoder, decoder
 
 
-@pytest.mark.parametrize("kind", list(FieldKind))
+@pytest.mark.parametrize("kind", [FieldKind.INTEGER, FieldKind.CHOICE])
 def test_writable_fields_activate_guest_owned_editor_without_mutating_value(kind):
     core, _, decoder = _visible_core(_content(kind))
     before = core.retained_state
@@ -213,3 +213,27 @@ def test_old_controls_profile_rejects_field_and_retains_complete_cell_fallback()
              mode=PresentRetainedMode.REPLACE_START, expected_status=2)
     assert core.retained_state is before and core.view.cells == fallback.cells
     assert core.model_revision == 1 and core.active
+
+
+def test_a_text_field_takes_positions_instead_of_activation():
+    core, _, decoder = _visible_core(_content(FieldKind.TEXT))
+    before = core.retained_state
+    with pytest.raises(TerminalSessionError, match="does not accept ACTIVATE"):
+        core.send_control_event(7, 1, 1, model_revision=3)
+    for kind in (ControlEventKind.PLACE, ControlEventKind.EXTEND):
+        outbound = core.send_control_event(
+            7, 1, 1, model_revision=3, event_kind=kind,
+            content_revision=7, item_key=0, scalar_offset=0,
+        )
+        frames = decoder.feed(outbound.payload)
+        event = decode_control_event(frames[0].payload)
+        assert (event.event_kind, event.item_key, event.content_revision) == (kind, 0, 7)
+        assert len(frames[0].payload) == 64
+    for changes, match in (({"item_key": 1}, "item key zero"),
+                           ({"scalar_offset": 99}, "past its value"),
+                           ({"content_revision": 6}, "superseded")):
+        position = dict(content_revision=7, item_key=0, scalar_offset=0) | changes
+        with pytest.raises(TerminalSessionError, match=match):
+            core.send_control_event(7, 1, 1, model_revision=3,
+                                    event_kind=ControlEventKind.PLACE, **position)
+    assert core.retained_state is before
