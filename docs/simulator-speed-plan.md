@@ -2,7 +2,8 @@
 
 Status: agreed 2026-10-13 (see Decisions). Step 1 is done (see Step 1
 results): the boot compile fell from about 40 s to 2.5 s. Step 2 is done
-(see Step 2): a keystroke fell from 0.40 s to 0.37 s. Step 3 is next.
+(see Step 2): a keystroke fell from 0.40 s to 0.37 s. Step 3 is under way
+(see Step 3).
 
 The hosted simulator with the native executor already runs guest Forth in
 C++, at about 80 million semantic steps per second. These measurements ask
@@ -197,10 +198,42 @@ about 29 million steps. That is step 3.
 
 ## Step 3: guest work per keystroke
 
-A keystroke costs about 29 million semantic steps. The guest phase profiler
-(`akashic_tui.py accept --phase-profile`) can show where they go, and the
-work then is in Akashic. This is the only step that also makes the device
-faster.
+A keystroke costs about 29 million semantic steps. This is the only step
+that also makes the device faster, and the work is in Akashic.
+
+**Method.** The guest phase profiler (`akashic_tui.py accept
+--phase-profile`) runs only on the emulator: the simulator rejects its
+instruction diagnostics. The simulator was sampled instead. At every host
+quantum yield, which comes every 65,536 guest steps whether the quantum ended
+in native or Python code, the sampler recorded the current word and every
+colon continuation on the return stack. Twelve characters typed into Pad gave
+5,357 samples, 446 per keystroke.
+
+**Where a keystroke goes.** 89% of its guest steps are the rich-terminal
+producer's prepare, which runs when the screen flush begins
+(`RTHP-PREPARE`). Desk's own painting is 3.4%, and the terminal service 4%.
+Inside the prepare:
+
+| Share of the keystroke | Work |
+| --- | --- |
+| 34% | the shell family producer: build the family batch for the whole Desk screen (22%, of which its preflight validation is 14%), then freeze it into a bank (8%) |
+| 32% | rebuild the candidate: the UIDL snapshot (10%) and the observed candidate (18.5%, of which its hybrid preflight is 9%) |
+| 16% | compare the candidate with the active one |
+| 7% | emit the delta |
+
+Each keystroke presents one delta, yet the prepare rebuilds, validates and
+compares the whole screen. Across all of it, the checks that caller spans do
+not alias module storage take 19% of the keystroke, about 37,000 span
+overlap tests. They nest: one module's check calls those of the modules it
+depends on, so one top-level check can test the same region up to four
+times.
+
+**Range primitives** (Akashic `f0645eea`). `URANGE-VALID?`,
+`URANGE-OVERLAP?` and `MSPAN-OVERLAP?` held 14% of the keystroke on their
+own. They now compute the same results with fewer stack operations: a
+disjoint `MSPAN-OVERLAP?` takes 46 steps instead of 92. A keystroke fell
+from 29.27 to 27.51 million guest steps (6%). Simulator wall time did not
+change measurably, since stack-only steps are the native executor's cheapest.
 
 ## Decisions
 
