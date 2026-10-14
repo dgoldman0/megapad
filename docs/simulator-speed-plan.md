@@ -2,8 +2,8 @@
 
 Status: agreed 2026-10-13 (see Decisions). Step 1 is done (see Step 1
 results): the boot compile fell from about 40 s to 2.5 s. Step 2 is done
-(see Step 2): a keystroke fell from 0.40 s to 0.37 s. Step 3 is under way:
-six of its design's seven parts are done (see Step 3).
+(see Step 2): a keystroke fell from 0.40 s to 0.37 s. Step 3 is done (see
+Step 3): a typing frame's build fell from 20.9 to 14.9 million guest steps.
 
 The hosted simulator with the native executor already runs guest Forth in
 C++, at about 80 million semantic steps per second. These measurements ask
@@ -256,15 +256,13 @@ to 16.7 million steps. Total steps per frame are not a fair comparison across
 runs, because Desk paints once per key and a slower host folds more keys into
 each frame. A full call-tree profile (this branch's `MEGAPAD_PROFILE_CHAINS`)
 then showed part 6's estimate was too high, and part 6 was redirected to the
-repeats the call tree shows. Four of its items are done: the shell checks its
-batch's structure once, the glyph planner appends plain ASCII cells without
-its general path, the shell's storage proof and the batch's span check stop
+repeats the call tree shows. It did four things: the shell checks its batch's
+structure once, the glyph planner appends plain ASCII cells without its
+general path, the shell's storage proof and the batch's span check stop
 repeating work, and emission skips glyph families equal to the acknowledged
 ones. The frame build fell from 16.7 to 14.9 million steps, and to about 11.8
 million without the documents' snapshot, which moves by up to 0.8 million with
-unrelated layout changes. The last item, keeping acknowledged identities, would
-save at most about 0.5 million and needs a rule change, so it awaits a
-decision.
+unrelated layout changes. That completes the design's seven parts.
 
 ## Decisions
 
