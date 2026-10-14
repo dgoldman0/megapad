@@ -22,7 +22,7 @@ from simulator.timer import HostedTimerService
 # Without a host quantum, native work still returns to the same dispatcher at
 # this interval. It bounds one native entry, not a guest-visible boundary.
 UNQUANTIZED_NATIVE_INTERVAL_STEPS = 8192
-SEMANTIC_API_VERSION = 7
+SEMANTIC_API_VERSION = 8
 
 
 def load_native_extension(*, required: bool):
@@ -128,6 +128,10 @@ class NativeExecutor:
             if admit_core and isinstance(word.implementation, rt.PrimitiveDefinition)
             and word.name in tile_operations
         }
+        # The service's identity guard is not free, so the program calls it
+        # only in a run that reaches a tile word, once.
+        tile = self.tile
+        self.program.bind_tile_guard(lambda: tile._native_value_executor() is not None)
         self.generation = runtime.dictionary.execution_generation
         self.plans = {}
         self.entry_costs = {}
@@ -269,6 +273,8 @@ class NativeExecutor:
 
         The tile words run natively only through the service whose value
         math is this extension's kernel, so results match the reference.
+        The program confirms the service's identity guard before the first
+        tile word it runs.
         """
 
         tile = self.tile
@@ -276,7 +282,6 @@ class NativeExecutor:
             not self.tile_primitives
             or self.runtime.tile is not tile
             or tile._native_values is not self.extension.tile_execute_values
-            or tile._native_value_executor() is None
         ):
             return None
         registers = tile._registers._state(tile._core_id)

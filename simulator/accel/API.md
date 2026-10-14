@@ -3,7 +3,7 @@
 The extension and its Python owner are built from the same checkout and use
 one current internal interface. Rebuild the extension after changing this
 boundary with `python setup_simulator_accel.py build_ext --inplace --force`.
-The extension exports `SEMANTIC_API_VERSION = 7`; its Python owner checks this
+The extension exports `SEMANTIC_API_VERSION = 8`; its Python owner checks this
 version before admission. An explicit native request rejects older builds;
 automatic selection keeps the reference executor and the Python dictionary
 when the version mismatches.
@@ -319,4 +319,7 @@ element, `(mode, source0, source1, destination, operations)` or `None`,
 which the owner publishes to the tile service and the Field ALU registers
 and to the tile-operation accountant before anything else observes them.
 The owner passes tile state only while the runtime keeps the tile service it
-started with, bound to this extension's own `tile_execute_values`.
+started with, bound to this extension's own `tile_execute_values`. It also
+binds the service's identity guard with `bind_tile_guard(callable)`; the
+program calls it once, at the first tile word of a run, and leaves every tile
+word of that run to Python when it returns false.

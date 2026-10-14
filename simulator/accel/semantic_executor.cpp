@@ -483,6 +483,9 @@ struct RunState {
     // Tile registers: TMODE, TSRC0, TSRC1 and TDST, when this run admits the
     // tile words, and the tile operations completed for the accountant.
     bool tile = false;
+    // The owner's guard runs once, at the first tile word of a run.
+    bool tile_checked = false;
+    bool tile_allowed = false;
     Cell tile_mode = 0;
     Cell tile_source0 = 0;
     Cell tile_source1 = 0;
@@ -685,6 +688,10 @@ public:
         plans_.clear();
         overlaid_.clear();
     }
+
+    // The owner's check that the tile service still computes with this
+    // extension's kernel, called at most once per run, at its first tile word.
+    void bind_tile_guard(py::object guard) { tile_guard_ = std::move(guard); }
 
     // Bind the hybrid runner's call capsule, or None to unbind. Routine
     // indexes are installed afterwards with set_routine().
@@ -1358,6 +1365,15 @@ private:
         return true;
     }
 
+    bool tile_admitted(RunState& s) {
+        if (!s.tile) return false;
+        if (!s.tile_checked) {
+            s.tile_checked = true;
+            s.tile_allowed = !tile_guard_ || tile_guard_().cast<bool>();
+        }
+        return s.tile_allowed;
+    }
+
     bool execute(Instruction& operation, MemoryRun& memory, RunState& s,
                  const py::dict& continuations, Plan*& plan) {
         const auto opcode = operation.opcode;
@@ -1519,14 +1535,14 @@ private:
             out[0] = s.fpcsr; produced = 1;
             break;
         case OP_TILE_MODE_SET:
-            if (!s.tile || !stack.inputs(0) || !stack.outputs(0)) return false;
+            if (!tile_admitted(s) || !stack.inputs(0) || !stack.outputs(0)) return false;
             stack.commit();
             s.tile_mode = operation.a & 0x7F;
             ++s.ip;
             return true;
         case OP_TILE_MODE_STORE: case OP_TILE_SOURCE0_STORE: case OP_TILE_SOURCE1_STORE:
         case OP_TILE_DESTINATION_STORE:
-            if (!s.tile || !stack.inputs(1) || !stack.outputs(0)) return false;
+            if (!tile_admitted(s) || !stack.inputs(1) || !stack.outputs(0)) return false;
             stack.commit();
             if (opcode == OP_TILE_MODE_STORE) s.tile_mode = v[0] & 0x7F;
             else if (opcode == OP_TILE_SOURCE0_STORE) s.tile_source0 = v[0];
@@ -1535,7 +1551,7 @@ private:
             ++s.ip;
             return true;
         case OP_TILE_BINARY:
-            return execute_tile_binary(operation, memory, s, stack);
+            return tile_admitted(s) && execute_tile_binary(operation, memory, s, stack);
         case OP_FPCSR_STORE:
             if (!stack.inputs(1) || !stack.outputs(0)) return false;
             stack.commit();
@@ -1770,6 +1786,7 @@ private:
     std::vector<Region> regions_;
     std::unordered_map<Cell, Plan> plans_;
     std::unordered_set<Cell> overlaid_;
+    py::object tile_guard_;
     const megapad::hybrid::RoutineCall* routine_call_ = nullptr;
     py::object routine_entry_;
     std::vector<NativeRoutine> routines_;
@@ -1782,7 +1799,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
     megapad::tile_values::register_bindings(module);
     megapad::dictionary::register_bindings(module);
     megapad::walker::register_bindings(module);
-    module.attr("SEMANTIC_API_VERSION") = 7;
+    module.attr("SEMANTIC_API_VERSION") = 8;
     module.attr("MACHINE_STOPPED_CALL") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_CALL));
     module.attr("MACHINE_STOPPED_RESUME") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_RESUME));
     module.attr("MACHINE_CALLBACK") = py::int_(static_cast<uint32_t>(MACHINE_CALLBACK));
@@ -1795,6 +1812,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
         .def("install", &NativeProgram::install, py::arg("xt"), py::arg("operations"),
              py::arg("overlaid") = false)
         .def("clear", &NativeProgram::clear)
+        .def("bind_tile_guard", &NativeProgram::bind_tile_guard, py::arg("guard"))
         .def("snapshot_stack", &NativeProgram::snapshot_stack,
              py::arg("bounds"), py::arg("continuations") = py::none())
         .def("run", &NativeProgram::run, py::arg("xt"), py::arg("ip"),
