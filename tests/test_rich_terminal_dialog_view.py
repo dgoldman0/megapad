@@ -13,6 +13,7 @@ pygame = pytest.importorskip("pygame")
 from rich_terminal.appearance import FLOWING_APPEARANCE, REFERENCE_APPEARANCE
 from rich_terminal.cell_model import BLANK_CELL, Cursor, TerminalView
 from rich_terminal.output_coordinator import CompositeTerminalView
+from rich_terminal import pygame_view
 from rich_terminal.pygame_view import (
     ControlHitTarget, ControlSurface, TextHitTarget, composite_draw_plane_result,
     resolve_pointer,
@@ -188,6 +189,74 @@ def test_an_empty_text_field_shows_its_placeholder():
     slot = pygame.Rect(7 * CELL_W, 10 * CELL_H, 8 * CELL_W, CELL_H)
     assert (pygame.image.tobytes(empty.surface.subsurface(slot), "RGBA")
             != pygame.image.tobytes(blank.surface.subsurface(slot), "RGBA"))
+
+
+class _EightPixelFont:
+    """Every character eight pixels wide."""
+
+    def size(self, text):
+        return (8 * len(text), 16)
+
+
+@pytest.mark.parametrize("text, left, right, center, expected", [
+    # Text that fits starts at its start edge: the left for left to right,
+    # the right for right to left.
+    ("Delete", 10, 100, False, 10),
+    ("\u05e9\u05dc\u05d5\u05dd", 10, 100, False, 100 - 32),
+    # Text too wide is clipped at its end side, so its start stays in view.
+    ("Delete notes.md", 10, 50, False, 10),
+    ("\u05e9\u05dc\u05d5\u05dd \u05e2\u05d5\u05dc\u05dd", 10, 50, False, 50 - 72),
+    # A centred label is centred while it fits, and else keeps its start.
+    ("Keep", 10, 100, True, 10 + (90 - 32) // 2),
+    ("\u05e9\u05dc\u05d5\u05dd \u05e2\u05d5\u05dc\u05dd", 10, 50, True, 50 - 72),
+])
+def test_a_laid_out_label_starts_at_its_start_edge_and_clips_its_end(
+    text, left, right, center, expected,
+):
+    assert pygame_view._label_left(_EightPixelFont(), text, left, right, 32,
+                                   center=center) == expected
+
+
+def _painted_text(monkeypatch, controls):
+    """The text, left, and right of every bounded text paint."""
+
+    calls = []
+    paint = pygame_view._paint_bounded_text
+
+    def record(pygame_module, surface, font, text, color, visible_rect, **kwargs):
+        calls.append((text, kwargs["left"], kwargs["right"], font))
+        return paint(pygame_module, surface, font, text, color, visible_rect, **kwargs)
+
+    monkeypatch.setattr(pygame_view, "_paint_bounded_text", record)
+    _paint(_plane(controls))
+    return calls
+
+
+def _width(font, text):
+    advance = max(1, CELL_W * 4)
+    return sum(pygame_view._scalar_advance(font, character, advance)
+               for character in pygame_view._label_characters(text))
+
+
+def test_dialog_lines_start_at_their_start_edge(monkeypatch):
+    hebrew = "\u05dc\u05de\u05d7\u05d5\u05e7?"
+    dialog = _dialog(content=DialogContent(
+        3, DialogFlag(0), 3, FieldRect(1, 0, 18, 1), FieldRect(1, 1, 18, 2),
+        hebrew + "\nIt cannot be undone."))
+    calls = {text: (left, right, font)
+             for text, left, right, font in _painted_text(monkeypatch, [dialog])}
+    left, right, font = calls[hebrew]
+    assert right - left == _width(font, hebrew) < 18 * CELL_W
+    left, right, _font = calls["It cannot be undone."]
+    assert right - left == 18 * CELL_W
+
+
+def test_a_button_label_too_wide_keeps_its_start(monkeypatch):
+    hebrew = " ".join(["\u05de\u05d7\u05d9\u05e7\u05d4 \u05e1\u05d5\u05e4\u05d9\u05ea"] * 3)
+    calls = {text: (left, right, font) for text, left, right, font
+             in _painted_text(monkeypatch, [_dialog(), _button(label=hebrew)])}
+    left, right, font = calls[hebrew]
+    assert right - left == _width(font, hebrew) > 8 * CELL_W
 
 
 def test_the_shared_viewer_transport_carries_dialogs_buttons_and_modality():

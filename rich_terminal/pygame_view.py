@@ -1348,6 +1348,42 @@ def _label_characters(text: str, direction: int = text_rules.DIRECTION_AUTO):
     return [placed.text for placed in text_rules.cached_row(text, direction, True).characters]
 
 
+def _label_rtl(text: str, direction: int = text_rules.DIRECTION_AUTO) -> bool:
+    """Whether renderer-laid-out text is one paragraph that resolves right
+    to left (APT-1-TEXT Section 10)."""
+
+    if direction == text_rules.DIRECTION_RTL:
+        return True
+    if direction == text_rules.DIRECTION_LTR or text.isascii():
+        return False
+    return text_rules.cached_row(text, direction, True).rtl
+
+
+def _label_left(
+    font,
+    text: str,
+    left: int,
+    right: int,
+    tab_advance: int,
+    *,
+    center: bool = False,
+    direction: int = text_rules.DIRECTION_AUTO,
+) -> int:
+    """Where renderer-laid-out text starts between LEFT and RIGHT: at its
+    paragraph's start edge, or centred when CENTER and it fits.  Text wider
+    than the room is clipped at its end side, so its start stays in view:
+    the right edge for a paragraph that runs right to left, else the left."""
+
+    width = sum(
+        _scalar_advance(font, character, tab_advance)
+        for character in _label_characters(text, direction)
+    )
+    room = right - left
+    if center and width <= room:
+        return left + (room - width) // 2
+    return right - width if _label_rtl(text, direction) else left
+
+
 def _bounded_text_width(
     font,
     text: str,
@@ -3290,7 +3326,8 @@ def _paint_dialog(
                     continue
                 _paint_bounded_text(
                     pygame_module, surface, font, line, color, line_clip,
-                    left=slot.left, right=slot.right, top=top, bottom=top + cell_height,
+                    left=_label_left(font, line, slot.left, slot.right, tab_advance),
+                    right=slot.right, top=top, bottom=top + cell_height,
                     tab_advance=tab_advance,
                 )
     finally:
@@ -3343,19 +3380,24 @@ def _paint_button(
         if draw.shortcut:
             shortcut_width = min(anchor.width // 2, _bounded_text_width(
                 font, draw.shortcut, anchor.width, tab_advance))
+            shortcut_right = anchor.right - cell_width // 2
+            shortcut_left = shortcut_right - shortcut_width
             _paint_bounded_text(
                 pygame_module, surface, font, draw.shortcut,
-                _MUTED_TEXT if enabled else _DISABLED_TEXT, visible,
-                left=anchor.right - cell_width // 2 - shortcut_width,
-                right=anchor.right - cell_width // 2, top=anchor.top, bottom=anchor.bottom,
+                _MUTED_TEXT if enabled else _DISABLED_TEXT,
+                _bounded_pygame_rect(pygame_module, _WideRect(
+                    shortcut_left, anchor.top, shortcut_width, anchor.height), visible),
+                left=_label_left(font, draw.shortcut, shortcut_left, shortcut_right,
+                                 tab_advance),
+                right=shortcut_right, top=anchor.top, bottom=anchor.bottom,
                 tab_advance=tab_advance,
             )
         room = anchor.width - shortcut_width - (cell_width if shortcut_width else 0)
-        width = _bounded_text_width(font, draw.label, room, tab_advance)
-        left = anchor.left + max(0, (room - width) // 2)
         _paint_bounded_text(
             pygame_module, surface, font, draw.label, text, visible,
-            left=left, right=anchor.left + room, top=anchor.top, bottom=anchor.bottom,
+            left=_label_left(font, draw.label, anchor.left, anchor.left + room, tab_advance,
+                             center=True),
+            right=anchor.left + room, top=anchor.top, bottom=anchor.bottom,
             tab_advance=tab_advance,
         )
     finally:
