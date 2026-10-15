@@ -15,8 +15,8 @@ from rich_terminal.cell_model import BLANK_CELL, Cursor, TerminalView
 from rich_terminal.output_coordinator import CompositeTerminalView
 from rich_terminal import pygame_view
 from rich_terminal.pygame_view import (
-    ControlHitTarget, ControlSurface, TextHitTarget, composite_draw_plane_result,
-    resolve_pointer,
+    ControlHitTarget, ControlSurface, DialogHitTarget, TextHitTarget,
+    composite_draw_plane_result, resolve_pointer,
 )
 from rich_terminal.retained_model import OwnerIdentity
 from rich_terminal.retained_scene import (
@@ -144,8 +144,10 @@ def test_buttons_take_points_the_dialog_swallows_the_rest(appearance):
     assert delete.identity.control_id == 22
     keep = surface(16 * CELL_W, 5 * CELL_H + 3)
     assert isinstance(keep, ControlHitTarget) and keep.identity.control_id == 23
-    # The message is the dialog's surface: a press there goes nowhere.
-    assert surface(7 * CELL_W, 3 * CELL_H + 3) is None
+    # The message is the dialog's own: a press there goes nowhere, and a
+    # wheel scrolls it.
+    body = surface(7 * CELL_W, 3 * CELL_H + 3)
+    assert isinstance(body, DialogHitTarget) and body.identity.control_id == 21
 
 
 def test_an_inactive_field_beneath_the_modal_region_takes_no_input_and_dims():
@@ -160,8 +162,10 @@ def test_an_inactive_field_beneath_the_modal_region_takes_no_input_and_dims():
     # so the field's last cell shows beside the dialog, dimmed.
     outside = (24 * CELL_W + 4, 4 * CELL_H + 6)
     assert inactive.surface.get_at(outside) != active.surface.get_at(outside)
-    assert resolve_pointer(inactive.hit_entries, *point, cell_width=CELL_W,
-                           cell_height=CELL_H) is None
+    # The dialog over the field takes the point, so the field gets none.
+    covered = resolve_pointer(inactive.hit_entries, *point, cell_width=CELL_W,
+                              cell_height=CELL_H)
+    assert isinstance(covered, DialogHitTarget) and covered.identity.control_id == 21
 
 
 def test_a_disabled_button_swallows_points_without_activating():

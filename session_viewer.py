@@ -23,6 +23,7 @@ from rich_terminal.pygame_view import (
     ControlHitTarget,
     ControlIdentity,
     ControlSurface,
+    DialogHitTarget,
     DocumentHitTarget,
     FieldHitTarget,
     HIT_MAP_ENTRY_TYPES,
@@ -560,7 +561,7 @@ class _RetainedDisplayState:
             raise TypeError(
                 "hit_entries must contain only ControlHitTarget, "
                 "RegionOcclusion, ControlSurface, TextHitTarget, "
-                "ItemHitTarget, or DocumentHitTarget values"
+                "ItemHitTarget, DocumentHitTarget, or DialogHitTarget values"
             )
         return entries
 
@@ -1045,6 +1046,30 @@ class _GuestKeyboardForwarder:
         else:
             params.update(content_revision=target.content_revision, item_key=item_key)
         return self._request_now("send_text_event", **params)
+
+    def send_dialog_scroll(
+        self,
+        target: DialogHitTarget,
+        *,
+        modifiers: int,
+        wheel_x: int,
+        wheel_y: int,
+    ) -> bool:
+        """Send one SCROLL for an acknowledged dialog."""
+
+        if not isinstance(target, DialogHitTarget):
+            raise TypeError("target must be DialogHitTarget")
+        identity = target.identity
+        return self._request_now(
+            "send_text_event",
+            owner_id=identity.owner_id,
+            owner_generation=identity.owner_generation,
+            control_id=identity.control_id,
+            event_kind=int(ControlEventKind.SCROLL),
+            modifiers=modifiers,
+            wheel_x=wheel_x,
+            wheel_y=wheel_y,
+        )
 
     def send_document_event(
         self,
@@ -1692,6 +1717,10 @@ class _PointerRouter:
                 modifiers=modifiers,
                 wheel_x=wheel_x,
                 wheel_y=wheel_y,
+            )
+        if isinstance(target, DialogHitTarget):
+            return self.keyboard.send_dialog_scroll(
+                target, modifiers=modifiers, wheel_x=wheel_x, wheel_y=wheel_y,
             )
         if isinstance(target, ResidualPoint):
             return self._send_raw(

@@ -1232,26 +1232,35 @@ class RichTerminalCore:
             owner_generation=event.owner_generation,
         )
         scene = self._require_retained_model()
-        # PLACE and EXTEND on a TEXT FIELD belong to RET_FIELDS, not to the
-        # collection family (RETAINED-1 section 9.2).
+        # PLACE and EXTEND on a TEXT FIELD belong to RET_FIELDS, and SCROLL on
+        # a DIALOG to RET_DIALOGS, not to the collection family (RETAINED-1
+        # sections 9.2 and 9.3).
         field_position = False
-        if event.event_kind in (ControlEventKind.PLACE, ControlEventKind.EXTEND):
+        dialog_scroll = False
+        if event.event_kind in (
+            ControlEventKind.PLACE, ControlEventKind.EXTEND, ControlEventKind.SCROLL,
+        ):
             try:
-                field_position = (
-                    scene.active_control_kind(owner, event.control_id) is ControlKind.FIELD
-                )
+                target_kind = scene.active_control_kind(owner, event.control_id)
             except SceneModelError as exc:
                 raise TerminalSessionError(
                     f"semantic control target is not interactable: {exc}"
                 ) from exc
+            if event.event_kind is ControlEventKind.SCROLL:
+                dialog_scroll = target_kind is ControlKind.DIALOG
+            else:
+                field_position = target_kind is ControlKind.FIELD
         if (
             event.event_kind not in (ControlEventKind.ACTIVATE, ControlEventKind.ADJUST)
             and not field_position
+            and not dialog_scroll
             and not policy.features & RetainedFeature.CONTROL_COLLECTIONS
         ):
             raise TerminalSessionError(
                 "positioned control input requires active RET_CONTROL_COLLECTIONS"
             )
+        if dialog_scroll and not policy.features & RetainedFeature.DIALOGS:
+            raise TerminalSessionError("dialog scrolling requires active RET_DIALOGS")
         if ((event.event_kind is ControlEventKind.ADJUST or field_position)
                 and not policy.features & RetainedFeature.FIELDS):
             raise TerminalSessionError("field input requires active RET_FIELDS")
@@ -1274,6 +1283,8 @@ class RichTerminalCore:
                     owner, event.control_id,
                     content_revision=event.content_revision, adjustable=True,
                 )
+            elif dialog_scroll:
+                scene.require_dialog_scroll(owner, event.control_id)
             elif event.event_kind is ControlEventKind.SCROLL:
                 scene.require_text_control(
                     owner,

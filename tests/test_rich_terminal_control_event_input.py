@@ -361,3 +361,20 @@ def test_text_field_positions_with_item_key_zero_need_only_fields(runtime):
     ):
         report = _dispatch(runtime, payload, features=fields)
         assert (report["dispatch"], report["has"]) == (2, 0)
+
+
+def test_a_scroll_needs_only_dialogs_while_positions_still_need_collections(runtime):
+    """A dialog takes SCROLL (RETAINED-1 section 9.3), so RET_DIALOGS admits
+    it without the collection family; positions still need the collections."""
+
+    dialogs = CONTROLS | 0x20000
+    report = _dispatch(
+        runtime,
+        encode_control_event(_event(ControlEventKind.SCROLL, wheel_y=1)),
+        features=dialogs,
+    )
+    assert (report["dispatch"], report["has"]) == (0, -1)
+    assert report["kind"] == int(ControlEventKind.SCROLL)
+    for payload in (_place_bytes(), _with(_place_bytes(), 24, (5).to_bytes(2, "little"))):
+        report = _dispatch(runtime, payload, features=dialogs)
+        assert (report["dispatch"], report["has"]) == (2, 0)

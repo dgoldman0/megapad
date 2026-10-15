@@ -1580,6 +1580,26 @@ class RetainedSceneModel:
             raise SceneModelError(SceneErrorCode.STATE, "control is hidden or disabled")
         return definition
 
+    def require_dialog_scroll(
+        self,
+        owner: OwnerIdentity,
+        control_id: int,
+    ) -> ControlDefinition:
+        """Resolve one visible DIALOG that is not a notice, which a wheel
+        scrolls (RETAINED-1 section 9.3)."""
+
+        _owner_scene, definition = self._active_control(owner, control_id)
+        if definition.kind is not ControlKind.DIALOG or definition.content is None:
+            raise SceneModelError(
+                SceneErrorCode.STATE,
+                "control kind does not accept this positioned event",
+            )
+        if definition.content.notice:
+            raise SceneModelError(SceneErrorCode.STATE, "a notice takes no input")
+        if not definition.visible:
+            raise SceneModelError(SceneErrorCode.STATE, "control is hidden")
+        return definition
+
     def require_text_position(
         self,
         owner: OwnerIdentity,

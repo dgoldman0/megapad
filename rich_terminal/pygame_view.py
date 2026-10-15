@@ -657,6 +657,21 @@ class DocumentHitTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class DialogHitTarget:
+    """One dialog that is not a notice: a press on it goes nowhere, and a
+    wheel over it scrolls its message (RETAINED-1 section 9.3)."""
+
+    identity: ControlIdentity
+    rect: PixelRect
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, ControlIdentity):
+            raise TypeError("identity must be ControlIdentity")
+        if not isinstance(self.rect, PixelRect):
+            raise TypeError("rect must be PixelRect")
+
+
+@dataclass(frozen=True, slots=True)
 class ResidualPoint:
     """A point showing CELL or residual content, named by its cell."""
 
@@ -666,10 +681,11 @@ class ResidualPoint:
 
 HitMapEntry = (
     ControlHitTarget | RegionOcclusion | ControlSurface | TextHitTarget | ItemHitTarget
-    | DocumentHitTarget
+    | DocumentHitTarget | DialogHitTarget
 )
 PointerTarget = (
-    ControlHitTarget | TextHitTarget | ItemHitTarget | DocumentHitTarget | ResidualPoint
+    ControlHitTarget | TextHitTarget | ItemHitTarget | DocumentHitTarget | DialogHitTarget
+    | ResidualPoint
 )
 HIT_MAP_ENTRY_TYPES = (
     ControlHitTarget,
@@ -678,6 +694,7 @@ HIT_MAP_ENTRY_TYPES = (
     TextHitTarget,
     ItemHitTarget,
     DocumentHitTarget,
+    DialogHitTarget,
 )
 
 
@@ -686,7 +703,8 @@ def _validated_hit_entries(hit_entries) -> tuple[HitMapEntry, ...]:
     if any(not isinstance(entry, HIT_MAP_ENTRY_TYPES) for entry in entries):
         raise TypeError(
             "hit_entries must contain only ControlHitTarget, RegionOcclusion, "
-            "ControlSurface, TextHitTarget, ItemHitTarget, or DocumentHitTarget values"
+            "ControlSurface, TextHitTarget, ItemHitTarget, DocumentHitTarget, or "
+            "DialogHitTarget values"
         )
     return entries
 
@@ -717,9 +735,9 @@ def resolve_pointer(
 ) -> PointerTarget | None:
     """Resolve where one point on the composed terminal surface may go.
 
-    An activatable control or a text root wins in reverse painter order.  A
-    control surface (menu bar, tabset, popup, disabled text root) swallows the
-    point.  A region barrier, or no entry at all, means the point shows CELL
+    An activatable control, a text root, or a dialog wins in reverse painter
+    order.  A control surface (menu bar, tabset, popup, disabled text root,
+    notice) swallows the point.  A region barrier, or no entry at all, means the point shows CELL
     or residual content, so a raw pointer gesture may name its cell.
     """
 
@@ -729,7 +747,8 @@ def resolve_pointer(
         if not entry.rect.contains(x, y):
             continue
         if isinstance(
-            entry, (ControlHitTarget, TextHitTarget, ItemHitTarget, DocumentHitTarget)
+            entry,
+            (ControlHitTarget, TextHitTarget, ItemHitTarget, DocumentHitTarget, DialogHitTarget),
         ):
             return entry
         if isinstance(entry, ControlSurface):
@@ -3276,8 +3295,9 @@ def _paint_dialog(
 ) -> list[HitMapEntry]:
     """Paint a dialog's frame and background over its root, its title, and
     its message lines in their slots, one line a row and never rewrapped
-    (RETAINED-1 section 9.3).  Its contents paint over it.  The root is a
-    control surface: a point on it starts no raw gesture."""
+    (RETAINED-1 section 9.3).  Its contents paint over it.  A press on the
+    root starts no raw gesture and goes nowhere; a wheel over a dialog that
+    is not a notice scrolls its message."""
 
     anchor, visible = _semantic_root_rects(
         pygame_module, surface, region, region_rect, draw.bounds,
@@ -3332,8 +3352,10 @@ def _paint_dialog(
                 )
     finally:
         surface.set_clip(prior_clip)
-    return [ControlSurface(region.owner_id, region.owner_generation, draw.control_id,
-                           _pixel_rect(visible))]
+    if content.notice:
+        return [ControlSurface(region.owner_id, region.owner_generation, draw.control_id,
+                               _pixel_rect(visible))]
+    return [DialogHitTarget(_identity(region, draw.control_id), _pixel_rect(visible))]
 
 
 def _paint_button(
@@ -5523,6 +5545,7 @@ __all__ = [
     "FieldHitTarget",
     "ControlIdentity",
     "ControlSurface",
+    "DialogHitTarget",
     "HitMapEntry",
     "ImageSurfaceKey",
     "PixelRect",

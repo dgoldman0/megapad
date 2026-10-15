@@ -241,7 +241,7 @@ Feature bits are:
 | 14 | `RET_FIELDS` | typed FIELD controls with explicit label/value slots |
 | 15 | `RET_GRID_CELLS` | typed NUMBER, FORMULA, and ERROR roles in TEXT_GRID |
 | 16 | `RET_CONTROL_DOCUMENTS` | the document CONTROL kind and its input |
-| 17 | `RET_DIALOGS` | modal regions, the dialog and button CONTROL kinds, and button activation |
+| 17 | `RET_DIALOGS` | modal regions, the dialog and button CONTROL kinds, button activation, and dialog scrolling |
 
 Bits 18 through 63 are zero. `RET_CORE` is mandatory for every supporting
 terminal. Every other advertised feature depends on `RET_CORE`. `RET_SERIES`
@@ -416,8 +416,8 @@ transaction bytes, and 56 outbound payload bytes for ADJUST. The existing CORE
 outbound minimum of 64 remains in force and already covers that event and the
 64-byte `PLACE` and `EXTEND` a TEXT field takes. `RET_DIALOGS` requires at
 least 136 inbound payload bytes for CONTROL plus the smallest DLG1 body and
-336 complete transaction bytes; its only event, `ACTIVATE`, fits the CORE
-outbound minimum. A client must
+336 complete transaction bytes; its events, a button's `ACTIVATE` and a
+dialog's 48-byte `SCROLL`, fit the CORE outbound minimum. A client must
 treat an inconsistent reply pair as the deterministic unsupported-profile
 outcome.
 
@@ -1369,7 +1369,7 @@ resulting authoritative state in a later transaction.
 | 1 | `ACTIVATE` | 40 bytes | `MENU`, `MENU_ITEM`, `TAB`, `TASK`, `LAUNCHER`, writable INTEGER or CHOICE `FIELD`, `BUTTON` | 8; `TAB` also 9; task entries also 13; FIELD also 14; BUTTON also 17 |
 | 2 | `PLACE` | 64 bytes | `TEXT_AREA`, `TEXT_GRID`, writable TEXT `FIELD` | 8 and 9; FIELD 8 and 14 |
 | 3 | `EXTEND` | 64 bytes | `TEXT_AREA`, writable TEXT `FIELD` | 8 and 9; FIELD 8 and 14 |
-| 4 | `SCROLL` | 48 bytes | `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW`, `DOCUMENT` | 8 and 9; `ITEM_VIEW` also 10; `DOCUMENT` also 16 |
+| 4 | `SCROLL` | 48 bytes | `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW`, `DOCUMENT`, `DIALOG` without `NOTICE` | 8 and 9; `ITEM_VIEW` also 10; `DOCUMENT` also 16; `DIALOG` 8 and 17 |
 | 5 | `FOLLOW` | 64 bytes | `TEXT_AREA`, `DOCUMENT` | 8 and 9; `DOCUMENT` also 16 |
 | 6 | `SELECT` | 64 bytes | `ITEM_VIEW` | 8, 9, and 10 |
 | 7 | `OPEN` | 64 bytes | `ITEM_VIEW` | 8, 9, and 10 |
@@ -1400,8 +1400,10 @@ The terminal may emit an event only for the exact active owner generation and
 control ID of a target kind listed for it, when the complete current control
 and all of its ancestors are effectively visible and enabled, and no visible
 `MODAL` region above its region makes it inactive (Section 9). `MENU_BAR`,
-`MENU_SEPARATOR`, `TABSET`, `TASKBAR`, and `DIALOG` never emit
-`CONTROL_EVENT`. FIELD events require writable content. `ACTIVATE` and
+`MENU_SEPARATOR`, `TABSET`, and `TASKBAR` never emit `CONTROL_EVENT`. A
+`DIALOG`, which has no enabled state, emits only `SCROLL`, while it and its
+ancestors are effectively visible, and a notice emits none. FIELD events
+require writable content. `ACTIVATE` and
 `ADJUST` require INTEGER or CHOICE content, and `ADJUST` also the exact
 current `content_revision`; `PLACE` and `EXTEND` require TEXT content. A
 BUTTON activates when it is effectively visible and enabled.
@@ -1578,7 +1580,11 @@ wider than its rectangle is clipped at its end side.
 
 The renderer draws the dialog's frame and background over its root, its title
 and message in their rectangles, and nothing else; the dialog's contents draw
-over it (Section 9.1). Title and message bytes consume aggregate UTF-8 quota.
+over it (Section 9.1). A press on the dialog itself, outside its contents,
+goes nowhere. A wheel over a dialog that is not a notice sends `SCROLL`: the
+client moves the message by the detents, as its own wheel would, and
+publishes the lines then in view; the renderer never moves the message
+itself. Title and message bytes consume aggregate UTF-8 quota.
 Changed severity, flags, message, or rectangles require complete newer DLG1
 content with a strictly newer content revision. Unsupported versions, flags,
 or severities, malformed text, more lines than message rows, noncanonical

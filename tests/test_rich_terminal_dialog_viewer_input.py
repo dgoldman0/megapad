@@ -1,6 +1,7 @@
 """A button the physical view shows activates through the acknowledged
-frame, a dialog's body takes no input, and a control beneath an open modal
-region is refused by the terminal (RETAINED-1 sections 9 and 9.1)."""
+frame, a press on a dialog's body goes nowhere while a wheel over a dialog
+that is not a notice scrolls it, and a control beneath an open modal region
+is refused by the terminal (RETAINED-1 sections 9, 9.1 and 9.3)."""
 
 from dataclasses import replace
 import json
@@ -70,7 +71,7 @@ def _open_core():
     return core, encoder, decoder
 
 
-def _visible_core(*, modal: bool):
+def _visible_core(*, modal: bool, flags=DialogFlag.NOTICE):
     core, encoder, decoder = _open_core()
     base = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0, 2, 2, 0, 3)
     # The bottom row, above region 1; MODAL when asked.
@@ -85,7 +86,7 @@ def _visible_core(*, modal: bool):
                               ButtonContent(ButtonFlag.DEFAULT)),
         ControlWireDefinition(7, 1, 3, ControlKind.DIALOG, ControlState.VISIBLE, 0, 2, 0, 0,
                               ObjectBounds(0, 0, 2, 1), "", "",
-                              DialogContent(1, DialogFlag.NOTICE, 2, FieldRect(0, 0, 0, 0),
+                              DialogContent(1, flags, 2, FieldRect(0, 0, 0, 0),
                                             FieldRect(0, 0, 2, 1), "Saved")),
     )
     operations = (
@@ -108,8 +109,8 @@ def font():
     return pygame.font.Font(None, 16)
 
 
-def _environment(font, *, modal: bool):
-    core, _, decoder = _visible_core(modal=modal)
+def _environment(font, *, modal: bool, flags=DialogFlag.NOTICE):
+    core, _, decoder = _visible_core(modal=modal, flags=flags)
     session = _FieldSession(core, decoder)
     machine = SharedMachine(session)
     machine._reset_generation = viewer_helpers.GENERATION
@@ -143,6 +144,41 @@ def test_a_shown_button_activates_and_a_notice_body_takes_nothing(font, modal):
     assert not pointer.button_up(1, (20, 30), (80, 40))
     assert len(session.events) == 1
     assert core.retained_state is before
+
+
+def test_a_wheel_over_a_dialog_scrolls_it_and_a_press_goes_nowhere(font):
+    core, session, client, pointer, result = _environment(
+        font, modal=True, flags=DialogFlag(0))
+    before = core.retained_state
+    assert not pointer.button_down(1, (20, 30), (80, 40))
+    assert not pointer.button_up(1, (20, 30), (80, 40))
+    assert session.events == []
+    # A host wheel step up is an APT detent down.
+    assert pointer.wheel(0, -1, (20, 30), (80, 40))
+    assert [(event.event_kind, event.control_id, event.wheel_y)
+            for event in session.events] == [(ControlEventKind.SCROLL, 3, 1)]
+    assert core.retained_state is before
+
+
+def test_a_wheel_over_a_notice_goes_nowhere(font):
+    core, session, client, pointer, result = _environment(font, modal=False)
+    assert not pointer.wheel(0, -1, (20, 30), (80, 40))
+    assert session.events == []
+
+
+def test_the_terminal_scrolls_only_a_dialog_that_is_not_a_notice():
+    core, _, _ = _visible_core(modal=True, flags=DialogFlag(0))
+    assert core.send_control_event(7, 1, 3, model_revision=core.model_revision,
+                                   event_kind=ControlEventKind.SCROLL,
+                                   wheel_y=1) is not None
+    core, _, _ = _visible_core(modal=True)
+    with pytest.raises(TerminalSessionError, match="a notice takes no input"):
+        core.send_control_event(7, 1, 3, model_revision=core.model_revision,
+                                event_kind=ControlEventKind.SCROLL, wheel_y=1)
+    # A button scrolls nothing.
+    with pytest.raises(TerminalSessionError, match="RET_CONTROL_COLLECTIONS"):
+        core.send_control_event(7, 1, 2, model_revision=core.model_revision,
+                                event_kind=ControlEventKind.SCROLL, wheel_y=1)
 
 
 def test_the_terminal_refuses_a_control_beneath_an_open_modal_region():

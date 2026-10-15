@@ -2717,8 +2717,8 @@ VARIABLE _PT-RSZ-BASE
     \ A crossed input is discarded once close has become irrevocable.  Before
     \ that boundary, only a positively discovered RET_CONTROLS session may
     \ admit this additive event family, only RET_CONTROL_COLLECTIONS may
-    \ admit the positioned and scroll kinds, and only RET_CONTROL_ITEMS the
-    \ item kinds.
+    \ admit the positioned and scroll kinds, save a dialog's SCROLL, which
+    \ RET_DIALOGS admits too, and only RET_CONTROL_ITEMS the item kinds.
     DUP _PT.S.STATE @ PT-ST-CLOSING <>
     OVER _PT.S.CLOSE-PENDING? @ 0= AND IF
         DUP _PT-RET-CONTROLS? 0= IF
@@ -2735,6 +2735,9 @@ VARIABLE _PT-RSZ-BASE
                 DUP _PT-RET-CONTROL-COLLECTIONS?
                 _PT-RX-P @ 24 + W@ _PT-CONTROL-FIELD-POSITION? IF
                     OVER _PT-RET-FIELDS? OR
+                THEN
+                _PT-RX-P @ 24 + W@ PT-CONTROL-SCROLL = IF
+                    OVER PT-RET-DIALOGS? OR
                 THEN
                 0= IF
                     6 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
