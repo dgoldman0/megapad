@@ -4522,7 +4522,11 @@ VARIABLE _PT-PR-CLIP-YEND
     _PT-PR-A @ 44 + L@ _PT-PR-CLIP-Y !
     _PT-PR-A @ 48 + L@ _PT-PR-CLIP-COLS !
     _PT-PR-A @ 52 + L@ _PT-PR-CLIP-ROWS !
-    _PT-PR-A @ 60 + L@ DUP 3 INVERT AND IF DROP FALSE EXIT THEN
+    _PT-PR-A @ 60 + L@ DUP 7 INVERT AND IF DROP FALSE EXIT THEN
+    \ A modal region needs the negotiated dialogs family.
+    DUP PT-REGION-F-MODAL AND IF
+        _PT-PO-S @ PT-RET-DIALOGS? 0= IF DROP FALSE EXIT THEN
+    THEN
     2 AND 0= IF
         _PT-PR-CLIP-X @ _PT-PR-CLIP-Y @ OR
         _PT-PR-CLIP-COLS @ OR _PT-PR-CLIP-ROWS @ OR 0= EXIT

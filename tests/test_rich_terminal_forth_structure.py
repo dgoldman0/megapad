@@ -467,6 +467,11 @@ def test_present_body_keeps_raw_fixed_operations_private() -> None:
     assert "_PT-M-REGION-REPLACE" in region
     assert "_PT-M-REGION-DROP" in region
     assert "_PT-PRESENT-FIXED-OP" in region_write
+    # Flags take VISIBLE, CLIPPED and MODAL, and MODAL needs DIALOGS.
+    definition = _definition(source, "_PT-PO-REGION-DEFINITION?")
+    assert "DUP 7 INVERT AND IF DROP FALSE EXIT THEN" in definition
+    modal = definition.index("PT-REGION-F-MODAL AND IF")
+    assert definition.index("PT-RET-DIALOGS? 0= IF DROP FALSE EXIT THEN") > modal
     assert "_PT.S.TX-RET-OPS @ <>" in commit
     assert "_PT.S.TX-RET-BYTES @ <>" in commit
     assert "PT-RET-REPLACE-START =" in commit
