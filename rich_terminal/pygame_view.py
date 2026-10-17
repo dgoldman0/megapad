@@ -2576,6 +2576,9 @@ def _paint_text_grid(
 _ITEM_INDENT = 2
 _ITEM_MARK = 2
 _ITEM_CHECK = 3
+# A checkable card's first field starts after its box and a space, as its
+# narrower width in SEMANTIC-CONTENT-1 leaves room for.
+_CARD_CHECK = 4
 _ITEM_GAP = 2
 
 
@@ -2762,7 +2765,7 @@ def _paint_item_view(
                         left=anchor.left, top=top, right=anchor.right, bottom=bottom,
                         width=1, clip=visible_anchor,
                     )
-            slot = 0
+            slot = 1 if cards else 0
             if role in (ItemViewRole.TREE, ItemViewRole.SECTIONS):
                 slot = _ITEM_INDENT * item.depth
             line_top, line_bottom = top, row_edge(item_row + 1)
@@ -2827,18 +2830,21 @@ def _paint_item_view(
                         end=content.columns[index].kind is ItemColumnKind.NUMBER,
                     )
             elif cards:
+                checkable = bool(state & ItemState.CHECKABLE)
                 line_row = item_row
                 for index, column in enumerate(content.columns):
-                    first = 1 if index == 0 else 3
-                    last = first + card_field_width(slots, index)
+                    if index:
+                        first = 3
+                    else:
+                        first = 1 + (_CARD_CHECK if checkable else 0)
+                    width = card_field_width(slots, index, checkable)
+                    last = first + width
                     if index >= len(fields):
                         line_row += 1
                         continue
                     item_field = fields[index]
                     if column.wrap:
-                        lines = text_rules.cached_lines(
-                            item_field.text, direction, card_field_width(slots, index)
-                        )
+                        lines = text_rules.cached_lines(item_field.text, direction, width)
                     else:
                         lines = (text_rules.cached_row(item_field.text, direction, True),)
                     for line in lines:
