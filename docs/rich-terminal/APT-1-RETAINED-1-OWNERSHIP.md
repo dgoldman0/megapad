@@ -220,8 +220,8 @@ Owner quotas are reservations, not optimistic hints. OWNER_OPEN succeeds only
 when the terminal can reserve the complete request without exceeding fixed
 epoch capabilities. The separate sums of live-owner region, resource, object,
 and series count quotas must fit their corresponding global maxima, and the
-separate resource-byte, UTF-8-byte, and sample-slot sums must fit their global
-totals. Every sum is checked before mutation. This makes later admission depend
+separate resource-byte, UTF-8-byte, sample-slot, and path-point sums must fit
+their global totals. Every sum is checked before mutation. This makes later admission depend
 on the owner reservation rather than unrelated owners becoming idle.
 
 The reservation ledger and usage ledgers are distinct. OWNER_OPEN increases the
@@ -258,14 +258,15 @@ Accounting units are exact:
   carried UTF-8 payload byte counts in that same ledger;
 - a series consumes its declared history capacity in sample slots, regardless
   of current sample count;
-- a VECTOR object reservation permits at most `max_path_points`; checked
-  `object_quota * max_path_points` bounds owner/global point storage; and
+- a POLYLINE consumes its point count in path points, and no line may have
+  more than `max_path_points`; and
 - transaction staging and upload staging are separate bounded transient pools
   derived from advertised transaction/chunk/resource policies.
 
-For region/object/control/semantic-item/series counts, UTF-8 bytes, and sample
-slots, active and committed hidden targets each have a separate logical usage
-ledger checked independently against the same owner reservation.
+For region/object/control/semantic-item/series counts, UTF-8 bytes, sample
+slots, and path points, active and committed hidden targets each have a
+separate logical usage ledger checked independently against the same owner
+reservation.
 They are not summed; this permits a complete copy-on-write replacement at the
 negotiated logical quota. A hidden drop changes only hidden usage. Reveal
 atomically promotes the hidden ledger and retires the prior active logical

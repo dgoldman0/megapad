@@ -357,7 +357,7 @@ now-forbidden legacy snapshot path.
 | 36 | `minimum_presentation_interval_us` | u32 |
 | 40 | `total_sample_slots` | u64 |
 | 48 | `total_utf8_bytes` | u64 |
-| 56 | `reserved` = 0 | u64 |
+| 56 | `total_path_points` | u64 |
 
 `image_formats` is the set of picture formats the terminal takes, one bit
 each: bit 0 raw row-major sRGB straight-alpha RGBA8, bit 1 QOI, bit 2 PNG and
@@ -365,7 +365,10 @@ bit 3 JPEG files (Section 8); other bits are zero. It is zero when
 `RET_RGBA_IMAGE` is absent. When that feature is set, bit 0 is set, since every
 terminal that shows pictures takes raw pixels. Image width and height are
 positive exactly when that feature is set, and they bound the decoded picture
-in every format. `max_path_points` is positive exactly when VECTOR is set.
+in every format. `max_path_points` and `total_path_points` are positive
+exactly when VECTOR is set. `total_path_points` is the terminal's budget for
+the points of every live owner's lines, from which each owner reserves its
+`path_point_quota` (Section 5).
 `max_glyph_run_bytes` is positive exactly when glyph-run objects are enabled;
 that requires positive `max_objects` and sufficient aggregate UTF-8 capacity.
 INSTRUMENT also requires that text capacity because READOUT formatting shares
@@ -381,7 +384,8 @@ PANES and STATUS_FIELDS likewise add no `RET_FORMATS` field and use those same b
 Advertised maxima must describe at least one usable maximum-sized item:
 `total_utf8_bytes >= max_glyph_run_bytes` when glyph runs are enabled;
 `max_samples_per_append <= max_history_per_series <= total_sample_slots` when
-SERIES is set; and checked
+SERIES is set; `max_path_points <= total_path_points` when VECTOR is set; and
+checked
 `max_image_width * max_image_height * 4 <= total_resource_bytes` when IMAGE is
 set. `max_objects` is positive when any object feature is set, and `max_series`
 is positive exactly when SERIES is set. Values may be smaller than another
@@ -552,9 +556,9 @@ occurs before atomic commit.
 Logical scene usage is target-local. For each owner, the active target and a
 committed hidden target independently check region count, combined
 object/control/semantic-item count, series count, complete
-GLYPH_RUN/READOUT/control label/shortcut/semantic-content UTF-8 bytes, and
-declared series history sample slots against the same owner
-reservation. Those two logical scene ledgers are not summed. Controls use an
+GLYPH_RUN/READOUT/control label/shortcut/semantic-content UTF-8 bytes,
+declared series history sample slots, and POLYLINE points against the same
+owner reservation. Those two logical scene ledgers are not summed. Controls use an
 independent identity namespace, but each CONTROL record and each carried STX1
 item consume one object-quota slot; their complete text consumes the same UTF-8
 quota as object text. A RET_DELTA commit validates the proposed active ledger;
@@ -647,7 +651,7 @@ one slot from that shared reservation.
 | 32 | `resource_byte_quota` | u64 |
 | 40 | `utf8_byte_quota` | u64 |
 | 48 | `sample_slot_quota` | u64 |
-| 56 | `reserved` = 0 | u64 |
+| 56 | `path_point_quota` | u64 |
 
 The terminal reserves all quotas atomically before returning success. Each
 individual count quota must not exceed its corresponding advertised maximum,
@@ -656,19 +660,19 @@ across all live owners must not exceed `max_regions`, `max_resources`,
 `max_objects`, and `max_series`. `object_quota` is one shared reservation for
 the target's combined OBJECT records, CONTROL records, STX1 and ITM1 items,
 and DOC1 blocks;
-it is not multiplied when CONTROLS is advertised. Resource-byte, UTF-8-byte, and
-sample-slot reservations across all live owners likewise must not exceed their
-advertised totals. Checked addition precedes mutation. An individually valid
-request whose aggregate would exceed any total returns RET_NO_CAPACITY and
-changes no owner record or reservation. A zero quota is valid for an unused
-feature family. An open with a feature-dependent nonzero quota is invalid when
-that feature is absent.
-Polyline point storage is bounded by `object_quota * max_path_points`, with
-checked multiplication; a terminal advertising VECTOR must be able to honor
-that worst case for accepted object reservations.
+it is not multiplied when CONTROLS is advertised. Resource-byte, UTF-8-byte,
+sample-slot, and path-point reservations across all live owners likewise must
+not exceed their advertised totals. Checked addition precedes mutation. An
+individually valid request whose aggregate would exceed any total returns
+RET_NO_CAPACITY and changes no owner record or reservation. A zero quota is
+valid for an unused feature family. An open with a feature-dependent nonzero
+quota is invalid when that feature is absent. A POLYLINE consumes its
+`point_count` from the path-point quota, so a terminal reserves room only for
+the points its owners ask for, never for every object being a line of the
+largest size.
 
-Region, combined object/control/semantic-item, series, UTF-8, and sample-slot
-quotas bound each logical scene target independently: active usage and
+Region, combined object/control/semantic-item, series, UTF-8, sample-slot, and
+path-point quotas bound each logical scene target independently: active usage and
 committed hidden usage must each fit the same owner reservation and
 are not added together. Control labels, shortcuts, and semantic-content text
 share the UTF-8 ledger with GLYPH_RUN and READOUT text. Resource count and
@@ -1706,8 +1710,12 @@ repeat point_count:
 ```
 
 `point_count` is at least 2 and at most `max_path_points`; `stroke_width` is
-nonzero. Paths use straight segments with round joins and round end caps. A
-closed path adds the last-to-first segment; it does not imply fill.
+nonzero. The points consume the transaction target's path-point usage: a
+DEFINE adds `point_count`, a REPLACE changes it by the difference, and a DROP
+releases it. Active and hidden usage are checked independently against the
+same owner path-point reservation under Section 5. Paths use straight
+segments with round joins and round end caps. A closed path adds the
+last-to-first segment; it does not imply fill.
 
 ### 11.3 IMAGE
 
@@ -2294,14 +2302,16 @@ Local attachment/capture refusal, or aggregate projection refusal before
 OWNER_OPEN, must leave CELL usable, but refused CELL pixels are not
 rich-rendering acceptance evidence.
 
-The checkpoint does not authorize partial capability advertisement. The
-checked-in `desktop-apt1` reference profile advertises exactly `RET_CORE`,
-`RET_INSTRUMENT`, `RET_CONTROLS`, and `RET_CONTROL_COLLECTIONS`: residual glyph
-runs, the complete readout/meter/status instrument family, menu and collection
-control storage/model/rendering, acknowledgement-bound menu/tab activation, and
-generic UIDL/widget projection are implemented as one slice. Image, vector,
-series, resource, and protocol-advertised cadence families remain disabled in
-that profile and are not acceptance prerequisites for this vertical.
+The checkpoint did not authorize partial capability advertisement. At the
+checkpoint the checked-in `desktop-apt1` reference profile advertised exactly
+`RET_CORE`, `RET_INSTRUMENT`, `RET_CONTROLS`, and `RET_CONTROL_COLLECTIONS`:
+residual glyph runs, the complete readout/meter/status instrument family, menu
+and collection control storage/model/rendering, acknowledgement-bound
+menu/tab activation, and generic UIDL/widget projection were implemented as
+one slice. The profile has since added each further family only once that
+family was complete end to end, and Akashic's engine documentation records
+its current selection. A family the profile does not advertise is not an
+acceptance prerequisite for this vertical.
 
 ### 16.2 Production qualification
 
