@@ -1291,6 +1291,13 @@ class SeriesDefinition:
         object.__setattr__(self, "samples", samples)
 
 
+def _object_path_points(definition: ObjectDefinition) -> int:
+    """The points an object takes from its owner's path-point quota."""
+
+    body = definition.body
+    return len(body.points) if isinstance(body, PolylineBody) else 0
+
+
 @dataclass(frozen=True, slots=True)
 class SceneUsage:
     regions: int = 0
@@ -1298,6 +1305,7 @@ class SceneUsage:
     series: int = 0
     utf8_bytes: int = 0
     sample_slots: int = 0
+    path_points: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -2002,6 +2010,7 @@ class RetainedSceneModel:
             owner_scene,
             object_delta=1,
             utf8_add=self._object_utf8_bytes(definition),
+            path_points_add=_object_path_points(definition),
         )
         self._admit_operation(staging, owner_scene, usage)
         owner_scene.objects[definition.object_id] = definition
@@ -2027,6 +2036,8 @@ class RetainedSceneModel:
             owner_scene,
             utf8_remove=self._object_utf8_bytes(current),
             utf8_add=self._object_utf8_bytes(definition),
+            path_points_remove=_object_path_points(current),
+            path_points_add=_object_path_points(definition),
         )
         self._admit_operation(staging, owner_scene, usage)
         owner_scene.objects[definition.object_id] = definition
@@ -2215,6 +2226,7 @@ class RetainedSceneModel:
             owner_scene,
             object_delta=-1,
             utf8_remove=self._object_utf8_bytes(definition),
+            path_points_remove=_object_path_points(definition),
         )
         self._admit_operation(staging, owner_scene, usage)
         del owner_scene.objects[normalized_id]
@@ -2773,6 +2785,8 @@ class RetainedSceneModel:
         utf8_add: int = 0,
         sample_slots_remove: int = 0,
         sample_slots_add: int = 0,
+        path_points_remove: int = 0,
+        path_points_add: int = 0,
     ) -> SceneUsage:
         prior = owner_scene.usage
         regions = prior.regions + region_delta
@@ -2784,6 +2798,7 @@ class RetainedSceneModel:
             or series < 0
             or utf8_remove > prior.utf8_bytes
             or sample_slots_remove > prior.sample_slots
+            or path_points_remove > prior.path_points
         ):
             self._fail(SceneErrorCode.STATE, "retained staging usage is inconsistent")
         try:
@@ -2797,9 +2812,16 @@ class RetainedSceneModel:
                 prior.sample_slots - sample_slots_remove,
                 sample_slots_add,
             )
+            path_points = _add_usage(
+                "path-point usage",
+                prior.path_points - path_points_remove,
+                path_points_add,
+            )
         except SceneModelError as exc:
             self._fail(exc.code, exc.detail)
-        return SceneUsage(regions, objects, series, utf8_bytes, sample_slots)
+        return SceneUsage(
+            regions, objects, series, utf8_bytes, sample_slots, path_points
+        )
 
     def _admit_operation(
         self,
@@ -2875,6 +2897,11 @@ class RetainedSceneModel:
         sample_slots = 0
         for definition in series.values():
             sample_slots = _add_usage("sample-slot usage", sample_slots, definition.history_capacity)
+        path_points = 0
+        for definition in objects.values():
+            path_points = _add_usage(
+                "path-point usage", path_points, _object_path_points(definition)
+            )
         usage = SceneUsage(
             len(regions),
             len(objects)
@@ -2885,6 +2912,7 @@ class RetainedSceneModel:
             len(series),
             utf8_bytes,
             sample_slots,
+            path_points,
         )
         return OwnerScene(
             owner,
@@ -2905,6 +2933,7 @@ class RetainedSceneModel:
             (usage.series, quota.series, "series"),
             (usage.utf8_bytes, quota.utf8_bytes, "UTF-8-byte"),
             (usage.sample_slots, quota.sample_slots, "sample-slot"),
+            (usage.path_points, quota.path_points, "path-point"),
         )
         for used, reserved, name in checks:
             if used > reserved:

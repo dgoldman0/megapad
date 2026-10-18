@@ -169,6 +169,8 @@ class RetainedPolicy:
     client_to_terminal_max_payload: int
     terminal_to_client_max_payload: int
     base_max_transaction_bytes: int
+    # The budget for every live owner's line points; zero without VECTOR.
+    total_path_points: int = 0
 
     def __post_init__(self) -> None:
         if isinstance(self.features, bool):
@@ -211,6 +213,7 @@ class RetainedPolicy:
             "total_resource_bytes",
             "total_sample_slots",
             "total_utf8_bytes",
+            "total_path_points",
         ):
             object.__setattr__(
                 self,
@@ -282,6 +285,9 @@ class RetainedPolicy:
 
         vector = bool(features & RetainedFeature.VECTOR)
         self._require_positive_exact("max_path_points", vector)
+        self._require_positive_exact("total_path_points", vector)
+        if vector and self.max_path_points > self.total_path_points:
+            raise ValueError("total path points cannot admit one maximum line")
 
         instrument = bool(features & RetainedFeature.INSTRUMENT)
         controls = bool(features & RetainedFeature.CONTROLS)
@@ -521,6 +527,7 @@ class OwnerQuotas:
     resource_bytes: int
     utf8_bytes: int
     sample_slots: int
+    path_points: int = 0
 
     def __post_init__(self) -> None:
         for name in ("regions", "resources", "objects", "series"):
@@ -529,7 +536,7 @@ class OwnerQuotas:
                 name,
                 _integer(name, getattr(self, name), minimum=0, maximum=UINT32_MAX),
             )
-        for name in ("resource_bytes", "utf8_bytes", "sample_slots"):
+        for name in ("resource_bytes", "utf8_bytes", "sample_slots", "path_points"):
             object.__setattr__(
                 self,
                 name,
@@ -539,11 +546,11 @@ class OwnerQuotas:
 
 _QUOTA_FIELDS = (
     "regions", "resources", "objects", "series",
-    "resource_bytes", "utf8_bytes", "sample_slots",
+    "resource_bytes", "utf8_bytes", "sample_slots", "path_points",
 )
 # Quotas that bound each scene target; OWNER_RESIZE never shrinks them.
 _GROW_ONLY_QUOTA_FIELDS = (
-    "regions", "objects", "series", "utf8_bytes", "sample_slots",
+    "regions", "objects", "series", "utf8_bytes", "sample_slots", "path_points",
 )
 
 
@@ -557,6 +564,7 @@ class ReservationTotals:
     resource_bytes: int = 0
     utf8_bytes: int = 0
     sample_slots: int = 0
+    path_points: int = 0
 
     def add(self, quotas: OwnerQuotas) -> ReservationTotals:
         return ReservationTotals(
@@ -576,6 +584,9 @@ class ReservationTotals:
             sample_slots=_checked_add(
                 "sample-slot reservations", self.sample_slots, quotas.sample_slots
             ),
+            path_points=_checked_add(
+                "path-point reservations", self.path_points, quotas.path_points
+            ),
         )
 
     def subtract(self, quotas: OwnerQuotas) -> ReservationTotals:
@@ -588,6 +599,7 @@ class ReservationTotals:
             "resource_bytes": self.resource_bytes - quotas.resource_bytes,
             "utf8_bytes": self.utf8_bytes - quotas.utf8_bytes,
             "sample_slots": self.sample_slots - quotas.sample_slots,
+            "path_points": self.path_points - quotas.path_points,
         }
         if any(value < 0 for value in values.values()):
             raise RuntimeError("owner reservation ledger underflow")
@@ -771,8 +783,8 @@ class OwnerLedger:
     ) -> PreparedOwnerLedgerInstall:
         """Change a live owner's reservation to ``quotas``.
 
-        Region, object, series, UTF-8 and sample-slot quotas bound each scene
-        target, which active and hidden usage must each fit, so they may only
+        Region, object, series, UTF-8, sample-slot and path-point quotas bound
+        each scene target, which active and hidden usage must each fit, so they may only
         grow. The resource count and bytes may also drop, down to
         ``resources_in_use``: the owner's committed resource count and bytes,
         which only the caller's resource store knows. Without it they may only
@@ -980,6 +992,7 @@ class OwnerLedger:
             ("resource bytes", quotas.resource_bytes, policy.total_resource_bytes),
             ("UTF-8 bytes", quotas.utf8_bytes, policy.total_utf8_bytes),
             ("sample slots", quotas.sample_slots, policy.total_sample_slots),
+            ("path points", quotas.path_points, policy.total_path_points),
         )
         for name, requested, maximum in maxima:
             if requested > maximum:
@@ -1009,6 +1022,10 @@ class OwnerLedger:
             raise OwnerLedgerError(
                 OwnerLedgerErrorCode.INVALID, "series quota requires SERIES"
             )
+        if not policy.features & RetainedFeature.VECTOR and quotas.path_points:
+            raise OwnerLedgerError(
+                OwnerLedgerErrorCode.INVALID, "path-point quota requires VECTOR"
+            )
 
     def _validate_reservation_totals(self, totals: ReservationTotals) -> None:
         policy = self._policy
@@ -1021,6 +1038,7 @@ class OwnerLedger:
             (totals.resource_bytes, policy.total_resource_bytes, "resource-byte"),
             (totals.utf8_bytes, policy.total_utf8_bytes, "UTF-8-byte"),
             (totals.sample_slots, policy.total_sample_slots, "sample-slot"),
+            (totals.path_points, policy.total_path_points, "path-point"),
         )
         for used, maximum, name in maxima:
             if used > maximum:

@@ -94,6 +94,7 @@
         "resource_bytes": 4,
         "utf8_bytes": 0,
         "sample_slots": 0,
+        "path_points": 0,
         "state": "live"
       }
     ],
@@ -104,7 +105,8 @@
       "series_quota": 0,
       "resource_bytes": 4,
       "utf8_bytes": 0,
-      "sample_slots": 0
+      "sample_slots": 0,
+      "path_points": 0
     },
     "resources": [],
     "owner_wide_resource_usage": [],
@@ -208,6 +210,7 @@
           "resource_bytes": 4,
           "utf8_bytes": 0,
           "sample_slots": 0,
+          "path_points": 0,
           "state": "live"
         }
       ],
@@ -218,7 +221,8 @@
         "series_quota": 0,
         "resource_bytes": 4,
         "utf8_bytes": 0,
-        "sample_slots": 0
+        "sample_slots": 0,
+        "path_points": 0
       },
       "resources": [],
       "owner_wide_resource_usage": [
@@ -347,6 +351,7 @@
           "resource_bytes": 4,
           "utf8_bytes": 0,
           "sample_slots": 0,
+          "path_points": 0,
           "state": "live"
         }
       ],
@@ -357,7 +362,8 @@
         "series_quota": 0,
         "resource_bytes": 4,
         "utf8_bytes": 0,
-        "sample_slots": 0
+        "sample_slots": 0,
+        "path_points": 0
       },
       "resources": [],
       "owner_wide_resource_usage": [
@@ -490,6 +496,7 @@
           "resource_bytes": 4,
           "utf8_bytes": 0,
           "sample_slots": 0,
+          "path_points": 0,
           "state": "live"
         }
       ],
@@ -500,7 +507,8 @@
         "series_quota": 0,
         "resource_bytes": 4,
         "utf8_bytes": 0,
-        "sample_slots": 0
+        "sample_slots": 0,
+        "path_points": 0
       },
       "resources": [],
       "owner_wide_resource_usage": [
@@ -623,6 +631,7 @@
           "resource_bytes": 4,
           "utf8_bytes": 0,
           "sample_slots": 0,
+          "path_points": 0,
           "state": "live"
         }
       ],
@@ -633,7 +642,8 @@
         "series_quota": 0,
         "resource_bytes": 4,
         "utf8_bytes": 0,
-        "sample_slots": 0
+        "sample_slots": 0,
+        "path_points": 0
       },
       "resources": [],
       "owner_wide_resource_usage": [
@@ -759,6 +769,7 @@
           "resource_bytes": 4,
           "utf8_bytes": 0,
           "sample_slots": 0,
+          "path_points": 0,
           "state": "live"
         }
       ],
@@ -769,7 +780,8 @@
         "series_quota": 0,
         "resource_bytes": 4,
         "utf8_bytes": 0,
-        "sample_slots": 0
+        "sample_slots": 0,
+        "path_points": 0
       },
       "resources": [],
       "owner_wide_resource_usage": [
@@ -901,6 +913,7 @@
           "resource_bytes": 4,
           "utf8_bytes": 0,
           "sample_slots": 0,
+          "path_points": 0,
           "state": "live"
         }
       ],
@@ -911,7 +924,8 @@
         "series_quota": 0,
         "resource_bytes": 4,
         "utf8_bytes": 0,
-        "sample_slots": 0
+        "sample_slots": 0,
+        "path_points": 0
       },
       "resources": [],
       "owner_wide_resource_usage": [
@@ -1047,6 +1061,7 @@
           "resource_bytes": 4,
           "utf8_bytes": 0,
           "sample_slots": 0,
+          "path_points": 0,
           "state": "live"
         }
       ],
@@ -1057,7 +1072,8 @@
         "series_quota": 0,
         "resource_bytes": 4,
         "utf8_bytes": 0,
-        "sample_slots": 0
+        "sample_slots": 0,
+        "path_points": 0
       },
       "resources": [],
       "owner_wide_resource_usage": [
@@ -1183,6 +1199,7 @@
           "resource_bytes": 4,
           "utf8_bytes": 0,
           "sample_slots": 0,
+          "path_points": 0,
           "state": "live"
         }
       ],
@@ -1193,7 +1210,8 @@
         "series_quota": 0,
         "resource_bytes": 4,
         "utf8_bytes": 0,
-        "sample_slots": 0
+        "sample_slots": 0,
+        "path_points": 0
       },
       "resources": [],
       "owner_wide_resource_usage": [],
@@ -1305,6 +1323,7 @@
           "resource_bytes": 4,
           "utf8_bytes": 0,
           "sample_slots": 0,
+          "path_points": 0,
           "state": "live"
         }
       ],
@@ -1315,7 +1334,8 @@
         "series_quota": 0,
         "resource_bytes": 4,
         "utf8_bytes": 0,
-        "sample_slots": 0
+        "sample_slots": 0,
+        "path_points": 0
       },
       "resources": [],
       "owner_wide_resource_usage": [],
@@ -1421,7 +1441,8 @@
         "series_quota": 0,
         "resource_bytes": 0,
         "utf8_bytes": 0,
-        "sample_slots": 0
+        "sample_slots": 0,
+        "path_points": 0
       },
       "resources": [],
       "owner_wide_resource_usage": [],

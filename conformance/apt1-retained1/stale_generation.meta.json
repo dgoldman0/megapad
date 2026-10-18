@@ -97,6 +97,7 @@
         "resource_bytes": 0,
         "utf8_bytes": 64,
         "sample_slots": 8,
+        "path_points": 0,
         "state": "live"
       }
     },
@@ -113,7 +114,8 @@
       "series_quota": 1,
       "resource_bytes": 0,
       "utf8_bytes": 64,
-      "sample_slots": 8
+      "sample_slots": 8,
+      "path_points": 0
     },
     "active_usage": [],
     "hidden_usage": [],

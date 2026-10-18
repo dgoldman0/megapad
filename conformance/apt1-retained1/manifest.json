@@ -91,7 +91,8 @@
     "max_history_per_series": 512,
     "minimum_presentation_interval_us": 500000,
     "total_sample_slots": 4096,
-    "total_utf8_bytes": 16384
+    "total_utf8_bytes": 16384,
+    "total_path_points": 4096
   },
   "fixture_format": "one complete frame per nonempty ASCII-hex line",
   "semantic_meta_format": "independent directions plus exact initial state and two cumulative credit ledgers",

@@ -2379,7 +2379,6 @@ VARIABLE _PT-RF-PIXELS
     _PT-RF-FORMATS @ L@ 2 <>
     _PT-RF-FORMATS @ 4 + L@ 1 <> OR IF FALSE EXIT THEN
     _PT-RF-FORMATS @ 8 + L@ 15 INVERT AND IF FALSE EXIT THEN
-    _PT-RF-FORMATS @ 56 + _PT-U64@ IF FALSE EXIT THEN
     _PT-RF-CAPS @ 8 + _PT-U64@ _PT-RV-FEATURES !
     _PT-RF-CAPS @ 48 + _PT-U64@ _PT-RV-RETMAX !
 
@@ -2392,6 +2391,8 @@ VARIABLE _PT-RF-PIXELS
     _PT-RF-FORMATS @ 16 + L@
     _PT-RV-FEATURES @ 0x04 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
     _PT-RF-FORMATS @ 20 + L@
+    _PT-RV-FEATURES @ 0x02 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
+    _PT-RF-FORMATS @ 56 + _PT-U64@
     _PT-RV-FEATURES @ 0x02 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
     _PT-RF-FORMATS @ 28 + L@
     _PT-RV-FEATURES @ 0x10 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
@@ -2429,7 +2430,11 @@ VARIABLE _PT-RF-PIXELS
         _PT-RF-FORMATS @ 24 + L@ 304 + 312 MAX
         _PT-RV-RETMAX @ U> IF FALSE EXIT THEN
     THEN
+    \ One line of the most points must fit the point budget too.
     _PT-RV-FEATURES @ 0x02 AND IF
+        _PT-RF-FORMATS @ 20 + L@ _PT-RF-FORMATS @ 56 + _PT-U64@ U> IF
+            FALSE EXIT
+        THEN
         _PT-RF-FORMATS @ 20 + L@ 8 * 80 +
         DUP _PT-RV-S @ _PT.S.PEER-MAX-PAY @ U> IF DROP FALSE EXIT THEN
         200 + _PT-RV-RETMAX @ U> IF FALSE EXIT THEN
@@ -3393,6 +3398,7 @@ VARIABLE _PT-OO-SERIES
 VARIABLE _PT-OO-RESOURCE-BYTES
 VARIABLE _PT-OO-UTF8-BYTES
 VARIABLE _PT-OO-SAMPLE-SLOTS
+VARIABLE _PT-OO-PATH-POINTS
 VARIABLE _PT-OO-MESSAGE
 
 : _PT-RETAINED-WRITE-STATE?  ( s -- flag )
@@ -3422,12 +3428,15 @@ VARIABLE _PT-OO-MESSAGE
     _PT-OO-SAMPLE-SLOTS @ _PT-OO-S @ _PT.S.RET-FORMATS 40 + _PT-U64@ U> IF
         FALSE EXIT
     THEN
+    _PT-OO-PATH-POINTS @ _PT-OO-S @ _PT.S.RET-FORMATS 56 + _PT-U64@ U> IF
+        FALSE EXIT
+    THEN
     TRUE ;
 
 \ Stack: owner generation region-q resource-q object-q series-q
-\        resource-byte-q utf8-byte-q sample-slot-q session --
+\        resource-byte-q utf8-byte-q sample-slot-q path-point-q session --
 : _PT-OWNER-QUOTA-ARGS
-    _PT-OO-S ! _PT-OO-SAMPLE-SLOTS ! _PT-OO-UTF8-BYTES !
+    _PT-OO-S ! _PT-OO-PATH-POINTS ! _PT-OO-SAMPLE-SLOTS ! _PT-OO-UTF8-BYTES !
     _PT-OO-RESOURCE-BYTES ! _PT-OO-SERIES ! _PT-OO-OBJECTS !
     _PT-OO-RESOURCES ! _PT-OO-REGIONS ! _PT-OO-GENERATION ! _PT-OO-OWNER ! ;
 
@@ -3461,6 +3470,7 @@ VARIABLE _PT-OO-MESSAGE
     _PT-OO-RESOURCE-BYTES @ _PT-FRAME-PAYLOAD 32 + _PT-U64!
     _PT-OO-UTF8-BYTES @ _PT-FRAME-PAYLOAD 40 + _PT-U64!
     _PT-OO-SAMPLE-SLOTS @ _PT-FRAME-PAYLOAD 48 + _PT-U64!
+    _PT-OO-PATH-POINTS @ _PT-FRAME-PAYLOAD 56 + _PT-U64!
     TRUE _PT-OO-S @ _PT-FRAME-SEND ?DUP IF EXIT THEN
     TRUE _PT-OO-S @ _PT.S.LIFE-AWAIT? !
     _PT-OO-MESSAGE @ _PT-OO-S @ _PT.S.LIFE-TYPE !
@@ -3472,7 +3482,8 @@ VARIABLE _PT-OO-MESSAGE
     PT-S-OK ;
 
 \ Stack: owner generation region-q resource-q object-q series-q
-\        resource-byte-q utf8-byte-q sample-slot-q session -- status
+\        resource-byte-q utf8-byte-q sample-slot-q path-point-q session
+\        -- status
 : PT-OWNER-OPEN
     _PT-OWNER-QUOTA-ARGS _PT-M-OWNER-OPEN _PT-OO-MESSAGE ! _PT-OWNER-QUOTA-REQUEST ;
 
@@ -3483,7 +3494,8 @@ VARIABLE _PT-OO-MESSAGE
 \ PT-RET-NO-CAPACITY when the terminal has no room; a refusal leaves the old
 \ reservation in force.
 \ Stack: owner generation region-q resource-q object-q series-q
-\        resource-byte-q utf8-byte-q sample-slot-q session -- status
+\        resource-byte-q utf8-byte-q sample-slot-q path-point-q session
+\        -- status
 : PT-OWNER-RESIZE
     _PT-OWNER-QUOTA-ARGS _PT-M-OWNER-RESIZE _PT-OO-MESSAGE ! _PT-OWNER-QUOTA-REQUEST ;
 

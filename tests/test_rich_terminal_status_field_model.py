@@ -173,7 +173,7 @@ def test_unadvertised_status_fields_reject_before_mutation():
 def test_group_parent_uses_existing_vector_authority_without_new_ancestry_rules():
     clock, _, scene = start(selected_policy=policy(
         features=RetainedFeature.CORE | RetainedFeature.STATUS_FIELDS | RetainedFeature.VECTOR,
-        max_path_points=2))
+        max_path_points=2, total_path_points=2))
     scene.define_object(field(body=GroupBody(), bounds=ObjectBounds(0, 0, 20, 10)))
     scene.define_object(field(object_id=2, parent_object_id=1))
     install(clock, scene, CommitDisposition.COMMIT)

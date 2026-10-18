@@ -345,6 +345,7 @@ def _quota_fields(quotas: OwnerQuotas) -> dict[str, int]:
         "resource_bytes": quotas.resource_bytes,
         "utf8_bytes": quotas.utf8_bytes,
         "sample_slots": quotas.sample_slots,
+        "path_points": quotas.path_points,
     }
 
 
@@ -671,6 +672,7 @@ class RichTerminalCore:
             ),
             total_sample_slots=policy.total_sample_slots,
             total_utf8_bytes=policy.total_utf8_bytes,
+            total_path_points=policy.total_path_points,
         )
 
     def _bind_retained_policy(
@@ -2130,11 +2132,11 @@ class RichTerminalCore:
             resource_bytes,
             utf8_bytes,
             sample_slots,
-            reserved,
+            path_points,
         ) = _OWNER_OPEN.unpack(frame.payload)
 
         prepared = None
-        if owner_id == 0 or owner_generation == 0 or reserved != 0:
+        if owner_id == 0 or owner_generation == 0:
             status = RetStatus.INVALID
         else:
             try:
@@ -2146,6 +2148,7 @@ class RichTerminalCore:
                     resource_bytes,
                     utf8_bytes,
                     sample_slots,
+                    path_points,
                 )
                 identity = self._owner_identity(owner_id, owner_generation)
                 if request is RetainedMessageType.OWNER_OPEN:

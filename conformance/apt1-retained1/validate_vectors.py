@@ -189,6 +189,7 @@ FORMAT_VALUES = {
     "minimum_presentation_interval_us": 500_000,
     "total_sample_slots": 4_096,
     "total_utf8_bytes": 16_384,
+    "total_path_points": 4_096,
 }
 
 HEADER_PREFIX = struct.Struct("<4sBBHHHIQQI")
@@ -354,7 +355,7 @@ def formats_payload() -> bytes:
         FORMAT_VALUES["minimum_presentation_interval_us"],
         FORMAT_VALUES["total_sample_slots"],
         FORMAT_VALUES["total_utf8_bytes"],
-        0,
+        FORMAT_VALUES["total_path_points"],
     )
 
 
@@ -368,6 +369,7 @@ def owner_open_payload(
     resource_bytes: int = 0,
     utf8_bytes: int = 64,
     sample_slots: int = 8,
+    path_points: int = 0,
 ) -> bytes:
     return OWNER_OPEN.pack(
         OWNER_ID,
@@ -379,7 +381,7 @@ def owner_open_payload(
         resource_bytes,
         utf8_bytes,
         sample_slots,
-        0,
+        path_points,
     )
 
 
@@ -931,7 +933,9 @@ def soundlab_initial_replace() -> Scenario:
         "OWNER_OPEN",
         30,
         0,
-        owner_open_payload(object_quota=12, series_quota=2, utf8_bytes=128, sample_slots=7),
+        owner_open_payload(
+            object_quota=12, series_quota=2, utf8_bytes=128, sample_slots=7, path_points=3
+        ),
         "atomically reserve the SoundLab owner quotas",
     )
     owner_credit = credit_before + len(owner.encoded)
@@ -2579,6 +2583,7 @@ QUOTA_FIELDS = (
     "resource_bytes",
     "utf8_bytes",
     "sample_slots",
+    "path_points",
 )
 
 QUOTA_LIMITS = {
@@ -2589,6 +2594,7 @@ QUOTA_LIMITS = {
     "resource_bytes": CAPS_VALUES["total_resource_bytes"],
     "utf8_bytes": FORMAT_VALUES["total_utf8_bytes"],
     "sample_slots": FORMAT_VALUES["total_sample_slots"],
+    "path_points": FORMAT_VALUES["total_path_points"],
 }
 
 def scenarios() -> tuple[Scenario, ...]:
@@ -2834,7 +2840,7 @@ def validate_discovery(supported: Scenario, unsupported: Scenario) -> None:
             FORMAT_VALUES["minimum_presentation_interval_us"],
             FORMAT_VALUES["total_sample_slots"],
             FORMAT_VALUES["total_utf8_bytes"],
-            0,
+            FORMAT_VALUES["total_path_points"],
         ),
     )
     if supported.precondition["terminal_to_client_available_credit"] < 2 * (HEADER_BYTES + 64):
@@ -2971,6 +2977,7 @@ def validate_object_bodies(initial: Scenario) -> None:
     owner_values = OWNER_OPEN.unpack(find_frames(initial, "OWNER_OPEN")[0].payload)
     check_equal("SoundLab owner object/series quotas", owner_values[4:6], (12, 2))
     check_equal("SoundLab owner text/sample quotas", (owner_values[7], owner_values[8]), (128, 7))
+    check_equal("SoundLab owner path-point quota", owner_values[9], 3)
 
     series_defines = find_frames(initial, "SERIES_DEFINE")
     check_equal("series definition count", len(series_defines), 2)
@@ -3344,7 +3351,7 @@ def validate_legacy_interleave(scenario: Scenario) -> None:
 
 def validate_aggregate_quota(scenario: Scenario) -> None:
     values = OWNER_OPEN.unpack(find_frames(scenario, "OWNER_OPEN")[0].payload)
-    request = {"owner_id":values[0],"generation":values[1],**dict(zip(QUOTA_FIELDS,values[2:9],strict=True))}
+    request = {"owner_id":values[0],"generation":values[1],**dict(zip(QUOTA_FIELDS,values[2:10],strict=True))}
     if not all(request[field] <= QUOTA_LIMITS[field] for field in QUOTA_FIELDS):
         fail("aggregate quota fixture request is not individually valid")
     existing = dict(scenario.precondition["existing_owner"])

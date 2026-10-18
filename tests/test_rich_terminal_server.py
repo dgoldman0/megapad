@@ -186,6 +186,7 @@ def _complete_retained_policy() -> RetainedPolicy:
         minimum_presentation_interval_us=0,
         total_sample_slots=16,
         total_utf8_bytes=128,
+        total_path_points=16,
         client_to_terminal_max_payload=256,
         terminal_to_client_max_payload=64,
         base_max_transaction_bytes=512,

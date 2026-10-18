@@ -152,11 +152,11 @@ PT-PIXELS-ANSWER@      ( session -- a u )
 PT-COMPLETION-POLL  ( completion session -- status has-completion )
 
 PT-OWNER-OPEN       ( owner generation region-q resource-q object-q series-q
-                      resource-byte-q utf8-byte-q sample-slot-q session
-                      -- status )
+                      resource-byte-q utf8-byte-q sample-slot-q path-point-q
+                      session -- status )
 PT-OWNER-RESIZE     ( owner generation region-q resource-q object-q series-q
-                      resource-byte-q utf8-byte-q sample-slot-q session
-                      -- status )
+                      resource-byte-q utf8-byte-q sample-slot-q path-point-q
+                      session -- status )
 PT-OWNER-DROP       ( owner generation session -- status )
 PT-RESOURCE-FORMAT? ( format session -- flag )
 PT-RESOURCE-BEGIN   ( owner generation resource format width height flags
@@ -488,7 +488,9 @@ OWNER_OPEN and OWNER_RESIZE always complete through RET_RESULT. A resize
 names the owner's complete new quota set. Each field is at least the current
 one, except the resource count and bytes, which may drop to the resources in
 use so that an owner gives space back; RET_NO_CAPACITY leaves the old
-reservation in force and is an ordinary answer, not a loss. OWNER_DROP and PRESENT complete
+reservation in force and is an ordinary answer, not a loss. The path-point
+quota reserves the points of the owner's lines; like every other quota it may
+not exceed what `RET_FORMATS` advertised, so it is zero without VECTOR. OWNER_DROP and PRESENT complete
 through TX_RESULT. RESOURCE_BEGIN, RESOURCE_COMMIT, RESOURCE_DROP, and
 RESOURCE_ABORT complete through RET_RESULT, as does a rejected RESOURCE_CHUNK.
 An accepted RESOURCE_CHUNK has no wire result: only cumulative CREDIT covering

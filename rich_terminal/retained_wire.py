@@ -569,6 +569,7 @@ class RetainedCaps:
             minimum_presentation_interval_us=formats.minimum_presentation_interval_us,
             total_sample_slots=formats.total_sample_slots,
             total_utf8_bytes=formats.total_utf8_bytes,
+            total_path_points=formats.total_path_points,
             client_to_terminal_max_payload=client_to_terminal_max_payload,
             terminal_to_client_max_payload=terminal_to_client_max_payload,
             base_max_transaction_bytes=base_max_transaction_bytes,
@@ -589,6 +590,7 @@ class RetainedFormats:
     minimum_presentation_interval_us: int
     total_sample_slots: int
     total_utf8_bytes: int
+    total_path_points: int = 0
 
     def __post_init__(self) -> None:
         for name in (
@@ -608,7 +610,7 @@ class RetainedFormats:
                 name,
                 _integer(name, getattr(self, name), minimum=0, maximum=UINT32_MAX),
             )
-        for name in ("total_sample_slots", "total_utf8_bytes"):
+        for name in ("total_sample_slots", "total_utf8_bytes", "total_path_points"):
             object.__setattr__(
                 self,
                 name,
@@ -1572,15 +1574,14 @@ def encode_ret_formats(formats: RetainedFormats) -> bytes:
         formats.max_image_width, formats.max_image_height, formats.max_path_points,
         formats.max_glyph_run_bytes, formats.max_samples_per_append,
         formats.max_history_per_series, formats.minimum_presentation_interval_us,
-        formats.total_sample_slots, formats.total_utf8_bytes, 0,
+        formats.total_sample_slots, formats.total_utf8_bytes,
+        formats.total_path_points,
     )
 
 
 def decode_ret_formats(payload) -> RetainedFormats:
     raw = _payload(payload, _RET_FORMATS.size, "RET_FORMATS")
-    *values, reserved = _RET_FORMATS.unpack(raw)
-    if reserved:
-        raise RetainedWireError(RetainedWireErrorCode.RESERVED, "RET_FORMATS reserved is nonzero")
+    values = _RET_FORMATS.unpack(raw)
     try:
         return RetainedFormats(*values)
     except (TypeError, ValueError) as exc:
@@ -1594,20 +1595,15 @@ def encode_owner_open(request: OwnerOpen) -> bytes:
     return _OWNER_OPEN.pack(
         request.owner_id, request.owner_generation, quota.regions, quota.resources,
         quota.objects, quota.series, quota.resource_bytes, quota.utf8_bytes,
-        quota.sample_slots, 0,
+        quota.sample_slots, quota.path_points,
     )
 
 
 def decode_owner_open(payload) -> OwnerOpen:
     raw = _payload(payload, _OWNER_OPEN.size, "OWNER_OPEN")
-    owner_id, generation, regions, resources, objects, series, resource_bytes, utf8_bytes, sample_slots, reserved = _OWNER_OPEN.unpack(raw)
-    if reserved:
-        raise RetainedWireError(RetainedWireErrorCode.RESERVED, "OWNER_OPEN reserved is nonzero")
+    owner_id, generation, *quotas = _OWNER_OPEN.unpack(raw)
     try:
-        return OwnerOpen(
-            owner_id, generation,
-            OwnerQuotas(regions, resources, objects, series, resource_bytes, utf8_bytes, sample_slots),
-        )
+        return OwnerOpen(owner_id, generation, OwnerQuotas(*quotas))
     except (TypeError, ValueError) as exc:
         raise RetainedWireError(RetainedWireErrorCode.SCALAR, str(exc)) from exc
 

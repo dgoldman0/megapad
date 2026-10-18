@@ -63,6 +63,7 @@ OBJECT_TYPES = {
 CAPACITY_LIMITS = {
     "region_quota":16,"resource_quota":8,"object_quota":64,"series_quota":16,
     "resource_bytes":1_048_576,"utf8_bytes":16_384,"sample_slots":4_096,
+    "path_points":4_096,
 }
 MAX_OWNER_RECORDS = 8
 MAX_LIVE_OWNERS = 4
@@ -213,12 +214,13 @@ def _recompute_reducer_ledgers(state: dict[str,Any]) -> None:
                     accumulated[identity] = {
                         "owner_id":identity[0],"generation":identity[1],
                         "regions":0,"objects":0,"series":0,
-                        "utf8_bytes":0,"sample_slots":0,
+                        "utf8_bytes":0,"sample_slots":0,"path_points":0,
                     }
                 item = accumulated[identity]
                 item[count_field] += 1
                 if family == "objects":
                     item["utf8_bytes"] += int(record.get("utf8_bytes",0))
+                    item["path_points"] += int(record.get("path_points",0))
                 elif family == "series":
                     item["sample_slots"] += int(record["capacity"])
         return [accumulated[key] for key in sorted(accumulated)]
@@ -227,7 +229,7 @@ def _recompute_reducer_ledgers(state: dict[str,Any]) -> None:
     state["hidden_usage"] = [] if state["hidden"] is None else reduce_scene(state["hidden"]["scene"])
     quota_fields = (
         "region_quota","resource_quota","object_quota","series_quota",
-        "resource_bytes","utf8_bytes","sample_slots",
+        "resource_bytes","utf8_bytes","sample_slots","path_points",
     )
     state["owner_reservation_totals"] = {
         field: sum(
@@ -271,13 +273,11 @@ def _blank_cell(cols: int, rows: int) -> dict[str, Any]:
 
 def _owner_record(payload: bytes) -> dict[str, Any]:
     values = OWNER_OPEN.unpack(payload)
-    if values[9] != 0:
-        _fail("OWNER_OPEN reserved field is nonzero")
     return {
         "owner_id":values[0],"generation":values[1],"region_quota":values[2],
         "resource_quota":values[3],"object_quota":values[4],"series_quota":values[5],
         "resource_bytes":values[6],"utf8_bytes":values[7],"sample_slots":values[8],
-        "state":"live",
+        "path_points":values[9],"state":"live",
     }
 
 
@@ -339,6 +339,8 @@ def _decode_object(payload: bytes) -> dict[str, Any]:
         record["value"] = METER_BODY.unpack_from(body)[12]
     elif object_type == OBJECT_TYPES["STATUS"]:
         record["value"] = STATUS_BODY.unpack_from(body)[8]
+    elif object_type == OBJECT_TYPES["POLYLINE"]:
+        record["path_points"] = struct.unpack_from("<I",body)[0]
     elif object_type == OBJECT_TYPES["PLOT"]:
         record["series_id"] = PLOT_BODY.unpack_from(body)[0]
     elif object_type == OBJECT_TYPES["WAVEFORM"]:
@@ -495,18 +497,19 @@ def _validate_scene(state: dict[str,Any], scene: dict[str,Any]) -> None:
     usage: dict[str,dict[str,int]] = {}
     def use(owner: int, generation: int) -> dict[str,int]:
         key = owner_key(owner,generation)
-        usage.setdefault(key,{"regions":0,"objects":0,"series":0,"utf8_bytes":0,"sample_slots":0})
+        usage.setdefault(key,{"regions":0,"objects":0,"series":0,"utf8_bytes":0,"sample_slots":0,"path_points":0})
         return usage[key]
     for record in scene["regions"].values(): use(record["owner_id"],record["generation"])["regions"] += 1
     for record in scene["objects"].values():
         item = use(record["owner_id"],record["generation"])
         item["objects"] += 1
         item["utf8_bytes"] += int(record.get("utf8_bytes",0))
+        item["path_points"] += int(record.get("path_points",0))
     for record in scene["series"].values():
         item = use(record["owner_id"],record["generation"])
         item["series"] += 1
         item["sample_slots"] += record["capacity"]
-    mapping = {"regions":"region_quota","objects":"object_quota","series":"series_quota","utf8_bytes":"utf8_bytes","sample_slots":"sample_slots"}
+    mapping = {"regions":"region_quota","objects":"object_quota","series":"series_quota","utf8_bytes":"utf8_bytes","sample_slots":"sample_slots","path_points":"path_points"}
     for key,counts in usage.items():
         owner = state["owners"].get(key)
         if owner is None or owner["state"] != "live":
