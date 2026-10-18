@@ -185,7 +185,8 @@
             5
           ],
           "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
-          "visible": true
+          "visible": true,
+          "path_points": 3
         },
         "534f554e444c4142:7:3": {
           "owner_id": 6003110622949818690,
@@ -366,6 +367,7 @@
         "resource_bytes": 0,
         "utf8_bytes": 128,
         "sample_slots": 7,
+        "path_points": 3,
         "state": "live"
       }
     },
@@ -382,7 +384,8 @@
       "series_quota": 2,
       "resource_bytes": 0,
       "utf8_bytes": 128,
-      "sample_slots": 7
+      "sample_slots": 7,
+      "path_points": 3
     },
     "active_usage": [
       {
@@ -392,7 +395,8 @@
         "objects": 8,
         "series": 2,
         "utf8_bytes": 16,
-        "sample_slots": 7
+        "sample_slots": 7,
+        "path_points": 3
       }
     ],
     "hidden_usage": [],

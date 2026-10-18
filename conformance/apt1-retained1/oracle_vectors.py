@@ -214,7 +214,7 @@ FRAME_PATHS = {
 
 OBJECT_BASE = {
     1: {"object_id":1,"object_type":1,"flags":1,"z_index":0,"region_id":1,"parent_id":0,"bounds":[0,0,80,5],"body_sha3_256":"a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a","visible":True},
-    2: {"object_id":2,"object_type":2,"flags":1,"z_index":0,"region_id":1,"parent_id":1,"bounds":[0,0,80,5],"body_sha3_256":"0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35","visible":True},
+    2: {"object_id":2,"object_type":2,"flags":1,"z_index":0,"region_id":1,"parent_id":1,"bounds":[0,0,80,5],"body_sha3_256":"0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35","visible":True,"path_points":3},
     3: {"object_id":3,"object_type":4,"flags":1,"z_index":1,"region_id":1,"parent_id":1,"bounds":[0,0,80,5],"body_sha3_256":"b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd","text_utf8_hex":"536f756e644c6162","utf8_bytes":8,"visible":True},
     4: {"object_id":4,"object_type":5,"flags":1,"z_index":0,"region_id":1,"parent_id":0,"bounds":[0,0,80,5],"body_sha3_256":"a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8","format":1,"decimal_places":2,"value":-1200,"scale":100,"unit_utf8_hex":"6442","formatted_utf8_hex":"2d31322e30306442","utf8_bytes":8,"visible":True},
     5: {"object_id":5,"object_type":6,"flags":1,"z_index":0,"region_id":1,"parent_id":0,"bounds":[0,5,80,4],"body_sha3_256":"b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615","value":-1200,"visible":True},
@@ -243,7 +243,7 @@ def _refresh_oracle_ledgers(state: dict[str, Any]) -> None:
                 {
                     "owner_id": record["owner_id"], "generation": record["generation"],
                     "regions": 0, "objects": 0, "series": 0,
-                    "utf8_bytes": 0, "sample_slots": 0,
+                    "utf8_bytes": 0, "sample_slots": 0, "path_points": 0,
                 },
             )
 
@@ -253,6 +253,7 @@ def _refresh_oracle_ledgers(state: dict[str, Any]) -> None:
             usage = bucket(record)
             usage["objects"] += 1
             usage["utf8_bytes"] += record.get("utf8_bytes", 0)
+            usage["path_points"] += record.get("path_points", 0)
         for record in scene["series"].values():
             usage = bucket(record)
             usage["series"] += 1
@@ -261,7 +262,7 @@ def _refresh_oracle_ledgers(state: dict[str, Any]) -> None:
 
     fields = (
         "region_quota", "resource_quota", "object_quota", "series_quota",
-        "resource_bytes", "utf8_bytes", "sample_slots",
+        "resource_bytes", "utf8_bytes", "sample_slots", "path_points",
     )
     live = [owner for owner in state["owners"].values() if owner["state"] == "live"]
     state["owner_reservation_totals"] = {
@@ -311,6 +312,7 @@ def owner_record(
     resource_bytes: int = 0,
     utf8_bytes: int = 128,
     sample_slots: int = 7,
+    path_points: int = 0,
     state: str = "live",
 ) -> dict[str, Any]:
     return {
@@ -323,6 +325,7 @@ def owner_record(
         "resource_bytes": resource_bytes,
         "utf8_bytes": utf8_bytes,
         "sample_slots": sample_slots,
+        "path_points": path_points,
         "state": state,
     }
 
@@ -527,14 +530,14 @@ def initial_state(name: str) -> dict[str, Any]:
         geometry = {"cols":80,"rows":25,"generation":0}
         cell_state = cell(80,25,text="L",cursor=(0,1,True))
         active = soundlab_scene()
-        owners[owner_key(OWNER_ID,OWNER_GENERATION)] = owner_record()
+        owners[owner_key(OWNER_ID,OWNER_GENERATION)] = owner_record(path_points=3)
         retained_visible = True
     elif name in {"mutation_and_drop_lifecycle", "mixed_commit_and_rejections"}:
         revision = highwater = 3
         geometry = {"cols":80,"rows":25,"generation":0}
         cell_state = cell(80,25,text="L",cursor=(0,1,True))
         active = soundlab_scene(dynamic=True)
-        owners[owner_key(OWNER_ID,OWNER_GENERATION)] = owner_record()
+        owners[owner_key(OWNER_ID,OWNER_GENERATION)] = owner_record(path_points=3)
         retained_visible = True
     elif name == "legacy_cell_and_replace_continue":
         geometry = {"cols":2,"rows":1,"generation":0}
@@ -545,7 +548,7 @@ def initial_state(name: str) -> dict[str, Any]:
         geometry = {"cols":3,"rows":2,"generation":1}
         cell_state = cell(2,1,text="OK")
         active = soundlab_scene(cols=2,rows=1)
-        owners[owner_key(OWNER_ID,OWNER_GENERATION)] = owner_record()
+        owners[owner_key(OWNER_ID,OWNER_GENERATION)] = owner_record(path_points=3)
         retained_visible = False
         rebuild_required = "layout"
     elif name in {"reset_crossed_present_commit", "reset_crossed_owner_drop"}:
@@ -564,7 +567,7 @@ def initial_state(name: str) -> dict[str, Any]:
         geometry = {"cols":80,"rows":25,"generation":0}
         cell_state = cell(80,25,text="L",cursor=(0,1,True))
         active = soundlab_scene()
-        owners[owner_key(OWNER_ID,OWNER_GENERATION)] = owner_record()
+        owners[owner_key(OWNER_ID,OWNER_GENERATION)] = owner_record(path_points=3)
         retained_visible = True
     elif name in {"owner_drop_tombstone", "control_reserve_boundary"}:
         revision = highwater = 3
@@ -786,7 +789,7 @@ def _apply_expected_effect(name: str, index: int, state: dict[str, Any]) -> None
     # Full initial SoundLab replacement, reveal, then legacy CELL interleave.
     elif name == "soundlab_initial_replace":
         if index == 0:
-            _open_owner(state, owner_record(), True)
+            _open_owner(state, owner_record(path_points=3), True)
         elif index == 12:
             state["hidden"] = {"mode":"replacement","scene":_partial_soundlab_start()}
             state["global_revision"] = 2

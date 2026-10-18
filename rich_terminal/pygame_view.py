@@ -16,6 +16,8 @@ from .apt1 import UINT32_MAX, UINT64_MAX
 from .retained_model import ResourceFormat
 from .retained_scene import ControlKind, ControlState, ImageFit, StatusSeverity
 from .retained_view import (
+    ButtonDraw,
+    DialogDraw,
     FieldDraw,
     DocumentDraw,
     GlyphRunDraw,
@@ -284,8 +286,11 @@ class ControlHitTarget:
             ControlKind.TASK,
             ControlKind.LAUNCHER,
             ControlKind.FIELD,
+            ControlKind.BUTTON,
         ):
-            raise ValueError("only MENU, MENU_ITEM, and TAB, TASK, LAUNCHER, or FIELD can be hit targets")
+            raise ValueError(
+                "only MENU, MENU_ITEM, TAB, TASK, LAUNCHER, FIELD, or BUTTON can be hit targets"
+            )
         object.__setattr__(self, "kind", kind)
         if not isinstance(self.rect, PixelRect):
             raise TypeError("rect must be PixelRect")
@@ -365,7 +370,8 @@ class ControlSurface:
 
 @dataclass(frozen=True, slots=True)
 class TextPosition:
-    """One STX1 position: a carried item key and a scalar boundary."""
+    """One STX1 or DOC1 position: a carried item key and a scalar boundary,
+    or a TEXT field's position, whose item key is zero."""
 
     item_key: int
     scalar_offset: int
@@ -374,7 +380,7 @@ class TextPosition:
         object.__setattr__(
             self,
             "item_key",
-            _integer("item_key", self.item_key, minimum=1, maximum=UINT64_MAX),
+            _integer("item_key", self.item_key, minimum=0, maximum=UINT64_MAX),
         )
         object.__setattr__(
             self,
@@ -390,7 +396,8 @@ class TextPosition:
 
 @dataclass(frozen=True, slots=True)
 class TextHitTarget:
-    """One enabled TEXT_AREA or TEXT_GRID root and the layout it was painted with.
+    """One enabled TEXT_AREA or TEXT_GRID root, or a writable TEXT FIELD's
+    value slot, and the layout it was painted with.
 
     ``rect`` is the visible root.  The anchor fields keep the unclipped root
     geometry because rows and columns are partitioned from it exactly as the
@@ -401,7 +408,10 @@ class TextHitTarget:
     that intersects the viewport.  ``links`` holds ``(item_key, start, end)``
     for each TEXT_AREA style run whose meaning is LINK, and ``read_only``
     whether the content is READ_ONLY, which decide when a press follows a
-    link (SEMANTIC-CONTENT-1).
+    link (SEMANTIC-CONTENT-1).  A TEXT FIELD target is its value slot laid
+    out as one TEXT_AREA row: ``rows`` is ``((0, 0, value),)``, its viewport
+    one row of the slot's cells, and its column origin the field's scroll
+    (RETAINED-1 section 9.2).
     """
 
     identity: ControlIdentity
@@ -428,8 +438,8 @@ class TextHitTarget:
         if isinstance(self.kind, bool):
             raise TypeError("kind must not be bool")
         kind = ControlKind(self.kind)
-        if kind not in (ControlKind.TEXT_AREA, ControlKind.TEXT_GRID):
-            raise ValueError("only TEXT_AREA and TEXT_GRID are text targets")
+        if kind not in (ControlKind.TEXT_AREA, ControlKind.TEXT_GRID, ControlKind.FIELD):
+            raise ValueError("only TEXT_AREA, TEXT_GRID, and a TEXT FIELD are text targets")
         object.__setattr__(self, "kind", kind)
         if not isinstance(self.rect, PixelRect):
             raise TypeError("rect must be PixelRect")
@@ -647,6 +657,21 @@ class DocumentHitTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class DialogHitTarget:
+    """One dialog that is not a notice: a press on it goes nowhere, and a
+    wheel over it scrolls its message (RETAINED-1 section 9.3)."""
+
+    identity: ControlIdentity
+    rect: PixelRect
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, ControlIdentity):
+            raise TypeError("identity must be ControlIdentity")
+        if not isinstance(self.rect, PixelRect):
+            raise TypeError("rect must be PixelRect")
+
+
+@dataclass(frozen=True, slots=True)
 class ResidualPoint:
     """A point showing CELL or residual content, named by its cell."""
 
@@ -656,10 +681,11 @@ class ResidualPoint:
 
 HitMapEntry = (
     ControlHitTarget | RegionOcclusion | ControlSurface | TextHitTarget | ItemHitTarget
-    | DocumentHitTarget
+    | DocumentHitTarget | DialogHitTarget
 )
 PointerTarget = (
-    ControlHitTarget | TextHitTarget | ItemHitTarget | DocumentHitTarget | ResidualPoint
+    ControlHitTarget | TextHitTarget | ItemHitTarget | DocumentHitTarget | DialogHitTarget
+    | ResidualPoint
 )
 HIT_MAP_ENTRY_TYPES = (
     ControlHitTarget,
@@ -668,6 +694,7 @@ HIT_MAP_ENTRY_TYPES = (
     TextHitTarget,
     ItemHitTarget,
     DocumentHitTarget,
+    DialogHitTarget,
 )
 
 
@@ -676,7 +703,8 @@ def _validated_hit_entries(hit_entries) -> tuple[HitMapEntry, ...]:
     if any(not isinstance(entry, HIT_MAP_ENTRY_TYPES) for entry in entries):
         raise TypeError(
             "hit_entries must contain only ControlHitTarget, RegionOcclusion, "
-            "ControlSurface, TextHitTarget, ItemHitTarget, or DocumentHitTarget values"
+            "ControlSurface, TextHitTarget, ItemHitTarget, DocumentHitTarget, or "
+            "DialogHitTarget values"
         )
     return entries
 
@@ -707,9 +735,9 @@ def resolve_pointer(
 ) -> PointerTarget | None:
     """Resolve where one point on the composed terminal surface may go.
 
-    An activatable control or a text root wins in reverse painter order.  A
-    control surface (menu bar, tabset, popup, disabled text root) swallows the
-    point.  A region barrier, or no entry at all, means the point shows CELL
+    An activatable control, a text root, or a dialog wins in reverse painter
+    order.  A control surface (menu bar, tabset, popup, disabled text root,
+    notice) swallows the point.  A region barrier, or no entry at all, means the point shows CELL
     or residual content, so a raw pointer gesture may name its cell.
     """
 
@@ -719,7 +747,8 @@ def resolve_pointer(
         if not entry.rect.contains(x, y):
             continue
         if isinstance(
-            entry, (ControlHitTarget, TextHitTarget, ItemHitTarget, DocumentHitTarget)
+            entry,
+            (ControlHitTarget, TextHitTarget, ItemHitTarget, DocumentHitTarget, DialogHitTarget),
         ):
             return entry
         if isinstance(entry, ControlSurface):
@@ -932,6 +961,7 @@ _OBJECT_DRAWS = (
 )
 _ROOT_CONTROLS = (
     TextAreaDraw, TextGridDraw, ItemViewDraw, TabSetDraw, TaskBarDraw, FieldDraw, DocumentDraw,
+    DialogDraw, ButtonDraw,
 )
 
 
@@ -1335,6 +1365,42 @@ def _label_characters(text: str, direction: int = text_rules.DIRECTION_AUTO):
     if text.isascii() and direction != text_rules.DIRECTION_RTL:
         return text
     return [placed.text for placed in text_rules.cached_row(text, direction, True).characters]
+
+
+def _label_rtl(text: str, direction: int = text_rules.DIRECTION_AUTO) -> bool:
+    """Whether renderer-laid-out text is one paragraph that resolves right
+    to left (APT-1-TEXT Section 10)."""
+
+    if direction == text_rules.DIRECTION_RTL:
+        return True
+    if direction == text_rules.DIRECTION_LTR or text.isascii():
+        return False
+    return text_rules.cached_row(text, direction, True).rtl
+
+
+def _label_left(
+    font,
+    text: str,
+    left: int,
+    right: int,
+    tab_advance: int,
+    *,
+    center: bool = False,
+    direction: int = text_rules.DIRECTION_AUTO,
+) -> int:
+    """Where renderer-laid-out text starts between LEFT and RIGHT: at its
+    paragraph's start edge, or centred when CENTER and it fits.  Text wider
+    than the room is clipped at its end side, so its start stays in view:
+    the right edge for a paragraph that runs right to left, else the left."""
+
+    width = sum(
+        _scalar_advance(font, character, tab_advance)
+        for character in _label_characters(text, direction)
+    )
+    room = right - left
+    if center and width <= room:
+        return left + (room - width) // 2
+    return right - width if _label_rtl(text, direction) else left
 
 
 def _bounded_text_width(
@@ -2510,6 +2576,9 @@ def _paint_text_grid(
 _ITEM_INDENT = 2
 _ITEM_MARK = 2
 _ITEM_CHECK = 3
+# A checkable card's first field starts after its box and a space, as its
+# narrower width in SEMANTIC-CONTENT-1 leaves room for.
+_CARD_CHECK = 4
 _ITEM_GAP = 2
 
 
@@ -2696,7 +2765,7 @@ def _paint_item_view(
                         left=anchor.left, top=top, right=anchor.right, bottom=bottom,
                         width=1, clip=visible_anchor,
                     )
-            slot = 0
+            slot = 1 if cards else 0
             if role in (ItemViewRole.TREE, ItemViewRole.SECTIONS):
                 slot = _ITEM_INDENT * item.depth
             line_top, line_bottom = top, row_edge(item_row + 1)
@@ -2761,18 +2830,21 @@ def _paint_item_view(
                         end=content.columns[index].kind is ItemColumnKind.NUMBER,
                     )
             elif cards:
+                checkable = bool(state & ItemState.CHECKABLE)
                 line_row = item_row
                 for index, column in enumerate(content.columns):
-                    first = 1 if index == 0 else 3
-                    last = first + card_field_width(slots, index)
+                    if index:
+                        first = 3
+                    else:
+                        first = 1 + (_CARD_CHECK if checkable else 0)
+                    width = card_field_width(slots, index, checkable)
+                    last = first + width
                     if index >= len(fields):
                         line_row += 1
                         continue
                     item_field = fields[index]
                     if column.wrap:
-                        lines = text_rules.cached_lines(
-                            item_field.text, direction, card_field_width(slots, index)
-                        )
+                        lines = text_rules.cached_lines(item_field.text, direction, width)
                     else:
                         lines = (text_rules.cached_row(item_field.text, direction, True),)
                     for line in lines:
@@ -3056,6 +3128,81 @@ def _paint_document(
     ]
 
 
+def _paint_field_text(
+    pygame_module, surface, font, identity, slot, slot_clip, content, *,
+    enabled: bool, editing: bool, cell_width: int,
+    appearance: Appearance = REFERENCE_APPEARANCE,
+) -> TextHitTarget | None:
+    """Paint a TEXT field's value in SLOT as one TEXT_AREA row at its
+    scroll, with its selection and caret while EDITING; an empty value
+    shows its placeholder (RETAINED-1 section 9.2).  Returns the value
+    slot's text target when the field is writable."""
+
+    columns = content.value_bounds.cols
+    placeholder = not content.text
+    shown = content.placeholder if placeholder else content.text
+    layout = text_rules.cached_row(shown, text_rules.DIRECTION_AUTO, True)
+    shift = _text_area_shift(layout, 0 if placeholder else content.scroll, columns)
+    low, high = sorted((content.anchor, content.caret))
+
+    def slot_edge(index: int) -> int:
+        return _partition_edge(slot.left, slot.width, index, columns)
+
+    if placeholder:
+        color = _DISABLED_TEXT
+    else:
+        color = _TEXT if enabled else _DISABLED_TEXT
+    for placed in layout.characters:
+        first = placed.column + shift
+        last = first + placed.width
+        if last <= 0 or first >= columns:
+            continue
+        left = slot_edge(max(first, 0))
+        right = slot_edge(min(last, columns))
+        if editing and not placeholder and low <= placed.start < high:
+            selected = _clipped_python_rect(
+                pygame_module, left, slot.top, right, slot.bottom, slot_clip)
+            if selected is not None:
+                surface.fill(appearance.selection if appearance.flowing else _TEXT_SELECTION,
+                             selected)
+        # A character the slot's edge cuts is not drawn (APT-1-TEXT Section 6).
+        if first < 0 or last > columns or placed.text == "\t":
+            continue
+        glyph_clip = _clipped_python_rect(
+            pygame_module, left, slot.top, right, slot.bottom, slot_clip)
+        if glyph_clip is not None:
+            _paint_cluster(pygame_module, surface, font, placed.text, color, glyph_clip,
+                           left=left, top=slot.top, bottom=slot.bottom)
+    if editing:
+        # APT-1-TEXT Section 9.2, as for a text area's caret.
+        caret_layout = layout if not placeholder else text_rules.cached_row(
+            "", text_rules.DIRECTION_AUTO, True)
+        caret_shift = shift if not placeholder else _text_area_shift(caret_layout, 0, columns)
+        placed = caret_layout.caret_character(0 if placeholder else content.caret)
+        if placed is None:
+            edge = (0 if caret_layout.rtl else caret_layout.width) + caret_shift
+        elif placed.level & 1:
+            edge = placed.column + placed.width + caret_shift
+        else:
+            edge = placed.column + caret_shift
+        if 0 <= edge <= columns:
+            caret_x = min(slot_edge(edge), slot.right - 1)
+            inset = 1 if slot.height > 2 else 0
+            caret = _clipped_python_rect(
+                pygame_module, caret_x, slot.top + inset, caret_x + 1,
+                slot.bottom - inset, slot_clip)
+            if caret is not None:
+                surface.fill(appearance.accent if appearance.flowing else _ACCENT[:3], caret)
+    if not content.is_placeable or not enabled:
+        return None
+    return TextHitTarget(
+        identity, ControlKind.FIELD, _pixel_rect(slot_clip),
+        slot.left, slot.top, slot.width, slot.height,
+        content.content_revision, 0, content.scroll, 1, columns,
+        rows=((0, 0, content.text),),
+    )
+
+
 def _paint_field(
     pygame_module, surface, font, region, region_rect, draw: FieldDraw,
     cell_width: int, cell_height: int, *, hovered, pressed,
@@ -3104,6 +3251,15 @@ def _paint_field(
                                 (slot.left, slot.bottom - 1), (slot.right - 1, slot.bottom - 1))
                 if content.read_only and enabled:
                     color = _MUTED_TEXT
+                if content.kind is FieldKind.TEXT:
+                    target = _paint_field_text(
+                        pygame_module, surface, font, identity, slot, slot_clip, content,
+                        enabled=enabled, editing=selected and writable,
+                        cell_width=cell_width, appearance=appearance,
+                    )
+                    if target is not None:
+                        entries.append(target)
+                    continue
                 if writable:
                     entries.append(FieldHitTarget(
                         identity, ControlKind.FIELD, _pixel_rect(slot_clip),
@@ -3125,6 +3281,159 @@ def _paint_field(
     finally:
         surface.set_clip(prior_clip)
     return entries
+
+
+_SEVERITY_COLORS = {
+    StatusSeverity.NEUTRAL: _TEXT,
+    StatusSeverity.INFO: (143, 199, 245),
+    StatusSeverity.SUCCESS: (132, 246, 218),
+    StatusSeverity.WARNING: (248, 202, 126),
+    StatusSeverity.ERROR: (250, 145, 146),
+}
+_BUTTON_SURFACE = (36, 45, 58)
+_DESTRUCTIVE = (250, 145, 146)
+
+
+def _paint_dialog(
+    pygame_module, surface, font, region, region_rect, draw: DialogDraw,
+    cell_width: int, cell_height: int, *,
+    appearance: Appearance = REFERENCE_APPEARANCE,
+) -> list[HitMapEntry]:
+    """Paint a dialog's frame and background over its root, its title, and
+    its message lines in their slots, one line a row and never rewrapped
+    (RETAINED-1 section 9.3).  Its contents paint over it.  A press on the
+    root starts no raw gesture and goes nowhere; a wheel over a dialog that
+    is not a notice scrolls its message."""
+
+    anchor, visible = _semantic_root_rects(
+        pygame_module, surface, region, region_rect, draw.bounds,
+    )
+    if visible.width <= 0 or visible.height <= 0:
+        return []
+    content = draw.content
+    severity = StatusSeverity(content.severity)
+    accent = _SEVERITY_COLORS[severity]
+    neutral = severity is StatusSeverity.NEUTRAL
+    tab_advance = max(1, cell_width * 4)
+    prior_clip = surface.get_clip()
+    try:
+        surface.set_clip(visible)
+        if appearance.flowing:
+            surface.fill(appearance.channel if content.notice else appearance.surface, visible)
+        else:
+            surface.fill(_GRID_CELL if content.notice else _COLLECTION_SURFACE, visible)
+        border = ((appearance.border if appearance.flowing else _COLLECTION_BORDER)
+                  if neutral else accent)
+        _paint_clipped_border(
+            pygame_module, surface, border, left=anchor.left, top=anchor.top,
+            right=anchor.right, bottom=anchor.bottom, width=1, clip=visible,
+        )
+        if content.notice and not neutral:
+            # A notice marks its meaning on its leading edge as well.
+            stripe = _clipped_python_rect(
+                pygame_module, anchor.left, anchor.top, anchor.left + 2, anchor.bottom, visible)
+            if stripe is not None:
+                surface.fill(accent, stripe)
+        slots = []
+        if not content.title_bounds.empty:
+            slots.append((content.title_bounds, (draw.title,), _TEXT))
+        if not content.message_bounds.empty:
+            slots.append((content.message_bounds, content.lines,
+                          _TEXT if neutral or content.notice else accent))
+        for bounds, lines, color in slots:
+            slot = _WideRect(anchor.left + bounds.x * cell_width,
+                             anchor.top + bounds.y * cell_height,
+                             bounds.cols * cell_width, bounds.rows * cell_height)
+            for index, line in enumerate(lines):
+                top = slot.top + index * cell_height
+                line_rect = _WideRect(slot.left, top, slot.width, cell_height)
+                line_clip = _bounded_pygame_rect(pygame_module, line_rect, visible)
+                if line_clip.width <= 0 or line_clip.height <= 0 or not line:
+                    continue
+                _paint_bounded_text(
+                    pygame_module, surface, font, line, color, line_clip,
+                    left=_label_left(font, line, slot.left, slot.right, tab_advance),
+                    right=slot.right, top=top, bottom=top + cell_height,
+                    tab_advance=tab_advance,
+                )
+    finally:
+        surface.set_clip(prior_clip)
+    if content.notice:
+        return [ControlSurface(region.owner_id, region.owner_generation, draw.control_id,
+                               _pixel_rect(visible))]
+    return [DialogHitTarget(_identity(region, draw.control_id), _pixel_rect(visible))]
+
+
+def _paint_button(
+    pygame_module, surface, font, region, region_rect, draw: ButtonDraw,
+    cell_width: int, cell_height: int, *, hovered, pressed,
+    appearance: Appearance = REFERENCE_APPEARANCE,
+) -> list[HitMapEntry]:
+    """Paint a button in its root: a default button filled with the accent,
+    a destructive one marked in red, the one with the keyboard ringed, a
+    disabled one muted (RETAINED-1 section 9.4).  An enabled button is an
+    ACTIVATE target; a disabled one is a surface that takes no input."""
+
+    anchor, visible = _semantic_root_rects(
+        pygame_module, surface, region, region_rect, draw.bounds,
+    )
+    if visible.width <= 0 or visible.height <= 0:
+        return []
+    content = draw.content
+    identity = _identity(region, draw.control_id)
+    enabled = bool(draw.state & ControlState.ENABLED)
+    focused = bool(draw.state & ControlState.SELECTED)
+    hot = enabled and identity in (hovered, pressed)
+    accent = appearance.accent if appearance.flowing else _ACCENT[:3]
+    if not enabled:
+        fill, text, edge = _GRID_CELL, _DISABLED_TEXT, _COLLECTION_BORDER
+    elif content.default:
+        fill, text, edge = accent, (12, 16, 22), accent
+    elif content.destructive:
+        fill, text, edge = (_TEXT_SELECTION if hot else _BUTTON_SURFACE), _DESTRUCTIVE, _DESTRUCTIVE
+    else:
+        fill = _TEXT_SELECTION if hot else _BUTTON_SURFACE
+        text, edge = _TEXT, (appearance.border if appearance.flowing else _COLLECTION_BORDER)
+    tab_advance = max(1, cell_width * 4)
+    prior_clip = surface.get_clip()
+    try:
+        surface.set_clip(visible)
+        surface.fill(fill, visible)
+        _paint_clipped_border(
+            pygame_module, surface, accent if focused and enabled else edge,
+            left=anchor.left, top=anchor.top, right=anchor.right, bottom=anchor.bottom,
+            width=2 if focused and enabled else 1, clip=visible,
+        )
+        shortcut_width = 0
+        if draw.shortcut:
+            shortcut_width = min(anchor.width // 2, _bounded_text_width(
+                font, draw.shortcut, anchor.width, tab_advance))
+            shortcut_right = anchor.right - cell_width // 2
+            shortcut_left = shortcut_right - shortcut_width
+            _paint_bounded_text(
+                pygame_module, surface, font, draw.shortcut,
+                _MUTED_TEXT if enabled else _DISABLED_TEXT,
+                _bounded_pygame_rect(pygame_module, _WideRect(
+                    shortcut_left, anchor.top, shortcut_width, anchor.height), visible),
+                left=_label_left(font, draw.shortcut, shortcut_left, shortcut_right,
+                                 tab_advance),
+                right=shortcut_right, top=anchor.top, bottom=anchor.bottom,
+                tab_advance=tab_advance,
+            )
+        room = anchor.width - shortcut_width - (cell_width if shortcut_width else 0)
+        _paint_bounded_text(
+            pygame_module, surface, font, draw.label, text, visible,
+            left=_label_left(font, draw.label, anchor.left, anchor.left + room, tab_advance,
+                             center=True),
+            right=anchor.left + room, top=anchor.top, bottom=anchor.bottom,
+            tab_advance=tab_advance,
+        )
+    finally:
+        surface.set_clip(prior_clip)
+    rect = _pixel_rect(visible)
+    if not enabled:
+        return [ControlSurface(region.owner_id, region.owner_generation, draw.control_id, rect)]
+    return [ControlHitTarget(identity, ControlKind.BUTTON, rect)]
 
 
 def _paint_taskbar(
@@ -4789,6 +5098,16 @@ def _paint_draw(
             pygame_module, surface, font, region, region_rect, draw,
             cell_w, cell_h, hovered=hovered, pressed=pressed, appearance=appearance,
         ))
+    elif isinstance(draw, DialogDraw):
+        hit_entries.extend(_paint_dialog(
+            pygame_module, surface, control_font, region, region_rect, draw,
+            cell_w, cell_h, appearance=appearance,
+        ))
+    elif isinstance(draw, ButtonDraw):
+        hit_entries.extend(_paint_button(
+            pygame_module, surface, control_font, region, region_rect, draw,
+            cell_w, cell_h, hovered=hovered, pressed=pressed, appearance=appearance,
+        ))
     elif isinstance(draw, TaskBarDraw):
         hit_entries.extend(_paint_taskbar(
             pygame_module, surface, control_font, region, region_rect, draw,
@@ -4903,6 +5222,42 @@ def retained_plane_layout(
     return tuple(regions)
 
 
+_INACTIVE_SCRIM = (8, 11, 16, 140)
+
+
+def _inactive_entries(entries) -> tuple[HitMapEntry, ...]:
+    """A control beneath an open modal region takes no input (RETAINED-1
+    section 9): each of its targets becomes a surface over the same
+    pixels, which swallows a point without starting a raw gesture."""
+
+    result = []
+    for entry in entries:
+        identity = getattr(entry, "identity", None)
+        if identity is None:
+            result.append(entry)
+            continue
+        result.append(ControlSurface(
+            identity.owner_id, identity.owner_generation, identity.control_id, entry.rect,
+        ))
+    return tuple(result)
+
+
+def _dim(pygame_module, surface, extent: PixelRect | None) -> None:
+    """Show the pixels of an inactive control as inactive, under the
+    current clip."""
+
+    if extent is None:
+        return
+    visible = pygame_module.Rect(
+        extent.left, extent.top, extent.right - extent.left, extent.bottom - extent.top,
+    ).clip(surface.get_clip())
+    if visible.width <= 0 or visible.height <= 0:
+        return
+    layer = pygame_module.Surface(visible.size, flags=pygame_module.SRCALPHA)
+    layer.fill(_INACTIVE_SCRIM)
+    surface.blit(layer, visible.topleft)
+
+
 def _paint_region(
     pygame_module,
     surface,
@@ -4956,6 +5311,10 @@ def _paint_region(
             appearance=appearance,
         )
         owners.extend([len(painted)] * (len(popups) - popups_start))
+        if region.inactive_controls and getattr(draw, "control_id", None) in (
+                region.inactive_controls):
+            _dim(pygame_module, surface, planned_draw.extent)
+            entries = list(_inactive_entries(entries))
         painted.append([index, tuple(entries), []])
     # A popup is a renderer-owned foreground surface above this region's
     # ordinary controls and objects.  Keep both its pixels and item targets
@@ -4965,7 +5324,8 @@ def _paint_region(
         prior_clip = surface.get_clip()
         try:
             surface.set_clip(popup.viewport)
-            painted[owner][2].extend(
+            popup_entries = painted[owner][2]
+            popup_entries.extend(
                 _paint_popup(
                     pygame_module,
                     surface,
@@ -4984,6 +5344,11 @@ def _paint_region(
             )
         finally:
             surface.set_clip(prior_clip)
+    if region.inactive_controls:
+        for record in painted:
+            draw = region.draws[record[0]]
+            if getattr(draw, "control_id", None) in region.inactive_controls:
+                record[2][:] = _inactive_entries(record[2])
     return painted
 
 
@@ -5186,6 +5551,7 @@ __all__ = [
     "FieldHitTarget",
     "ControlIdentity",
     "ControlSurface",
+    "DialogHitTarget",
     "HitMapEntry",
     "ImageSurfaceKey",
     "PixelRect",

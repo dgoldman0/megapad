@@ -160,11 +160,27 @@ def test_activation_and_adjustment_reject_readonly_disabled_and_hidden_fields(ch
             check()
 
 
-def test_text_field_accepts_activation_but_not_adjustment():
+def test_text_field_takes_positions_but_neither_activation_nor_adjustment():
     _, _, owner, scene = visible(definition_changes={"content": text_content()})
-    assert scene.require_interactable_control(owner, 1).content.text == "text"
+    with pytest.raises(SceneModelError, match="does not accept ACTIVATE"):
+        scene.require_interactable_control(owner, 1)
     with pytest.raises(SceneModelError, match="does not accept ADJUST"):
         scene.require_field_control(owner, 1, content_revision=1, adjustable=True)
+    assert scene.require_field_position(
+        owner, 1, content_revision=1, item_key=0, scalar_offset=4).text == "text"
+    for changes, match in (({"item_key": 1}, "item key zero"),
+                           ({"scalar_offset": 5}, "past its value"),
+                           ({"content_revision": 2}, "superseded")):
+        position = dict(content_revision=1, item_key=0, scalar_offset=0) | changes
+        with pytest.raises(SceneModelError, match=match):
+            scene.require_field_position(owner, 1, **position)
+
+
+def test_numeric_fields_take_activation_but_no_positions():
+    _, _, owner, scene = visible()
+    assert scene.require_interactable_control(owner, 1)
+    with pytest.raises(SceneModelError, match="only a TEXT FIELD"):
+        scene.require_field_position(owner, 1, content_revision=1, item_key=0, scalar_offset=0)
 
 
 @pytest.mark.parametrize("kwargs", [{"adjustable": True}, {"content_revision": 0},

@@ -12,8 +12,8 @@ from tests import test_rich_terminal_taskbar_viewer_input as taskbar_helpers
 from tests import test_session_viewer as keyboard_helpers
 from emulator.shared_session import SharedMachine
 from rich_terminal import DriverStatus
-from rich_terminal.pygame_view import FieldHitTarget
-from rich_terminal.retained_scene import ControlState
+from rich_terminal.pygame_view import FieldHitTarget, TextHitTarget
+from rich_terminal.retained_scene import ControlKind, ControlState
 from rich_terminal.retained_wire import ControlEventKind, RetainedMessageType, encode_control_definition
 from rich_terminal.semantic_fields import FieldKind
 from session_viewer import _GuestKeyboardForwarder, _PointerRouter, _RetainedDisplayState
@@ -87,13 +87,13 @@ def test_acknowledged_value_slot_wheel_reaches_binary_adjust_without_value_mutat
     assert core.retained_state is before and core.output_view is output
 
 
-@pytest.mark.parametrize("kind", list(FieldKind))
+@pytest.mark.parametrize("kind", [FieldKind.INTEGER, FieldKind.CHOICE])
 def test_value_click_uses_existing_activate_for_each_writable_kind(font, kind):
     (core, _, _, session, server, client, keyboard, display, pointer,
      offer, result) = _environment(font, field_helpers._content(kind))
     taskbar_helpers._ack(session, server, keyboard, display, offer, result)
     assert isinstance(result.hit_targets[0], FieldHitTarget)
-    assert result.hit_targets[0].adjustable == (kind is not FieldKind.TEXT)
+    assert result.hit_targets[0].adjustable
     before = core.retained_state
     assert pointer.button_down(1, (60, 30), (80, 40))
     assert pointer.button_up(1, (60, 30), (80, 40))
@@ -101,6 +101,29 @@ def test_value_click_uses_existing_activate_for_each_writable_kind(font, kind):
     event = session.events[0]
     assert event.event_kind is ControlEventKind.ACTIVATE and event.content_revision == 0
     assert client.requests[0][0] == "send_control_event"
+    assert core.retained_state is before
+
+
+def test_a_text_value_click_places_and_shift_click_extends_at_item_key_zero(font):
+    (core, _, _, session, server, client, keyboard, display, pointer,
+     offer, result) = _environment(font, field_helpers._content(FieldKind.TEXT))
+    taskbar_helpers._ack(session, server, keyboard, display, offer, result)
+    assert not result.hit_targets
+    target = next(entry for entry in result.hit_entries if isinstance(entry, TextHitTarget))
+    assert target.kind is ControlKind.FIELD
+    before = core.retained_state
+    assert pointer.button_down(1, (60, 30), (80, 40))
+    assert not pointer.button_up(1, (60, 30), (80, 40))
+    assert pointer.button_down(1, (60, 30), (80, 40), modifiers=1)
+    assert not pointer.button_up(1, (60, 30), (80, 40))
+    assert [(event.event_kind, event.content_revision, event.item_key, event.scalar_offset)
+            for event in session.events] == [
+        (ControlEventKind.PLACE, 7, 0, 0), (ControlEventKind.EXTEND, 7, 0, 0),
+    ]
+    assert [method for method, _ in client.requests] == ["send_text_event"] * 2
+    # The wheel over a TEXT field's value sends nothing: it takes no SCROLL.
+    assert not pointer.wheel(0, 1, (60, 30), (80, 40))
+    assert len(session.events) == 2
     assert core.retained_state is before
 
 

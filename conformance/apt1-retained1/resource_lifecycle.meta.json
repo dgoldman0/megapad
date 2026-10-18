@@ -199,6 +199,7 @@
         "resource_bytes": 8,
         "utf8_bytes": 0,
         "sample_slots": 0,
+        "path_points": 0,
         "state": "live"
       },
       "534f554e444c4143:1": {
@@ -211,6 +212,7 @@
         "resource_bytes": 0,
         "utf8_bytes": 0,
         "sample_slots": 2,
+        "path_points": 0,
         "state": "live"
       }
     },
@@ -238,7 +240,8 @@
       "series_quota": 1,
       "resource_bytes": 8,
       "utf8_bytes": 0,
-      "sample_slots": 2
+      "sample_slots": 2,
+      "path_points": 0
     },
     "active_usage": [
       {
@@ -248,7 +251,8 @@
         "objects": 1,
         "series": 0,
         "utf8_bytes": 0,
-        "sample_slots": 0
+        "sample_slots": 0,
+        "path_points": 0
       },
       {
         "owner_id": 6003110622949818691,
@@ -257,7 +261,8 @@
         "objects": 1,
         "series": 1,
         "utf8_bytes": 0,
-        "sample_slots": 2
+        "sample_slots": 2,
+        "path_points": 0
       }
     ],
     "hidden_usage": [],

@@ -345,6 +345,7 @@ def _quota_fields(quotas: OwnerQuotas) -> dict[str, int]:
         "resource_bytes": quotas.resource_bytes,
         "utf8_bytes": quotas.utf8_bytes,
         "sample_slots": quotas.sample_slots,
+        "path_points": quotas.path_points,
     }
 
 
@@ -671,6 +672,7 @@ class RichTerminalCore:
             ),
             total_sample_slots=policy.total_sample_slots,
             total_utf8_bytes=policy.total_utf8_bytes,
+            total_path_points=policy.total_path_points,
         )
 
     def _bind_retained_policy(
@@ -1225,20 +1227,6 @@ class RichTerminalCore:
             wheel_y=wheel_y,
             adjustment=adjustment,
         )
-        if (
-            event.event_kind not in (ControlEventKind.ACTIVATE, ControlEventKind.ADJUST)
-            and not policy.features & RetainedFeature.CONTROL_COLLECTIONS
-        ):
-            raise TerminalSessionError(
-                "positioned control input requires active RET_CONTROL_COLLECTIONS"
-            )
-        if (event.event_kind is ControlEventKind.ADJUST
-                and not policy.features & RetainedFeature.FIELDS):
-            raise TerminalSessionError("field input requires active RET_FIELDS")
-        items_active = bool(policy.features & RetainedFeature.CONTROL_ITEMS)
-        if event.names_item and not items_active:
-            raise TerminalSessionError("item input requires active RET_CONTROL_ITEMS")
-        documents_active = bool(policy.features & RetainedFeature.CONTROL_DOCUMENTS)
         owner = OwnerIdentity(
             session_id=session_id,
             presentation_epoch=clock.presentation_epoch,
@@ -1246,14 +1234,59 @@ class RichTerminalCore:
             owner_generation=event.owner_generation,
         )
         scene = self._require_retained_model()
+        # PLACE and EXTEND on a TEXT FIELD belong to RET_FIELDS, and SCROLL on
+        # a DIALOG to RET_DIALOGS, not to the collection family (RETAINED-1
+        # sections 9.2 and 9.3).
+        field_position = False
+        dialog_scroll = False
+        if event.event_kind in (
+            ControlEventKind.PLACE, ControlEventKind.EXTEND, ControlEventKind.SCROLL,
+        ):
+            try:
+                target_kind = scene.active_control_kind(owner, event.control_id)
+            except SceneModelError as exc:
+                raise TerminalSessionError(
+                    f"semantic control target is not interactable: {exc}"
+                ) from exc
+            if event.event_kind is ControlEventKind.SCROLL:
+                dialog_scroll = target_kind is ControlKind.DIALOG
+            else:
+                field_position = target_kind is ControlKind.FIELD
+        if (
+            event.event_kind not in (ControlEventKind.ACTIVATE, ControlEventKind.ADJUST)
+            and not field_position
+            and not dialog_scroll
+            and not policy.features & RetainedFeature.CONTROL_COLLECTIONS
+        ):
+            raise TerminalSessionError(
+                "positioned control input requires active RET_CONTROL_COLLECTIONS"
+            )
+        if dialog_scroll and not policy.features & RetainedFeature.DIALOGS:
+            raise TerminalSessionError("dialog scrolling requires active RET_DIALOGS")
+        if ((event.event_kind is ControlEventKind.ADJUST or field_position)
+                and not policy.features & RetainedFeature.FIELDS):
+            raise TerminalSessionError("field input requires active RET_FIELDS")
+        items_active = bool(policy.features & RetainedFeature.CONTROL_ITEMS)
+        if event.names_item and not items_active:
+            raise TerminalSessionError("item input requires active RET_CONTROL_ITEMS")
+        documents_active = bool(policy.features & RetainedFeature.CONTROL_DOCUMENTS)
         try:
             if event.event_kind is ControlEventKind.ACTIVATE:
                 scene.require_interactable_control(owner, event.control_id)
+            elif field_position:
+                scene.require_field_position(
+                    owner, event.control_id,
+                    content_revision=event.content_revision,
+                    item_key=event.item_key,
+                    scalar_offset=event.scalar_offset,
+                )
             elif event.event_kind is ControlEventKind.ADJUST:
                 scene.require_field_control(
                     owner, event.control_id,
                     content_revision=event.content_revision, adjustable=True,
                 )
+            elif dialog_scroll:
+                scene.require_dialog_scroll(owner, event.control_id)
             elif event.event_kind is ControlEventKind.SCROLL:
                 scene.require_text_control(
                     owner,
@@ -2099,11 +2132,11 @@ class RichTerminalCore:
             resource_bytes,
             utf8_bytes,
             sample_slots,
-            reserved,
+            path_points,
         ) = _OWNER_OPEN.unpack(frame.payload)
 
         prepared = None
-        if owner_id == 0 or owner_generation == 0 or reserved != 0:
+        if owner_id == 0 or owner_generation == 0:
             status = RetStatus.INVALID
         else:
             try:
@@ -2115,6 +2148,7 @@ class RichTerminalCore:
                     resource_bytes,
                     utf8_bytes,
                     sample_slots,
+                    path_points,
                 )
                 identity = self._owner_identity(owner_id, owner_generation)
                 if request is RetainedMessageType.OWNER_OPEN:
@@ -2967,6 +3001,7 @@ class RichTerminalCore:
                     visible=operation.visible,
                     clipped=operation.clipped,
                     geometry_generation=begin.geometry_generation,
+                    modal=operation.modal,
                 )
                 if message_type is RetainedMessageType.REGION_DEFINE:
                     model.define_region(region)

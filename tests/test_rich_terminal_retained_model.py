@@ -57,6 +57,7 @@ def _policy(**changes) -> RetainedPolicy:
         "minimum_presentation_interval_us": 16_667,
         "total_sample_slots": 24,
         "total_utf8_bytes": 192,
+        "total_path_points": 32,
         "client_to_terminal_max_payload": 256,
         "terminal_to_client_max_payload": 64,
         "base_max_transaction_bytes": 8192,
@@ -255,6 +256,40 @@ def test_owner_resize_grows_a_live_reservation_or_leaves_it_unchanged():
     assert dropped.value.code is OwnerLedgerErrorCode.STALE_OWNER
 
 
+def test_line_points_are_a_budget_owners_reserve_and_grow():
+    with pytest.raises(ValueError, match="total_path_points must be positive"):
+        _policy(total_path_points=0)
+    with pytest.raises(ValueError, match="cannot admit one maximum line"):
+        _policy(max_path_points=8, total_path_points=7)
+    with pytest.raises(ValueError, match="total_path_points must be zero"):
+        _policy(
+            features=ALL_FEATURES & ~RetainedFeature.VECTOR,
+            max_path_points=0,
+        )
+
+    ledger = _ledger()
+    owner = _identity(1)
+    ledger.open(owner, _quotas(path_points=20))
+    before = ledger.state
+    assert before.reservations.path_points == 20
+
+    # Two owners share the terminal's 32 points; a share beyond it is invalid.
+    with pytest.raises(OwnerLedgerError) as aggregate:
+        ledger.open(_identity(2), _quotas(path_points=13))
+    assert aggregate.value.code is OwnerLedgerErrorCode.NO_CAPACITY
+    with pytest.raises(OwnerLedgerError) as beyond:
+        ledger.open(_identity(2), _quotas(path_points=33))
+    assert beyond.value.code is OwnerLedgerErrorCode.INVALID
+    assert ledger.state is before
+
+    # An owner grows its share and may not shrink it.
+    assert ledger.resize(owner, _quotas(path_points=32)) is OwnerResizeDisposition.RESIZED
+    assert ledger.state.reservations.path_points == 32
+    with pytest.raises(OwnerLedgerError) as shrink:
+        ledger.resize(owner, _quotas(path_points=31))
+    assert shrink.value.code is OwnerLedgerErrorCode.INVALID
+
+
 def test_exact_scope_generation_drop_tombstone_and_reopen_lifecycle():
     ledger = _ledger()
     owner = _identity(22, 4)
@@ -440,6 +475,14 @@ def test_absent_feature_quota_is_rejected_without_mutation():
         ledger.open(_identity(1), _quotas(resources=1))
 
     assert caught.value.code is OwnerLedgerErrorCode.INVALID
+    assert ledger.state is before
+
+    with pytest.raises(OwnerLedgerError) as points:
+        ledger.open(
+            _identity(1),
+            OwnerQuotas(1, 0, 0, 0, 0, 0, 0, path_points=1),
+        )
+    assert points.value.code is OwnerLedgerErrorCode.INVALID
     assert ledger.state is before
 
     glyph_policy = replace(

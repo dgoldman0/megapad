@@ -157,7 +157,7 @@ def test_control_discovery_uses_shared_object_and_utf8_capacity() -> None:
     assert "0x100    CONSTANT _PT-RET-CONTROLS" in source
     assert "0x200    CONSTANT _PT-RET-CONTROL-COLLECTIONS" in source
     assert "0x400    CONSTANT _PT-RET-CONTROL-ITEMS" in source
-    assert "0x1FF3F  CONSTANT _PT-RET-FEATURE-MASK" in source
+    assert "0x3FF3F  CONSTANT _PT-RET-FEATURE-MASK" in source
     assert "0x8000   CONSTANT _PT-RET-GRID-CELLS" in source
     assert (
         "_PT-RV-FEATURES @ _PT-RET-GRID-CELLS AND\n"
@@ -467,6 +467,11 @@ def test_present_body_keeps_raw_fixed_operations_private() -> None:
     assert "_PT-M-REGION-REPLACE" in region
     assert "_PT-M-REGION-DROP" in region
     assert "_PT-PRESENT-FIXED-OP" in region_write
+    # Flags take VISIBLE, CLIPPED and MODAL, and MODAL needs DIALOGS.
+    definition = _definition(source, "_PT-PO-REGION-DEFINITION?")
+    assert "DUP 7 INVERT AND IF DROP FALSE EXIT THEN" in definition
+    modal = definition.index("PT-REGION-F-MODAL AND IF")
+    assert definition.index("PT-RET-DIALOGS? 0= IF DROP FALSE EXIT THEN") > modal
     assert "_PT.S.TX-RET-OPS @ <>" in commit
     assert "_PT.S.TX-RET-BYTES @ <>" in commit
     assert "PT-RET-REPLACE-START =" in commit
@@ -709,7 +714,11 @@ def test_control_event_is_feature_revision_and_type_checked() -> None:
     assert "_PT-RET-CONTROLS? 0=" in dispatch
     # ACTIVATE and the independently gated ADJUST do not require collections.
     assert "W@ PT-CONTROL-ACTIVATE <> IF" in dispatch
-    assert "_PT-RET-CONTROL-COLLECTIONS? 0=" in dispatch
+    # Positions need the collections, or for PLACE and EXTEND, which also
+    # name a TEXT field's value, the fields.
+    assert "DUP _PT-RET-CONTROL-COLLECTIONS?" in dispatch
+    assert "W@ _PT-CONTROL-FIELD-POSITION? IF" in dispatch
+    assert "OVER _PT-RET-FIELDS? OR" in dispatch
     assert "_PT-RET-FIELDS? 0=" in dispatch
     assert "_PT-RX-LEN @ 40 U<" in dispatch
     assert "_PT-CONTROL-EVENT-BYTES DUP 0=" in dispatch

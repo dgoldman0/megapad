@@ -292,12 +292,9 @@ def test_wrapping_cards_carry_line_feeds_and_a_viewport_row() -> None:
         (dict(columns=(ItemColumn(TEXT), ItemColumn(TEXT))), "does not wrap"),
         (dict(items=(), item_total=0, viewport_first=0, viewport_count=0),
          "empty viewport"),
-        (dict(items=(_item(11, 0, "YOU", "hi", state=S.CHECKABLE),
-                     _item(12, 1, "AGENT", "x"), _item(13, 2, "YOU", "y"))),
-         "no check box"),
     ],
 )
-def test_only_cards_wrap_have_a_viewport_row_and_no_check_box(change, message) -> None:
+def test_only_cards_wrap_and_have_a_viewport_row(change, message) -> None:
     change = {"viewport_row": 1, **change}
     with pytest.raises(ValueError, match=message):
         _transcript(**change)
@@ -323,6 +320,35 @@ def test_card_rows_follow_the_shared_line_rule() -> None:
     assert card_row_count(content, lone, 20) == 2
     # Wider views break less.
     assert card_row_count(content, agent, 40) == 1 + 3
+
+
+def test_a_checkable_card_narrows_its_first_field() -> None:
+    # A source list: each card's name wraps, after its check box when it
+    # has one.
+    sources = ItemViewContent(
+        content_revision=4,
+        role=ItemViewRole.CARDS,
+        flags=ItemViewFlag(0),
+        columns=(ItemColumn(TEXT, wrap=True), ItemColumn(TEXT)),
+        item_total=2,
+        viewport_first=0,
+        viewport_count=2,
+        items=(
+            _item(21, 0, "Morning bulletin", "syndication",
+                  state=S.CHECKABLE | S.CHECKED | S.SELECTED),
+            _item(22, 1, "Morning bulletin", "syndication"),
+        ),
+    )
+    assert decode_item_view_content(encode_item_view_content(sources)) == sources
+    checked, plain = sources.items
+    # Width 20: a checkable card's first field is 14 cells, not 18; later
+    # fields keep 16.
+    assert card_field_width(20, 0, checkable=True) == 14
+    assert card_field_width(20, 1, checkable=True) == 16
+    assert card_field_width(3, 0, checkable=True) == 1
+    # "Morning bulletin" is 16 cells: one line at 18, two at 14.
+    assert card_row_count(sources, plain, 20) == 1 + 1
+    assert card_row_count(sources, checked, 20) == 2 + 1
 
 
 def _code(raw: bytes) -> SemanticContentErrorCode:

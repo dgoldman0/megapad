@@ -126,10 +126,13 @@ def _promote(state, keyboard, offer, targets, *, response_status="presented"):
 
 def test_only_independently_activatable_controls_can_enter_the_hit_map():
     assert _target(kind=ControlKind.TAB).kind is ControlKind.TAB
-    with pytest.raises(ValueError, match="MENU, MENU_ITEM, and TAB"):
+    with pytest.raises(ValueError, match="can be hit targets"):
         _target(kind=ControlKind.TEXT_AREA)
-    with pytest.raises(ValueError, match="MENU, MENU_ITEM, and TAB"):
+    with pytest.raises(ValueError, match="can be hit targets"):
         _target(kind=ControlKind.TEXT_GRID)
+    with pytest.raises(ValueError, match="can be hit targets"):
+        _target(kind=ControlKind.DIALOG)
+    assert _target(kind=ControlKind.BUTTON).kind is ControlKind.BUTTON
 
 
 def test_pending_hit_map_is_not_authority_until_accepted_sink_present():

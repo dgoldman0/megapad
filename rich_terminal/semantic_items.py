@@ -432,8 +432,6 @@ class ItemViewContent:
                 raise ValueError(
                     "a list, table, or cards item is a top-level item that cannot expand"
                 )
-            if self.role is ItemViewRole.CARDS and item.state & ItemState.CHECKABLE:
-                raise ValueError("a card has no check box")
             return
         if self.role is ItemViewRole.TREE:
             if item.role is not ItemRole.ITEM:
@@ -757,12 +755,15 @@ def decode_item_view_content(payload) -> ItemViewContent:
         raise _fail(SemanticContentErrorCode.CONSISTENCY, str(exc)) from exc
 
 
-def card_field_width(root_cols: int, field_index: int) -> int:
+def card_field_width(root_cols: int, field_index: int, checkable: bool = False) -> int:
     """The widest a card's field ``field_index`` may be at a root width:
-    ``max(W - 2, 1)`` for the first field and ``max(W - 4, 1)`` for later
-    ones (SEMANTIC-CONTENT-1)."""
+    ``max(W - 2, 1)`` for the first field, or ``max(W - 6, 1)`` in a
+    checkable card, whose check box comes before it, and ``max(W - 4, 1)``
+    for later ones (SEMANTIC-CONTENT-1)."""
 
-    return max(root_cols - (2 if field_index == 0 else 4), 1)
+    if field_index:
+        return max(root_cols - 4, 1)
+    return max(root_cols - (6 if checkable else 2), 1)
 
 
 def card_row_count(content: ItemViewContent, item: ViewItem, root_cols: int) -> int:
@@ -770,6 +771,7 @@ def card_row_count(content: ItemViewContent, item: ViewItem, root_cols: int) -> 
     that a field in a ``WRAP`` column takes one per line of its paragraphs
     (APT-1-TEXT Section 12)."""
 
+    checkable = bool(item.state & ItemState.CHECKABLE)
     rows = 0
     for index, column in enumerate(content.columns):
         if column.wrap and index < len(item.fields):
@@ -777,7 +779,7 @@ def card_row_count(content: ItemViewContent, item: ViewItem, root_cols: int) -> 
                 text_rules.cached_lines(
                     item.fields[index].text,
                     content.direction,
-                    card_field_width(root_cols, index),
+                    card_field_width(root_cols, index, checkable),
                 )
             )
         else:

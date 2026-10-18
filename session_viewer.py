@@ -23,6 +23,7 @@ from rich_terminal.pygame_view import (
     ControlHitTarget,
     ControlIdentity,
     ControlSurface,
+    DialogHitTarget,
     DocumentHitTarget,
     FieldHitTarget,
     HIT_MAP_ENTRY_TYPES,
@@ -560,7 +561,7 @@ class _RetainedDisplayState:
             raise TypeError(
                 "hit_entries must contain only ControlHitTarget, "
                 "RegionOcclusion, ControlSurface, TextHitTarget, "
-                "ItemHitTarget, or DocumentHitTarget values"
+                "ItemHitTarget, DocumentHitTarget, or DialogHitTarget values"
             )
         return entries
 
@@ -1046,6 +1047,30 @@ class _GuestKeyboardForwarder:
             params.update(content_revision=target.content_revision, item_key=item_key)
         return self._request_now("send_text_event", **params)
 
+    def send_dialog_scroll(
+        self,
+        target: DialogHitTarget,
+        *,
+        modifiers: int,
+        wheel_x: int,
+        wheel_y: int,
+    ) -> bool:
+        """Send one SCROLL for an acknowledged dialog."""
+
+        if not isinstance(target, DialogHitTarget):
+            raise TypeError("target must be DialogHitTarget")
+        identity = target.identity
+        return self._request_now(
+            "send_text_event",
+            owner_id=identity.owner_id,
+            owner_generation=identity.owner_generation,
+            control_id=identity.control_id,
+            event_kind=int(ControlEventKind.SCROLL),
+            modifiers=modifiers,
+            wheel_x=wheel_x,
+            wheel_y=wheel_y,
+        )
+
     def send_document_event(
         self,
         target: DocumentHitTarget,
@@ -1239,13 +1264,19 @@ def _wheel_steps(value) -> int:
     return max(-_WHEEL_LIMIT, min(_WHEEL_LIMIT, steps))
 
 
+# A press names a position and a drag or Shift press extends the selection
+# in a text area and in a TEXT field's value (RETAINED-1 section 9.2).
+_EXTENDABLE_TEXT_KINDS = (ControlKind.TEXT_AREA, ControlKind.FIELD)
+
+
 class _PointerRouter:
     """Route pointer input through one sink-acknowledged hit map.
 
-    A menu, menu item, or tab activates on a matching release in the same
-    acknowledged frame.  A press on an enabled text root sends PLACE (EXTEND
-    with Shift), and dragging from it sends EXTEND at the position under the
-    pointer, clamped to the root.  A press on an item view sends EXPAND or
+    A menu, menu item, tab, task entry, field, or button activates on a
+    matching release in the same acknowledged frame.  A press on an enabled
+    text root or a writable TEXT field's value sends PLACE (EXTEND with
+    Shift), and dragging from it sends EXTEND at the position under the
+    pointer, clamped to the root or the value slot.  A press on an item view sends EXPAND or
     COLLAPSE on a disclosure mark, CHECK on a check box, and otherwise
     SELECT, or OPEN for a second press on the same item within the
     double-press interval.  A press on CELL or residual content starts
@@ -1453,7 +1484,7 @@ class _PointerRouter:
             self._text_identity,
             display_token=token,
         )
-        if target is None or target.kind is not ControlKind.TEXT_AREA:
+        if target is None or target.kind not in _EXTENDABLE_TEXT_KINDS:
             self._text_identity = None
             self._text_position = None
             return
@@ -1525,7 +1556,7 @@ class _PointerRouter:
                 return False
             kind = (
                 ControlEventKind.EXTEND
-                if modifiers & _APT_SHIFT and target.kind is ControlKind.TEXT_AREA
+                if modifiers & _APT_SHIFT and target.kind in _EXTENDABLE_TEXT_KINDS
                 else ControlEventKind.PLACE
             )
             if not self.keyboard.send_text_event(
@@ -1535,7 +1566,7 @@ class _PointerRouter:
                 position=text_position,
             ):
                 return False
-            if target.kind is ControlKind.TEXT_AREA:
+            if target.kind in _EXTENDABLE_TEXT_KINDS:
                 self._text_identity = target.identity
                 self._text_position = text_position
             return True
@@ -1660,6 +1691,10 @@ class _PointerRouter:
                 target, adjustment=-wheel_y, modifiers=modifiers,
             )
         if isinstance(target, TextHitTarget):
+            # A TEXT field takes positions but no SCROLL (RETAINED-1 section
+            # 9.2), so the wheel does nothing over its value.
+            if target.kind is ControlKind.FIELD:
+                return False
             return self.keyboard.send_text_event(
                 target,
                 ControlEventKind.SCROLL,
@@ -1682,6 +1717,10 @@ class _PointerRouter:
                 modifiers=modifiers,
                 wheel_x=wheel_x,
                 wheel_y=wheel_y,
+            )
+        if isinstance(target, DialogHitTarget):
+            return self.keyboard.send_dialog_scroll(
+                target, modifiers=modifiers, wheel_x=wheel_x, wheel_y=wheel_y,
             )
         if isinstance(target, ResidualPoint):
             return self._send_raw(
@@ -2133,6 +2172,10 @@ def _region_header(region) -> tuple:
         region.clip_rows,
         region.z_order,
         region.clipped,
+        # A modal region's appearance or a control becoming inactive beneath
+        # one changes its pixels and its targets, so the region repaints.
+        region.modal,
+        region.inactive_controls,
     )
 
 

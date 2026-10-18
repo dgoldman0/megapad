@@ -73,6 +73,12 @@ class TestFieldForthInput(_KDOSTestBase):
              True, [0, 0, 0, 0, 0, 0, 0]),
             ("existing_scroll", _payload(kind=4, tail=struct.pack("<hhI", -3, 4, 0)),
              0x301, 3, True, [8, 0, 0, 0, 0, -3, 4]),
+            # A TEXT field's position names item key zero, and RET_FIELDS
+            # admits PLACE and EXTEND without the collection family.
+            ("field_place", _payload(kind=2, tail=struct.pack("<QQII", 7, 0, 3, 0)),
+             _FIELD_FEATURES, 3, True, [24, 7, 0, 0, 3, 0, 0]),
+            ("field_extend", _payload(kind=3, tail=struct.pack("<QQII", 7, 0, 0, 0)),
+             _FIELD_FEATURES, 3, True, [24, 7, 0, 0, 0, 0, 0]),
         ]
         rejected = [
             ("zero_adjustment", _payload(adjustment=0), _FIELD_FEATURES, 3),
@@ -92,6 +98,12 @@ class TestFieldForthInput(_KDOSTestBase):
             ("nonzero_reserved", _payload(reserved=1), _FIELD_FEATURES, 3),
             ("unknown_kind", _payload(kind=12), _FIELD_FEATURES, 3),
             ("resyncing_state", _payload(), _FIELD_FEATURES, 4),
+            ("follow_key_zero", _payload(kind=5, tail=struct.pack("<QQII", 7, 0, 3, 0)),
+             0x301, 3),
+            ("scroll_without_collections",
+             _payload(kind=4, tail=struct.pack("<hhI", -3, 4, 0)), _FIELD_FEATURES, 3),
+            ("place_without_fields_or_collections",
+             _payload(kind=2, tail=struct.pack("<QQII", 7, 0, 3, 0)), 0x101, 3),
         ]
         cases.extend((*case, False, []) for case in rejected)
 

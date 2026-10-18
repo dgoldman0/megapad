@@ -171,6 +171,7 @@ def test_discovery_pair_builds_the_canonical_caller_bounded_policy():
     assert policy.max_live_owners == 4
     assert policy.max_retained_transaction_bytes == 32_768
     assert policy.max_path_points == 256
+    assert policy.total_path_points == 4096
     assert policy.max_samples_per_append == 64
     assert policy.total_sample_slots == 4096
 
@@ -213,8 +214,6 @@ def test_every_payload_decoder_rejects_non_exact_length(message_type, decode):
     ("message_type", "decode", "offset"),
     (
         (RetainedMessageType.RET_QUERY, decode_ret_query, 4),
-        (RetainedMessageType.RET_FORMATS, decode_ret_formats, 56),
-        (RetainedMessageType.OWNER_OPEN, decode_owner_open, 56),
         (RetainedMessageType.RET_RESULT, decode_ret_result, 4),
         (RetainedMessageType.PRESENT_BEGIN, decode_present_begin, 60),
         (RetainedMessageType.PRESENT_COMMIT, decode_present_commit, 12),
@@ -227,6 +226,23 @@ def test_reserved_fields_are_strictly_zero(message_type, decode, offset):
     with pytest.raises(RetainedWireError) as caught:
         decode(payload)
     assert caught.value.code is RetainedWireErrorCode.RESERVED
+
+
+def test_point_budget_and_quota_round_trip_at_offset_56():
+    formats = decode_ret_formats(_oracle_payloads(RetainedMessageType.RET_FORMATS)[0])
+    assert formats.total_path_points == 4096
+    assert decode_ret_formats(encode_ret_formats(formats)) == formats
+
+    owners = [
+        decode_owner_open(payload)
+        for payload in _oracle_payloads(RetainedMessageType.OWNER_OPEN)
+    ]
+    # The SoundLab owner reserves the three points of its line.
+    owner = next(owner for owner in owners if owner.quotas.objects == 12)
+    assert owner.quotas.path_points == 3
+    raw = encode_owner_open(owner)
+    assert int.from_bytes(raw[56:64], "little") == 3
+    assert decode_owner_open(raw) == owner
 
 
 def test_query_caps_and_formats_reject_tag_reserved_feature_and_format_aliases():
@@ -666,7 +682,7 @@ def test_region_definition_codec_enforces_exact_scalar_and_flag_contract():
     assert definition.clipped
 
     payload = bytearray(encode_region_definition(definition))
-    payload[-4:] = (0x4).to_bytes(4, "little")
+    payload[-4:] = (0x8).to_bytes(4, "little")  # bit 2 is MODAL; bit 3 is reserved
     with pytest.raises(RetainedWireError) as reserved:
         decode_region_definition(payload)
     assert reserved.value.code is RetainedWireErrorCode.RESERVED

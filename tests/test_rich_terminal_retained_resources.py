@@ -61,6 +61,7 @@ def _policy(**changes) -> RetainedPolicy:
         "minimum_presentation_interval_us": 16_667,
         "total_sample_slots": 24,
         "total_utf8_bytes": 192,
+        "total_path_points": 32,
         "client_to_terminal_max_payload": 256,
         "terminal_to_client_max_payload": 64,
         "base_max_transaction_bytes": 8192,

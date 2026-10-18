@@ -50,11 +50,13 @@ from .retained_scene import (
     StatusFieldBody,
     StatusSeverity,
     WaveformBody,
+    control_beneath_modal,
     validate_control_shape,
     validate_pane_shape,
     validate_status_field_shape,
 )
 from .semantic_content import SemanticTextContent
+from .semantic_dialogs import ButtonContent, DialogContent
 from .semantic_fields import FieldContent
 from .semantic_items import ItemViewContent
 from .semantic_documents import DocumentContent
@@ -1051,9 +1053,12 @@ def _root_draw_fields(
     order,
     z_order,
     bounds,
-    content: SemanticTextContent | ItemViewContent | FieldContent | DocumentContent | None,
+    content: (SemanticTextContent | ItemViewContent | FieldContent | DocumentContent
+              | DialogContent | ButtonContent | None),
 ) -> tuple[
-    int, ControlState, int, int, ObjectBounds, SemanticTextContent | ItemViewContent | FieldContent | DocumentContent | None
+    int, ControlState, int, int, ObjectBounds,
+    SemanticTextContent | ItemViewContent | FieldContent | DocumentContent
+    | DialogContent | ButtonContent | None
 ]:
     control_id = _integer(
         "control_id", control_id, minimum=1, maximum=UINT64_MAX
@@ -1085,6 +1090,12 @@ def _root_draw_fields(
     elif kind is ControlKind.DOCUMENT:
         if not isinstance(content, DocumentContent):
             raise TypeError("DOCUMENT draw requires DocumentContent")
+    elif kind is ControlKind.DIALOG:
+        if not isinstance(content, DialogContent):
+            raise TypeError("DIALOG draw requires DialogContent")
+    elif kind is ControlKind.BUTTON:
+        if not isinstance(content, ButtonContent):
+            raise TypeError("BUTTON draw requires ButtonContent")
     elif content is not None:
         raise ValueError(f"{kind.name} draw carries no semantic text content")
     return control_id, state, order, z_order, bounds, content
@@ -1238,6 +1249,73 @@ class FieldDraw:
             ("control_id", control_id), ("state", state), ("order", order),
             ("z_order", z_order), ("bounds", bounds), ("label", label),
             ("content", content),
+        ):
+            object.__setattr__(self, name, value)
+
+
+@dataclass(frozen=True, slots=True)
+class DialogDraw:
+    """A dialog or notice: its title, its client-broken message lines and
+    severity in exact slots; its contents are other roots above it."""
+
+    control_id: int
+    state: ControlState
+    order: int
+    z_order: int
+    bounds: ObjectBounds
+    title: str
+    content: DialogContent
+
+    def __post_init__(self) -> None:
+        control_id, state, order, z_order, bounds, content = _root_draw_fields(
+            ControlKind.DIALOG, self.control_id, self.state, self.order,
+            self.z_order, self.bounds, self.content,
+        )
+        assert isinstance(content, DialogContent)
+        title = _control_text("title", self.title, nonempty=False)
+        validate_control_shape(
+            kind=ControlKind.DIALOG, state=state, z_order=z_order,
+            parent_control_id=0, order=order, bounds=bounds,
+            label=title, shortcut="", content=content,
+        )
+        for name, value in (
+            ("control_id", control_id), ("state", state), ("order", order),
+            ("z_order", z_order), ("bounds", bounds), ("title", title),
+            ("content", content),
+        ):
+            object.__setattr__(self, name, value)
+
+
+@dataclass(frozen=True, slots=True)
+class ButtonDraw:
+    """A button: its label, optional shortcut, and role flags."""
+
+    control_id: int
+    state: ControlState
+    order: int
+    z_order: int
+    bounds: ObjectBounds
+    label: str
+    shortcut: str
+    content: ButtonContent
+
+    def __post_init__(self) -> None:
+        control_id, state, order, z_order, bounds, content = _root_draw_fields(
+            ControlKind.BUTTON, self.control_id, self.state, self.order,
+            self.z_order, self.bounds, self.content,
+        )
+        assert isinstance(content, ButtonContent)
+        label = _control_text("label", self.label, nonempty=True)
+        shortcut = _control_text("shortcut", self.shortcut, nonempty=False)
+        validate_control_shape(
+            kind=ControlKind.BUTTON, state=state, z_order=z_order,
+            parent_control_id=0, order=order, bounds=bounds,
+            label=label, shortcut=shortcut, content=content,
+        )
+        for name, value in (
+            ("control_id", control_id), ("state", state), ("order", order),
+            ("z_order", z_order), ("bounds", bounds), ("label", label),
+            ("shortcut", shortcut), ("content", content),
         ):
             object.__setattr__(self, name, value)
 
@@ -1428,6 +1506,7 @@ ObjectDraw = (
 SemanticRootDraw = (
     MenuBarDraw | TextAreaDraw | TextGridDraw | TabSetDraw
     | ItemViewDraw | TaskBarDraw | FieldDraw | DocumentDraw
+    | DialogDraw | ButtonDraw
 )
 RetainedDraw = ObjectDraw | SemanticRootDraw
 
@@ -1505,6 +1584,11 @@ class RetainedRegionDraw:
     z_order: int
     clipped: bool
     draws: tuple[RetainedDraw, ...]
+    # A MODAL region is a modal scope (RETAINED-1 section 9).  The control
+    # IDs of this region's draws that a visible modal region above it makes
+    # inactive: they take no input, and a renderer may show them dimmed.
+    modal: bool = False
+    inactive_controls: frozenset[int] = frozenset()
 
     def __post_init__(self) -> None:
         for name in ("owner_id", "owner_generation", "region_id"):
@@ -1567,6 +1651,8 @@ class RetainedRegionDraw:
                     FieldDraw,
                     ItemViewDraw,
                     DocumentDraw,
+                    DialogDraw,
+                    ButtonDraw,
                 ),
             )
             for draw in draws
@@ -1574,6 +1660,15 @@ class RetainedRegionDraw:
             raise TypeError("draws contain a value outside the retained draw vocabulary")
         if tuple(sorted(draws, key=_draw_order_key)) != draws:
             raise ValueError("region draw values are not in back-to-front order")
+        object.__setattr__(self, "modal", _boolean("modal", self.modal))
+        inactive = frozenset(self.inactive_controls)
+        semantic_ids = set()
+        for draw in draws:
+            if not isinstance(draw, _OBJECT_DRAW_TYPES):
+                semantic_ids |= _semantic_draw_control_ids(draw)
+        if not inactive <= semantic_ids:
+            raise ValueError("inactive controls must name this region's semantic draws")
+        object.__setattr__(self, "inactive_controls", inactive)
         if any(
             isinstance(draw, PaneDraw) and draw.content_region_id == self.region_id
             for draw in draws
@@ -2206,6 +2301,29 @@ def _project_field(root_id: int, controls: _ValidatedControlMap) -> FieldDraw:
     )
 
 
+def _project_dialog(root_id: int, controls: _ValidatedControlMap) -> DialogDraw:
+    root, kind, state, content = controls[root_id]
+    if kind is not ControlKind.DIALOG or root.bounds is None or not isinstance(
+            content, DialogContent):
+        raise RetainedViewError("semantic root is not a bounded DIALOG")
+    return DialogDraw(
+        control_id=root.control_id, state=state, order=root.order,
+        z_order=root.z_order, bounds=root.bounds, title=root.label, content=content,
+    )
+
+
+def _project_button(root_id: int, controls: _ValidatedControlMap) -> ButtonDraw:
+    root, kind, state, content = controls[root_id]
+    if kind is not ControlKind.BUTTON or root.bounds is None or not isinstance(
+            content, ButtonContent):
+        raise RetainedViewError("semantic root is not a bounded BUTTON")
+    return ButtonDraw(
+        control_id=root.control_id, state=state, order=root.order,
+        z_order=root.z_order, bounds=root.bounds, label=root.label,
+        shortcut=root.shortcut, content=content,
+    )
+
+
 def _project_semantic_root(
     root_id: int,
     controls: _ValidatedControlMap,
@@ -2226,6 +2344,10 @@ def _project_semantic_root(
         return _project_field(root_id, controls)
     if kind is ControlKind.DOCUMENT:
         return _project_document(root_id, controls)
+    if kind is ControlKind.DIALOG:
+        return _project_dialog(root_id, controls)
+    if kind is ControlKind.BUTTON:
+        return _project_button(root_id, controls)
     raise RetainedViewError(f"semantic root has unsupported kind {kind.name}")
 
 
@@ -2672,15 +2794,19 @@ def project_composite_draw_plane(
                     f"visible {definition.kind.name} object "
                     f"{definition.object_id} is unsupported by draw-plane rendering"
                 )
+            inactive: set[int] = set()
             for control_id in control_roots.get(region.region_id, ()):
                 if controls[control_id][2] & ControlState.VISIBLE:
-                    draws.append(
-                        _project_semantic_root(
-                            control_id,
-                            controls,
-                            control_children,
-                        )
+                    root_draw = _project_semantic_root(
+                        control_id,
+                        controls,
+                        control_children,
                     )
+                    draws.append(root_draw)
+                    if control_beneath_modal(
+                        retained, owner_scene, controls[control_id][0], region
+                    ):
+                        inactive |= _semantic_draw_control_ids(root_draw)
             draws.sort(key=_draw_order_key)
             projected_regions.append(
                 RetainedRegionDraw(
@@ -2698,6 +2824,8 @@ def project_composite_draw_plane(
                     z_order=region.z_order,
                     clipped=region.clipped,
                     draws=tuple(draws),
+                    modal=region.modal,
+                    inactive_controls=frozenset(inactive),
                 )
             )
 
@@ -2720,6 +2848,8 @@ def project_composite_draw_plane(
 __all__ = [
     "DisplayScope",
     "FieldDraw",
+    "DialogDraw",
+    "ButtonDraw",
     "GlyphRunDraw",
     "ImageDraw",
     "ImageResourceManifest",

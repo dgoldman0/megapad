@@ -1657,6 +1657,47 @@ def test_cards_take_exact_rows_wrap_their_fields_and_scroll_by_rows():
     assert _ink(surface, 7, 1, plain) and not _ink(surface, 8, 1, plain)
 
 
+
+def test_a_checkable_card_shows_its_box_before_its_first_field():
+    pygame = pytest.importorskip("pygame")
+    S = ItemState
+    content = ItemViewContent(
+        6, ItemViewRole.CARDS, 0,
+        (ItemColumn(ItemColumnKind.TEXT, wrap=True), ItemColumn(ItemColumnKind.TEXT)),
+        2, 0, 2,
+        (
+            # A checkable card's name is 14 cells at width 20, so
+            # "Morning bulletin" breaks after "Morning".
+            _view_item(1, 0, "Morning bulletin", "rss", state=S.CHECKABLE | S.CHECKED),
+            _view_item(2, 1, "Evening", "atom", state=S.CHECKABLE),
+        ),
+    )
+    draw = ItemViewDraw(53, VISIBLE | ENABLED, 0, 0, ObjectBounds(0, 0, 20, 6), content)
+    surface, result = _render(pygame, _plane(_region(draw)))
+    (target,) = [e for e in result.hit_entries if isinstance(e, ItemHitTarget)]
+    assert [(part.item_key, part.area) for part in target.items] == [
+        (1, PixelRect(0, 0, 200, 30)),
+        (2, PixelRect(0, 30, 200, 50)),
+    ]
+    # Each box is one cell in on its card's first row, and a press on it
+    # checks; elsewhere a press selects.
+    assert target.item_at(15, 5) == ("check", 1)
+    assert target.item_at(15, 35) == ("check", 2)
+    assert target.item_at(15, 15) == ("select", 1)
+    assert target.item_at(100, 5) == ("select", 1)
+    plain = tuple(surface.get_at((175, 5)))[:3]
+    # The box takes cells 1 and 2, and the name starts five cells in.
+    assert _ink(surface, 1, 0, plain) and _ink(surface, 2, 0, plain)
+    assert not _ink(surface, 3, 0, plain) and not _ink(surface, 4, 0, plain)
+    assert _ink(surface, 5, 0, plain) and _ink(surface, 11, 0, plain)
+    assert not _ink(surface, 12, 0, plain)
+    # "bulletin" keeps the name's start; the box is on the first row only.
+    assert _ink(surface, 5, 1, plain) and not _ink(surface, 1, 1, plain)
+    # A later field is three cells in.
+    assert _ink(surface, 3, 2, plain) and not _ink(surface, 1, 2, plain)
+    assert _ink(surface, 1, 3, plain) and _ink(surface, 5, 3, plain)
+
+
 # --- Documents ----------------------------------------------------------------
 
 from rich_terminal.pygame_view import DocumentHitTarget  # noqa: E402

@@ -93,6 +93,7 @@ def _policy() -> RetainedPolicy:
         minimum_presentation_interval_us=16_667,
         total_sample_slots=64,
         total_utf8_bytes=256,
+        total_path_points=64,
         client_to_terminal_max_payload=512,
         terminal_to_client_max_payload=64,
         base_max_transaction_bytes=8192,
@@ -112,6 +113,7 @@ def _quotas(**changes) -> OwnerQuotas:
         "resource_bytes": 0,
         "utf8_bytes": 128,
         "sample_slots": 32,
+        "path_points": 8,
     }
     values.update(changes)
     return OwnerQuotas(**values)
@@ -234,6 +236,7 @@ def test_complete_definition_target_is_hidden_then_atomically_revealed():
     assert owner_scene.usage.series == 2
     assert owner_scene.usage.utf8_bytes == len("Level".encode()) + len("-12.5 dB".encode())
     assert owner_scene.usage.sample_slots == 16
+    assert owner_scene.usage.path_points == 2
     assert owners.require_live(owner).high_water.region == 1
     assert owners.require_live(owner).high_water.object == 8
     assert owners.require_live(owner).high_water.series == 2
@@ -316,6 +319,38 @@ def test_replace_start_promotes_layout_requirement_to_replacement_pending():
     assert scene.state.requirement is RebuildRequirement.REPLACE
 
 
+def test_line_points_come_from_the_owner_path_point_quota():
+    clock, _owners, owner, scene = _domain(quotas=_quotas(path_points=5))
+    corners = (Point(0, 0), Point(0xFFFFFFFF, 0), Point(0xFFFFFFFF, 0xFFFFFFFF))
+    line = lambda object_id, points: _object(
+        owner, object_id, PolylineBody(points, 0x01000000, GREEN)
+    )
+    usage = lambda target: target.owners[owner.owner_id].usage.path_points
+    _begin(clock, scene, 2, RetainedMode.REPLACE_START)
+    scene.define_region(_region(owner))
+    scene.define_object(line(1, corners))
+    scene.define_object(line(2, corners[:2]))
+    _install(scene, clock, CommitDisposition.COMMIT)
+    assert usage(scene.state.hidden) == 5
+
+    # A replacement changes usage by the difference and a drop gives it
+    # back, so three more points fit the five reserved.
+    _begin(clock, scene, 3, RetainedMode.REPLACE_CONTINUE)
+    scene.replace_object(line(1, corners[:2]))
+    scene.drop_object(owner, 2)
+    scene.define_object(line(3, corners))
+    _install(scene, clock, CommitDisposition.COMMIT_AND_REVEAL)
+    assert usage(scene.state.active) == 5
+
+    # A sixth point does not fit, and the refused transaction changes nothing.
+    active = scene.state.active
+    _begin(clock, scene, 4, RetainedMode.DELTA)
+    with pytest.raises(SceneModelError) as over:
+        scene.define_object(line(4, corners[:2]))
+    assert over.value.code is SceneErrorCode.QUOTA
+    assert scene.state.active is active
+
+
 def test_dependency_or_quota_rejection_leaves_scene_and_id_ledger_unchanged():
     clock, owners, owner, scene = _domain(quotas=_quotas(objects=1))
     initial_scene = scene.state
@@ -371,6 +406,7 @@ def test_zero_glyph_capacity_rejects_even_an_empty_background_paint():
         _policy(),
         features=RetainedFeature.CORE,
         max_path_points=0,
+        total_path_points=0,
         max_glyph_run_bytes=0,
         max_series=0,
         max_samples_per_append=0,
@@ -379,7 +415,7 @@ def test_zero_glyph_capacity_rejects_even_an_empty_background_paint():
         total_sample_slots=0,
         total_utf8_bytes=0,
     )
-    quotas = _quotas(objects=1, series=0, utf8_bytes=0, sample_slots=0)
+    quotas = _quotas(objects=1, series=0, utf8_bytes=0, sample_slots=0, path_points=0)
     clock, _owners, owner, scene = _domain(policy=policy, quotas=quotas)
     _begin(clock, scene, 2, RetainedMode.REPLACE_START)
     scene.define_region(_region(owner))

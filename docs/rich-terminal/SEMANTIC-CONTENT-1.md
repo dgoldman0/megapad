@@ -384,8 +384,7 @@ bounds before it commits the control.
 The role fixes the structure:
 
 - In a `LIST`, `TABLE`, or `CARDS` view, every item is an `ITEM` with
-  parent zero and depth zero, and none is `EXPANDABLE`. No `CARDS` item is
-  `CHECKABLE`.
+  parent zero and depth zero, and none is `EXPANDABLE`.
 - In a `TREE`, every item is an `ITEM`. A top-level item has parent zero and
   depth zero. Any other item names its parent and has depth one more than
   the parent's. A carried parent has a lower ordinal and is `EXPANDABLE`
@@ -419,9 +418,10 @@ aligned at its column's end.
 
 `CARDS` shows each item's fields together as one card, and its rows are
 exact, so that client and renderer agree on every row. With `W` the root's
-width in cells, field 0's lines are at most `max(W - 2, 1)` cells wide and
-each later field's at most `max(W - 4, 1)`. A card's rows are its fields'
-lines, column by column:
+width in cells, field 0's lines are at most `max(W - 2, 1)` cells wide, or
+`max(W - 6, 1)` in a `CHECKABLE` card, whose check box comes before them,
+and each later field's at most `max(W - 4, 1)`. A card's rows are its
+fields' lines, column by column:
 
 - a field in a column without `WRAP` is one line, clipped at its width;
 - a field in a `WRAP` column is broken into lines of its width, paragraph by
@@ -432,7 +432,9 @@ The first viewport item starts `viewport row` rows above the root's top
 edge, each later item starts on the row after the one before it ends, and
 rows past the root's bottom edge are clipped. The renderer adds no row
 between cards and chooses where each field's lines sit across the card,
-within their widths. A card box or other mark lies within the card's rows.
+within their widths. A card box or other mark lies within the card's rows,
+and a `CHECKABLE` card's check box on its first row, before field 0's
+lines.
 
 ## DOC1 body
 
@@ -633,7 +635,9 @@ Unicode-scalar boundary within that item. The terminal computes a position
 from its own presentation of the content and emits an event only for a
 visible, effectively enabled root. `READ_ONLY` content admits all four kinds,
 because they move the caret, selection, or viewport, or follow a link, and
-never change the text.
+never change the text. `PLACE` and `EXTEND` also name positions in a TEXT
+`FIELD`; that use needs feature bit 14 instead of 9, and
+`APT-1-RETAINED-1.md` Section 9.2 defines it.
 
 `PLACE` puts the caret in a text area or selects a grid item:
 

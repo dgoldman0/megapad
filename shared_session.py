@@ -21,6 +21,8 @@ from typing import Any
 from rich_terminal import DriverStatus
 from rich_terminal.apt1 import UINT32_MAX, UINT64_MAX
 from rich_terminal.retained_view import (
+    ButtonDraw,
+    DialogDraw,
     INT32_MAX,
     INT32_MIN,
     INT64_MAX,
@@ -81,6 +83,10 @@ from rich_terminal.semantic_items import (
 )
 from rich_terminal.semantic_fields import (
     FieldContent, decode_field_content, encode_field_content,
+)
+from rich_terminal.semantic_dialogs import (
+    ButtonContent, DialogContent, decode_button_content, decode_dialog_content,
+    encode_button_content, encode_dialog_content,
 )
 from rich_terminal.semantic_documents import (
     DocumentContent,
@@ -808,6 +814,14 @@ _FIELD_WIRE_FIELDS = (
     "kind", "control_id", "state", "order", "z_order", "bounds", "label",
     "content_fdc1_base64",
 )
+_DIALOG_WIRE_FIELDS = (
+    "kind", "control_id", "state", "order", "z_order", "bounds", "title",
+    "content_dlg1_base64",
+)
+_BUTTON_WIRE_FIELDS = (
+    "kind", "control_id", "state", "order", "z_order", "bounds", "label",
+    "shortcut", "content_btn1_base64",
+)
 _TABSET_WIRE_FIELDS = (
     "kind",
     "control_id",
@@ -845,6 +859,8 @@ _REGION_HEADER_FIELDS = (
     "clip_rows",
     "z_order",
     "clipped",
+    "modal",
+    "inactive_controls",
 )
 _REGION_WIRE_FIELDS = _REGION_HEADER_FIELDS + ("draws",)
 # A region carried as changes against the base region with its identity.
@@ -1031,6 +1047,22 @@ def _field_content_from_wire(value, name: str) -> FieldContent:
         raise ValueError(f"{name} is not canonical FDC1: {exc}") from exc
 
 
+def _dialog_content_from_wire(value, name: str) -> DialogContent:
+    payload = _canonical_base64(value, name)
+    try:
+        return decode_dialog_content(payload)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} is not canonical DLG1: {exc}") from exc
+
+
+def _button_content_from_wire(value, name: str) -> ButtonContent:
+    payload = _canonical_base64(value, name)
+    try:
+        return decode_button_content(payload)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} is not canonical BTN1: {exc}") from exc
+
+
 def _semantic_content_from_wire(value, name: str) -> SemanticTextContent:
     encoded = _wire_text(value, name)
     try:
@@ -1150,6 +1182,8 @@ def _retained_draw_to_wire(
         | TabSetDraw
         | TaskBarDraw
         | FieldDraw
+        | DialogDraw
+        | ButtonDraw
     ),
 ) -> dict:
     if isinstance(draw, GlyphRunDraw):
@@ -1421,6 +1455,34 @@ def _retained_draw_to_wire(
             "label": draw.label,
             "content_fdc1_base64": _field_content_to_wire(draw.content),
         }
+    if isinstance(draw, DialogDraw):
+        validate_control_shape(
+            kind=ControlKind.DIALOG, state=draw.state, order=draw.order,
+            z_order=draw.z_order, parent_control_id=0, bounds=draw.bounds,
+            label=draw.title, shortcut="", content=draw.content,
+        )
+        return {
+            "kind": "dialog", "control_id": draw.control_id,
+            "state": int(draw.state), "order": draw.order,
+            "z_order": draw.z_order, "bounds": _bounds_to_wire(draw.bounds),
+            "title": draw.title,
+            "content_dlg1_base64": base64.b64encode(
+                encode_dialog_content(draw.content)).decode("ascii"),
+        }
+    if isinstance(draw, ButtonDraw):
+        validate_control_shape(
+            kind=ControlKind.BUTTON, state=draw.state, order=draw.order,
+            z_order=draw.z_order, parent_control_id=0, bounds=draw.bounds,
+            label=draw.label, shortcut=draw.shortcut, content=draw.content,
+        )
+        return {
+            "kind": "button", "control_id": draw.control_id,
+            "state": int(draw.state), "order": draw.order,
+            "z_order": draw.z_order, "bounds": _bounds_to_wire(draw.bounds),
+            "label": draw.label, "shortcut": draw.shortcut,
+            "content_btn1_base64": base64.b64encode(
+                encode_button_content(draw.content)).decode("ascii"),
+        }
     if isinstance(draw, TabSetDraw):
         return {
             "kind": "tabset",
@@ -1459,6 +1521,8 @@ def _region_header_to_wire(region: RetainedRegionDraw) -> dict:
         "clip_rows": region.clip_rows,
         "z_order": region.z_order,
         "clipped": region.clipped,
+        "modal": region.modal,
+        "inactive_controls": sorted(region.inactive_controls),
     }
 
 
@@ -1760,6 +1824,45 @@ def _item_view_from_wire(data, name: str) -> ItemViewDraw:
     )
 
 
+def _dialog_from_wire(data, name: str) -> DialogDraw:
+    wire = _wire_object(data, name, _DIALOG_WIRE_FIELDS)
+    if wire["kind"] != "dialog":
+        raise ValueError(f"{name} kind must be dialog")
+    return DialogDraw(
+        control_id=_wire_integer(wire["control_id"], f"{name} control_id",
+                                 minimum=1, maximum=UINT64_MAX),
+        state=_control_state_from_wire(wire["state"], f"{name} state"),
+        order=_wire_integer(wire["order"], f"{name} order",
+                            minimum=0, maximum=UINT32_MAX),
+        z_order=_wire_integer(wire["z_order"], f"{name} z_order",
+                              minimum=INT32_MIN, maximum=INT32_MAX),
+        bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+        title=_wire_text(wire["title"], f"{name} title"),
+        content=_dialog_content_from_wire(wire["content_dlg1_base64"],
+                                          f"{name} content_dlg1_base64"),
+    )
+
+
+def _button_from_wire(data, name: str) -> ButtonDraw:
+    wire = _wire_object(data, name, _BUTTON_WIRE_FIELDS)
+    if wire["kind"] != "button":
+        raise ValueError(f"{name} kind must be button")
+    return ButtonDraw(
+        control_id=_wire_integer(wire["control_id"], f"{name} control_id",
+                                 minimum=1, maximum=UINT64_MAX),
+        state=_control_state_from_wire(wire["state"], f"{name} state"),
+        order=_wire_integer(wire["order"], f"{name} order",
+                            minimum=0, maximum=UINT32_MAX),
+        z_order=_wire_integer(wire["z_order"], f"{name} z_order",
+                              minimum=INT32_MIN, maximum=INT32_MAX),
+        bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+        label=_wire_text(wire["label"], f"{name} label"),
+        shortcut=_wire_text(wire["shortcut"], f"{name} shortcut"),
+        content=_button_content_from_wire(wire["content_btn1_base64"],
+                                          f"{name} content_btn1_base64"),
+    )
+
+
 def _field_from_wire(data, name: str) -> FieldDraw:
     wire = _wire_object(data, name, _FIELD_WIRE_FIELDS)
     if wire["kind"] != "field":
@@ -1903,6 +2006,8 @@ def _retained_draw_from_wire(
     | ItemViewDraw
     | FieldDraw
     | DocumentDraw
+    | DialogDraw
+    | ButtonDraw
 ):
     if not isinstance(data, Mapping):
         raise TypeError(f"{name} must be an object")
@@ -2300,6 +2405,10 @@ def _retained_draw_from_wire(
         return _document_from_wire(data, name)
     if kind == "field":
         return _field_from_wire(data, name)
+    if kind == "dialog":
+        return _dialog_from_wire(data, name)
+    if kind == "button":
+        return _button_from_wire(data, name)
     raise ValueError(f"{name} kind is not a retained draw kind")
 
 
@@ -2421,7 +2530,20 @@ def _region_header_from_wire(region: Mapping[str, Any], prefix: str) -> dict:
             maximum=INT32_MAX,
         ),
         "clipped": _wire_boolean(region["clipped"], f"{prefix} clipped"),
+        "modal": _wire_boolean(region["modal"], f"{prefix} modal"),
+        "inactive_controls": _inactive_controls_from_wire(
+            region["inactive_controls"], f"{prefix} inactive_controls"),
     }
+
+
+def _inactive_controls_from_wire(value, name: str) -> frozenset[int]:
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"{name} must be an array")
+    ids = [_wire_integer(item, f"{name} item", minimum=1, maximum=UINT64_MAX)
+           for item in value]
+    if ids != sorted(set(ids)):
+        raise ValueError(f"{name} must be strictly ascending")
+    return frozenset(ids)
 
 
 def _region_draws_from_wire(region: Mapping[str, Any], prefix: str) -> tuple:
