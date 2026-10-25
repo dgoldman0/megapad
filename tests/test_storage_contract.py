@@ -721,7 +721,7 @@ def test_flush_is_the_explicit_durability_boundary(tmp_path, monkeypatch):
 
     assert path.read_bytes()[:SECTOR_SIZE] == b"\x00" * SECTOR_SIZE
     calls = []
-    monkeypatch.setattr("devices.os.fsync", lambda fd: calls.append(fd))
+    monkeypatch.setattr("shared.storage.os.fsync", lambda fd: calls.append(fd))
 
     device.write8(0x00, STORAGE_CMD_FLUSH)
 
@@ -751,7 +751,7 @@ def test_flush_faults_are_visible_and_host_oserror_is_contained(
     def fail_fsync(_fd):
         raise OSError("host unavailable")
 
-    monkeypatch.setattr("devices.os.fsync", fail_fsync)
+    monkeypatch.setattr("shared.storage.os.fsync", fail_fsync)
     device.write8(0x00, STORAGE_CMD_FLUSH)
     assert device.result == (
         STORAGE_RESULT_PARTIAL | STORAGE_RESULT_FLUSH_FAILURE
@@ -903,3 +903,26 @@ def test_system_cold_boot_resets_controller_but_preserves_media_identity(tmp_pat
     assert device.result == STORAGE_RESULT_OK
     assert device.active_request is None
     assert not device.stalled
+
+
+def test_flush_writes_only_the_sectors_the_guest_changed(tmp_path):
+    device, memory, path = _attached_device(tmp_path)
+    memory[:SECTOR_SIZE] = b"\xE7" * SECTOR_SIZE
+    _program(device, sector=1)
+    device.write8(0x00, STORAGE_CMD_WRITE)
+    device.write_sectors(2, 1, b"\xE8" * SECTOR_SIZE)
+    # Bytes put in sector 3 behind the device's back show that the flush
+    # leaves sectors nobody changed alone.
+    with path.open("r+b") as stream:
+        stream.seek(3 * SECTOR_SIZE)
+        stream.write(b"\xEE" * SECTOR_SIZE)
+
+    device.write8(0x00, STORAGE_CMD_FLUSH)
+
+    assert device.result == STORAGE_RESULT_OK
+    assert path.read_bytes() == (
+        b"\x00" * SECTOR_SIZE
+        + b"\xE7" * SECTOR_SIZE
+        + b"\xE8" * SECTOR_SIZE
+        + b"\xEE" * SECTOR_SIZE
+    )

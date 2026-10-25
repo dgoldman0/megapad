@@ -1,6 +1,10 @@
-"""Machine-independent constants for the MegaPad block-storage ABI."""
+"""Machine-independent constants for the MegaPad block-storage ABI, and the
+host file that holds a storage device's media."""
 
 from __future__ import annotations
+
+import os
+from pathlib import Path
 
 
 SECTOR_SIZE = 512
@@ -54,7 +58,98 @@ STORAGE_CAPS = (
 )
 
 
+class HostImageFile:
+    """The host file that holds a storage device's media.
+
+    The device marks each sector it changes, and a flush writes only the
+    marked sectors, in place, then syncs the file.  The whole image is
+    written instead when the file is not known to hold the media: after
+    media is attached from anything but that file, or when the file is
+    missing or of another size.  A flush with nothing marked leaves the
+    file alone, since the last flush already made it durable.  A failed
+    flush keeps every mark, so the next one writes them all again.
+    """
+
+    __slots__ = ("_dirty", "_whole")
+
+    def __init__(self) -> None:
+        self._dirty: set[int] = set()
+        self._whole = True
+
+    def media_attached(self, *, file_holds_media: bool) -> None:
+        """New media: the file already holds it, or must receive all of it."""
+
+        self._dirty.clear()
+        self._whole = not file_holds_media
+
+    def media_detached(self) -> None:
+        self._dirty.clear()
+        self._whole = False
+
+    def mark(self, first_sector: int, count: int = 1) -> None:
+        """Sectors the device has changed, or may have, since the last flush."""
+
+        self._dirty.update(range(first_sector, first_sector + count))
+
+    def flush(self, path: str | os.PathLike[str], image: bytearray) -> None:
+        """Make PATH hold IMAGE durably.  Host failures raise ``OSError``."""
+
+        if not self._whole and not self._dirty:
+            return
+        path = Path(path)
+        try:
+            stream = path.open("r+b")
+        except FileNotFoundError:
+            stream = path.open("wb")
+            whole = True
+        else:
+            whole = (
+                self._whole
+                or os.fstat(stream.fileno()).st_size != len(image)
+            )
+        with stream, memoryview(image) as view:
+            if whole:
+                _write_at(stream, 0, view)
+                stream.truncate(len(image))
+            else:
+                for first, count in _runs(sorted(self._dirty)):
+                    start = first * SECTOR_SIZE
+                    _write_at(
+                        stream, start, view[start:start + count * SECTOR_SIZE]
+                    )
+            stream.flush()
+            os.fsync(stream.fileno())
+        self._dirty.clear()
+        self._whole = False
+
+
+def _runs(sectors: list[int]):
+    """Consecutive sectors of a sorted list, as (first, count) runs."""
+
+    first = previous = None
+    for sector in sectors:
+        if previous is not None and sector == previous + 1:
+            previous = sector
+            continue
+        if first is not None:
+            yield first, previous - first + 1
+        first = previous = sector
+    if first is not None:
+        yield first, previous - first + 1
+
+
+def _write_at(stream, offset: int, data: memoryview) -> None:
+    stream.seek(offset)
+    written = stream.write(data)
+    if written != len(data):
+        raise OSError(
+            f"short storage image write: {written} of {len(data)} bytes "
+            f"at offset {offset}"
+        )
+
+
 __all__ = [
+    "HostImageFile",
     "SECTOR_SIZE",
     "STORAGE_CAPS",
     "STORAGE_CAP_COMPLETION",

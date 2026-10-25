@@ -14,6 +14,7 @@ from pathlib import Path
 from shared.cells import MASK64
 from shared.storage import (
     SECTOR_SIZE,
+    HostImageFile,
     STORAGE_CAP_COMPLETION,
     STORAGE_CAP_FLUSH,
     STORAGE_CAP_GEN_GUARD,
@@ -79,6 +80,7 @@ class HostedStorageService:
         "_capabilities",
         "_claimed",
         "_completion",
+        "_host_file",
         "_image",
         "_image_path",
         "_media_changed",
@@ -113,6 +115,7 @@ class HostedStorageService:
         self._claimed = False
         self._image = bytearray()
         self._image_path: Path | None = None
+        self._host_file = HostImageFile()
         self._present = False
         self._write_protected = False
         self._media_generation = 0
@@ -126,13 +129,17 @@ class HostedStorageService:
             path = Path(image_path)
             try:
                 payload = path.read_bytes()
+                found = True
             except FileNotFoundError:
                 payload = bytes(SECTOR_SIZE * DEFAULT_IMAGE_SECTORS)
+                found = False
             self.attach(
                 payload,
                 image_path=path,
                 write_protected=write_protected,
             )
+            # Media read from its own file needs only its changes written.
+            self._host_file.media_attached(file_holds_media=found)
         elif image is not None:
             self.attach(image, write_protected=write_protected)
         elif write_protected:
@@ -223,7 +230,11 @@ class HostedStorageService:
         image_path: str | os.PathLike[str] | Path | None = None,
         write_protected: bool = False,
     ) -> None:
-        """Replace media without flushing and advance its wrapping identity."""
+        """Replace media without flushing and advance its wrapping identity.
+
+        The first flush writes the whole image to IMAGE_PATH, which is not
+        known to hold it.
+        """
 
         if not isinstance(write_protected, bool):
             raise TypeError("storage write_protected flag must be bool")
@@ -231,6 +242,7 @@ class HostedStorageService:
         next_path = None if image_path is None else Path(image_path)
         self._image = payload
         self._image_path = next_path
+        self._host_file.media_attached(file_holds_media=False)
         self._present = True
         self._write_protected = write_protected
         self._advance_media_generation()
@@ -240,6 +252,7 @@ class HostedStorageService:
 
         self._image = bytearray()
         self._image_path = None
+        self._host_file.media_detached()
         self._present = False
         self._write_protected = False
         self._advance_media_generation()
@@ -406,6 +419,7 @@ class HostedStorageService:
             try:
                 if write:
                     payload = memory.read_bytes(chunk_dma, chunk_bytes)
+                    self._host_file.mark(lba + completed, chunk_count)
                     image[media_start:media_limit] = payload
                 else:
                     memory.write_bytes(
@@ -457,18 +471,9 @@ class HostedStorageService:
             return STORAGE_RESULT_MEDIA_REMOVED
 
         image_path = self._image_path
-        image = bytes(self._image)
         try:
             if image_path is not None:
-                with image_path.open("wb") as stream:
-                    written = stream.write(image)
-                    if written != len(image):
-                        raise OSError(
-                            f"short storage image write: {written} of "
-                            f"{len(image)} bytes"
-                        )
-                    stream.flush()
-                    os.fsync(stream.fileno())
+                self._host_file.flush(image_path, self._image)
         except OSError:
             result = STORAGE_RESULT_FLUSH_FAILURE | STORAGE_RESULT_PARTIAL
             self._publish_result(result, 0)

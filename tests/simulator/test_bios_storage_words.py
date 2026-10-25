@@ -422,6 +422,48 @@ def test_pathless_checked_flush_completes_as_a_semantic_barrier() -> None:
     assert storage.transferred == 0
 
 
+def test_flush_writes_only_the_sectors_the_guest_changed(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "media.img"
+    path.write_bytes(bytes(4 * SECTOR_SIZE))
+    storage = HostedStorageService(image_path=path)
+    runtime = MegaForthRuntime(storage=storage)
+    runtime.memory.fill(0, SECTOR_SIZE, 0xE7)
+    assert _execute(runtime, "DISK-WRITE-CHECKED", 0, 1, 1) == (1, 0)
+    # Bytes put in sector 3 behind the device's back show that the flush
+    # leaves sectors nobody changed alone.
+    with path.open("r+b") as stream:
+        stream.seek(3 * SECTOR_SIZE)
+        stream.write(b"\xEE" * SECTOR_SIZE)
+
+    assert _execute(runtime, "DISK-FLUSH-CHECKED") == (0,)
+    assert path.read_bytes() == (
+        bytes(SECTOR_SIZE)
+        + b"\xE7" * SECTOR_SIZE
+        + bytes(SECTOR_SIZE)
+        + b"\xEE" * SECTOR_SIZE
+    )
+
+    # With nothing written since, a flush writes nothing.
+    path.write_bytes(bytes(4 * SECTOR_SIZE))
+    assert _execute(runtime, "DISK-FLUSH-CHECKED") == (0,)
+    assert path.read_bytes() == bytes(4 * SECTOR_SIZE)
+
+
+def test_media_attached_from_bytes_is_written_whole_by_the_first_flush(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "copy.img"
+    path.write_bytes(b"\xEE" * (2 * SECTOR_SIZE))
+    storage = HostedStorageService(bytes(SECTOR_SIZE))
+    storage.attach(b"\x5A" * (2 * SECTOR_SIZE), image_path=path)
+    runtime = MegaForthRuntime(storage=storage)
+
+    assert _execute(runtime, "DISK-FLUSH-CHECKED") == (0,)
+    assert path.read_bytes() == b"\x5A" * (2 * SECTOR_SIZE)
+
+
 def test_generation_guard_rejects_a_swap_at_flush_acceptance(
     tmp_path: Path,
 ) -> None:

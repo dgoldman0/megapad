@@ -20,7 +20,6 @@ these through the MMIO dispatch layer in emulator/system.py.
 
 from __future__ import annotations
 import operator
-import os
 import socket
 import time
 import threading
@@ -59,6 +58,7 @@ from shared.mlkem import (
 )
 from shared.storage import (
     SECTOR_SIZE,
+    HostImageFile,
     STORAGE_CAPS,
     STORAGE_CAP_COMPLETION,
     STORAGE_CAP_FLUSH,
@@ -631,6 +631,7 @@ class Storage(Device):
         super().__init__("Storage", STORAGE_BASE, 0x25)
         self.image_path = image_path
         self._image_data: bytearray = bytearray()
+        self._host_file = HostImageFile()
         self._capacity_sectors: int = 0
         self.sector_num: int = 0
         self.dma_addr: int = 0
@@ -690,13 +691,16 @@ class Storage(Device):
             self.load_image(image_path)
 
     @staticmethod
-    def _read_image(path: str) -> bytearray:
+    def _read_image(path: str) -> tuple[bytearray, bool]:
+        """The image at PATH, and whether the file holds it: an absent file
+        gives a new empty 1 MiB image."""
         try:
             with open(path, "rb") as f:
                 image_data = bytearray(f.read())
+            found = True
         except FileNotFoundError:
-            # Create empty image
-            image_data = bytearray(SECTOR_SIZE * 2048)  # 1 MiB default
+            image_data = bytearray(SECTOR_SIZE * 2048)
+            found = False
         if len(image_data) % SECTOR_SIZE:
             raise ValueError(
                 f"storage image size {len(image_data)} is not a multiple "
@@ -704,17 +708,20 @@ class Storage(Device):
             )
         if len(image_data) // SECTOR_SIZE > 0xFFFF_FFFF:
             raise ValueError("storage image exceeds the u32 sector capacity")
-        return image_data
+        return image_data, found
 
     def load_image(self, path: str):
         """Attach a disk image, creating a 1 MiB image if it is absent."""
         self._require_cycle_mutation_allowed()
-        image_data = self._read_image(path)
-        self._replace_media(image_data, path)
+        image_data, found = self._read_image(path)
+        self._replace_media(image_data, path, file_holds_media=found)
 
-    def _replace_media(self, image_data: bytearray, path: str):
+    def _replace_media(
+        self, image_data: bytearray, path: str, *, file_holds_media: bool
+    ):
         self._abort_for_media_change()
         self._image_data = image_data
+        self._host_file.media_attached(file_holds_media=file_holds_media)
         self._capacity_sectors = len(image_data) // SECTOR_SIZE
         self.image_path = path
         self.status = STORAGE_STATUS_PRESENT
@@ -722,22 +729,16 @@ class Storage(Device):
         self.media_changed = True
 
     def save_image(self):
-        """Durably flush the complete attached image to its host file.
+        """Durably bring the host file up to the attached image.
 
-        Direct host callers see any ``OSError``.  The MMIO FLUSH command maps
-        it to a precise terminal result instead of allowing it to escape the
+        The sectors changed since the last save are written in place, or the
+        whole image when the file is not known to hold it.  Direct host
+        callers see any ``OSError``.  The MMIO FLUSH command maps it to a
+        precise terminal result instead of allowing it to escape the
         emulator.
         """
         if self.image_path is not None and self.status & STORAGE_STATUS_PRESENT:
-            with open(self.image_path, "wb") as f:
-                written = f.write(self._image_data)
-                if written != len(self._image_data):
-                    raise OSError(
-                        f"short storage image write: {written} of "
-                        f"{len(self._image_data)} bytes"
-                    )
-                f.flush()
-                os.fsync(f.fileno())
+            self._host_file.flush(self.image_path, self._image_data)
 
     def swap_image(self, new_path: str, *, save_current: bool = True):
         """Hot-swap to a different disk image.
@@ -747,10 +748,10 @@ class Storage(Device):
         empty image is created.
         """
         self._require_cycle_mutation_allowed()
-        image_data = self._read_image(new_path)
+        image_data, found = self._read_image(new_path)
         if save_current:
             self.save_image()
-        self._replace_media(image_data, new_path)
+        self._replace_media(image_data, new_path, file_holds_media=found)
 
     def detach_image(self, *, save: bool = True):
         """Detach the current disk image."""
@@ -759,6 +760,7 @@ class Storage(Device):
             self.save_image()
         self._abort_for_media_change()
         self._image_data = bytearray()
+        self._host_file.media_detached()
         self._capacity_sectors = 0
         self.image_path = None
         self.status = 0
@@ -768,6 +770,7 @@ class Storage(Device):
     def _force_fault_detach(self):
         """Remove media inside an active injected fault without recursing."""
         self._image_data = bytearray()
+        self._host_file.media_detached()
         self._capacity_sectors = 0
         self.image_path = None
         self.status = 0
@@ -986,6 +989,7 @@ class Storage(Device):
             raise ValueError(
                 f"storage write needs {transfer_size} bytes, got {len(data)}"
             )
+        self._host_file.mark(sector, count)
         self._image_data[start:end] = data[:transfer_size]
 
     def read8(self, offset: int) -> int:
@@ -1424,6 +1428,7 @@ class Storage(Device):
             self._dma_next_token += nbytes
             self._active_effect = True
             try:
+                self._host_file.mark(sector, count)
                 self._image_data[media_start:media_end] = payload
             except Exception:
                 if self._request_is_current(request):
@@ -1612,6 +1617,7 @@ class Storage(Device):
                 media_start = (
                     sector + self._dma_sector_index
                 ) * SECTOR_SIZE
+                self._host_file.mark(sector + self._dma_sector_index)
                 for byte_index, value in enumerate(
                     self._dma_write_sector
                 ):
