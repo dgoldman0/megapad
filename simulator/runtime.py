@@ -697,6 +697,7 @@ class MegaForthRuntime:
         diagnostics: HostedDiagnosticsService | None = None,
         timer: HostedTimerService | None = None,
         storage: HostedStorageService | None = None,
+        settings_storage: HostedStorageService | None = None,
         install_core_words: bool = True,
         execution_backend: str | None = None,
     ) -> None:
@@ -720,6 +721,12 @@ class MegaForthRuntime:
             raise TypeError("timer must be a HostedTimerService or None")
         if storage is not None and not isinstance(storage, HostedStorageService):
             raise TypeError("storage must be a HostedStorageService or None")
+        if settings_storage is not None and not isinstance(
+            settings_storage, HostedStorageService
+        ):
+            raise TypeError(
+                "settings_storage must be a HostedStorageService or None"
+            )
         if memory is None:
             from simulator.platform import create_one_core_address_space
 
@@ -777,6 +784,13 @@ class MegaForthRuntime:
             else timer.clone()
         )
         self.storage = HostedStorageService() if storage is None else storage
+        # The second storage controller's disk, the settings disk, whose
+        # medium is write-protected.  Without one the controller holds none.
+        self.settings_storage = (
+            HostedStorageService()
+            if settings_storage is None
+            else settings_storage
+        )
         self.tile = HostedTileService(
             self.memory,
             self.field,
@@ -936,6 +950,7 @@ class MegaForthRuntime:
                         guard_factory=self._native_execution.extension.TileIdentityGuard,
                     )
         self.storage.claim()
+        self.settings_storage.claim()
 
     @property
     def execution_backend(self) -> str:

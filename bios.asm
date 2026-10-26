@@ -8545,7 +8545,8 @@ disk_dma_span_ok:
 ; disk_command_checked: submit and wait for exactly one controller command.
 ;   R0 = command, R1 = LBA, R9 = DMA address, R10 = expected MEDIA_GEN,
 ;   R12 = controller count
-;   Caller owns FS lock and has validated the complete public request.
+;   Caller owns FS lock and has validated the complete public request; the
+;   controller is the one at var_disk_base, which the caller set under it.
 ;   Returns R0 = RESULT/TIMEOUT, R7 = TRANSFERRED.
 ;   COMPLETE is snapshotted only after an inherited busy command is gone, so
 ;   an old terminal publication cannot be mistaken for this request.
@@ -8559,10 +8560,13 @@ disk_command_checked:
     str r11, r10              ; +24 expected MEDIA_GEN
 
     ; Defense in depth for a legacy/raw command that bypassed FS lock.
+    ; The poll reads STATUS through R13, set once.
     ldi64 r12, 1048576
+    ldi64 r13, var_disk_base
+    ldn r13, r13
+    addi r13, 0x01
 disk_command_wait_idle:
-    ldi64 r11, 0xFFFF_FF00_0000_0201
-    ld.b r7, r11
+    ld.b r7, r13
     andi r7, 0x01
     cmpi r7, 0
     breq disk_command_idle
@@ -8572,7 +8576,9 @@ disk_command_wait_idle:
     lbr disk_command_timeout_before_issue
 
 disk_command_idle:
-    ldi64 r11, 0xFFFF_FF00_0000_0216
+    ldi64 r11, var_disk_base
+    ldn r11, r11
+    addi r11, 0x16
     ldi64 r0, read_mmio_u32_le
     call.l r0
     mov r11, r15
@@ -8583,17 +8589,23 @@ disk_command_idle:
     ldn r0, r15
     cmpi r0, 0xFF
     breq disk_command_issue
-    ldi64 r0, 0xFFFF_FF00_0000_0202
+    ldi64 r0, var_disk_base
+    ldn r0, r0
+    addi r0, 0x02
     ldi64 r11, write_mmio_u32_le
     call.l r11
-    ldi64 r0, 0xFFFF_FF00_0000_0206
+    ldi64 r0, var_disk_base
+    ldn r0, r0
+    addi r0, 0x06
     mov r1, r9
     ldi64 r11, write_mmio_addr8_le
     call.l r11
     mov r11, r15
     addi r11, 8
     ldn r12, r11
-    ldi64 r11, 0xFFFF_FF00_0000_020E
+    ldi64 r11, var_disk_base
+    ldn r11, r11
+    addi r11, 0x0E
     st.b r11, r12
 
 disk_command_issue:
@@ -8602,16 +8614,24 @@ disk_command_issue:
     mov r11, r15
     addi r11, 24
     ldn r1, r11
-    ldi64 r0, 0xFFFF_FF00_0000_0220
+    ldi64 r0, var_disk_base
+    ldn r0, r0
+    addi r0, 0x20
     ldi64 r11, write_mmio_u32_le
     call.l r11
     ldn r7, r15
-    ldi64 r11, 0xFFFF_FF00_0000_0224
+    ldi64 r11, var_disk_base
+    ldn r11, r11
+    addi r11, 0x24
     st.b r11, r7
 
+    ; The poll reads COMPLETE through R13, set once; the serializer keeps it.
     ldi64 r12, 1048576
+    ldi64 r13, var_disk_base
+    ldn r13, r13
+    addi r13, 0x16
 disk_command_wait_complete:
-    ldi64 r11, 0xFFFF_FF00_0000_0216
+    mov r11, r13
     ldi64 r0, read_mmio_u32_le
     call.l r0
     mov r11, r15
@@ -8625,7 +8645,9 @@ disk_command_wait_complete:
 
     ; Close the boundary race: accept a completion published on the final
     ; bounded iteration before deciding that this command timed out.
-    ldi64 r11, 0xFFFF_FF00_0000_0216
+    ldi64 r11, var_disk_base
+    ldn r11, r11
+    addi r11, 0x16
     ldi64 r0, read_mmio_u32_le
     call.l r0
     mov r11, r15
@@ -8642,12 +8664,17 @@ disk_command_timeout:
     ; acceptance, RESET is idle and clears its result.  Detect the changed
     ; generation and conservatively mark that lost terminal publication
     ; partial rather than claiming a clean timeout.
-    ldi64 r11, 0xFFFF_FF00_0000_0200
+    ldi64 r11, var_disk_base
+    ldn r11, r11
     ldi r7, 0x04
     st.b r11, r7
-    ldi64 r11, 0xFFFF_FF00_0000_0215
+    ldi64 r11, var_disk_base
+    ldn r11, r11
+    addi r11, 0x15
     ld.b r1, r11
-    ldi64 r11, 0xFFFF_FF00_0000_021F
+    ldi64 r11, var_disk_base
+    ldn r11, r11
+    addi r11, 0x1F
     ld.b r7, r11
     mov r13, r1
     andi r13, 0x7F
@@ -8658,7 +8685,9 @@ disk_command_timeout:
     ; COMPLETE to determine whether an unobservable terminal operation raced
     ; with RESET; save TRANSFERRED because the serializer returns in R7.
     mov r13, r7
-    ldi64 r11, 0xFFFF_FF00_0000_0216
+    ldi64 r11, var_disk_base
+    ldn r11, r11
+    addi r11, 0x16
     ldi64 r0, read_mmio_u32_le
     call.l r0
     mov r11, r15
@@ -8679,7 +8708,8 @@ disk_command_timeout_reset_result:
 
 disk_command_timeout_before_issue:
     ; An inherited raw command is not progress for this checked request.
-    ldi64 r11, 0xFFFF_FF00_0000_0200
+    ldi64 r11, var_disk_base
+    ldn r11, r11
     ldi r7, 0x04
     st.b r11, r7
     ldi r0, 0x0A
@@ -8687,7 +8717,9 @@ disk_command_timeout_before_issue:
     lbr disk_command_return
 
 disk_command_complete:
-    ldi64 r11, 0xFFFF_FF00_0000_0215
+    ldi64 r11, var_disk_base
+    ldn r11, r11
+    addi r11, 0x15
     ld.b r0, r11              ; stable controller result, PARTIAL preserved
     addi r11, 10              ; +0x15 -> +0x1F
     ld.b r7, r11              ; confirmed whole sectors for this chunk
@@ -8698,7 +8730,8 @@ disk_command_return:
 
 ; disk_transfer_checked: common checked READ/WRITE implementation.
 ;   R0 = 1 READ or 2 WRITE, R1 = starting LBA, R9 = DMA, R12 = total count,
-;   R10 = caller generation, R8 = generation mode (0=snapshot, 1=bound)
+;   R10 = caller generation, R8 = generation mode (0=snapshot, 1=bound),
+;   R13 = the controller's MMIO base
 ;   Returns R0 = status, R13 = confirmed sectors.  R1/R9 advance only across
 ;   confirmed sectors and R12 is the unconfirmed remainder.
 ;   The complete request is validated before its first externally visible
@@ -8726,15 +8759,22 @@ disk_transfer_checked:
     call.l r11
     cmpi r0, 0
     lbrne disk_transfer_return_unlocked
+    ; The controller every routine below addresses while FS lock 2 is held.
+    ldi64 r11, var_disk_base
+    str r11, r13
 
     ; Presence and the precise/completion/media-generation/guard capabilities
     ; required by every checked operation.
-    ldi64 r11, 0xFFFF_FF00_0000_0201
+    ldi64 r11, var_disk_base
+    ldn r11, r11
+    addi r11, 0x01
     ld.b r7, r11
     andi r7, 0x80
     cmpi r7, 0
     lbreq disk_transfer_no_media
-    ldi64 r11, 0xFFFF_FF00_0000_021E
+    ldi64 r11, var_disk_base
+    ldn r11, r11
+    addi r11, 0x1E
     ld.b r7, r11
     ldn r0, r15
     cmpi r0, 1
@@ -8753,7 +8793,9 @@ disk_transfer_bind_generation:
     ; Bind every controller-sized chunk to one attachment identity while the
     ; FS lock is held.  Legacy checked words snapshot here; generation-bound
     ; words reject a stale caller generation before geometry validation.
-    ldi64 r11, 0xFFFF_FF00_0000_021A
+    ldi64 r11, var_disk_base
+    ldn r11, r11
+    addi r11, 0x1A
     ldi64 r0, read_mmio_u32_le
     call.l r0
     mov r11, r15
@@ -8780,7 +8822,9 @@ disk_transfer_validate_count:
     lbreq disk_transfer_invalid_count
 
     ; Validate the complete LBA interval without addition overflow.
-    ldi64 r11, 0xFFFF_FF00_0000_0211
+    ldi64 r11, var_disk_base
+    ldn r11, r11
+    addi r11, 0x11
     ldi64 r0, read_mmio_u32_le
     call.l r0                 ; R7 = attached capacity u32
     mov r11, r15
@@ -8812,7 +8856,9 @@ disk_transfer_next_chunk:
     ldn r12, r11
     cmpi r12, 0
     lbreq disk_transfer_success
-    ldi64 r11, 0xFFFF_FF00_0000_021A
+    ldi64 r11, var_disk_base
+    ldn r11, r11
+    addi r11, 0x1A
     ldi64 r0, read_mmio_u32_le
     call.l r0
     mov r11, r15
@@ -8847,7 +8893,9 @@ disk_transfer_batch_ready:
     ; chunk before accepting or advancing it.
     mov r1, r0
     mov r13, r7
-    ldi64 r11, 0xFFFF_FF00_0000_021A
+    ldi64 r11, var_disk_base
+    ldn r11, r11
+    addi r11, 0x1A
     ldi64 r0, read_mmio_u32_le
     call.l r0
     mov r11, r15
@@ -8966,7 +9014,8 @@ disk_transfer_return_unlocked:
 
 ; disk_flush_checked_core: checked durability barrier using the same command
 ; submission/completion/result path as checked transfers.
-;   R10 = caller generation, R8 = generation mode (0=snapshot, 1=bound)
+;   R10 = caller generation, R8 = generation mode (0=snapshot, 1=bound),
+;   R13 = the controller's MMIO base
 ;   Returns R0=status.
 disk_flush_checked_core:
     subi r15, 16
@@ -8978,17 +9027,25 @@ disk_flush_checked_core:
     call.l r11
     cmpi r0, 0
     lbrne disk_flush_checked_return_unlocked
-    ldi64 r11, 0xFFFF_FF00_0000_0201
+    ldi64 r11, var_disk_base
+    str r11, r13
+    ldi64 r11, var_disk_base
+    ldn r11, r11
+    addi r11, 0x01
     ld.b r7, r11
     andi r7, 0x80
     cmpi r7, 0
     breq disk_flush_checked_no_media
-    ldi64 r11, 0xFFFF_FF00_0000_021E
+    ldi64 r11, var_disk_base
+    ldn r11, r11
+    addi r11, 0x1E
     ld.b r7, r11
     andi r7, 0x7C            ; FLUSH + PRECISE + COMPLETE + GEN + GUARD
     cmpi r7, 0x7C
     brne disk_flush_checked_unsupported
-    ldi64 r11, 0xFFFF_FF00_0000_021A
+    ldi64 r11, var_disk_base
+    ldn r11, r11
+    addi r11, 0x1A
     ldi64 r0, read_mmio_u32_le
     call.l r0
     mov r11, r15
@@ -9045,6 +9102,7 @@ w_disk_read_checked:
     ldi r8, 0                 ; snapshot current generation under FS lock
     ldi r10, 0
     ldi r0, 0x01
+    ldi64 r13, 0xFFFF_FF00_0000_0200
     ldi64 r11, disk_transfer_checked
     call.l r11
     addi r14, 8               ; three inputs become two outputs
@@ -9065,6 +9123,7 @@ w_disk_write_checked:
     ldi r8, 0                 ; snapshot current generation under FS lock
     ldi r10, 0
     ldi r0, 0x02
+    ldi64 r13, 0xFFFF_FF00_0000_0200
     ldi64 r11, disk_transfer_checked
     call.l r11
     addi r14, 8
@@ -9078,6 +9137,7 @@ w_disk_write_checked:
 w_disk_flush_checked:
     ldi r8, 0                 ; snapshot current generation under FS lock
     ldi r10, 0
+    ldi64 r13, 0xFFFF_FF00_0000_0200
     ldi64 r11, disk_flush_checked_core
     call.l r11
     subi r14, 8
@@ -9097,6 +9157,7 @@ w_disk_read_gen_checked:
     ldn r9, r11
     ldi r8, 1                 ; bind to the caller's generation
     ldi r0, 0x01
+    ldi64 r13, 0xFFFF_FF00_0000_0200
     ldi64 r11, disk_transfer_checked
     call.l r11
     addi r14, 16              ; four inputs become two outputs
@@ -9119,6 +9180,7 @@ w_disk_write_gen_checked:
     ldn r9, r11
     ldi r8, 1                 ; bind to the caller's generation
     ldi r0, 0x02
+    ldi64 r13, 0xFFFF_FF00_0000_0200
     ldi64 r11, disk_transfer_checked
     call.l r11
     addi r14, 16
@@ -9132,9 +9194,154 @@ w_disk_write_gen_checked:
 w_disk_flush_gen_checked:
     ldn r10, r14
     ldi r8, 1                 ; bind to the caller's generation
+    ldi64 r13, 0xFFFF_FF00_0000_0200
     ldi64 r11, disk_flush_checked_core
     call.l r11
     str r14, r0               ; replace generation with status
+    ret.l
+
+; Storage units.  Unit 0 is the system disk's controller at MMIO +0x0200,
+; unit 1 the settings disk's at +0x0280, the same controller design; the
+; settings disk's medium is write-protected.  A unit the machine does not
+; have reads as an empty slot: no medium, no capacity, no capabilities.
+
+; disk_unit_base: R1 = unit.  Returns R13 = its controller's MMIO base, or 0.
+disk_unit_base:
+    cmpi r1, 0
+    breq disk_unit_base_system
+    cmpi r1, 1
+    breq disk_unit_base_settings
+    ldi r13, 0
+    ret.l
+disk_unit_base_system:
+    ldi64 r13, 0xFFFF_FF00_0000_0200
+    ret.l
+disk_unit_base_settings:
+    ldi64 r13, 0xFFFF_FF00_0000_0280
+    ret.l
+
+; DISK-UNITS ( -- n )  storage units this machine has
+w_disk_units:
+    ldi r1, 2
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; UNIT-DISK@ ( unit -- status )  the unit's STATUS register
+w_unit_disk_status:
+    ldn r1, r14
+    ldi64 r11, disk_unit_base
+    call.l r11
+    ldi r1, 0
+    cmpi r13, 0
+    breq w_unit_disk_status_done
+    mov r11, r13
+    addi r11, 0x01
+    ld.b r1, r11
+w_unit_disk_status_done:
+    str r14, r1
+    ret.l
+
+; UNIT-DISK-SECTORS ( unit -- count )  the unit's attached capacity (u32)
+w_unit_disk_sectors:
+    ldi r9, 0x11
+    lbr w_unit_disk_u32
+
+; UNIT-DISK-MEDIA-GEN ( unit -- generation )  the unit's attachment generation
+w_unit_disk_media_gen:
+    ldi r9, 0x1A
+w_unit_disk_u32:
+    ; R9 = the u32 register's offset
+    ldn r1, r14
+    ldi64 r11, disk_unit_base
+    call.l r11
+    ldi r7, 0
+    cmpi r13, 0
+    breq w_unit_disk_u32_done
+    mov r11, r13
+    add r11, r9
+    ldi64 r0, read_mmio_u32_le
+    call.l r0
+w_unit_disk_u32_done:
+    str r14, r7
+    ret.l
+
+; UNIT-DISK-CAPS ( unit -- caps )  the unit's controller capabilities
+w_unit_disk_caps:
+    ldn r1, r14
+    ldi64 r11, disk_unit_base
+    call.l r11
+    ldi r1, 0
+    cmpi r13, 0
+    breq w_unit_disk_caps_done
+    mov r11, r13
+    addi r11, 0x1E
+    ld.b r1, r11
+w_unit_disk_caps_done:
+    str r14, r1
+    ret.l
+
+; UNIT-DISK-READ-GEN-CHECKED
+;   ( dma lba count generation unit -- completed status )
+w_unit_disk_read_gen_checked:
+    ldi r0, 0x01
+    lbr w_unit_disk_transfer
+; UNIT-DISK-WRITE-GEN-CHECKED
+;   ( dma lba count generation unit -- completed status )
+w_unit_disk_write_gen_checked:
+    ldi r0, 0x02
+w_unit_disk_transfer:
+    ; R0 = command
+    ldn r1, r14
+    ldi64 r11, disk_unit_base
+    call.l r11
+    addi r14, 8               ; the unit is consumed
+    cmpi r13, 0
+    lbreq w_unit_disk_transfer_no_unit
+    ldn r10, r14
+    mov r11, r14
+    addi r11, 8
+    ldn r12, r11
+    addi r11, 8
+    ldn r1, r11
+    addi r11, 8
+    ldn r9, r11
+    ldi r8, 1                 ; bind to the caller's generation
+    ldi64 r11, disk_transfer_checked
+    call.l r11
+    addi r14, 16              ; four inputs become two outputs
+    str r14, r0               ; TOS = status
+    mov r11, r14
+    addi r11, 8
+    str r11, r13              ; NOS = completed
+    ret.l
+w_unit_disk_transfer_no_unit:
+    addi r14, 16
+    ldi r0, 0x01              ; NO_MEDIA
+    str r14, r0
+    mov r11, r14
+    addi r11, 8
+    ldi r0, 0
+    str r11, r0
+    ret.l
+
+; UNIT-DISK-FLUSH-GEN-CHECKED ( generation unit -- status )
+w_unit_disk_flush_gen_checked:
+    ldn r1, r14
+    ldi64 r11, disk_unit_base
+    call.l r11
+    addi r14, 8               ; the unit is consumed
+    cmpi r13, 0
+    breq w_unit_disk_flush_no_unit
+    ldn r10, r14
+    ldi r8, 1                 ; bind to the caller's generation
+    ldi64 r11, disk_flush_checked_core
+    call.l r11
+    str r14, r0
+    ret.l
+w_unit_disk_flush_no_unit:
+    ldi r0, 0x01              ; NO_MEDIA
+    str r14, r0
     ret.l
 
 ; disk_read_sectors: BIOS MP64FS reader backed by the public checked core.
@@ -9145,6 +9352,7 @@ disk_read_sectors:
     ldi r8, 0                 ; BIOS filesystem reads snapshot generation
     ldi r10, 0
     ldi r0, 0x01
+    ldi64 r13, 0xFFFF_FF00_0000_0200   ; the system disk
     ldi64 r11, disk_transfer_checked
     call.l r11
     ret.l
@@ -24311,12 +24519,85 @@ d_sha384_init:
     ret.l
 
 ; === SHA384-FINAL ===
-latest_entry:
 d_sha384_final:
     .dq d_sha384_init
     .db 12
     .ascii "SHA384-FINAL"
     ldi64 r11, w_sha384_final
+    call.l r11
+    ret.l
+
+; The storage unit words append after SHA-384.
+; === DISK-UNITS ===
+d_disk_units:
+    .dq d_sha384_final
+    .db 10
+    .ascii "DISK-UNITS"
+    ldi64 r11, w_disk_units
+    call.l r11
+    ret.l
+
+; === UNIT-DISK@ ===
+d_unit_disk_status:
+    .dq d_disk_units
+    .db 10
+    .ascii "UNIT-DISK@"
+    ldi64 r11, w_unit_disk_status
+    call.l r11
+    ret.l
+
+; === UNIT-DISK-SECTORS ===
+d_unit_disk_sectors:
+    .dq d_unit_disk_status
+    .db 17
+    .ascii "UNIT-DISK-SECTORS"
+    ldi64 r11, w_unit_disk_sectors
+    call.l r11
+    ret.l
+
+; === UNIT-DISK-MEDIA-GEN ===
+d_unit_disk_media_gen:
+    .dq d_unit_disk_sectors
+    .db 19
+    .ascii "UNIT-DISK-MEDIA-GEN"
+    ldi64 r11, w_unit_disk_media_gen
+    call.l r11
+    ret.l
+
+; === UNIT-DISK-CAPS ===
+d_unit_disk_caps:
+    .dq d_unit_disk_media_gen
+    .db 14
+    .ascii "UNIT-DISK-CAPS"
+    ldi64 r11, w_unit_disk_caps
+    call.l r11
+    ret.l
+
+; === UNIT-DISK-READ-GEN-CHECKED ===
+d_unit_disk_read_gen_checked:
+    .dq d_unit_disk_caps
+    .db 26
+    .ascii "UNIT-DISK-READ-GEN-CHECKED"
+    ldi64 r11, w_unit_disk_read_gen_checked
+    call.l r11
+    ret.l
+
+; === UNIT-DISK-WRITE-GEN-CHECKED ===
+d_unit_disk_write_gen_checked:
+    .dq d_unit_disk_read_gen_checked
+    .db 27
+    .ascii "UNIT-DISK-WRITE-GEN-CHECKED"
+    ldi64 r11, w_unit_disk_write_gen_checked
+    call.l r11
+    ret.l
+
+; === UNIT-DISK-FLUSH-GEN-CHECKED ===
+latest_entry:
+d_unit_disk_flush_gen_checked:
+    .dq d_unit_disk_write_gen_checked
+    .db 27
+    .ascii "UNIT-DISK-FLUSH-GEN-CHECKED"
+    ldi64 r11, w_unit_disk_flush_gen_checked
     call.l r11
     ret.l
 
@@ -24409,6 +24690,11 @@ var_compile_active:
 ; FSLOAD line tracking — used for error context
 var_fsload_line:
     .dq 0
+
+; The MMIO base of the storage controller the checked disk routines address.
+; Written only while FS lock 2 is held, by the routine that took the lock.
+var_disk_base:
+    .dq 0xFFFF_FF00_0000_0200
 
 ; Validated MP64FS geometry and metadata buffers.  FSLOAD and autoboot share
 ; the same bounded reader and reject the directory before using any entry.

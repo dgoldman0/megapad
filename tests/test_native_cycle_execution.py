@@ -16,6 +16,7 @@ from devices import (
     NIC_BASE,
     SECTOR_SIZE,
     STORAGE_BASE,
+    STORAGE1_BASE,
     STORAGE_CMD_READ,
     STORAGE_CMD_RESET,
     STORAGE_CMD_WRITE,
@@ -72,6 +73,7 @@ def _system(
     worker_count: int | None = None,
     realtime_clock: bool = False,
     storage_image: str | None = None,
+    settings_image: str | None = None,
     cold_instruction_cache: bool = False,
 ) -> MegapadSystem:
     system = MegapadSystem(
@@ -84,6 +86,7 @@ def _system(
         worker_count=worker_count,
         realtime_clock=realtime_clock,
         storage_image=storage_image,
+        settings_image=settings_image,
     )
     system.load_binary(0, code)
     system.boot(entry=0)
@@ -2738,6 +2741,42 @@ def test_storage_read_is_strict_byte_dma_and_publishes_terminal_state(
         ._main_bus_snapshot()
         .last_issue_sequences[disk_port]
     ) == SECTOR_SIZE
+
+
+def test_the_settings_disk_shares_the_disk_port_under_strict_cycles(tmp_path):
+    """The settings disk's controller reaches memory through the disk's
+    one bus port: its read is byte DMA on the disk requester's port, while
+    the system disk's controller stays idle."""
+    payload = bytes((index * 7 + 3) & 0xFF for index in range(SECTOR_SIZE))
+    path = tmp_path / "strict-cycle-settings.img"
+    path.write_bytes(payload)
+    system = _system(
+        assemble("st.b r1, r2\nhalt"),
+        settings_image=str(path),
+    )
+    settings = system.settings_storage
+    target = 0x400
+    _write_storage_register(settings, 0x02, 0, 4)
+    _write_storage_register(settings, 0x06, target, 8)
+    settings.write8(0x0E, 1)
+    system.cpu.regs[1] = MMIO_BASE + STORAGE1_BASE
+    system.cpu.regs[2] = STORAGE_CMD_READ
+
+    system.run_cycle_batch(2, max_instructions=100)
+    assert settings.read8(0x01) & STORAGE_STATUS_BUSY
+    assert len(_pending_storage_requests(system)) == 1
+    beats, final = _drain_strict_storage(system, lambda: not settings.busy)
+
+    assert beats == [
+        (_mp64_accel.BusOperation.WRITE, target + index, value)
+        for index, value in enumerate(payload)
+    ]
+    assert final.system_stop_reason == "all_halted"
+    assert bytes(system.cpu.mem[target:target + SECTOR_SIZE]) == payload
+    assert settings.result == STORAGE_RESULT_OK
+    assert settings.completion == 1
+    assert system.storage.completion == 0
+    assert system._storage_dma_owner is None
 
 
 def test_storage_stall_release_rejects_native_batch_reentry(tmp_path):

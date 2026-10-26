@@ -6,7 +6,11 @@ from typing import Callable
 
 from shared import scalar_fp
 from shared.cells import CELL_BYTES, MASK64, forth_flag, s64, u64
-from shared.storage import STORAGE_RESULT_TIMEOUT
+from shared.storage import (
+    STORAGE_RESULT_NO_MEDIA,
+    STORAGE_RESULT_TIMEOUT,
+    STORAGE_UNITS,
+)
 from simulator.aes import (
     AES_AAD_LENGTH,
     AES_COMMAND,
@@ -1354,17 +1358,20 @@ def _disk_transfer_value(
     *,
     write: bool,
     generation: int | None,
+    storage=None,
 ) -> tuple[int, int]:
-    """Run one value-based checked transfer through native lock two."""
+    """Run one value-based checked transfer through native lock two, on
+    STORAGE's controller, the system disk's by default."""
 
+    storage = runtime.storage if storage is None else storage
     core_id, _task_id = runtime.guest_identity(context)
     if runtime.spinlocks.acquire(2, core_id) != 0:
         return 0, STORAGE_RESULT_TIMEOUT
     try:
         operation = (
-            runtime.storage.write_checked
+            storage.write_checked
             if write
-            else runtime.storage.read_checked
+            else storage.read_checked
         )
         return operation(
             runtime.memory,
@@ -1393,6 +1400,84 @@ def _mp64fs_valid(
         )
 
     context.data.push(validate_attached_mp64fs(runtime, context, read_checked))
+
+
+def _storage_unit(runtime: MegaForthRuntime, unit: int):
+    """The disk of storage controller UNIT: 0 the system disk, 1 the
+    settings disk; None for a unit the machine does not have."""
+
+    if unit == 0:
+        return runtime.storage
+    if unit == 1:
+        return runtime.settings_storage
+    return None
+
+
+def _unit_disk_value(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+    name: str,
+) -> None:
+    """( unit -- value ): a controller's register; 0 for a unit the
+    machine does not have, as for an empty slot."""
+
+    storage = _storage_unit(runtime, context.data.peek())
+    context.data.replace_top(0 if storage is None else getattr(storage, name))
+
+
+def _unit_disk_transfer_checked(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+    *,
+    write: bool,
+) -> None:
+    """( dma lba count generation unit -- completed status ).  Every input
+    is read before any is consumed, so too short a stack changes nothing."""
+
+    dma = context.data.peek(4)
+    lba = context.data.peek(3)
+    count = context.data.peek(2)
+    generation = context.data.peek(1)
+    storage = _storage_unit(runtime, context.data.peek())
+    if storage is None:
+        completed, status = 0, STORAGE_RESULT_NO_MEDIA
+    else:
+        completed, status = _disk_transfer_value(
+            runtime,
+            context,
+            dma,
+            lba,
+            count,
+            write=write,
+            generation=generation,
+            storage=storage,
+        )
+    for _ in range(5):
+        context.data.pop()
+    context.data.push(completed)
+    context.data.push(status)
+
+
+def _unit_disk_flush_checked(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    """( generation unit -- status )."""
+
+    generation = context.data.peek(1)
+    storage = _storage_unit(runtime, context.data.pop())
+    if storage is None:
+        context.data.replace_top(STORAGE_RESULT_NO_MEDIA)
+        return
+    core_id, _task_id = runtime.guest_identity(context)
+    if runtime.spinlocks.acquire(2, core_id) != 0:
+        status = STORAGE_RESULT_TIMEOUT
+    else:
+        try:
+            status = storage.flush_checked(generation=generation)
+        finally:
+            runtime.spinlocks.release(2, core_id)
+    context.data.replace_top(status)
 
 
 def _disk_flush_checked(
@@ -3062,6 +3147,41 @@ def install_core(runtime: MegaForthRuntime) -> None:
 
     # 2ROT follows: the checked SHA-2 one-shots of three spans use it.
     runtime.define_primitive(b"2ROT", _two_rot)
+
+    # The storage unit words follow: unit 0 the system disk, unit 1 the
+    # settings disk.
+    runtime.define_primitive(
+        b"DISK-UNITS",
+        lambda context: context.data.push(STORAGE_UNITS),
+    )
+    for name, register in (
+        (b"UNIT-DISK@", "status"),
+        (b"UNIT-DISK-SECTORS", "total_sectors"),
+        (b"UNIT-DISK-MEDIA-GEN", "media_generation"),
+        (b"UNIT-DISK-CAPS", "capabilities"),
+    ):
+        runtime.define_primitive(
+            name,
+            lambda context, register=register: _unit_disk_value(
+                runtime, context, register,
+            ),
+        )
+    runtime.define_primitive(
+        b"UNIT-DISK-READ-GEN-CHECKED",
+        lambda context: _unit_disk_transfer_checked(
+            runtime, context, write=False,
+        ),
+    )
+    runtime.define_primitive(
+        b"UNIT-DISK-WRITE-GEN-CHECKED",
+        lambda context: _unit_disk_transfer_checked(
+            runtime, context, write=True,
+        ),
+    )
+    runtime.define_primitive(
+        b"UNIT-DISK-FLUSH-GEN-CHECKED",
+        lambda context: _unit_disk_flush_checked(runtime, context),
+    )
 
 
 def _scalar_float_word(service, shape: str, op: int | None):

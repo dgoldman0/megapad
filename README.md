@@ -298,6 +298,8 @@ make build
 python megapad.py --help
 python megapad.py --mode emulator --bios bios.asm --storage sample.img
 python megapad.py --mode simulator --storage desktop.img --executor native
+# A settings disk, attached write-protected to the second storage controller:
+python megapad.py --mode simulator --storage desktop.img --settings-storage settings.img
 python megapad.py --mode hybrid --storage hybrid.img --executor native --hybrid-routines routines.json
 
 # Each mode documents its own supported options.

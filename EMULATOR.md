@@ -177,7 +177,8 @@ All MMIO registers live at base `0xFFFF_FF00_0000_0000`:
 |---|---|---|
 | `+0x0000` | 16 B | UART (serial console) |
 | `+0x0100` | 16 B | Timer |
-| `+0x0200` | 16 B | Storage controller |
+| `+0x0200` | 37 B | Storage controller 0: the system disk |
+| `+0x0280` | 37 B | Storage controller 1: the settings disk, its medium write-protected |
 | `+0x0300` | 112 B | System Info (board ID, topology, VRAM, crypto capabilities, bus ports) |
 | `+0x0400` | 128 B | NIC (Network Interface) |
 | `+0x0500` | 16 B | Mailbox (inter-core IPI) |
@@ -278,6 +279,15 @@ restore it.
 ### Storage Controller
 
 Sector-based block device backed by a host file.  Sector size is 512 bytes.
+The machine has two controllers of this design.  Controller 0, at `+0x0200`,
+holds the system disk.  Controller 1, at `+0x0280`, holds the settings disk
+(`--settings-storage IMAGE`), whose medium is write-protected: STATUS shows
+bit 5 while a medium is present, every WRITE ends `WRITE_PROTECTED`, and
+its host file is never written, nor created when absent.  Without an image
+controller 1 holds no medium.  The two controllers share the disk's one bus
+port for DMA, which serves one beat at a time.  The table below is the
+original subset; [`docs/storage-controller-contract.md`](docs/storage-controller-contract.md)
+gives the complete register map.
 
 | Offset | Name | R/W | Description |
 |---|---|---|---|
@@ -669,6 +679,9 @@ input loaded by `KYBER-KEYGEN`; `KYBER-ENCAPS` continues to consume the first
 
 **Disk / Storage**
 `DISK@` `DISK-SEC!` `DISK-DMA!` `DISK-N!` `DISK-READ` `DISK-WRITE` `DISK-FLUSH`
+`DISK-UNITS` `UNIT-DISK@` `UNIT-DISK-SECTORS` `UNIT-DISK-MEDIA-GEN`
+`UNIT-DISK-CAPS` `UNIT-DISK-READ-GEN-CHECKED` `UNIT-DISK-WRITE-GEN-CHECKED`
+`UNIT-DISK-FLUSH-GEN-CHECKED`
 
 **Timer & Interrupts**
 `TIMER!` `TIMER-CTRL!` `TIMER-ACK` `EI!` `DI!` `ISR!`

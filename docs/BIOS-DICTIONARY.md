@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The `bios.asm` dictionary link chain contains **550** entries.  The numbered
+The `bios.asm` dictionary link chain contains **558** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -581,7 +581,14 @@ the nonzero path emits the parsed message and resets through `ABORT`.
 | 204 | `POOL-FREE` | `( bitmap index -- bitmap' )` | | Free slot at index: clear bit. |
 | 205 | `POOL-COUNT` | `( bitmap -- n )` | | Count allocated slots via POPCNT. |
 
-### Disk / Storage (17 words)
+### Disk / Storage (25 words)
+
+The machine has two storage controllers of one design: unit 0 holds the
+system disk at MMIO +0x0200, unit 1 the settings disk at +0x0280, whose
+medium is write-protected.  The `DISK-*` words address the system disk; the
+`UNIT-DISK-*` words take a unit and address either.  A unit the machine does
+not have reads as an empty slot: no medium, no capacity, no capabilities,
+and its transfers return `NO_MEDIA` (1).
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
@@ -602,6 +609,14 @@ the nonzero path emits the parsed message and resets through `ABORT`.
 | 220 | `DISK-READ-GEN-CHECKED` | `( dma lba count generation -- completed status )` | | Generation-bound checked read; rejects a stale identity before DMA |
 | 221 | `DISK-WRITE-GEN-CHECKED` | `( dma lba count generation -- completed status )` | | Generation-bound checked write; rejects a stale identity before media mutation |
 | 222 | `DISK-FLUSH-GEN-CHECKED` | `( generation -- status )` | | Generation-bound ordering and durability barrier |
+| 549 | `DISK-UNITS` | `( -- n )` | | The storage units this machine has: 2 |
+| 550 | `UNIT-DISK@` | `( unit -- status )` | | The unit's STATUS register; 0 for a unit the machine does not have |
+| 551 | `UNIT-DISK-SECTORS` | `( unit -- count )` | | The unit's attached media capacity (u32) |
+| 552 | `UNIT-DISK-MEDIA-GEN` | `( unit -- generation )` | | The unit's attachment generation (u32) |
+| 553 | `UNIT-DISK-CAPS` | `( unit -- caps )` | | The unit's controller capabilities |
+| 554 | `UNIT-DISK-READ-GEN-CHECKED` | `( dma lba count generation unit -- completed status )` | | Generation-bound checked read on the unit |
+| 555 | `UNIT-DISK-WRITE-GEN-CHECKED` | `( dma lba count generation unit -- completed status )` | | Generation-bound checked write on the unit; the settings disk returns `WRITE_PROTECTED` (8) |
+| 556 | `UNIT-DISK-FLUSH-GEN-CHECKED` | `( generation unit -- status )` | | Generation-bound ordering and durability barrier on the unit |
 
 ### Timer & Interrupts (9 words)
 

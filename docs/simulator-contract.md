@@ -3623,7 +3623,12 @@ ordering remain observable.
 
 The admitted hosted service is pseudo-BIOS-only. It implements `DISK@`, the
 three media queries, the six ordinary/generation-bound checked operations, and
-`MP64FS-VALID?` against one exact sector image. It does not implement the raw
+`MP64FS-VALID?` against one exact sector image, the system disk. A second
+service is the settings disk, unit 1, whose image is attached write-protected
+(`--settings-storage`) or absent; `DISK-UNITS`, the four `UNIT-DISK-*` queries
+and the three `UNIT-DISK-*-GEN-CHECKED` operations address either unit, under
+the same lock 2, and a unit the machine does not have reads as an empty
+slot. It does not implement the raw
 setup/command words or storage MMIO, BUSY/rejection visibility, RESET, DMA
 cadence, controller timeouts, fault injection, or device interrupts. One mutable
 service instance may be claimed by exactly one runtime. Host attachment,

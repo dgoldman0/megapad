@@ -518,3 +518,75 @@ def test_flush_failure_reports_a_conservative_partial_result(
     assert storage.result == expected
     assert storage.completion == 1
     assert storage.transferred == 0
+
+
+def test_unit_words_address_the_system_and_settings_disks() -> None:
+    """Unit 0 is the system disk and unit 1 the settings disk, whose medium
+    is write-protected.  A unit the machine does not have reads as an empty
+    slot and transfers nothing."""
+    system = HostedStorageService(bytes(4 * SECTOR_SIZE))
+    image = b"SAFE!" + bytes(2 * SECTOR_SIZE - 5)
+    settings = HostedStorageService(image, write_protected=True)
+    runtime = MegaForthRuntime(storage=system, settings_storage=settings)
+    assert runtime.settings_storage is settings
+
+    assert _execute(runtime, "DISK-UNITS") == (2,)
+    status, = _execute(runtime, "UNIT-DISK@", 1)
+    assert status & STORAGE_STATUS_PRESENT
+    assert status & STORAGE_STATUS_WRITE_PROTECTED
+    assert _execute(runtime, "UNIT-DISK-SECTORS", 1) == (2,)
+    assert _execute(runtime, "UNIT-DISK-CAPS", 1) == (STORAGE_CAPS,)
+    assert _execute(runtime, "UNIT-DISK-MEDIA-GEN", 1) == (
+        settings.media_generation,
+    )
+    assert _execute(runtime, "UNIT-DISK@", 0) == _execute(runtime, "DISK@")
+    assert _execute(runtime, "UNIT-DISK-SECTORS", 0) == (4,)
+    for name in ("UNIT-DISK@", "UNIT-DISK-SECTORS", "UNIT-DISK-MEDIA-GEN",
+                 "UNIT-DISK-CAPS"):
+        assert _execute(runtime, name, 2) == (0,)
+        assert _execute(runtime, name, MASK64) == (0,)
+
+    generation = settings.media_generation
+    assert _execute(
+        runtime, "UNIT-DISK-READ-GEN-CHECKED", 1, 0, 1, generation, 1,
+    ) == (1, 0)
+    assert runtime.memory.read_bytes(1, 5) == b"SAFE!"
+    assert _execute(
+        runtime, "UNIT-DISK-WRITE-GEN-CHECKED", 1, 0, 1, generation, 1,
+    ) == (0, STORAGE_RESULT_WRITE_PROTECTED)
+    assert settings.image_bytes == image
+    assert _execute(runtime, "UNIT-DISK-FLUSH-GEN-CHECKED", generation, 1) == (0,)
+    assert _execute(
+        runtime, "UNIT-DISK-READ-GEN-CHECKED", 1, 0, 1, generation, 2,
+    ) == (0, STORAGE_RESULT_NO_MEDIA)
+    assert _execute(runtime, "UNIT-DISK-FLUSH-GEN-CHECKED", generation, 2) == (
+        STORAGE_RESULT_NO_MEDIA,
+    )
+    assert _execute(
+        runtime, "UNIT-DISK-WRITE-GEN-CHECKED", 1, 3, 1,
+        system.media_generation, 0,
+    ) == (1, 0)
+    assert system.image_bytes[3 * SECTOR_SIZE:3 * SECTOR_SIZE + 5] == b"SAFE!"
+
+
+def test_without_a_settings_disk_unit_one_holds_no_medium() -> None:
+    runtime = MegaForthRuntime()
+    assert _execute(runtime, "UNIT-DISK@", 1) == (0,)
+    assert _execute(runtime, "UNIT-DISK-SECTORS", 1) == (0,)
+    assert _execute(runtime, "UNIT-DISK-READ-GEN-CHECKED", 0, 0, 1, 0, 1) == (
+        0, STORAGE_RESULT_NO_MEDIA,
+    )
+
+
+def test_unit_words_change_nothing_on_too_short_a_stack() -> None:
+    runtime = MegaForthRuntime(storage=HostedStorageService(bytes(SECTOR_SIZE)))
+    context = runtime.main_context
+    for name, depth in (("UNIT-DISK-READ-GEN-CHECKED", 4),
+                        ("UNIT-DISK-WRITE-GEN-CHECKED", 4),
+                        ("UNIT-DISK-FLUSH-GEN-CHECKED", 1)):
+        for value in range(depth):
+            context.data.push(9 - value)
+        with pytest.raises(StackUnderflow, match="data stack underflow"):
+            runtime.execute(name)
+        assert context.data.snapshot() == tuple(9 - value for value in range(depth))
+        context.data.clear()

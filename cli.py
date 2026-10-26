@@ -822,6 +822,7 @@ class MegapadCLI(cmd.Cmd):
         new_size = kib * 1024
         old_sys = self.sys
         storage_image = old_sys.storage.image_path
+        settings_image = old_sys.settings_storage.image_path
         nic_backend = old_sys._nic_backend
         nic_port = old_sys.nic._passthrough_port
         nic_peer_port = old_sys.nic._passthrough_peer_port
@@ -834,6 +835,7 @@ class MegapadCLI(cmd.Cmd):
         self.sys = MegapadSystem(
             ram_size=new_size,
             storage_image=storage_image,
+            settings_image=settings_image,
             nic_port=nic_port,
             nic_peer_port=nic_peer_port,
             nic_backend=nic_backend,
@@ -1541,6 +1543,9 @@ def main():
                         help="RAM size in KiB (default: 1024)")
     parser.add_argument("--storage", type=str, default=None,
                         help="Disk image file to attach")
+    parser.add_argument("--settings-storage", type=str, default=None,
+                        help="Settings disk image to attach, write-protected, "
+                             "to the second storage controller")
     parser.add_argument("--load", type=str, action="append", default=[],
                         help="Load binary: FILE[@ADDR] (can repeat)")
     parser.add_argument("--bios", type=str, default=None,
@@ -1643,6 +1648,7 @@ def main():
     sys_emu = MegapadSystem(
         ram_size=args.ram * 1024,
         storage_image=args.storage,
+        settings_image=args.settings_storage,
         nic_port=args.nic,
         nic_peer_port=args.nic_peer_port,
         nic_backend=nic_backend,

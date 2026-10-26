@@ -20,6 +20,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a shared MegaPad session")
     parser.add_argument("--bios", type=Path, default=ROOT / "bios.asm")
     parser.add_argument("--storage", type=Path)
+    parser.add_argument(
+        "--settings-storage", type=Path,
+        help="settings disk image, attached write-protected to the second "
+             "storage controller",
+    )
     parser.add_argument("--socket", default=DEFAULT_SOCKET)
     parser.add_argument("--ram-kib", type=int, default=1024)
     parser.add_argument("--ext-mem-mib", type=int, default=128)
@@ -130,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     session = MachineSession.from_bios(
         args.bios,
         storage_image=args.storage,
+        settings_image=args.settings_storage,
         ram_size=args.ram_kib << 10,
         ext_mem_size=args.ext_mem_mib << 20,
         vram_size=args.vram_mib << 20,

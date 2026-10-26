@@ -14,6 +14,19 @@ entire requested transfer was accepted by the live backend.  It is not a
 durability claim.  A subsequent successful `FLUSH` is the ordering and
 durability boundary for all earlier successful writes.
 
+## Controllers
+
+Every machine has two controllers of this design, each decoding its own
+128-byte window.  Controller 0, at MMIO `+0x0200`, holds the system disk.
+Controller 1, at `+0x0280`, holds the settings disk, whose medium is
+write-protected: while a medium is present `STATUS` shows `WRITE_PROTECTED`
+and every `WRITE` completes with that result, changing nothing.  A host
+attaches the settings disk's image read-only and never creates or writes it.
+The two controllers reach memory through the disk's one DMA bus port, which
+serves one beat at a time and holds its grant until the beat it granted
+completes.  The BIOS's `UNIT-DISK-*` words address either controller by its
+unit number, 0 or 1.
+
 ## Register map
 
 The original offsets through `TOTAL_SECTORS` retain their byte meanings.  The

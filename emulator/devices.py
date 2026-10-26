@@ -10,7 +10,9 @@ We carve out the first slice for our emulated peripherals:
 
   MMIO_BASE + 0x0000 .. 0x00FF  : UART  (serial console)
   MMIO_BASE + 0x0100 .. 0x01FF  : Timer
-  MMIO_BASE + 0x0200 .. 0x02FF  : Storage controller (block device)
+  MMIO_BASE + 0x0200 .. 0x027F  : Storage controller 0 (the system disk)
+  MMIO_BASE + 0x0280 .. 0x02FF  : Storage controller 1 (the settings disk,
+                                  whose medium is write-protected)
   MMIO_BASE + 0x0300 .. 0x03FF  : System info / board-level
   MMIO_BASE + 0x0C00 .. 0x0C1F  : One-shot PCM audio output
 
@@ -110,6 +112,9 @@ UART_BASE    = 0x0000
 UART_GEOM_BASE = 0x0010  # UART geometry (terminal dimensions) — within UART block
 TIMER_BASE   = 0x0100
 STORAGE_BASE = 0x0200
+# The second storage controller, the same design as the first.  It holds the
+# settings disk, whose medium the machine reads and never writes.
+STORAGE1_BASE = 0x0280
 SYSINFO_BASE = 0x0300
 NIC_BASE     = 0x0400
 MBOX_BASE    = 0x0500
@@ -627,8 +632,14 @@ class Storage(Device):
     })
     _FAULT_ACTIONS = frozenset({"fail", "stall", "detach"})
 
-    def __init__(self, image_path: Optional[str] = None):
-        super().__init__("Storage", STORAGE_BASE, 0x25)
+    def __init__(
+        self,
+        image_path: Optional[str] = None,
+        *,
+        base: int = STORAGE_BASE,
+        write_protected: bool = False,
+    ):
+        super().__init__("Storage", base, 0x25)
         self.image_path = image_path
         self._image_data: bytearray = bytearray()
         self._host_file = HostImageFile()
@@ -645,7 +656,9 @@ class Storage(Device):
         self.rejected: bool = False
         self.result_valid: bool = False
         self.media_changed: bool = False
-        self.write_protected: bool = False
+        # A write-protected medium refuses every WRITE, is never written
+        # back to its host file, and must exist: it is never created.
+        self.write_protected: bool = write_protected
         self.result: int = STORAGE_RESULT_OK
         self.completion: int = 0
         self.media_generation: int = 0
@@ -690,15 +703,17 @@ class Storage(Device):
         if image_path:
             self.load_image(image_path)
 
-    @staticmethod
-    def _read_image(path: str) -> tuple[bytearray, bool]:
+    def _read_image(self, path: str) -> tuple[bytearray, bool]:
         """The image at PATH, and whether the file holds it: an absent file
-        gives a new empty 1 MiB image."""
+        gives a new empty 1 MiB image, except for a write-protected medium,
+        which must exist."""
         try:
             with open(path, "rb") as f:
                 image_data = bytearray(f.read())
             found = True
         except FileNotFoundError:
+            if self.write_protected:
+                raise
             image_data = bytearray(SECTOR_SIZE * 2048)
             found = False
         if len(image_data) % SECTOR_SIZE:
@@ -737,6 +752,8 @@ class Storage(Device):
         precise terminal result instead of allowing it to escape the
         emulator.
         """
+        if self.write_protected:
+            return
         if self.image_path is not None and self.status & STORAGE_STATUS_PRESENT:
             self._host_file.flush(self.image_path, self._image_data)
 
@@ -1007,7 +1024,8 @@ class Storage(Device):
                 s |= STORAGE_STATUS_RESULT_VALID
             if self.media_changed:
                 s |= STORAGE_STATUS_MEDIA_CHANGED
-            if self.write_protected:
+            # Write protection is the medium's: an empty slot shows none.
+            if self.write_protected and self.status & STORAGE_STATUS_PRESENT:
                 s |= STORAGE_STATUS_WRITE_PROTECTED
             return s
         if 0x02 <= offset <= 0x05:

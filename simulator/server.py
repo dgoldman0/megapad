@@ -62,12 +62,36 @@ def _nonnegative_int(value: str) -> int:
     return parsed
 
 
+def settings_image_path(args) -> Path | None:
+    """The settings disk image a session attaches, which must exist."""
+
+    if args.settings_storage is None:
+        return None
+    path = args.settings_storage.resolve()
+    if not path.is_file():
+        raise ValueError(f"settings storage image does not exist: {path}")
+    return path
+
+
+def settings_storage_service(path: Path | None) -> HostedStorageService | None:
+    """The settings disk: its image, write-protected, or no medium."""
+
+    if path is None:
+        return None
+    return HostedStorageService(image_path=path, write_protected=True)
+
+
 def build_argument_parser(
     *,
     description: str = "Run a shared MegaPad semantic-simulator session",
 ) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--storage", type=Path, required=True)
+    parser.add_argument(
+        "--settings-storage", type=Path,
+        help="settings disk image, attached write-protected to the second "
+             "storage controller",
+    )
     parser.add_argument("--socket", default=DEFAULT_SOCKET)
     parser.add_argument("--ram-kib", type=_positive_int, default=1024)
     parser.add_argument("--ext-mem-mib", type=_nonnegative_int, default=128)
@@ -174,6 +198,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
     storage_path = args.storage.resolve()
     if not storage_path.is_file():
         raise ValueError(f"storage image does not exist: {storage_path}")
+    settings_path = settings_image_path(args)
     executor = configured_production_executor(args.executor)
     # Resolve the environment before image preparation so a bad value fails
     # without first running autoexec. None selects the executor's default.
@@ -202,6 +227,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
     preparation = prepare_image_bootstrap(
         memory=memory,
         storage=storage,
+        settings_storage=settings_storage_service(settings_path),
         terminal_cols=args.cols,
         terminal_rows=args.rows,
         semantic_step_budget=args.semantic_step_budget,

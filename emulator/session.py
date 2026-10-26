@@ -97,6 +97,7 @@ class MachineSession(TerminalSession):
         bios_path: str | os.PathLike,
         *,
         storage_image: str | os.PathLike | None = None,
+        settings_image: str | os.PathLike | None = None,
         ram_size: int = 1 << 20,
         ext_mem_size: int = 128 << 20,
         vram_size: int = 4 << 20,
@@ -124,6 +125,7 @@ class MachineSession(TerminalSession):
         system = MegapadSystem(
             ram_size=ram_size,
             storage_image=str(storage_image) if storage_image else None,
+            settings_image=str(settings_image) if settings_image else None,
             ext_mem_size=ext_mem_size,
             vram_size=vram_size,
             num_cores=num_cores,

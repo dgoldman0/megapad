@@ -50,6 +50,7 @@ def run_scenario(path: Path) -> dict:
     if bios is None:
         raise ScenarioFailure("scenario machine.bios is required")
     storage = resolve_path(base, machine.get("storage"))
+    settings = resolve_path(base, machine.get("settings_storage"))
 
     started = time.perf_counter()
     action_reports: list[dict] = []
@@ -58,6 +59,7 @@ def run_scenario(path: Path) -> dict:
     with MachineSession.from_bios(
         bios,
         storage_image=storage,
+        settings_image=settings,
         ram_size=int(machine.get("ram_kib", 1024)) << 10,
         ext_mem_size=int(machine.get("ext_mem_mib", 128)) << 20,
         vram_size=int(machine.get("vram_mib", 4)) << 20,

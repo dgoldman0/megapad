@@ -59,6 +59,7 @@ from .devices import (
     FramebufferDevice, CppFramebufferProxy, CppTimerProxy, CppUartGeomProxy,
     RTC, CppRTCProxy, CppWotsProxy,
     SECTOR_SIZE, UART_BASE, UART_GEOM_BASE, TIMER_BASE, STORAGE_BASE,
+    STORAGE1_BASE,
     SYSINFO_BASE, NIC_BASE, MBOX_BASE, SPINLOCK_BASE,
     NTT_BASE, KEM_BASE, FB_BASE, NIC_MTU, NIC_MAX_FRAME,
     PortBridgeCSR,
@@ -1183,6 +1184,7 @@ class MegapadSystem:
 
     def __init__(self, ram_size: int = 1 << 20,
                  storage_image: Optional[str] = None,
+                 settings_image: Optional[str] = None,
                  nic_port: Optional[int] = None,
                  nic_peer_port: Optional[int] = None,
                  nic_backend: 'Optional[NICBackend]' = None,
@@ -1298,12 +1300,20 @@ class MegapadSystem:
         # Timer is now handled natively by C++ accelerator — use proxy
         self.timer = CppTimerProxy(self.cores[0]._cs)
         self.storage = Storage(storage_image)
-        self.storage._cycle_mutation_guard = (
-            self._native_system._require_storage_mutation_allowed
+        # The settings disk: the second controller, whose medium the machine
+        # reads and never writes.  Without an image it holds no medium.
+        self.settings_storage = Storage(
+            settings_image, base=STORAGE1_BASE, write_protected=True,
         )
-        self.storage._stall_release_guard = (
-            self._native_system._require_storage_stall_release_allowed
-        )
+        for controller in self._storage_controllers():
+            controller._cycle_mutation_guard = (
+                self._native_system._require_storage_mutation_allowed
+            )
+            controller._stall_release_guard = (
+                self._native_system._require_storage_stall_release_allowed
+            )
+        # The controller holding the shared disk port's grant (strict cycle).
+        self._storage_dma_owner: Optional[Storage] = None
         self.audio = AudioOutput()
         self.nic = NetworkDevice(
             passthrough_port=nic_port,
@@ -1375,6 +1385,7 @@ class MegapadSystem:
         # Timer time is advanced by the authoritative native system clock.
         self.bus.register(self.timer, externally_clocked=True)
         self.bus.register(self.storage)
+        self.bus.register(self.settings_storage)
         self.bus.register(self.audio)
         self.bus.register(self.sysinfo)
         # Retain the Python NIC for backend lifecycle and status. Native
@@ -1408,14 +1419,15 @@ class MegapadSystem:
         # Wire the ordinary storage controller to one identity-checked system
         # memory capability. Strict-cycle and customized callback paths retain
         # their byte-visible DMA state machine.
-        self.storage._bind_system_memory(
-            read_byte=self._raw_mem_read,
-            write_byte=self._raw_mem_write,
-            span_valid=self._raw_mem_span_valid,
-            memory_scope=self._storage_dma_memory_use,
-            read_span=self._raw_mem_read_span,
-            write_span=self._raw_mem_write_span,
-        )
+        for controller in self._storage_controllers():
+            controller._bind_system_memory(
+                read_byte=self._raw_mem_read,
+                write_byte=self._raw_mem_write,
+                span_valid=self._raw_mem_span_valid,
+                memory_scope=self._storage_dma_memory_use,
+                read_span=self._raw_mem_read_span,
+                write_span=self._raw_mem_write_span,
+            )
         # Only the ordinary system methods establish equivalence between
         # scalar reads and direct span copies. Subclasses and customized
         # callbacks retain their byte-visible behavior from the first submit.
@@ -2694,7 +2706,9 @@ class MegapadSystem:
         # Cancel every native target and cached DMA beat atomically before a
         # device can discard the controller state that would consume it.
         self._native_system._reset_cycle_execution_and_main_bus()
-        self.storage.reset()
+        self._storage_dma_owner = None
+        for controller in self._storage_controllers():
+            controller.reset()
         self.audio.reset()
         # System time and shared input devices intentionally survive this CPU
         # reboot, so retain their external-event provenance and future events.
@@ -3266,10 +3280,12 @@ class MegapadSystem:
             for cpu in self.cores[:self.num_full_cores]
         ]
         dma_callback_sets = self._cycle_dma_callback_sets()
-        previous_strict_submission = (
-            self.storage._strict_cycle_submission
+        controllers = self._storage_controllers()
+        previous_strict_submission = tuple(
+            controller._strict_cycle_submission for controller in controllers
         )
-        self.storage._strict_cycle_submission = True
+        for controller in controllers:
+            controller._strict_cycle_submission = True
         try:
             result = self._native_system.run_full_core_cycle_batch(
                 max_system_cycles,
@@ -3281,9 +3297,10 @@ class MegapadSystem:
                 max_instructions,
             )
         finally:
-            self.storage._strict_cycle_submission = (
-                previous_strict_submission
-            )
+            for controller, previous in zip(
+                controllers, previous_strict_submission
+            ):
+                controller._strict_cycle_submission = previous
         stop_reason = str(result.system_stop_reason)
         if "." in stop_reason:
             stop_reason = stop_reason.rsplit(".", 1)[-1]
@@ -3320,8 +3337,34 @@ class MegapadSystem:
             timing_model="strict_shared_clock",
         )
 
+    def _storage_controllers(self) -> tuple[Storage, Storage]:
+        """The system disk's controller, then the settings disk's."""
+        return self.storage, self.settings_storage
+
+    def _storage_dma_granted(self) -> Optional[Storage]:
+        """The controller the shared disk port serves: the one granted a
+        beat that has not completed, or else the first, in controller
+        order, with a beat to offer, which the port then grants."""
+        owner = self._storage_dma_owner
+        if owner is not None and owner.cycle_dma_view()[1] is not None:
+            return owner
+        self._storage_dma_owner = None
+        for controller in self._storage_controllers():
+            if controller.cycle_dma_view()[1] is not None:
+                self._storage_dma_owner = controller
+                return controller
+        return None
+
     def _inspect_storage_dma(self, _current_cycle: int) -> DmaEndpointView:
-        active, pending = self.storage.cycle_dma_view()
+        # Both storage controllers share the disk's one bus port.  The port
+        # is active while either controller is, and offers the beat of the
+        # controller it granted, holding that grant until the beat completes.
+        active = any(
+            controller.cycle_dma_view()[0]
+            for controller in self._storage_controllers()
+        )
+        owner = self._storage_dma_granted()
+        pending = None if owner is None else owner.cycle_dma_view()[1]
         beat = None
         if pending is not None:
             beat = DmaBeat(
@@ -3342,7 +3385,13 @@ class MegapadSystem:
             if result.read_value is None
             else int(result.read_value) & 0xFF
         )
-        accepted = self.storage.cycle_dma_complete(
+        owner = self._storage_dma_owner
+        if owner is None:
+            raise RuntimeError(
+                "storage DMA completion has no granted controller"
+            )
+        self._storage_dma_owner = None
+        accepted = owner.cycle_dma_complete(
             int(token),
             read_value=read_value,
             faulted=result.fault != BusFault.NONE,
@@ -3357,7 +3406,8 @@ class MegapadSystem:
 
     def _accept_storage_dma(self, token: int, _grant) -> None:
         """Validate capture of the disk beat retained until completion."""
-        _active, pending = self.storage.cycle_dma_view()
+        owner = self._storage_dma_owner
+        pending = None if owner is None else owner.cycle_dma_view()[1]
         if pending is None or int(pending.token) != int(token):
             raise RuntimeError(
                 "storage DMA acceptance does not match its pending beat"
@@ -3659,6 +3709,10 @@ class MegapadSystem:
         lines.append(f"  Storage: {'present' if self.storage.status & 0x80 else 'none'} "
                       f"sectors={self.storage.total_sectors} "
                       f"image={self.storage.image_path or 'N/A'}")
+        settings = self.settings_storage
+        lines.append(f"  Settings disk: {'present' if settings.status & 0x80 else 'none'} "
+                      f"sectors={settings.total_sectors} "
+                      f"image={settings.image_path or 'N/A'} (write-protected)")
         lines.append(f"  Audio: generation={self.audio.generation} "
                      f"frames={self.audio.last_frames} "
                      f"rate={self.audio.last_rate or self.audio.rate} "

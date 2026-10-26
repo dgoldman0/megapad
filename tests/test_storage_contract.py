@@ -48,6 +48,7 @@ from devices import (
     STORAGE_STATUS_REJECTED,
     STORAGE_STATUS_RESULT_VALID,
     STORAGE_STATUS_WRITE_PROTECTED,
+    STORAGE1_BASE,
     Storage,
 )
 from system import (
@@ -926,3 +927,97 @@ def test_flush_writes_only_the_sectors_the_guest_changed(tmp_path):
         + b"\xE8" * SECTOR_SIZE
         + b"\xEE" * SECTOR_SIZE
     )
+
+
+def test_a_write_protected_medium_must_exist_and_is_never_written(tmp_path):
+    """The settings disk's medium is write-protected: a missing image is an
+    error rather than a new empty one, and nothing writes its file."""
+    missing = tmp_path / "missing.img"
+    with pytest.raises(FileNotFoundError):
+        Storage(str(missing), base=STORAGE1_BASE, write_protected=True)
+    assert not missing.exists()
+
+    path = tmp_path / "settings.img"
+    payload = bytes(range(256)) * 4
+    path.write_bytes(payload)
+    device = Storage(str(path), base=STORAGE1_BASE, write_protected=True)
+    memory = bytearray(SECTOR_SIZE)
+    device._mem_read = lambda address: memory[address]
+    device._mem_write = lambda address, value: memory.__setitem__(address, value)
+    device._mem_span_valid = lambda address, count: (
+        0 <= address and 0 < count <= len(memory) - address
+    )
+    assert device.base == STORAGE1_BASE
+    assert device.read8(0x01) & STORAGE_STATUS_WRITE_PROTECTED
+    assert _read_le(device, 0x11, 4) == 2
+    _guarded_command(device, STORAGE_CMD_WRITE, device.media_generation)
+    assert device.result == STORAGE_RESULT_WRITE_PROTECTED
+    device.save_image()
+    device.detach_image(save=True)
+    assert path.read_bytes() == payload
+
+
+def _two_disk_system(tmp_path, *, settings=True):
+    system_path = tmp_path / "system.img"
+    system_path.write_bytes(b"\x11" * (4 * SECTOR_SIZE))
+    settings_path = tmp_path / "settings.img"
+    settings_path.write_bytes(
+        b"\x5A" * SECTOR_SIZE + b"\x00" * (3 * SECTOR_SIZE)
+    )
+    system = MegapadSystem(
+        ram_size=4096,
+        storage_image=str(system_path),
+        settings_image=str(settings_path) if settings else None,
+        num_cores=1,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+        worker_count=1,
+    )
+    system.load_binary(0, assemble("st.b r1, r2\nhalt"))
+    system.boot(entry=0)
+    return system, settings_path
+
+
+def test_the_settings_disk_is_the_second_controller_and_refuses_writes(tmp_path):
+    """The second controller answers at +0x0280 with its own medium; the
+    system disk's controller at +0x0200 sees none of its commands.  A guest
+    read there fills memory, and a guest write is refused and changes
+    nothing."""
+    system, settings_path = _two_disk_system(tmp_path)
+    disk, settings = system.storage, system.settings_storage
+    assert settings.base == STORAGE1_BASE and disk.base == STORAGE_BASE
+    assert system.bus.find_device(STORAGE1_BASE + 0x01) == (settings, 0x01)
+    assert system.bus.find_device(STORAGE_BASE + 0x24) == (disk, 0x24)
+    status = settings.read8(0x01)
+    assert status & STORAGE_STATUS_PRESENT
+    assert status & STORAGE_STATUS_WRITE_PROTECTED
+    assert not disk.read8(0x01) & STORAGE_STATUS_WRITE_PROTECTED
+
+    _program(settings, sector=0, dma=256, count=1)
+    _write_le(settings, 0x20, settings.media_generation, 4)
+    system.cpu.regs[1] = MMIO_BASE + STORAGE1_BASE + 0x24
+    system.cpu.regs[2] = STORAGE_CMD_READ
+    system.run_batch_stats(1)
+    assert settings.result == STORAGE_RESULT_OK
+    assert system._shared_mem[256:256 + SECTOR_SIZE] == b"\x5A" * SECTOR_SIZE
+    assert disk.completion == 0
+
+    system.cpu.pc = 0
+    system.cpu.regs[2] = STORAGE_CMD_WRITE
+    system.run_batch_stats(1)
+    assert settings.result == STORAGE_RESULT_WRITE_PROTECTED
+    assert settings._image_data[:SECTOR_SIZE] == b"\x5A" * SECTOR_SIZE
+    system.settings_storage.save_image()
+    assert settings_path.read_bytes()[:SECTOR_SIZE] == b"\x5A" * SECTOR_SIZE
+    assert disk.completion == 0
+
+
+def test_without_a_settings_image_the_second_controller_holds_no_medium(tmp_path):
+    system, _settings_path = _two_disk_system(tmp_path, settings=False)
+    settings = system.settings_storage
+    assert settings.read8(0x01) == 0
+    assert _read_le(settings, 0x11, 4) == 0
+    _guarded_command(settings, STORAGE_CMD_READ, settings.media_generation)
+    assert settings.result == STORAGE_RESULT_NO_MEDIA

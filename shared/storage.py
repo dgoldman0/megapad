@@ -9,6 +9,10 @@ from pathlib import Path
 
 SECTOR_SIZE = 512
 
+# Storage controllers on every machine: unit 0 holds the system disk, unit 1
+# the settings disk, whose medium is write-protected.
+STORAGE_UNITS = 2
+
 STORAGE_CMD_READ = 0x01
 STORAGE_CMD_WRITE = 0x02
 STORAGE_CMD_STATUS = 0x03

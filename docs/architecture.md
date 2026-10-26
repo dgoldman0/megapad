@@ -48,7 +48,8 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
     │  FFFF_FF00+  ┌──────────────────────┐ │
     │   0x0000     │  UART                │ │
     │   0x0100     │  Timer               │ │
-    │   0x0200     │  Storage Controller  │ │
+    │   0x0200     │  Storage Controller 0│ │
+    │   0x0280     │  Storage Controller 1│ │
     │   0x0300     │  System Info (R/O)   │ │
     │   0x0400     │  NIC                 │ │
     │   0x0500     │  Mailbox (IPI)       │ │
@@ -142,7 +143,8 @@ device occupies a small range:
 | **UART** | `+0x0000` | 16 bytes | Serial I/O (keyboard/terminal) |
 | **UART Geometry** | `+0x0010` | 16 bytes | Terminal dimensions, resize status/request |
 | **Timer** | `+0x0100` | 16 bytes | 32-bit timer with compare-match |
-| **Storage** | `+0x0200` | 32 bytes | Checked sector controller with completion, precise result, media identity, and capacity registers |
+| **Storage** | `+0x0200` | 37 bytes | Checked sector controller with completion, precise result, media identity, and capacity registers: the system disk |
+| **Storage 1** | `+0x0280` | 37 bytes | The same controller: the settings disk, its medium write-protected |
 | **System Info** | `+0x0300` | 112 bytes | Board ID, topology, memory layout, crypto capabilities, requester count |
 | **NIC** | `+0x0400` | 128 bytes | Network interface controller |
 | **Mailbox** | `+0x0500` | 16 bytes | Inter-core IPI (data + send + status + ack) |
@@ -382,6 +384,8 @@ controller's u32 capacity encoding.
 
 The normative command, completion, failure, ordering, and durability behavior
 is defined in [Storage controller and checked block-I/O contract](storage-controller-contract.md).
+A second controller of the same design, at `+0x0280`, holds the settings
+disk, whose medium is write-protected; both share the disk's DMA bus port.
 
 FPGA builds expose the logical media window through the synthesizable
 `DISK_TOTAL_SECTORS` parameter.  The portable top and SoC default it to the

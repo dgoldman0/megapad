@@ -917,9 +917,13 @@ and a file abstraction provides cursor-based I/O over contiguous sector ranges.
 
 ### 7.1 BIOS Disk Words
 
-Seventeen BIOS words expose the storage device (at MMIO offset 0x0200).
-KDOS production paths use the checked operations; raw setup/command words are
-retained for controller diagnostics and do not wait for completion.
+Seventeen BIOS words expose the system disk's storage controller (at MMIO
+offset 0x0200), and eight more, `DISK-UNITS` and the `UNIT-DISK-*` words,
+address either of the machine's two controllers by unit: 0 the system disk,
+1 the settings disk at 0x0280, whose medium is write-protected (see the
+[BIOS reference](docs/bios-forth.md)).  KDOS production paths use the
+checked operations; raw setup/command words are retained for controller
+diagnostics and do not wait for completion.
 
 | Word | Stack | Description |
 |---|---|---|

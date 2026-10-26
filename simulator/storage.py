@@ -131,6 +131,10 @@ class HostedStorageService:
                 payload = path.read_bytes()
                 found = True
             except FileNotFoundError:
+                # A write-protected medium is never written, so a file that
+                # holds no image can never come to hold one.
+                if write_protected:
+                    raise
                 payload = bytes(SECTOR_SIZE * DEFAULT_IMAGE_SECTORS)
                 found = False
             self.attach(

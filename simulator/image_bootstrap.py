@@ -139,6 +139,7 @@ def prepare_image_bootstrap(
     *,
     memory: SparseAddressSpace,
     storage: HostedStorageService,
+    settings_storage: HostedStorageService | None = None,
     terminal_cols: int = 80,
     terminal_rows: int = 30,
     semantic_step_budget: int | None = None,
@@ -159,6 +160,8 @@ def prepare_image_bootstrap(
     constructed runtime to publish declarations before boot source runs. That
     runtime must own the exact memory and storage supplied here, and its
     executor must already have been selected during construction.
+    SETTINGS_STORAGE is the settings disk on the second storage controller;
+    None leaves that controller without a medium.
     """
 
     if not isinstance(memory, SparseAddressSpace):
@@ -168,13 +171,16 @@ def prepare_image_bootstrap(
 
     if runtime is None:
         runtime = MegaForthRuntime(
-            memory=memory, storage=storage, execution_backend=execution_backend,
+            memory=memory, storage=storage, settings_storage=settings_storage,
+            execution_backend=execution_backend,
         )
     else:
         if not isinstance(runtime, MegaForthRuntime):
             raise TypeError("runtime must be a MegaForthRuntime or None")
         if runtime.memory is not memory or runtime.storage is not storage:
             raise ValueError("prepared runtime must own the supplied memory and storage")
+        if settings_storage is not None and runtime.settings_storage is not settings_storage:
+            raise ValueError("prepared runtime must own the supplied settings storage")
         if execution_backend is not None:
             raise ValueError("a prepared runtime already owns its executor selection")
     # Establish the caller's baseline before any boot source can query it.

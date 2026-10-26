@@ -88,6 +88,7 @@ from devices import (
     STORAGE_CMD_READ, STORAGE_CMD_WRITE, STORAGE_CMD_FLUSH,
     STORAGE_RESULT_MEDIA_FAILURE, STORAGE_RESULT_FLUSH_FAILURE,
     STORAGE_RESULT_MEDIA_REMOVED, STORAGE_RESULT_UNSUPPORTED,
+    STORAGE_RESULT_NO_MEDIA, STORAGE_RESULT_WRITE_PROTECTED,
     STORAGE_CAP_GEN_GUARD, STORAGE_CAPS,
     PORT_BRIDGE_BASE, TRNG_BASE, DEFAULT_PORT_MAP, PortBridgeCSR,
     FB_BASE,
@@ -124,8 +125,10 @@ BIOS_PATH = os.environ.get("MP64_BIOS", os.path.join(PROJECT_ROOT, "bios.asm"))
 
 
 def make_system(ram_kib: int = 1024, storage_image: str = None,
-                num_cores: int = 1, ext_mem_mib: int = 0) -> MegapadSystem:
+                num_cores: int = 1, ext_mem_mib: int = 0,
+                settings_image: str = None) -> MegapadSystem:
     return MegapadSystem(ram_size=ram_kib * 1024, storage_image=storage_image,
+                         settings_image=settings_image,
                          num_cores=num_cores,
                          ext_mem_size=ext_mem_mib * (1 << 20))
 
@@ -1592,15 +1595,18 @@ class TestBIOS(unittest.TestCase):
                         code_size,
                     )
 
-    def _boot_bios(self, ram_kib=256, storage_image=None, ext_mem_mib=0):
+    def _boot_bios(self, ram_kib=256, storage_image=None, ext_mem_mib=0,
+                   settings_image=None):
         # Fast path: restore from snapshot (default 256K, no storage)
         if (ram_kib == 256 and storage_image is None
+                and settings_image is None
                 and ext_mem_mib == 0
                 and self.__class__._bios_snapshot is not None):
             return self._boot_bios_fast()
         # Slow path: fresh boot (non-default RAM size or storage)
         sys = make_system(ram_kib=ram_kib, storage_image=storage_image,
-                          ext_mem_mib=ext_mem_mib)
+                          ext_mem_mib=ext_mem_mib,
+                          settings_image=settings_image)
         buf = capture_uart(sys)
         sys.load_binary(0, self.bios_code)
         self._register_accel_hooks(sys)
@@ -2440,6 +2446,71 @@ class TestBIOS(unittest.TestCase):
             self.assertEqual(sys.storage._image_data[8 * SECTOR_SIZE], 0x31)
         finally:
             os.unlink(path)
+
+    def test_unit_words_read_the_settings_disk_and_never_write_it(self):
+        """Unit 1 is the settings disk on the second controller: present,
+        write-protected, read through the unit words, and every write to it
+        refused.  Unit 0 is the system disk.  Any other unit reads as an
+        empty slot."""
+        settings = bytearray(64 * SECTOR_SIZE)
+        settings[:5] = b"SAFE!"
+        with tempfile.TemporaryDirectory() as directory:
+            system_path = os.path.join(directory, "system.img")
+            settings_path = os.path.join(directory, "settings.img")
+            with open(system_path, "wb") as f:
+                f.write(b"\x00" * (2048 * SECTOR_SIZE))
+            with open(settings_path, "wb") as f:
+                f.write(settings)
+            sys, buf = self._boot_bios(storage_image=system_path,
+                                       settings_image=settings_path)
+            for _ in range(20):
+                if sys.cpu.idle:
+                    break
+                sys.run_batch(100_000)
+            settings_gen = sys.settings_storage.media_generation
+            system_gen = sys.storage.media_generation
+            text = self._run_forth(sys, buf, [
+                'DISK-UNITS ."  UNITS=" .',
+                '1 UNIT-DISK@ 0xA0 AND ."  STATUS1=" .',
+                '1 UNIT-DISK-SECTORS ."  SECTORS1=" .',
+                '1 UNIT-DISK-CAPS ."  CAPS1=" .',
+                '1 UNIT-DISK-MEDIA-GEN ."  GEN1=" .',
+                '0 UNIT-DISK@ DISK@ = ."  SAME0=" .',
+                '0 UNIT-DISK-SECTORS ."  SECTORS0=" .',
+                '2 UNIT-DISK@ ."  STATUS2=" .',
+                '2 UNIT-DISK-SECTORS ."  SECTORS2=" .',
+                'VARIABLE unit-buf 512 ALLOT',
+                (f'unit-buf 0 1 {settings_gen} 1 UNIT-DISK-READ-GEN-CHECKED '
+                 '."  READ1=" . .'),
+                'unit-buf C@ ."  BYTE1=" .',
+                (f'unit-buf 0 1 {settings_gen} 1 UNIT-DISK-WRITE-GEN-CHECKED '
+                 '."  WRITE1=" . .'),
+                f'{settings_gen} 1 UNIT-DISK-FLUSH-GEN-CHECKED ."  FLUSH1=" .',
+                (f'unit-buf 0 1 {settings_gen} 2 UNIT-DISK-READ-GEN-CHECKED '
+                 '."  READ2=" . .'),
+                f'{settings_gen} 2 UNIT-DISK-FLUSH-GEN-CHECKED ."  FLUSH2=" .',
+                (f'unit-buf 9 1 {system_gen} 0 UNIT-DISK-WRITE-GEN-CHECKED '
+                 '."  WRITE0=" . .'),
+            ])
+            self.assertIn("UNITS=2 ", text)
+            self.assertIn("STATUS1=160 ", text)
+            self.assertIn("SECTORS1=64 ", text)
+            self.assertIn("CAPS1=127 ", text)
+            self.assertIn(f"GEN1={settings_gen} ", text)
+            self.assertIn("SAME0=-1 ", text)
+            self.assertIn("SECTORS0=2048 ", text)
+            self.assertIn("STATUS2=0 ", text)
+            self.assertIn("SECTORS2=0 ", text)
+            self.assertIn("READ1=0 1 ", text)
+            self.assertIn(f"BYTE1={ord('S')} ", text)
+            self.assertIn(f"WRITE1={STORAGE_RESULT_WRITE_PROTECTED} 0 ", text)
+            self.assertIn("FLUSH1=0 ", text)
+            self.assertIn(f"READ2={STORAGE_RESULT_NO_MEDIA} 0 ", text)
+            self.assertIn(f"FLUSH2={STORAGE_RESULT_NO_MEDIA} ", text)
+            self.assertIn("WRITE0=0 1 ", text)
+            self.assertEqual(sys.storage._image_data[9 * SECTOR_SIZE], ord("S"))
+            with open(settings_path, "rb") as f:
+                self.assertEqual(f.read(), bytes(settings))
 
     def test_disk_generation_bound_flush_checks_identity(self):
         """A stale bound flush has no host effect; the current one persists."""
@@ -5753,10 +5824,18 @@ class TestBIOSTACC(unittest.TestCase):
         return tuple(base + offset for offset in (0, 64, 128, 192, 512))
 
     def test_tacc_dictionary_tail_chain(self):
-        """WOTS, AES's block-mode words and SHA-384 append after the
-        unchanged full-TACC dictionary tail."""
+        """WOTS, AES's block-mode words, SHA-384 and the storage unit words
+        append after the unchanged full-TACC dictionary tail."""
         labels = self._labels
         chain = (
+            ("d_unit_disk_flush_gen_checked", "d_unit_disk_write_gen_checked"),
+            ("d_unit_disk_write_gen_checked", "d_unit_disk_read_gen_checked"),
+            ("d_unit_disk_read_gen_checked", "d_unit_disk_caps"),
+            ("d_unit_disk_caps", "d_unit_disk_media_gen"),
+            ("d_unit_disk_media_gen", "d_unit_disk_sectors"),
+            ("d_unit_disk_sectors", "d_unit_disk_status"),
+            ("d_unit_disk_status", "d_disk_units"),
+            ("d_disk_units", "d_sha384_final"),
             ("d_sha384_final", "d_sha384_init"),
             ("d_sha384_init", "d_aes_cbc_iv_store"),
             ("d_aes_cbc_iv_store", "d_aes_mode_store"),
@@ -5785,7 +5864,9 @@ class TestBIOSTACC(unittest.TestCase):
             ("d_tamac", "d_caller_span_status"),
             ("d_caller_span_status", "d_entropy_ready"),
         )
-        self.assertEqual(labels["latest_entry"], labels["d_sha384_final"])
+        self.assertEqual(
+            labels["latest_entry"], labels["d_unit_disk_flush_gen_checked"],
+        )
         for current, previous in chain:
             link = int.from_bytes(
                 self._code[labels[current]:labels[current] + 8],
@@ -5802,7 +5883,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 550)
+        self.assertEqual(len(seen), 558)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -16087,7 +16168,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 550)
+        self.assertEqual(len(seen), 558)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -17709,14 +17790,15 @@ class TestBIOSEntropyFill(unittest.TestCase):
         return bytes(sys_obj.cpu.mem[start:start + length])
 
     def test_dictionary_append_preserves_every_older_link(self):
-        """WOTS, then AES's block-mode words, then SHA-384 append without
-        changing any older dictionary link."""
+        """WOTS, then AES's block-mode words, then SHA-384, then the storage
+        unit words append without changing any older dictionary link."""
         labels = self._bios_labels
         self.assertEqual(
             labels["latest_entry"],
-            labels["d_sha384_final"],
+            labels["d_unit_disk_flush_gen_checked"],
         )
         for current, previous in (
+            ("d_disk_units", "d_sha384_final"),
             ("d_sha384_final", "d_sha384_init"),
             ("d_sha384_init", "d_aes_cbc_iv_store"),
             ("d_aes_cbc_iv_store", "d_aes_mode_store"),
