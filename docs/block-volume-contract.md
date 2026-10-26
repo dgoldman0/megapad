@@ -20,8 +20,11 @@ cells unless a field is explicitly described as bytes.
 | `SECTOR` | 512 | Logical sector size supported by this backend |
 | `PART-WORKSPACE-MIN` | 5120 | Minimum caller-owned partition workspace |
 
-`BD-OPEN` creates one block-device reference to the currently attached
-medium.  `VOL-RAW`, `VOL-SLICE`, and successful partition discovery create
+`BD-OPEN-UNIT` creates one block-device reference to the medium currently
+attached to a storage unit: unit 0 (`SYSTEM-UNIT`), the system disk, or unit
+1 (`SETTINGS-UNIT`), the settings disk.  `BD-OPEN` is unit 0.  A device's
+reads, writes, flushes and staleness all address its own unit.  The settings
+disk's medium is write-protected, so its device carries `VOL-F-READONLY`.  `VOL-RAW`, `VOL-SLICE`, and successful partition discovery create
 volume references and increment the parent block device's reference count.
 `VOL-CLOSE` clears one volume and releases that reference.  `BD-CLOSE` refuses
 to clear a block device while any volume still refers to it.
@@ -66,7 +69,7 @@ their own cache/namespace locking above that boundary.
 | 8 | 8 | ABI | — | `STORAGE-ABI` |
 | 16 | 8 | cookie | `BD.COOKIE` | Nonzero object identity |
 | 24 | 8 | backend kind | — | 1 for the Megapad controller |
-| 32 | 8 | backend identity | — | Controller/backend instance identity |
+| 32 | 8 | backend identity | `BD.UNIT` | The controller: its storage unit plus one; `BD.UNIT` gives the unit |
 | 40 | 8 | media generation | `BD.MEDIA-GEN` | Attachment generation captured at open |
 | 48 | 8 | sector size | `BD.SECTOR-SIZE` | 512 |
 | 56 | 8 | sector count | `BD.SECTORS` | Exact attached capacity |
@@ -89,7 +92,10 @@ The public block-device words are:
 
 | Word | Stack effect | Contract |
 | --- | --- | --- |
-| `BD-OPEN` | `( bd -- ior )` | Clear and bind a descriptor to the current attachment |
+| `BD-OPEN-UNIT` | `( bd unit -- ior )` | Clear and bind a descriptor to the unit's current attachment |
+| `BD-OPEN` | `( bd -- ior )` | `BD-OPEN-UNIT` on the system disk, unit 0 |
+| `BD.UNIT` | `( bd -- unit )` | The storage unit a descriptor addresses |
+| `UNIT-DISK?` | `( unit -- flag )` | Whether the unit holds a medium |
 | `BD-CLOSE` | `( bd -- ior )` | Clear an unreferenced descriptor; return busy while volumes exist |
 | `BD-VALID?` | `( bd -- flag )` | Validate permanent descriptor structure and capabilities |
 | `BD-STALE?` | `( bd -- flag )` | Compare the saved attachment generation with the controller |
@@ -170,6 +176,12 @@ remain live. The word publishes a new raw volume on success but does not clear
 before rebinding. `FS-VOLUME!` instead validates a current volume, publishes
 its pointer, and clears `FS-OK`. It borrows the descriptor without incrementing
 the parent reference count, so its owner must keep it live until selection
+changes.
+
+`SETTINGS-BD` and `SETTINGS-VOLUME` are the settings disk's raw singletons.
+`SETTINGS-OPEN ( -- ior )` closes and reopens them in the same destructive
+order on unit 1; the volume is read-only, and `FS-VOLUME` is left as it was.
+A filesystem mounted on it reads the system settings, which only the host
 changes.
 
 `STORAGE-ENSURE` lazily opens the singleton only when the selection is invalid

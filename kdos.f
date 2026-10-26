@@ -3834,6 +3834,14 @@ VARIABLE BENCH-T0
 \ DISK? ( -- flag ) true if storage device present
 : DISK?  ( -- flag )  DISK@ 128 AND 0<> ;
 
+\ The machine's storage units: the system disk, and the settings disk, whose
+\ medium is write-protected (the BIOS's UNIT-DISK-* words).
+0 CONSTANT SYSTEM-UNIT
+1 CONSTANT SETTINGS-UNIT
+
+\ UNIT-DISK? ( unit -- flag ) true if storage unit UNIT holds a medium
+: UNIT-DISK?  ( unit -- flag )  UNIT-DISK@ 128 AND 0<> ;
+
 \ ---------------------------------------------------------------------
 \  Explicit block-device and bounded-volume objects
 \ ---------------------------------------------------------------------
@@ -3925,6 +3933,9 @@ VARIABLE BENCH-T0
 : BD.CAPS        ( bd -- u )  64 + @ ;
 : BD.FLAGS       ( bd -- u )  72 + @ ;
 : BD.REFS        ( bd -- a )  88 + ;
+\ The storage unit a block device addresses: its controller identity, which
+\ BD-OPEN-UNIT sets to the unit plus one.
+: BD.UNIT        ( bd -- unit )  32 + @ 1- ;
 
 : VOL.COOKIE      ( vol -- u )  16 + @ ;
 : VOL.BD          ( vol -- bd ) 24 + @ ;
@@ -3972,39 +3983,46 @@ VARIABLE STORAGE-COOKIE
 
 : BD-STALE?  ( bd -- flag )
     DUP BD-VALID? 0= IF DROP TRUE EXIT THEN
-    DISK? 0= IF DROP TRUE EXIT THEN
-    BD.MEDIA-GEN DISK-MEDIA-GEN <> ;
+    DUP BD.UNIT UNIT-DISK? 0= IF DROP TRUE EXIT THEN
+    DUP BD.MEDIA-GEN SWAP BD.UNIT UNIT-DISK-MEDIA-GEN <> ;
 
-: BD-OPEN  ( bd -- ior )
+\ BD-OPEN-UNIT ( bd unit -- ior )  Open BD on storage unit UNIT.  A medium
+\ the controller cannot write, or a write-protected one such as the settings
+\ disk's, opens read-only.
+: BD-OPEN-UNIT  ( bd unit -- ior )
+    >R
     DUP BD-VALID? IF
-        DUP BD.REFS @ IF DROP BD-E-BUSY EXIT THEN
+        DUP BD.REFS @ IF DROP R> DROP BD-E-BUSY EXIT THEN
     THEN
     DUP /BLOCK-DEVICE 0 FILL
-    DISK? 0= IF DROP BD-E-NO-MEDIA EXIT THEN
-    DISK-CAPS BD-REQUIRED-CAPS AND BD-REQUIRED-CAPS <> IF
-        DROP BD-E-UNSUPPORTED EXIT
+    R@ UNIT-DISK? 0= IF DROP R> DROP BD-E-NO-MEDIA EXIT THEN
+    R@ UNIT-DISK-CAPS BD-REQUIRED-CAPS AND BD-REQUIRED-CAPS <> IF
+        DROP R> DROP BD-E-UNSUPPORTED EXIT
     THEN
     STORAGE-ABI OVER 8 + !
     STORAGE-COOKIE-NEXT OVER 16 + !
     1 OVER 24 + !                    \ backend kind: Megapad controller
-    1 OVER 32 + !                    \ controller/backend identity
-    DISK-MEDIA-GEN OVER 40 + !
+    R@ 1+ OVER 32 + !                \ controller identity: the unit plus one
+    R@ UNIT-DISK-MEDIA-GEN OVER 40 + !
     SECTOR OVER 48 + !
-    DISK-SECTORS DUP 0= IF
-        DROP /BLOCK-DEVICE 0 FILL BD-E-NO-MEDIA EXIT
+    R@ UNIT-DISK-SECTORS DUP 0= IF
+        DROP /BLOCK-DEVICE 0 FILL R> DROP BD-E-NO-MEDIA EXIT
     THEN
     OVER 56 + !
-    DISK-CAPS OVER 64 + !
+    R@ UNIT-DISK-CAPS OVER 64 + !
     0
-    DISK-CAPS 2 AND 0= IF VOL-F-READONLY OR THEN
-    DISK@ 32 AND IF VOL-F-READONLY OR THEN
+    R@ UNIT-DISK-CAPS 2 AND 0= IF VOL-F-READONLY OR THEN
+    R@ UNIT-DISK@ 32 AND IF VOL-F-READONLY OR THEN
     OVER 72 + !
     1 OVER 80 + !                    \ synchronization kind: FS lock/controller
-    DISK-MEDIA-GEN OVER BD.MEDIA-GEN <> IF
+    R> UNIT-DISK-MEDIA-GEN OVER BD.MEDIA-GEN <> IF
         /BLOCK-DEVICE 0 FILL BD-E-STALE EXIT
     THEN
     BLOCK-DEVICE-MAGIC SWAP !
     0 ;
+
+\ BD-OPEN ( bd -- ior )  Open BD on the system disk.
+: BD-OPEN  ( bd -- ior )  SYSTEM-UNIT BD-OPEN-UNIT ;
 
 : BD-CLOSE  ( bd -- ior )
     DUP BD-VALID? 0= IF DROP 0 EXIT THEN
@@ -4027,7 +4045,7 @@ VARIABLE STORAGE-COOKIE
     DUP >R
     2 PICK R@ 112 + !
     OVER R@ 120 + !
-    BD.MEDIA-GEN DISK-READ-GEN-CHECKED
+    BD.MEDIA-GEN R@ BD.UNIT UNIT-DISK-READ-GEN-CHECKED
     DUP IOR-FROM-BLOCK-RESULT SWAP DROP
     DUP R@ 96 + !
     OVER R@ 104 + !
@@ -4045,7 +4063,7 @@ VARIABLE STORAGE-COOKIE
     DUP >R
     2 PICK R@ 112 + !
     OVER R@ 120 + !
-    BD.MEDIA-GEN DISK-WRITE-GEN-CHECKED
+    BD.MEDIA-GEN R@ BD.UNIT UNIT-DISK-WRITE-GEN-CHECKED
     DUP IOR-FROM-BLOCK-RESULT SWAP DROP
     DUP R@ 96 + !
     OVER R@ 104 + !
@@ -4055,7 +4073,7 @@ VARIABLE STORAGE-COOKIE
     DUP BD-VALID? 0= IF DROP BD-E-BAD-DESCRIPTOR EXIT THEN
     DUP BD-STALE? IF DROP BD-E-STALE EXIT THEN
     DUP BD.CAPS 4 AND 0= IF DROP BD-E-UNSUPPORTED EXIT THEN
-    DUP >R BD.MEDIA-GEN DISK-FLUSH-GEN-CHECKED
+    DUP >R BD.MEDIA-GEN R@ BD.UNIT UNIT-DISK-FLUSH-GEN-CHECKED
     IOR-FROM-BLOCK-RESULT
     DUP R@ 96 + !
     0 R@ 104 + !
@@ -4768,6 +4786,23 @@ VARIABLE FS-OK
         STORAGE-OPEN EXIT
     THEN
     FS-VOLUME @ VOL-STALE? IF 0 FS-OK ! VOL-E-STALE EXIT THEN
+    0 ;
+
+\ The settings disk's raw volume.  Its medium is write-protected, so the
+\ volume is read-only; a filesystem mounted on it reads the system
+\ settings, which only the host changes.
+CREATE SETTINGS-BD  /BLOCK-DEVICE ALLOT
+CREATE SETTINGS-VOLUME  /VOLUME ALLOT
+
+\ SETTINGS-OPEN ( -- ior )  Open the settings disk's raw volume afresh.
+: SETTINGS-OPEN  ( -- ior )
+    SETTINGS-VOLUME VOL-CLOSE DROP
+    SETTINGS-BD BD-CLOSE DROP
+    SETTINGS-BD SETTINGS-UNIT BD-OPEN-UNIT ?DUP IF EXIT THEN
+    SETTINGS-BD SETTINGS-VOLUME VOL-RAW ?DUP IF
+        SETTINGS-BD BD-CLOSE DROP
+        EXIT
+    THEN
     0 ;
 
 \ Last checked result is retained for diagnostics even when the compatibility

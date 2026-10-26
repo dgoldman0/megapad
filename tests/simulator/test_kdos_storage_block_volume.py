@@ -31,18 +31,21 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-storage-block-volume-3819-4163.f"
+    / "kdos-storage-block-volume-3819-4181.f"
 )
 
 FIRST_LINE = 3819
-LAST_LINE = 4163
+LAST_LINE = 4181
 SLICE_SHA256 = (
-    "e4d09d0801838fc9721ba68e39f2c5a5dbc139101c9c4a3489fb66cab9b248b1"
+    "df615cfef9b429f84f51fab140bbfa1ec4ca8f366deaabb6c41299a5779a998f"
 )
-SLICE_GIT_BLOB = "efc0e23d5bab7ad71c101b65948b9e5e4ec2f8ad"
+SLICE_GIT_BLOB = "91f7141d6f36469e9b05e8233cf91d81891a538e"
 DEFINITIONS = (
     b"SECTOR",
     b"DISK?",
+    b"SYSTEM-UNIT",
+    b"SETTINGS-UNIT",
+    b"UNIT-DISK?",
     b"BLOCK-DEVICE-MAGIC",
     b"VOLUME-MAGIC",
     b"STORAGE-ABI",
@@ -94,6 +97,7 @@ DEFINITIONS = (
     b"BD.CAPS",
     b"BD.FLAGS",
     b"BD.REFS",
+    b"BD.UNIT",
     b"VOL.COOKIE",
     b"VOL.BD",
     b"VOL.BD-COOKIE",
@@ -114,6 +118,7 @@ DEFINITIONS = (
     b"BD-REQUIRED-CAPS",
     b"BD-VALID?",
     b"BD-STALE?",
+    b"BD-OPEN-UNIT",
     b"BD-OPEN",
     b"BD-CLOSE",
     b"_BD-CHECK",
@@ -155,7 +160,7 @@ ZERO_VARIABLES = (
 
 def _verified_slice() -> bytes:
     source = FIXTURE.read_bytes()
-    assert len(source) == 11_424
+    assert len(source) == 12_399
     assert source.count(b"\n") == LAST_LINE - FIRST_LINE + 1
     assert hashlib.sha256(source).hexdigest() == SLICE_SHA256
     assert _git_blob_id(source) == SLICE_GIT_BLOB
@@ -239,7 +244,7 @@ def test_storage_slice_is_exact_and_loads_without_touching_media(
     loaded_storage: MegaForthRuntime,
 ) -> None:
     runtime = loaded_storage
-    assert len(DEFINITIONS) == 97
+    assert len(DEFINITIONS) == 102
     assert all(runtime.find(name) is not None for name in DEFINITIONS)
     assert all(_variable(runtime, name) == 0 for name in ZERO_VARIABLES)
     assert _constant(runtime, "SECTOR") == SECTOR_SIZE
@@ -530,3 +535,61 @@ def test_volume_reslice_is_transactional_and_io_is_relative_to_its_base() -> Non
     assert _execute(runtime, "VOL-FLUSH", volume) == (0,)
     assert _execute(runtime, "VOL-CLOSE", volume) == (0,)
     assert runtime.memory.read64(block + 88) == 0
+
+
+def test_a_block_device_opens_on_either_unit_and_the_settings_disk_reads_only() -> None:
+    """BD-OPEN-UNIT opens a block device on unit 0, the system disk, or on
+    unit 1, the settings disk, whose write-protected medium opens it
+    read-only.  Each device reads and goes stale with its own unit; BD-OPEN
+    is unit 0, and a unit with no medium does not open."""
+    system_image = bytes((0x11,)) * (2 * SECTOR_SIZE)
+    settings_image = bytes((0x5A,)) * SECTOR_SIZE + bytes((0x6B,)) * SECTOR_SIZE
+    runtime = _load_storage(MegaForthRuntime(
+        storage=HostedStorageService(system_image),
+        settings_storage=HostedStorageService(settings_image, write_protected=True),
+    ))
+    system_bd = _define_extent(runtime, "SYSTEM-UNIT-BD", 128)
+    settings_bd = _define_extent(runtime, "SETTINGS-UNIT-BD", 128)
+    other_bd = _define_extent(runtime, "OTHER-UNIT-BD", 128)
+    dma = _define_extent(runtime, "UNIT-DMA", SECTOR_SIZE)
+    assert _constant(runtime, "SYSTEM-UNIT") == 0
+    assert _constant(runtime, "SETTINGS-UNIT") == 1
+
+    assert _execute(runtime, "BD-OPEN", system_bd) == (0,)
+    assert _execute(runtime, "BD.UNIT", system_bd) == (0,)
+    assert _execute(runtime, "BD.FLAGS", system_bd) == (0,)
+    assert _execute(runtime, "BD-OPEN-UNIT", settings_bd, 1) == (0,)
+    assert _execute(runtime, "BD.UNIT", settings_bd) == (1,)
+    assert _execute(runtime, "BD.FLAGS", settings_bd) == (
+        _constant(runtime, "VOL-F-READONLY"),
+    )
+    assert _execute(runtime, "BD.SECTORS", settings_bd) == (2,)
+
+    assert _execute(runtime, "BD-READ", dma, 1, 1, settings_bd) == (1, 0)
+    assert runtime.memory.read_bytes(dma, SECTOR_SIZE) == bytes((0x6B,)) * SECTOR_SIZE
+    assert _execute(runtime, "BD-WRITE", dma, 0, 1, settings_bd) == (
+        0,
+        _constant(runtime, "BD-E-READONLY"),
+    )
+    assert runtime.settings_storage.image_bytes == settings_image
+    assert _execute(runtime, "BD-READ", dma, 0, 1, system_bd) == (1, 0)
+    assert runtime.memory.read_bytes(dma, SECTOR_SIZE) == bytes((0x11,)) * SECTOR_SIZE
+    assert _execute(runtime, "BD-FLUSH", settings_bd) == (0,)
+
+    # A new settings medium makes only the settings disk's device stale.
+    runtime.settings_storage.attach(settings_image, write_protected=True)
+    assert _execute(runtime, "BD-STALE?", settings_bd) == (TRUE,)
+    assert _execute(runtime, "BD-STALE?", system_bd) == (0,)
+    assert _execute(runtime, "BD-READ", dma, 0, 1, settings_bd) == (
+        0,
+        _constant(runtime, "BD-E-STALE"),
+    )
+    assert _execute(runtime, "BD-READ", dma, 0, 1, system_bd) == (1, 0)
+
+    assert _execute(runtime, "BD-OPEN-UNIT", other_bd, 2) == (
+        _constant(runtime, "BD-E-NO-MEDIA"),
+    )
+    runtime.settings_storage.detach()
+    assert _execute(runtime, "BD-OPEN-UNIT", other_bd, 1) == (
+        _constant(runtime, "BD-E-NO-MEDIA"),
+    )

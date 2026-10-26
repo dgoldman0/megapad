@@ -37,6 +37,23 @@ VARIABLE FS-OK
     FS-VOLUME @ VOL-STALE? IF 0 FS-OK ! VOL-E-STALE EXIT THEN
     0 ;
 
+\ The settings disk's raw volume.  Its medium is write-protected, so the
+\ volume is read-only; a filesystem mounted on it reads the system
+\ settings, which only the host changes.
+CREATE SETTINGS-BD  /BLOCK-DEVICE ALLOT
+CREATE SETTINGS-VOLUME  /VOLUME ALLOT
+
+\ SETTINGS-OPEN ( -- ior )  Open the settings disk's raw volume afresh.
+: SETTINGS-OPEN  ( -- ior )
+    SETTINGS-VOLUME VOL-CLOSE DROP
+    SETTINGS-BD BD-CLOSE DROP
+    SETTINGS-BD SETTINGS-UNIT BD-OPEN-UNIT ?DUP IF EXIT THEN
+    SETTINGS-BD SETTINGS-VOLUME VOL-RAW ?DUP IF
+        SETTINGS-BD BD-CLOSE DROP
+        EXIT
+    THEN
+    0 ;
+
 \ Last checked result is retained for diagnostics even when the compatibility
 \ wrapper raises ABORT.  A zero ior with a short transfer is an internal
 \ contract failure, never a successful KDOS operation.

@@ -34,15 +34,15 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-storage-compat-4734-4867.f"
+    / "kdos-storage-compat-4752-4902.f"
 )
 
-FIRST_LINE = 4734
-LAST_LINE = 4867
+FIRST_LINE = 4752
+LAST_LINE = 4902
 SLICE_SHA256 = (
-    "7ba6cb19989623363d2e78ac45ae81b1b7e4bb2ad51864005bfbb35b1f768199"
+    "e1b7e0e3a9fbb419578e6d03680c07b771d16c24747e961d453f5e41ad0b23be"
 )
-SLICE_GIT_BLOB = "70046e73a1d53a562671ac7b196466354fbdd5ab"
+SLICE_GIT_BLOB = "255fc00752d77f039eb9038a89d4a1fbb548ffa1"
 
 DEFINITIONS = (
     b"SYSTEM-BD",
@@ -52,6 +52,9 @@ DEFINITIONS = (
     b"STORAGE-OPEN",
     b"FS-VOLUME!",
     b"STORAGE-ENSURE",
+    b"SETTINGS-BD",
+    b"SETTINGS-VOLUME",
+    b"SETTINGS-OPEN",
     b"DISK-IO-STATUS",
     b"DISK-IO-COMPLETED",
     b"DISK-IO-IOR",
@@ -74,7 +77,7 @@ DEFINITIONS = (
 
 def _verified_slice() -> bytes:
     source = FIXTURE.read_bytes()
-    assert len(source) == 4_127
+    assert len(source) == 4_726
     assert source.count(b"\n") == LAST_LINE - FIRST_LINE + 1
     assert hashlib.sha256(source).hexdigest() == SLICE_SHA256
     assert _git_blob_id(source) == SLICE_GIT_BLOB
@@ -132,7 +135,7 @@ def test_storage_compat_slice_is_exact_and_loads_without_touching_media() -> Non
     runtime = _load_storage_compat()
     block, volume = _system_objects(runtime)
 
-    assert len(DEFINITIONS) == 24
+    assert len(DEFINITIONS) == 27
     assert all(runtime.find(name) is not None for name in DEFINITIONS)
     # CREATE/ALLOT does not clear these bodies; virgin hosted memory supplies
     # the zero-filled first-construction state required by the object contract.
@@ -513,3 +516,38 @@ def test_disk_info_reports_the_current_attachment_without_opening_it() -> None:
     assert present.drain_uart_output() == b" Storage:  present\r\n"
     assert present.memory.read_bytes(present_block, 128) == bytes(128)
     assert present.memory.read_bytes(present_volume, 144) == bytes(144)
+
+
+def test_settings_open_binds_the_settings_disk_read_only_and_leaves_the_system_volume() -> None:
+    """SETTINGS-OPEN opens the settings disk's raw volume, read-only, beside
+    the system disk's, which stays the filesystem volume."""
+    settings_image = _patterned_image(3)
+    runtime = MegaForthRuntime(
+        storage=HostedStorageService(_patterned_image(4)),
+        settings_storage=HostedStorageService(settings_image, write_protected=True),
+    )
+    runtime = _evaluate_storage_compat(_evaluate_partition(_load_storage(runtime)))
+    _block, system_volume = _system_objects(runtime)
+    volume = _execute(runtime, "SETTINGS-VOLUME")[0]
+    block = _execute(runtime, "SETTINGS-BD")[0]
+    dma = _define_extent(runtime, "SETTINGS-DMA", SECTOR_SIZE)
+
+    assert _execute(runtime, "SETTINGS-OPEN") == (0,)
+    assert _execute(runtime, "BD.UNIT", block) == (1,)
+    assert _execute(runtime, "VOL.FLAGS", volume) == (
+        _constant(runtime, "VOL-F-READONLY"),
+    )
+    assert _execute(runtime, "VOL.SECTORS", volume) == (3,)
+    assert _execute(runtime, "VOL-READ", dma, 2, 1, volume) == (1, 0)
+    assert runtime.memory.read_bytes(dma, SECTOR_SIZE) == bytes((2,)) * SECTOR_SIZE
+    write = _execute(runtime, "VOL-WRITE", dma, 0, 1, volume)
+    assert write[0] == 0 and write[1] != 0
+    assert runtime.settings_storage.image_bytes == settings_image
+    assert _variable(runtime, "FS-VOLUME") == system_volume
+
+    # Opened again, the binding is fresh; without a medium it does not open.
+    assert _execute(runtime, "SETTINGS-OPEN") == (0,)
+    runtime.settings_storage.detach()
+    assert _execute(runtime, "SETTINGS-OPEN") == (
+        _constant(runtime, "BD-E-NO-MEDIA"),
+    )

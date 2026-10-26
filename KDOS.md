@@ -960,6 +960,13 @@ Every read, write, and flush carries the captured generation through the
 controller's atomic guarded-command path, so a replacement between validation
 and command acceptance fails stale before DMA or media effects.
 
+A block device addresses one storage unit: `BD-OPEN-UNIT ( bd unit -- ior )`
+opens it on unit 0 (`SYSTEM-UNIT`), the system disk, or unit 1
+(`SETTINGS-UNIT`), the settings disk, whose write-protected medium opens
+read-only; `BD-OPEN` is unit 0, and `BD.UNIT` reads a device's unit.
+`SETTINGS-OPEN` binds the settings disk's raw volume in `SETTINGS-VOLUME`
+(over `SETTINGS-BD`), leaving `FS-VOLUME` as it was.
+
 The public object operations are `BD-OPEN`, `BD-CLOSE`, `BD-VALID?`,
 `BD-STALE?`, `BD-READ`, `BD-WRITE`, `BD-FLUSH`, `VOL-RAW`, `VOL-SLICE`,
 `VOL-CLOSE`, `VOL-VALID?`, `VOL-STALE?`, `VOL-READ`, `VOL-WRITE`, and
