@@ -82,6 +82,14 @@ module tb_soc_smoke;
         .sd_card_present(1'b0),
         .sd_write_protected(1'b0),
 
+        // Settings SD — a card in the slot, so its controller answers
+        // present and write-protected
+        .sd1_sck       (),
+        .sd1_mosi      (),
+        .sd1_miso      (1'b1),
+        .sd1_cs_n      (),
+        .sd1_card_present(1'b1),
+
         // NIC — tied off
         .nic_tx_valid  (nic_tx_valid),
         .nic_tx_data   (nic_tx_data),
@@ -219,6 +227,39 @@ module tb_soc_smoke;
         check("SysInfo capability writes are acknowledged and ignored",
               u_soc.bus_mmio_ack === 1'b1
               && u_soc.bus_mmio_rdata == 64'hF);
+
+        // The storage window holds two controllers: the system disk's at
+        // 0x200-0x27F, with no card, and the settings disk's at 0x280-0x2FF,
+        // whose card is present and write-protected.  STATUS (+1) tells them
+        // apart; before the second controller, 0x281 aliased the first.
+        force u_soc.bus_mmio_wen = 1'b0;
+        force u_soc.bus_mmio_size = BUS_BYTE;
+        force u_soc.bus_mmio_addr = 12'h201;
+        // The controller registers its read: data and ACK follow an edge.
+        @(posedge clk);
+        #1;
+        check("The system disk's STATUS answers at 0x201 with no card",
+              u_soc.bus_mmio_ack === 1'b1
+              && u_soc.bus_mmio_rdata[7] === 1'b0
+              && u_soc.mmio_sel_disk === 1'b1
+              && u_soc.mmio_sel_disk1 === 1'b0);
+        force u_soc.bus_mmio_addr = 12'h281;
+        @(posedge clk);
+        #1;
+        check("The settings disk's STATUS answers at 0x281, present and protected",
+              u_soc.bus_mmio_ack === 1'b1
+              && u_soc.bus_mmio_rdata[7] === 1'b1
+              && u_soc.bus_mmio_rdata[5] === 1'b1
+              && u_soc.mmio_sel_disk === 1'b0
+              && u_soc.mmio_sel_disk1 === 1'b1);
+        force u_soc.bus_mmio_addr = 12'h27F;
+        #1;
+        check("0x27F still decodes to the system disk",
+              u_soc.mmio_sel_disk === 1'b1 && u_soc.mmio_sel_disk1 === 1'b0);
+        force u_soc.bus_mmio_addr = 12'h2FF;
+        #1;
+        check("0x2FF decodes to the settings disk",
+              u_soc.mmio_sel_disk === 1'b0 && u_soc.mmio_sel_disk1 === 1'b1);
 
         // Exercise raw Keccak through the integrated SoC decode/mux rather
         // than only through the standalone SHA front-end bench.

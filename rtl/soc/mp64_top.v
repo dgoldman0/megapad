@@ -33,7 +33,8 @@ module mp64_top #(
     parameter MEM_BANKS         = 4,
     parameter ICACHE_LINES      = 256,
     parameter ICACHE_LINE_W     = 128,       // bits per I-cache line
-    parameter [31:0] DISK_TOTAL_SECTORS = 32'd65536
+    parameter [31:0] DISK_TOTAL_SECTORS = 32'd65536,
+    parameter [31:0] SETTINGS_TOTAL_SECTORS = 32'd2048
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -49,6 +50,13 @@ module mp64_top #(
     output wire        sd_cs_n,
     input  wire        sd_card_present,
     input  wire        sd_write_protected,
+
+    // === Settings SD card (SPI): the settings disk, always write-protected ===
+    output wire        sd1_sck,
+    output wire        sd1_mosi,
+    input  wire        sd1_miso,
+    output wire        sd1_cs_n,
+    input  wire        sd1_card_present,
 
     // === External memory PHY ===
     output wire        phy_req,
@@ -88,7 +96,8 @@ module mp64_top #(
         .NUM_CLUSTERS       (NUM_CLUSTERS),
         .CORES_PER_CLUSTER  (CORES_PER_CLUSTER),
         .MEM_DEPTH          (MEM_DEPTH),
-        .DISK_TOTAL_SECTORS (DISK_TOTAL_SECTORS)
+        .DISK_TOTAL_SECTORS (DISK_TOTAL_SECTORS),
+        .SETTINGS_TOTAL_SECTORS (SETTINGS_TOTAL_SECTORS)
     ) u_soc (
         .sys_clk       (clk),
         .sys_rst_n     (rst_n),
@@ -117,6 +126,13 @@ module mp64_top #(
         .sd_cs_n       (sd_cs_n),
         .sd_card_present      (sd_card_present),
         .sd_write_protected   (sd_write_protected),
+
+        // Settings SD card
+        .sd1_sck       (sd1_sck),
+        .sd1_mosi      (sd1_mosi),
+        .sd1_miso      (sd1_miso),
+        .sd1_cs_n      (sd1_cs_n),
+        .sd1_card_present (sd1_card_present),
 
         // NIC PHY
         .nic_tx_valid  (nic_tx_valid),

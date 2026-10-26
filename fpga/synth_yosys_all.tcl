@@ -78,6 +78,7 @@ read_verilog -sv -Irtl/pkg \
     rtl/mem/mp64_memory.v      \
     rtl/mem/mp64_extmem.v      \
     rtl/bus/mp64_bus.v         \
+    rtl/bus/mp64_byte_dma_arbiter.v         \
     rtl/periph/mp64_uart.v     \
     rtl/periph/mp64_timer.v    \
     rtl/periph/mp64_disk.v     \

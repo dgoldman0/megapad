@@ -145,6 +145,7 @@ set required_rtl [list \
     rtl/core/mp64_icache.v \
     rtl/core/mp64_cluster.v \
     rtl/bus/mp64_bus.v \
+    rtl/bus/mp64_byte_dma_arbiter.v \
     rtl/mem/mp64_memory.v \
     rtl/mem/mp64_extmem.v \
     rtl/gpu/mp64_tile.v \

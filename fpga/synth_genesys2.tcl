@@ -53,6 +53,7 @@ set rtl_files [list \
     ${RTL_DIR}/core/mp64_icache.v                  \
     ${RTL_DIR}/core/mp64_cluster.v                 \
     ${RTL_DIR}/bus/mp64_bus.v                      \
+    ${RTL_DIR}/bus/mp64_byte_dma_arbiter.v                      \
     ${RTL_DIR}/mem/mp64_memory.v                   \
     ${RTL_DIR}/mem/mp64_extmem.v                   \
     ${RTL_DIR}/gpu/mp64_tacc.v                     \

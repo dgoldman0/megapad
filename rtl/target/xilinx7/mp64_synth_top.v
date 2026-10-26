@@ -128,6 +128,14 @@ module mp64_synth_top (
         .sd_card_present     (1'b1),
         .sd_write_protected  (1'b0),
 
+        // This target has no settings card slot: the settings disk's
+        // controller holds no medium.
+        .sd1_sck    (),
+        .sd1_mosi   (),
+        .sd1_miso   (1'b1),
+        .sd1_cs_n   (),
+        .sd1_card_present (1'b0),
+
         // NIC (tied off)
         .nic_tx_valid (),
         .nic_tx_data  (),

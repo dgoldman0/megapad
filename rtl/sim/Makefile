@@ -329,7 +329,8 @@ tb_dict.vvp: tb_dict.v $(CORE)/mp64_cpu.v $(FPU_SRC) $(CORE)/mp64_dict.v \
 # Phase 4: Peripherals, Crypto & GPU
 # ==========================================================================
 
-phase4: peripherals rtc disk_controller disk_bus_dma crypto ntt kem nic mailbox \
+phase4: peripherals rtc disk_controller disk_bus_dma byte_dma_arbiter \
+        disk_pair_dma crypto ntt kem nic mailbox \
         trng tile tacc tacc_vectors
 	@echo ""
 	@echo "--- Phase 4 complete ---"
@@ -370,6 +371,23 @@ tb_disk_bus_dma.vvp: tb_disk_bus_dma.v sd_spi_model.v \
                      $(PRIM)/mp64_sram_dp.v \
                      ../pkg/mp64_pkg.vh
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
+# --- Two byte-DMA masters on one bus master port ---
+byte_dma_arbiter: tb_byte_dma_arbiter.vvp
+	$(VVP) $<
+
+tb_byte_dma_arbiter.vvp: tb_byte_dma_arbiter.v $(BUS)/mp64_byte_dma_arbiter.v
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
+# --- The system and settings disks on the disk's one DMA port ---
+disk_pair_dma: tb_disk_pair_dma.vvp
+	$(VVP) $<
+
+tb_disk_pair_dma.vvp: tb_disk_pair_dma.v sd_spi_model.v \
+                      $(PERIPH)/mp64_disk.v $(BUS)/mp64_byte_dma_arbiter.v \
+                      $(BUS)/mp64_bus.v $(MEM)/mp64_memory.v \
+                      $(PRIM)/mp64_sram_dp.v ../pkg/mp64_pkg.vh
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $(filter %.v,$^)
 
 # --- Crypto (authoritative SHA3/Keccak/WOTS contracts plus AES regression) ---
 crypto: sha3_keccak wots aes

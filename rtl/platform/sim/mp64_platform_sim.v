@@ -103,6 +103,13 @@ module mp64_platform_sim #(
         .sd_card_present(1'b0),
         .sd_write_protected(1'b0),
 
+        // Settings SD (unused)
+        .sd1_sck        (),
+        .sd1_mosi       (),
+        .sd1_miso       (1'b1),
+        .sd1_cs_n       (),
+        .sd1_card_present(1'b0),
+
         // External memory (tied off)
         .phy_req        (),
         .phy_addr       (),

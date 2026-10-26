@@ -1378,7 +1378,8 @@ Proposed layout with SHA-256/512 widened and CRC relocated:
 |---------------|--------|---------------------|------------|
 | 0x000–0x0FF   | 256 B  | UART                | existing   |
 | 0x100–0x1FF   | 256 B  | Timer               | existing   |
-| 0x200–0x2FF   | 256 B  | Disk                | existing   |
+| 0x200–0x27F   | 128 B  | Disk 0: the system disk | existing |
+| 0x280–0x2FF   | 128 B  | Disk 1: the settings disk, write-protected; shares disk 0's DMA port | new |
 | 0x300–0x3FF   | 256 B  | SysInfo             | existing   |
 | 0x400–0x4FF   | 256 B  | NIC                 | existing   |
 | 0x500–0x6FF   | 512 B  | Mailbox             | existing   |

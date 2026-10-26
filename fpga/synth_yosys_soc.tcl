@@ -42,7 +42,8 @@ read_verilog -sv -Irtl/pkg \
 
 # ---- Bus ---------------------------------------------------------------------
 read_verilog -sv -Irtl/pkg \
-    rtl/bus/mp64_bus.v
+    rtl/bus/mp64_bus.v \
+    rtl/bus/mp64_byte_dma_arbiter.v
 
 # ---- Memory ------------------------------------------------------------------
 read_verilog -sv -Irtl/pkg \
