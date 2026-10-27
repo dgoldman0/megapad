@@ -1085,6 +1085,13 @@ SEP, SEX, CSR (reduced set), and CALL.L / RET.L.
 
 Estimated area savings: ~300 FFs / ~200 LUTs per micro-core vs a full core.
 
+The RTL microcore currently implements 16 general registers, not the full
+core's 32, and has no instruction cache; boot gives microcores no stacks.
+Because the BIOS uses stripped instructions and registers above R15, today's
+BIOS Forth does not run on a microcore. The agreed direction, JIT-compiled
+kernel words, and the open register-count decision are in
+[microcore-kernels-plan.md](microcore-kernels-plan.md).
+
 ### Privilege Model
 
 Full cores implement the two-level model below through private `PRIV` and MPU
