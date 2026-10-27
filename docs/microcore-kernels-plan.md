@@ -67,11 +67,17 @@ the launch design must either work without microcore IPIs or wire them.
 
 ## 3. Two gaps to close
 
-- **Register count.** The design says microcores run the same ISA as full
-  cores minus the 1802-heritage features, which implies 32 registers. The RTL
-  implements 16. Register-held kernel stacks are the strongest reason to give
-  microcores all 32. Settle this when the RTL work is scheduled, and make the
-  RTL and [architecture.md](architecture.md#micro-core-architecture) agree.
+- **Register count: 32** (decided 2026-10-27). Microcores run the same ISA
+  as full cores minus the 1802-heritage features, so they get all 32
+  registers, which the emulator already models. Thirty-two keeps one
+  register model for kernel compilation and leaves room for register-held
+  kernel stacks, so fewer spills compete for the cluster's bus port. The
+  cost is 16 more 64-bit registers in each microcore. The RTL implements 16
+  today. Read from its source, though not yet tested, it accepts the REX
+  prefix but ignores the extension bit, so an instruction naming R17 uses
+  R1. The RTL work widens the register file to 32 and decodes REX's
+  extension bits as the full core does. A test then runs R16 to R31 on a
+  microcore in both the RTL and the emulator.
 - **Stacks and entry.** Boot leaves microcores halted with no stack. The
   kernel runtime must give each microcore a spill area and an entry
   convention before any kernel runs. The original microcore notes leaned the
@@ -141,8 +147,6 @@ contract.
 - The kernel vocabulary, and how the compiler checks a word against it.
 - Launch and completion: barrier, mailbox or scratchpad flag, given that the
   RTL ties microcore IPIs off.
-- Register count: give the RTL microcore 32 registers, or document 16
-  (section 3).
 - Whether microcores can fetch from the scratchpad on every backend (idea 1).
 - Which fetch ideas to build, and in what order, once a first kernel is
   measured.
