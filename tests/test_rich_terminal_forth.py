@@ -2393,6 +2393,10 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "VARIABLE PT-TEST-RET-STATE",
                 "VARIABLE PT-TEST-RET-CAPS-U",
                 "VARIABLE PT-TEST-PHASE",
+                "VARIABLE PT-TEST-BUSY-ACTIVE",
+                "VARIABLE PT-TEST-BUSY-SENT",
+                "VARIABLE PT-TEST-NEEDED-SENT",
+                "VARIABLE PT-TEST-BUSY-SETTLED",
                 ": PT-TEST-TX-STATUS",
                 "  PT-TEST-TX-S @ OR PT-TEST-TX-S ! ;",
                 ": PT-TEST-WAIT-ACTIVE",
@@ -2444,6 +2448,8 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "  PT-TEST-RET-STATE @ . PT-TEST-RET-CAPS-U @ .",
                 "  PT-TEST-CLOSE-S @ . PT-TEST-CLOSE-WAIT-S @ .",
                 "  PT-TEST-SESSION PT-STATE@ . PT-STREAM-OWNED? .",
+                "  PT-TEST-BUSY-ACTIVE @ . PT-TEST-BUSY-SENT @ .",
+                "  PT-TEST-NEEDED-SENT @ . PT-TEST-BUSY-SETTLED @ .",
                 "  TX-FLUSH ;",
                 "CREATE PT-TEST-EXTRAS 4 ALLOT 0x301 PT-TEST-EXTRAS L!",
                 ": PT-TEST-SEND-INITIAL-SNAPSHOT",
@@ -2525,6 +2531,8 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "  -9 PT-TEST-RET-STATE ! -9 PT-TEST-RET-CAPS-U !",
                 "  -9 PT-TEST-CLOSE-S ! -9 PT-TEST-CLOSE-WAIT-S !",
                 "  -9 PT-TEST-DISCOVER-S !",
+                "  -9 PT-TEST-BUSY-ACTIVE ! -9 PT-TEST-BUSY-SENT !",
+                "  -9 PT-TEST-NEEDED-SENT ! -9 PT-TEST-BUSY-SETTLED !",
                 "  PT-TEST-RX 8192 PT-TEST-TX 8192",
                 "  PT-TEST-INCOMING-EVENT PT-EVENT-SIZE PT-TEST-SESSION",
                 "    PT-INIT PT-TEST-INIT-S !",
@@ -2533,8 +2541,11 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "  PT-TEST-BEGIN-MARK PT-TEST-PHASE . TX-FLUSH",
                 "  PT-TEST-SESSION PT-START PT-TEST-START-S !",
                 "  PT-TEST-WAIT-ACTIVE PT-TEST-ACTIVE-S !",
+                "  PT-TEST-SESSION PT-RESULT-BUSY? PT-TEST-BUSY-ACTIVE !",
                 "  2 PT-TEST-PHASE !",
                 "  PT-TEST-SEND-INITIAL-SNAPSHOT",
+                "  PT-TEST-SESSION PT-RESULT-BUSY? PT-TEST-BUSY-SENT !",
+                "  PT-TEST-SESSION PT-SNAPSHOT-NEEDED? PT-TEST-NEEDED-SENT !",
                 "  PT-TEST-RECEIVE-RESULT",
                 "  3 PT-TEST-PHASE !",
                 "  PT-TEST-RECEIVE-EVENT",
@@ -2543,6 +2554,7 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "  PT-TEST-SEND-RESIZED-SNAPSHOT",
                 "  PT-TEST-RECEIVE-RESULT",
                 "  PT-TEST-CAPTURE-RETAINED",
+                "  PT-TEST-SESSION PT-RESULT-BUSY? PT-TEST-BUSY-SETTLED !",
                 "  5 PT-TEST-PHASE !",
                 "  PT-TEST-DO-CLOSE",
                 "  6 PT-TEST-PHASE !",
@@ -2673,9 +2685,12 @@ class TestRichTerminalForth(_KDOSTestBase):
         ):
             self.assertNotIn(diagnostic, text)
 
+        # The last four: PT admits work once active; a committed snapshot
+        # still answers PT-SNAPSHOT-NEEDED? while its result is outstanding,
+        # and PT is no longer busy once the results have arrived.
         expected = (
             b"PTRESULT 0 0 0 0 0 0 0 512 1 120 1 0 1 "
-            b"0 515 16 2 1 3 0 0 0 0 0 "
+            b"0 515 16 2 1 3 0 0 0 0 0 0 -1 -1 0 "
         )
         self.assertIn(expected, raw)
         self.assertTrue(key_sent)

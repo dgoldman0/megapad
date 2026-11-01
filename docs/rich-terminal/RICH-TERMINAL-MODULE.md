@@ -134,6 +134,7 @@ PT-SERVICE-PENDING? ( session -- flag )
 PT-STATE@           ( session -- state )
 PT-ACTIVE?          ( session -- flag )
 PT-SNAPSHOT-NEEDED? ( session -- flag )
+PT-RESULT-BUSY?     ( session -- flag )
 PT-STREAM-OWNED?    ( -- flag )
 PT-OWNS?            ( session -- flag )
 PT-LEGACY-PENDING?  ( session -- flag )
@@ -449,6 +450,16 @@ checks each span's payload, `12 + 8 * count + 4 * cluster-words`, against
 `PT-SNAPSHOT-NEEDED?` is true after opening and after an accepted soft reset.
 Only a successful `TX_RESULT` for a snapshot commit clears it. Normal delta
 begin while it is true returns `PT-S-INVALID` without output.
+
+`PT-RESULT-BUSY?` is true while PT admits no new transaction or lifecycle
+request: a result, lifecycle reply or completion is outstanding, or a soft
+reset or close is pending. A begin that its state and arguments would
+otherwise admit returns `PT-S-WOULD-BLOCK` then. A
+snapshot already committed answers `PT-SNAPSHOT-NEEDED?` until its result, so
+a caller that forces a snapshot whenever one is needed waits while
+`PT-RESULT-BUSY?` is true; forcing in that gap sends a second complete
+snapshot once the first succeeds. When the barrier clears, the need remains
+only if the snapshot failed or a reset or resize raised it again.
 
 After positive retained discovery, ordinary CELL delta transactions remain
 available through the existing public words and share PT's one transaction-ID,

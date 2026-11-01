@@ -725,6 +725,17 @@ _PT-M-RESOURCE-ABORT  CONSTANT PT-REQUEST-RESOURCE-ABORT
     DUP _PT-SETTLEMENT-BUSY?
     SWAP _PT.S.CLOSE-PENDING? @ OR ;
 
+\ PT-RESULT-BUSY? ( session -- flag )
+\   True while PT admits no new transaction or lifecycle request: a result,
+\   lifecycle reply or completion is outstanding, or a soft reset or close
+\   is pending.  A committed snapshot answers PT-SNAPSHOT-NEEDED? until its
+\   result arrives, so a caller that forces a snapshot to meet that need
+\   waits while this is true; afterwards the need remains only if the
+\   snapshot failed or a reset or resize raised it again.
+: PT-RESULT-BUSY?  ( session -- flag )
+    DUP _PT-VALID-S? 0= IF DROP FALSE EXIT THEN
+    _PT-RESULT-BUSY? ;
+
 \ =====================================================================
 \  Checked scalar, range, and little-endian helpers
 \ =====================================================================
