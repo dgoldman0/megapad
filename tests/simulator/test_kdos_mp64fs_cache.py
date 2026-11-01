@@ -25,15 +25,15 @@ from tests.simulator.test_kdos_storage_compat import _patterned_image
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
-    Path(__file__).with_name("fixtures") / "kdos-mp64fs-cache-5103-5233.f"
+    Path(__file__).with_name("fixtures") / "kdos-mp64fs-cache-5103-5245.f"
 )
 
 FIRST_LINE = 5103
-LAST_LINE = 5233
+LAST_LINE = 5245
 SLICE_SHA256 = (
-    "caf26787745bdf711a89130db7f8b30d45b0f9a63534b4ccb58a601bb2cea062"
+    "936494892f8968e08a5009aab45c4c4c0f307a53cf109594ce70891bae3e7f4c"
 )
-SLICE_GIT_BLOB = "0789d11789aa0fd1b086f0370c7c57e84a61a956"
+SLICE_GIT_BLOB = "32e0f8ef71a34396c355db5675311d15bc234ef7"
 
 DEFINITIONS = (
     b"FS-MAX-FILES",
@@ -55,6 +55,7 @@ DEFINITIONS = (
     b"FF-NEED",
     b"FF-START",
     b"FF-LEN",
+    b"FF-FULL?",
     b"FIND-FREE",
     b"DIRENT",
     b"DE.SEC",
@@ -73,7 +74,7 @@ DEFINITIONS = (
 
 def _verified_slice() -> bytes:
     source = FIXTURE.read_bytes()
-    assert len(source) == 4_579
+    assert len(source) == 5_140
     assert source.count(b"\n") == LAST_LINE - FIRST_LINE + 1
     assert hashlib.sha256(source).hexdigest() == SLICE_SHA256
     assert _git_blob_id(source) == SLICE_GIT_BLOB
@@ -112,7 +113,7 @@ def _load_mp64fs_cache(
 def test_mp64fs_cache_slice_is_exact_and_loads_without_storage_io() -> None:
     runtime = _load_mp64fs_cache(_patterned_image(32))
 
-    assert len(DEFINITIONS) == 32
+    assert len(DEFINITIONS) == 33
     assert all(runtime.find(name) is not None for name in DEFINITIONS)
     assert _constant(runtime, "FS-MAX-FILES") == 128
     assert _constant(runtime, "FS-ENTRY-SIZE") == 48
@@ -161,7 +162,7 @@ def test_bitmap_words_address_bits_across_the_complete_cache() -> None:
     runtime.memory.write64(_execute(runtime, "FS-BMAP-N")[0], 16)
     sectors = (0, 7, 8, 4_095, 4_096, 65_535)
 
-    for bit in range(8):
+    for bit in range(64):
         assert _execute(runtime, "BIT-MASK", bit) == (1 << bit,)
     for sector in sectors:
         assert _execute(runtime, "BIT-FREE?", sector) == (TRUE,)
@@ -217,6 +218,41 @@ def test_find_free_returns_the_first_complete_run_without_allocating_it() -> Non
     assert _execute(runtime, "FIND-FREE", 3) == (37,)
     for sector in (37, 38, 39):
         assert _execute(runtime, "BIT-FREE?", sector) == (TRUE,)
+    assert runtime.storage.completion == 0
+
+
+def test_find_free_passes_whole_allocated_bytes_and_ends_at_the_limit() -> None:
+    runtime = _load_mp64fs_cache()
+    bitmap = _execute(runtime, "FS-BMAP")[0]
+    total = _execute(runtime, "FS-TOTAL")[0]
+
+    # Sector 8 is free; every other bit of the first six bytes is set,
+    # including the four past a 44-sector total.
+    runtime.memory.write64(total, 44)
+    runtime.memory.write_bytes(bitmap, b"\xff\xfe\xff\xff\xff\xff")
+    assert _execute(runtime, "FF-FULL?", 16) == (TRUE,)
+    assert _execute(runtime, "FF-FULL?", 32) == (TRUE,)
+    assert _execute(runtime, "FF-FULL?", 17) == (0,)
+    assert _execute(runtime, "FF-FULL?", 8) == (0,)
+    # Sectors 40 to 47 pass FS-TOTAL, so that byte goes one sector at a time
+    # and the search ends at FS-TOTAL itself.
+    assert _execute(runtime, "FF-FULL?", 40) == (0,)
+    assert _execute(runtime, "FIND-FREE", 1) == (MASK64,)
+    assert _variable(runtime, "FF-LEN") == 0
+
+    # The canonical Desktop image's shape: every sector below 14,725 is
+    # allocated, so the search passes 1,836 whole bytes before the run.
+    runtime.memory.write64(total, 65_536)
+    runtime.memory.write64(_execute(runtime, "FS-BMAP-N")[0], 16)
+    runtime.memory.write_bytes(
+        bitmap, b"\xff" * 1_840 + b"\x1f" + bytes(16 * SECTOR_SIZE - 1_841)
+    )
+    assert _execute(runtime, "FIND-FREE", 3) == (14_725,)
+    assert (
+        _variable(runtime, "FF-NEED"),
+        _variable(runtime, "FF-START"),
+        _variable(runtime, "FF-LEN"),
+    ) == (3, 14_725, 3)
     assert runtime.storage.completion == 0
 
 

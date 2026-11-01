@@ -1145,10 +1145,10 @@ scratch use unlocked globals and are non-reentrant. Multi-stage failures may
 leave earlier bytes committed without advancing descriptor metadata, and no
 file operation flushes or persists that metadata.
 
-The adjacent MP64FS foundation fixture is exact unchanged `kdos.f` lines
-5004–5134: 131 lines, 4,579 bytes, and SHA-256
-`caf26787745bdf711a89130db7f8b30d45b0f9a63534b4ccb58a601bb2cea062`.
-It publishes 32 definitions through `FIND-FREE-SLOT`. Load installs
+The adjacent MP64FS foundation fixture is the next 143 lines of `kdos.f`:
+5,140 bytes with SHA-256
+`936494892f8968e08a5009aab45c4c4c0f307a53cf109594ce70891bae3e7f4c`.
+It publishes 33 definitions through `FIND-FREE-SLOT`. Load installs
 provisional geometry and root `CWD`, reserves the three global cache windows,
 and leaves `FS-OK` false without validating or touching storage. Focused
 acceptance covers geometry derivation, the complete 65,536-bit bitmap window,

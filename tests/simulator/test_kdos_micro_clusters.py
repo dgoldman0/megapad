@@ -31,12 +31,12 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-micro-clusters-7561-7668.f"
+    / "kdos-micro-clusters-7573-7680.f"
 )
 
-FIRST_LINE = 7561
-FIXTURE_LAST_LINE = 7668
-LAST_LINE = 7667
+FIRST_LINE = 7573
+FIXTURE_LAST_LINE = 7680
+LAST_LINE = 7679
 FIXTURE_BYTES = 3_755
 FIXTURE_SHA256 = (
     "ab779a33407b88f24c44bd058ce9c389e90531c80506ef0b16a6aab43c6062cc"
@@ -91,7 +91,8 @@ def _verified_slice() -> bytes:
     assert lines[LAST_LINE] == boundary
     assert fixture.endswith(boundary)
     # Keep the terminal blank seam self-contained while authenticating the
-    # following section marker; only the exact 7462–7568 prefix is evaluated.
+    # following section marker; only the exact FIRST_LINE–LAST_LINE prefix is
+    # evaluated.
     source = fixture[: -len(boundary)]
     assert len(source) == SLICE_BYTES
     assert source.count(b"\n") == LAST_LINE - FIRST_LINE + 1

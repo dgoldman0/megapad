@@ -22,14 +22,14 @@ from tests.simulator.test_kdos_aes import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
-KDOS_LINES = 9_993
-KDOS_BYTES = 348_177
+KDOS_LINES = 10_005
+KDOS_BYTES = 348_738
 KDOS_SHA256 = (
-    "967685aca02f4f84e3c2547b35179cbd14f73ed6b95d4b35eb932f45e239571d"
+    "75372ff377117029ecb8d24483622f5a736b25232f3e9de80351f6caa609c768"
 )
-SUBMITTED_LINES = 6_729
-SUBMITTED_PAYLOAD_BYTES = 217_714
-CLI_UART_BYTES = 224_443
+SUBMITTED_LINES = 6_736
+SUBMITTED_PAYLOAD_BYTES = 217_978
+CLI_UART_BYTES = 224_714
 MAX_SUBMITTED_LINE = 99
 CANONICAL_EXTERNAL_BYTES = 128 << 20
 CANONICAL_HBW_BYTES = 3 << 20
@@ -182,7 +182,7 @@ def test_complete_kdos_loads_once_and_runs_representative_subsystems() -> None:
 
     loaded_words = runtime.dictionary.words[len(core_words) :]
     assert len(core_words) == 455
-    assert len(loaded_words) == 1_475
+    assert len(loaded_words) == 1_476
     assert loaded_words[0].name == b".R"
     assert tuple(word.name for word in loaded_words[-2:]) == (
         b"_AUTOEXEC-NAME",

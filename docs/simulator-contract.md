@@ -1817,12 +1817,12 @@ Shared `FDESC`, `FT-N`, `FW-*`, `FR-*`, and `FSCRATCH` make construction and
 I/O non-reentrant, and per-sector locking does not make read-modify-write or
 multi-sector work atomic. Failures can leave earlier destination or media
 effects, no logical hole is automatically zero-filled, all raw field access
-trusts its pointers, and descriptor metadata is never persisted. After blank
-line 5068, exact unchanged lines 5069 through 5198 admit the initial MP64FS
-foundation. Including that leading seam, its fixture contains 131 lines and
-4,579 bytes (SHA-256
-`caf26787745bdf711a89130db7f8b30d45b0f9a63534b4ccb58a601bb2cea062`)
-and publishes 32 definitions through `FIND-FREE-SLOT`.
+trusts its pointers, and descriptor metadata is never persisted. After the
+blank line that follows the file abstraction, the next 142 lines admit the
+initial MP64FS foundation. Including that leading seam, its fixture contains
+143 lines and 5,140 bytes (SHA-256
+`936494892f8968e08a5009aab45c4c4c0f307a53cf109594ce70891bae3e7f4c`)
+and publishes 33 definitions through `FIND-FREE-SLOT`.
 
 Load allocates three runtime-global cache windows, initializes provisional
 geometry (`FS-TOTAL = 2048`, `FS-BMAP-N = 1`) and root `CWD = 255`, and leaves

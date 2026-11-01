@@ -58,9 +58,7 @@ VARIABLE CWD   255 CWD !
 \ ── Bitmap operations ────────────────────────────────────────────────
 
 \ BIT-MASK ( bitpos -- mask ) compute 1 << bitpos
-: BIT-MASK  ( bitpos -- mask )
-    DUP 0= IF DROP 1 EXIT THEN
-    1 SWAP 0 DO 2* LOOP ;
+: BIT-MASK  ( bitpos -- mask )  1 SWAP LSHIFT ;
 
 \ BIT-FREE? ( sector -- flag ) true if sector is unallocated
 : BIT-FREE?  ( sector -- flag )
@@ -87,23 +85,37 @@ VARIABLE FF-NEED
 VARIABLE FF-START
 VARIABLE FF-LEN
 
+\ FF-FULL? ( sector -- flag ) true when SECTOR starts a bitmap byte whose
+\ eight sectors are all allocated and all lie below FS-TOTAL.  FIND-FREE
+\ passes such a byte in one step.  Its +LOOP ends only when the index
+\ equals FS-TOTAL, and a whole byte below FS-TOTAL never steps past it.
+: FF-FULL?  ( sector -- flag )
+    DUP 7 AND IF DROP 0 EXIT THEN
+    DUP 8 + FS-TOTAL @ > IF DROP 0 EXIT THEN
+    8 / FS-BMAP + C@ 255 = ;
+
 : FIND-FREE  ( count -- sector | -1 )
     FF-NEED !
     FS-DSTART FF-START !
     0 FF-LEN !
     -1                                 \ result on stack
     FS-TOTAL @ FS-DSTART DO
-        I BIT-FREE? IF
-            FF-LEN @ 0= IF I FF-START ! THEN
-            1 FF-LEN +!
-            FF-LEN @ FF-NEED @ >= IF
-                DROP FF-START @        \ replace -1 with start
-                LEAVE
-            THEN
+        I FF-FULL? IF
+            0 FF-LEN !  8              \ eight allocated sectors at once
         ELSE
-            0 FF-LEN !
+            I BIT-FREE? IF
+                FF-LEN @ 0= IF I FF-START ! THEN
+                1 FF-LEN +!
+                FF-LEN @ FF-NEED @ >= IF
+                    DROP FF-START @    \ replace -1 with start
+                    LEAVE
+                THEN
+            ELSE
+                0 FF-LEN !
+            THEN
+            1
         THEN
-    LOOP ;
+    +LOOP ;
 
 \ ── Directory helpers ────────────────────────────────────────────────
 

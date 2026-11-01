@@ -1180,10 +1180,10 @@ bytes, with SHA-256
 `d76d714ed903db5bcd5a6ba5271288ea31c08e2f5fdec2eabd86dbb0bd0cbc32`.
 Load initializes the registry count and scratch variables and allocates the
 registry and sector scratch without executing `FILE`, touching media, or
-printing. Exact lines 5068 through 5198 then add all 32 initial MP64FS cache,
-geometry, bitmap, allocation-search, and packed directory definitions in 131
-lines and 4,579 bytes, with SHA-256
-`caf26787745bdf711a89130db7f8b30d45b0f9a63534b4ccb58a601bb2cea062`.
+printing. The next 143 lines, 5,140 bytes with SHA-256
+`936494892f8968e08a5009aab45c4c4c0f307a53cf109594ce70891bae3e7f4c`,
+then add all 33 initial MP64FS cache, geometry, bitmap, allocation-search, and
+packed directory definitions.
 Load installs provisional 2,048-sector geometry, root `CWD`, zeroed scratch,
 and cold-hosted cache storage without validating or touching media. Exact
 lines 5199 through 5281 then add `FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and
@@ -1950,7 +1950,8 @@ filesystem/cache/media I/O, sync, flush, diagnostic update, or output.
 | `BIT-MASK` | `( bitpos -- mask )` | Compute a cell-width `1 << bitpos`; bitmap callers pass only `0..7`. |
 | `BIT-FREE?` | `( sector -- flag )` | Test the corresponding cached bitmap bit. |
 | `BIT-SET` / `BIT-CLR` | `( sector -- )` | Mutate the corresponding cached bitmap bit. |
-| `FIND-FREE` | `( count -- sector \| -1 )` | Return the first complete free run in `[FS-DSTART, FS-TOTAL)` without reserving it. |
+| `FF-FULL?` | `( sector -- flag )` | True when the sector starts a bitmap byte whose eight sectors are all allocated and all below `FS-TOTAL`. |
+| `FIND-FREE` | `( count -- sector \| -1 )` | Return the first complete free run in `[FS-DSTART, FS-TOTAL)` without reserving it; a byte `FF-FULL?` accepts is passed in one step. |
 | `DIRENT` | `( slot -- addr )` | Address one of the 128 packed 48-byte cache entries. |
 | `DE.SEC` … `DE.EXT1-CNT` | `( de -- value )` | Read the packed little-endian directory fields. |
 | `FIND-FREE-SLOT` | `( -- slot \| -1 )` | Return the first entry whose name byte zero is zero. |
@@ -1959,9 +1960,11 @@ The admitted helper domain assumes validator-approved geometry
 (`1 <= FS-BMAP-N <= 16`, `13 + FS-BMAP-N < FS-TOTAL <= 65536`), an in-range
 sector, a positive `FIND-FREE` count, a `DIRENT` index in `0..127`, and
 complete cache spans. The helpers do not check `FS-OK`, bounds, or geometry.
-Equal or reversed geometry bounds in `FIND-FREE` and out-of-domain negative or
-very large `BIT-MASK` positions can drive ordinary `DO` across the modulo
-64-bit cell space. Nonpositive and high-bit run counts are separately
+Equal or reversed geometry bounds can drive `FIND-FREE`'s ordinary `DO` across
+the modulo 64-bit cell space. Its `+LOOP` ends only when the index equals
+`FS-TOTAL`, so it steps eight sectors only over a byte that lies wholly below
+`FS-TOTAL`; the result and the `FF-*` scratch are those of a search one
+sector at a time. Nonpositive and high-bit run counts are separately
 unqualified and can produce nonsensical results under the source's signed
 comparison, although valid geometry still bounds that scan. `FIND-FREE` uses
 shared `FF-*` scratch and is not reentrant. `FIND-FREE-SLOT` deliberately
