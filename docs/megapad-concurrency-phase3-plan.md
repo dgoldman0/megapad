@@ -55,6 +55,12 @@ Changes to an interim decision must update this table and its tests in the same
 milestone. A green test suite alone is not permission to erase the contention
 or broaden the architectural claim.
 
+On 2026-10-27, P3-D6 was reopened as a direction, speculative rounds checked
+for cross-core conflicts and rerun in lock-step when one occurs, in
+[parallel-multicore-simulation-plan.md](parallel-multicore-simulation-plan.md).
+Its table entry is unchanged until an implementation lands with the
+one-, two- and four-lane evidence the entry requires.
+
 ## Element 1 contract
 
 - `worker_count` means the total host-execution lane count, including lane zero

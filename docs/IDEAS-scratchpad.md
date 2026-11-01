@@ -9,6 +9,11 @@ when the items below are all done and documented.
 
 ## 1. Micro-Core CPU Variant (Roadmap Layer 6, Item 39)
 
+> **2026-10-27:** the items still open here — the shared cluster I-cache,
+> wiring the main arbiter's QoS registers, and microcore stacks — and the
+> agreed kernel direction are tracked in
+> [microcore-kernels-plan.md](microcore-kernels-plan.md).
+
 ### Goal
 
 Design a stripped-down "MP64µ" core that is **ISA-compatible** at the
