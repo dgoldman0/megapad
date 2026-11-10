@@ -343,6 +343,39 @@ callers invoking an input-reading word through `evaluate` must prequeue every
 byte it will consume. UART output is already published immediately, so the
 native `KEY` operation's pre-block TX flush has no additional hosted effect.
 
+### Keeping the KDOS pins in step
+
+The KDOS tests pin `kdos.f` by position. Each fixture,
+`tests/simulator/fixtures/kdos-<part>-<first>-<last>.f`, is a copy of the lines
+its name gives, and its test holds that range with the slice's SHA-256 and git
+blob id, and usually its byte length. A few tests also pin the whole file. An
+edit that adds or removes lines therefore moves every later slice. One command
+cuts the fixtures again, renames them for their new ranges, and moves the line
+numbers and hashes in the tests:
+
+```sh
+python3 tools/repin_kdos_slices.py           # after editing kdos.f
+python3 tools/repin_kdos_slices.py --check   # change nothing; exit 1 if stale
+```
+
+Every new value comes from the committed tests and from git's diff of `kdos.f`
+against `HEAD`, or against the revision `--base` names, so a second run
+changes nothing. The summary names what the tool leaves to a person:
+
+- a slice whose text changed, whose hashes and length it has set, and whose
+  definition list, counts and behavior tests it has not touched;
+- new source that lies in no slice, with the `--place OLD=NEW` argument that
+  ends the slice before it there, or starts the slice after it there;
+- the pins that follow what KDOS does when it loads, such as the lines
+  submitted, the words defined and the dictionary's bindings in
+  `test_kdos_regular_load.py` and `bench_simulator_kdos_load.py`, which only
+  a run can measure;
+- `MEGAPAD_REVISION`, the revision whose line numbers the tests' source names
+  give, which only a later commit can advance to the one that changed
+  `kdos.f`.
+
+The tool's docstring states the rules that say what a pin is, and its limits.
+
 ## Real-source proofs
 
 The conformance test loads a byte-for-byte snapshot of unchanged
@@ -922,6 +955,11 @@ source line from 39 through EOF is covered in order on one composed runtime.
 In addition, the complete pinned file is now qualified once through the
 line-by-line checked evaluator in CLI submission order. This remains semantic
 compatibility evidence rather than native cold-load or timing evidence.
+
+Each slice is pinned by position: its fixture is named for its line range, and
+its test holds that range with the slice's SHA-256 and git blob id.
+[Keeping the KDOS pins in step](#keeping-the-kdos-pins-in-step) gives the
+command that moves them after an edit to `kdos.f`.
 
 The bootstrap loader was scaffolding, not KDOS module-loader evidence. The
 ordinary unchanged `REQUIRE` path is now qualified separately through §20 and
