@@ -43183,11 +43183,14 @@ class TestAppLoad(_KDOSTestBase):
                 [
                     "VARIABLE BAD-APP-IOR",
                     ': TRY-BAD-APP S" APP-LOAD badapp.f" EVALUATE ;',
-                    ": CATCH-BAD-APP ['] TRY-BAD-APP CATCH "
-                    "BAD-APP-IOR ! ;",
+                    # The word that catches a THROW across EVALUATE gives
+                    # the evaluator its depth back, as EVALUATE-CHECKED does.
+                    ": CATCH-BAD-APP EVAL-DEPTH @ >R ['] TRY-BAD-APP CATCH",
+                    "  BAD-APP-IOR ! R> EVALUATOR-UNWIND ;",
                     "CATCH-BAD-APP",
                     '." BAD-APP-IOR=" BAD-APP-IOR @ .',
                     '." AFTER-BAD-APP=" _LD-SP @ . PRIV@ .',
+                    '." EVAL-AFTER-BAD-APP=" EVAL-DEPTH @ .',
                     "APP-LOAD goodapp.f",
                     "APP-RECOVERED .",
                     '." AFTER-GOOD-APP=" _LD-SP @ . PRIV@ .',
@@ -43196,6 +43199,7 @@ class TestAppLoad(_KDOSTestBase):
             )
             self.assertIn("BAD-APP-IOR=-88 ", out)
             self.assertIn("AFTER-BAD-APP=0 0 ", out)
+            self.assertIn("EVAL-AFTER-BAD-APP=0 ", out)
             self.assertIn("7373 ", out)
             self.assertIn("AFTER-GOOD-APP=0 0 ", out)
         finally:
@@ -43896,13 +43900,19 @@ class TestKDOSModuleSystem(_KDOSTestBase):
                     "VARIABLE BAD-ATTEMPTS",
                     "CWD @ BAD-CWD !",
                     ': TRY-BAD S" REQUIRE mods/retry.f" EVALUATE ;',
-                    ": CATCH-BAD ['] TRY-BAD CATCH BAD-IOR ! ;",
+                    # The THROW crosses TRY-BAD's EVALUATE, whose input
+                    # frame the BIOS keeps.  The word that catches gives
+                    # the evaluator its depth back, as EVALUATE-CHECKED
+                    # does; until then the BIOS evaluates nothing more.
+                    ": CATCH-BAD EVAL-DEPTH @ >R ['] TRY-BAD CATCH BAD-IOR !",
+                    "  R> EVALUATOR-UNWIND ;",
                     "CATCH-BAD",
                     '." BAD-IOR=" BAD-IOR @ .',
                     '." CWD-SAME=" CWD @ BAD-CWD @ = .',
                     '." ROLLED-BACK=" MODULE? retry.f 0= .',
                     '." AFTER-BAD=" _LD-SP @ .',
                     '." REQ-AFTER-BAD=" _LD-FROM-SP @ .',
+                    '." EVAL-AFTER-BAD=" EVAL-DEPTH @ .',
                     "REQUIRE mods/retry.f",
                     "RETRY-TAIL .",
                     '." LOADED=" MODULE? retry.f .',
@@ -43921,6 +43931,7 @@ class TestKDOSModuleSystem(_KDOSTestBase):
             self.assertIn("ATTEMPTS=2 ", text)
             self.assertIn("AFTER-BAD=0 ", text)
             self.assertIn("REQ-AFTER-BAD=0 ", text)
+            self.assertIn("EVAL-AFTER-BAD=0 ", text)
             self.assertIn("AFTER-RETRY=0 ", text)
             self.assertIn("REQ-AFTER-RETRY=0 ", text)
             self.assertNotIn("REQUIRE nested too deep", text)
@@ -44398,7 +44409,7 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
         )
 
     def test_nested_throw_rolls_back_all_provisional_ids_then_retries(self):
-        """A successful nested frame survives its throwing outer frame."""
+        """A throwing outer frame takes its finished nested frame with it."""
         seed_ids = [f"rollback.seed.{i:03d}" for i in range(255)]
         outer_ids = ("rollback.outer", "rollback.outer.alias")
         inner_id = "rollback.inner"
@@ -44440,10 +44451,8 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
                 "VARIABLE _RR-DEPTH VARIABLE _RR-EVAL VARIABLE _RR-CWD",
                 "VARIABLE _RR-LD-SP VARIABLE _RR-REQ-SP VARIABLE _RR-HEAP",
                 "VARIABLE _RR-HEAP-FAIL VARIABLE _RR-HEAP-RETRY",
-                "VARIABLE _RR-HERE-FAIL VARIABLE _RR-HERE-RETRY",
-                "VARIABLE _RR-COUNT VARIABLE _RR-HEAP-EXACT",
-                "VARIABLE _RR-HEAP-DELTA VARIABLE _RR-INNER-BLOCK",
-                "VARIABLE _RR-FRAG VARIABLE _RR-FRAG-FAIL",
+                "VARIABLE _RR-HERE VARIABLE _RR-HERE-FAIL",
+                "VARIABLE _RR-HERE-RETRY VARIABLE _RR-COUNT VARIABLE _RR-FRAG",
                 "VARIABLE _RR-HEAP-STABLE VARIABLE _RR-HERE-STABLE",
                 "0 _RR-INNER-ATTEMPTS ! 0 _RR-OUTER-ATTEMPTS !",
                 "0 _RR-BAD !",
@@ -44454,39 +44463,33 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
                 "DEPTH _RR-DEPTH ! EVAL-DEPTH @ _RR-EVAL ! CWD @ _RR-CWD !",
                 "_LD-SP @ _RR-LD-SP ! _LD-FROM-SP @ _RR-REQ-SP !",
                 "HEAP-FREE-BYTES _RR-HEAP ! HEAP-FRAG _RR-FRAG !",
-                "_MOD-COUNT _RR-COUNT !",
+                "HERE _RR-HERE ! _MOD-COUNT _RR-COUNT !",
                 "_RR-CHECKED _RR-STATUS ! EVAL-THROW @ _RR-THROW !",
             ]
+            # The seeds stay.  The nested module finished before its parent
+            # threw, and its IDs had merged into the parent's frame, so it
+            # goes with the parent's own.
             for module_id in seed_ids:
                 lines.append(
                     f"MODULE? {module_id} 0= IF 1 _RR-BAD +! THEN"
                 )
-            lines.append(
-                f"MODULE? {inner_id} 0= IF 1 _RR-BAD +! THEN"
-            )
-            for module_id in outer_ids:
+            for module_id in (inner_id, *outer_ids):
                 lines.append(
                     f"MODULE? {module_id} IF 1 _RR-BAD +! THEN"
                 )
             lines.extend([
                 "HEAP-FREE-BYTES _RR-HEAP-FAIL ! HERE _RR-HERE-FAIL !",
-                "_RR-HEAP @ _RR-HEAP-FAIL @ - _RR-HEAP-DELTA !",
-                'S" rollback.inner" _MOD-FIND /ALLOC-HDR - 8 + @',
-                "_RR-INNER-BLOCK !",
-                "HEAP-FRAG DUP _RR-FRAG-FAIL ! _RR-FRAG @ -",
-                "1+ /ALLOC-HDR * _RR-INNER-BLOCK @ +",
-                "_RR-HEAP-DELTA @ =",
-                "_RR-HEAP-EXACT !",
                 'CR ." [RR-ROLLBACK " _RR-STATUS @ . _RR-THROW @ .',
                 '_RR-BAD @ . DEPTH _RR-DEPTH @ = .',
                 'EVAL-DEPTH @ _RR-EVAL @ = . CWD @ _RR-CWD @ = .',
                 '_LD-SP @ _RR-LD-SP @ = . _LD-FROM-SP @ _RR-REQ-SP @ = .',
-                '_RR-HEAP-DELTA @ . _RR-INNER-BLOCK @ .',
-                '_RR-FRAG-FAIL @ _RR-FRAG @ - .',
-                '_RR-HEAP-EXACT @ . _MOD-COUNT _RR-COUNT @ 1+ = .',
-                '_MOD-COUNT . _MOD-BUCKET-COUNT . _MOD-GROW-PENDING @ .',
+                '_RR-HEAP-FAIL @ _RR-HEAP @ = . HEAP-FRAG _RR-FRAG @ = .',
+                '_RR-HERE-FAIL @ _RR-HERE @ = . _MOD-COUNT _RR-COUNT @ = .',
+                '_MOD-COUNT . _MOD-FILES . _MOD-BUCKET-COUNT .',
+                '_MOD-GROW-PENDING @ .',
                 '_RR-INNER-ATTEMPTS @ . _RR-OUTER-ATTEMPTS @ .',
-                'ROLLBACK-INNER-VALUE . HEAP-CHECK . ." ]"',
+                '[DEFINED] ROLLBACK-INNER-VALUE .',
+                '[DEFINED] ROLLBACK-OUTER-VALUE . HEAP-CHECK . ." ]"',
                 "0 _RR-BAD ! _RR-CHECKED _RR-RETRY1 !",
             ])
             for module_id in (*outer_ids, inner_id):
@@ -44499,7 +44502,7 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
                 "HEAP-FREE-BYTES _RR-HEAP-RETRY @ = _RR-HEAP-STABLE !",
                 "HERE _RR-HERE-RETRY @ = _RR-HERE-STABLE !",
                 'CR ." [RR-RETRY " _RR-RETRY1 @ . _RR-RETRY2 @ .',
-                '_RR-BAD @ . _MOD-COUNT . _MOD-BUCKET-COUNT .',
+                '_RR-BAD @ . _MOD-COUNT . _MOD-FILES . _MOD-BUCKET-COUNT .',
                 'DEPTH _RR-DEPTH @ = .',
                 'EVAL-DEPTH @ _RR-EVAL @ = . CWD @ _RR-CWD @ = .',
                 '_LD-SP @ _RR-LD-SP @ = . _LD-FROM-SP @ _RR-REQ-SP @ = .',
@@ -44514,18 +44517,22 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
         finally:
             os.unlink(image)
 
+        # The failed load leaves the registry, the heap and the dictionary
+        # as they were: 255 names, no file, 128 buckets, each file's lines
+        # run once, and neither file's definition.
         self.assertRegex(
             self._marker_payload(text, "RR-ROLLBACK"),
             r"\[RR-ROLLBACK\s+5\s+-733\s+0\s+-1\s+-1\s+-1\s+-1\s+"
-            r"-1\s+([1-9]\d*)\s+([1-9]\d*)\s+(-?\d+)\s+-1\s+-1\s+"
-            r"256\s+128\s+"
-            r"0\s+1\s+1\s+901\s+-1\s+\]",
+            r"-1\s+-1\s+-1\s+-1\s+-1\s+255\s+0\s+128\s+0\s+"
+            r"1\s+1\s+0\s+0\s+-1\s+\]",
         )
+        # The retry loads both files again and commits three names and two
+        # files, which grows the registry; a further REQUIRE changes nothing.
         self.assertRegex(
             self._marker_payload(text, "RR-RETRY"),
-            r"\[RR-RETRY\s+0\s+0\s+0\s+258\s+256\s+-1\s+-1\s+-1\s+"
-            r"-1\s+-1\s+-1\s+-1\s+-1\s+-1\s+1\s+2\s+902\s+901\s+"
-            r"-1\s+\]",
+            r"\[RR-RETRY\s+0\s+0\s+0\s+258\s+2\s+256\s+-1\s+-1\s+"
+            r"-1\s+-1\s+-1\s+-1\s+-1\s+-1\s+-1\s+2\s+2\s+902\s+"
+            r"901\s+-1\s+\]",
         )
 
     def test_entry_allocation_oom_is_atomic_and_retriable(self):

@@ -1856,6 +1856,14 @@ both restore the exact caller source.  Status 5 remains sticky while enclosing
 evaluators unwind, preventing either the failed source tail or an enclosing
 line tail from executing.
 
+A word that catches a `THROW` across plain `EVALUATE` with a `CATCH` of its
+own owes the evaluator the same service: it reads `EVAL-DEPTH @` before the
+`CATCH` and passes that value to `EVALUATOR-UNWIND` after it.  Until it does,
+the evaluator stays one level deep with status 5 recorded, and the BIOS runs
+no `EVALUATE` at a nonzero depth that holds a failure.  The next `LOAD`,
+`REQUIRE` or `APP-LOAD` then evaluates no line of its file and rethrows the
+code still in `EVAL-THROW`.  `ABORT` returns the depth to zero.
+
 Dictionary changes are not automatically transactional. A caller that
 snapshots `HERE` and `LATEST` must pass that pair to `DICT-ROLLBACK` on failure,
 then call `EVALUATOR-RESET`. That order is intentional: reset clears compiler

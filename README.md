@@ -261,9 +261,11 @@ a separate external-memory temporary allocation, so it does not re-enter the
 BIOS boot loader's live buffer.  `REQUIRE` pre-registers the source's exact
 `PROVIDED` ID before evaluation to terminate dependency cycles.  Entry OOM
 executes no source; a source throw unwinds its evaluator frame, transfer
-allocation, relative-directory state, and every frame-owned provisional ID
-while preserving a nested dependency that already completed.  The corrected
-source can then be retried.
+allocation, relative-directory state, and every provisional ID the frame
+owns.  A nested dependency that had finished belongs to that set: its IDs
+merged into the frame when it finished, so they and its definitions go with
+the frame's.  The corrected source can then be retried, and it loads the
+dependency again.
 
 The feature inventory is not a completion claim: current TCP/TLS qualification
 boundaries are recorded in `docs/tls-hardening.md`.

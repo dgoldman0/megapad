@@ -871,18 +871,21 @@ without fixing them.
   DOT, and DOTACC in the single compute cycle, while the §10 model (and the
   emulator) charges 1, 2, 2, 2, 3, and 3 extra cycles. FP32/FP64 match the
   model.
-- **KDOS loads after a THROW.** A THROW inside a load leaves the next load
-  broken. Three tests show it, and all fail the same way on `main`
-  (`c9134b2`) or at the end of Phase 6:
+- **KDOS loads after a THROW.** Resolved since, in the tests: the loader
+  restores its own state, and three tests failed for other reasons.
   - `TestAppLoad::test_app_load_throw_restores_loader_and_machine_state`
-    runs into wild code after `-88 THROW` inside `APP-LOAD`. Since Phase 7
-    makes F7 and FD-FF trap, that wild code traps in a loop the harness
-    counts as one step per trap, so the test no longer ends and its output
-    grows without bound. Deselect it until the loader bug is fixed.
-  - `TestKDOSModuleSystem::test_relative_require_throw_rolls_back_and_retries`
     and
-    `TestKDOSDynamicModuleRegistry::test_nested_throw_rolls_back_all_provisional_ids_then_retries`
-    fail with the same output before and after Phase 7.
+    `TestKDOSModuleSystem::test_relative_require_throw_rolls_back_and_retries`
+    caught the THROW across a plain `EVALUATE` and left the BIOS evaluator
+    one level deep with a failure recorded. The BIOS then ran no later
+    `EVALUATE`, so the repeated load evaluated nothing and rethrew the old
+    code at the prompt, where it was uncaught. Their catching word now
+    returns the evaluator to its depth with `EVALUATOR-UNWIND`, as
+    `EVALUATE-CHECKED` does.
+  - `TestKDOSDynamicModuleRegistry::test_nested_throw_rolls_back_all_provisional_ids_then_retries`
+    expected a finished nested dependency to survive its parent's failure.
+    The loader rolls it back with the parent, as KDOS.md says, and the test
+    now expects that.
 - **Uncaught KDOS `THROW`.** Fixed since: with no `CATCH` frame, `THROW`
   prints `uncaught THROW` and its code and takes the BIOS `ABORT`
   (`: T5 5 THROW ; T5` returns to the prompt). It ran `0 RP!` into wild
