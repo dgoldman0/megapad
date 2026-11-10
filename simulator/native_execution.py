@@ -152,6 +152,32 @@ class NativeExecutor:
         tile = self.tile
         self.program.bind_tile_guard(lambda: tile._native_value_executor() is not None)
         self.generation = runtime.dictionary.execution_generation
+        # How each kind of IR operation becomes a plan entry: the entry itself
+        # where the operation carries nothing, else a function of it. Calls
+        # and string literals need their word and are planned in _install.
+        op = extension
+        self._planned = {
+            ir.Literal: lambda i: (op.OP_LITERAL, i.value, 0),
+            ir.Branch: lambda i: (op.OP_BRANCH, i.target, 0),
+            ir.BranchZero: lambda i: (op.OP_BRANCH_ZERO, i.target, 0),
+            ir.Return: (op.OP_RETURN, 0, 0),
+            ir.RPush: (op.OP_R_PUSH, 0, 0),
+            ir.RPop: (op.OP_R_POP, 0, 0),
+            ir.RPeek: (op.OP_R_PEEK, 0, 0),
+            ir.Do: (op.OP_DO, 0, 0),
+            ir.QuestionDo: lambda i: (op.OP_QUESTION_DO, i.target, 0),
+            ir.Loop: lambda i: (op.OP_LOOP, i.target, 0),
+            ir.PlusLoop: lambda i: (op.OP_PLUS_LOOP, i.target, 0),
+            ir.Unloop: (op.OP_UNLOOP, 0, 0),
+            ir.StoreValue: lambda i: (op.OP_STORE_VALUE, i.address, 0),
+            ir.AbortIf: (op.OP_ABORT_IF, 0, 0),
+            ir.RPushPair: (op.OP_R_PUSH_PAIR, 0, 0),
+            ir.RPopPair: (op.OP_R_POP_PAIR, 0, 0),
+            ir.RPeekPair: (op.OP_R_PEEK_PAIR, 0, 0),
+        }
+        # What a compiled call to a word becomes, by execution token: the
+        # word, its plan entry, and the colon word that entry enters, if any.
+        self.call_plans = {}
         self.plans = {}
         self.entry_costs = {}
         self.continuation_frames = {}
@@ -175,6 +201,7 @@ class NativeExecutor:
     def invalidate(self):
         self.program.clear()
         self.plans.clear()
+        self.call_plans.clear()
         self.entry_costs.clear()
         self.continuation_frames.clear()
         self.does_entries.clear()
@@ -351,16 +378,44 @@ class NativeExecutor:
         )
 
     def _call(self, target, pending):
+        """The plan entry for a compiled call to ``target``.
+
+        The entry depends only on the word and on what invalidate() clears,
+        so it is worked out once for each word. A colon word the entry enters
+        goes on ``pending`` until it has a plan.
+        """
+
+        known = self.call_plans.get(target.xt)
+        if known is None or known[0] is not target:
+            op = self.extension
+            if isinstance(target.implementation, rt.RoutineDefinition):
+                # A routine's entry allocates its index and binds its callback
+                # sites as it is planned, so it is not kept here.
+                index = self._routine_index(target, pending)
+                if index is not None:
+                    return op.OP_CALL_ROUTINE, index, 0
+                return op.OP_STOP, 0, 0
+            entry, entered = self._plan_call(target)
+            known = (target, entry, entered)
+            self.call_plans[target.xt] = known
+        entered = known[2]
+        if entered is not None and entered.xt not in self.plans:
+            pending.append(entered)
+        return known[1]
+
+    def _plan_call(self, target):
+        """A call's plan entry, and the colon word the entry enters, if any."""
+
         op = self.extension
         implementation = target.implementation
         if isinstance(implementation, rt.ConstantDefinition):
-            return op.OP_PUSH_CELL, implementation.value, 0
+            return (op.OP_PUSH_CELL, implementation.value, 0), None
         if isinstance(implementation, rt.ValueDefinition):
-            return op.OP_FETCH_VALUE, target.body_address, 0
+            return (op.OP_FETCH_VALUE, target.body_address, 0), None
         if isinstance(implementation, rt.CreatedDefinition):
             action = implementation.action
             if action is None:
-                return op.OP_PUSH_CELL, target.body_address, 0
+                return (op.OP_PUSH_CELL, target.body_address, 0), None
             # A DOES> child pushes its body and continues in its defining
             # word, which is planned like any colon word it calls.
             source = self.runtime.dictionary.live_word(action.source_xt)
@@ -370,30 +425,24 @@ class NativeExecutor:
                 if entry is None:
                     entry = self.program.does_entry(action.source_xt, action.entry_ip)
                     self.does_entries[key] = entry
-                pending.append(source)
-                return op.OP_DOES, target.body_address, entry
+                return (op.OP_DOES, target.body_address, entry), source
         if isinstance(implementation, rt.PrimitiveDefinition):
             admitted = self.primitives.get(target.xt)
             if admitted is not None and admitted[0] is target:
-                return admitted[1], 0, 0
+                return (admitted[1], 0, 0), None
             scalar = self.scalar_primitives.get(target.xt)
             if scalar is not None and scalar[0] is target:
-                return scalar[1]
+                return scalar[1], None
             tile = self.tile_primitives.get(target.xt)
             if tile is not None and tile[0] is target:
-                return tile[1]
+                return tile[1], None
             cell = self.cell_primitives.get(target.xt)
             if cell is not None and cell[0] is target:
-                return cell[1]
+                return cell[1], None
         if isinstance(implementation, rt.ColonDefinition):
             if target.xt not in self.runtime._colon_accelerators:
-                pending.append(target)
-                return op.OP_CALL, target.xt, 0
-        if isinstance(implementation, rt.RoutineDefinition):
-            index = self._routine_index(target, pending)
-            if index is not None:
-                return op.OP_CALL_ROUTINE, index, 0
-        return op.OP_STOP, 0, 0
+                return (op.OP_CALL, target.xt, 0), target
+        return (op.OP_STOP, 0, 0), None
 
     def _prepare(self, initial):
         if self.generation != self.runtime.dictionary.execution_generation:
@@ -407,6 +456,9 @@ class NativeExecutor:
 
         runtime = self.runtime
         op = self.extension
+        planned = self._planned
+        live_word = runtime.dictionary.live_word
+        stop = (op.OP_STOP, 0, 0)
         while pending:
             word = pending.pop()
             if word.xt in self.plans:
@@ -419,53 +471,23 @@ class NativeExecutor:
             # instruction indices; unsupported operations remain explicit stops.
             self.plans[word.xt] = word
             operations = []
+            append = operations.append
             for instruction in word.implementation.operations:
-                item = (op.OP_STOP, 0, 0)
-                if isinstance(instruction, ir.Literal):
-                    item = (op.OP_LITERAL, instruction.value, 0)
-                elif isinstance(instruction, (ir.Call, ir.CallSelf)):
-                    target = word if isinstance(instruction, ir.CallSelf) else (
-                        runtime.dictionary.live_word(instruction.xt)
-                    )
-                    if target is not None:
-                        item = self._call(target, pending)
-                elif isinstance(instruction, ir.Branch):
-                    item = (op.OP_BRANCH, instruction.target, 0)
-                elif isinstance(instruction, ir.BranchZero):
-                    item = (op.OP_BRANCH_ZERO, instruction.target, 0)
-                elif isinstance(instruction, ir.Return):
-                    item = (op.OP_RETURN, 0, 0)
-                elif isinstance(instruction, ir.RPush):
-                    item = (op.OP_R_PUSH, 0, 0)
-                elif isinstance(instruction, ir.RPop):
-                    item = (op.OP_R_POP, 0, 0)
-                elif isinstance(instruction, ir.RPeek):
-                    item = (op.OP_R_PEEK, 0, 0)
-                elif isinstance(instruction, ir.Do):
-                    item = (op.OP_DO, 0, 0)
-                elif isinstance(instruction, ir.QuestionDo):
-                    item = (op.OP_QUESTION_DO, instruction.target, 0)
-                elif isinstance(instruction, ir.Loop):
-                    item = (op.OP_LOOP, instruction.target, 0)
-                elif isinstance(instruction, ir.PlusLoop):
-                    item = (op.OP_PLUS_LOOP, instruction.target, 0)
-                elif isinstance(instruction, ir.Unloop):
-                    item = (op.OP_UNLOOP, 0, 0)
-                elif isinstance(instruction, ir.StoreValue):
-                    item = (op.OP_STORE_VALUE, instruction.address, 0)
-                elif isinstance(instruction, ir.AbortIf):
-                    item = (op.OP_ABORT_IF, 0, 0)
-                elif isinstance(instruction, ir.RPushPair):
-                    item = (op.OP_R_PUSH_PAIR, 0, 0)
-                elif isinstance(instruction, ir.RPopPair):
-                    item = (op.OP_R_POP_PAIR, 0, 0)
-                elif isinstance(instruction, ir.RPeekPair):
-                    item = (op.OP_R_PEEK_PAIR, 0, 0)
-                elif isinstance(instruction, ir.PushStringLiteral):
-                    item = (op.OP_STRING_LITERAL,
+                kind = type(instruction)
+                entry = planned.get(kind)
+                if entry is not None:
+                    append(entry if type(entry) is tuple else entry(instruction))
+                elif kind is ir.Call:
+                    target = live_word(instruction.xt)
+                    append(stop if target is None else self._call(target, pending))
+                elif kind is ir.CallSelf:
+                    append(self._call(word, pending))
+                elif kind is ir.PushStringLiteral:
+                    append((op.OP_STRING_LITERAL,
                             word.body_address + instruction.offset,
-                            instruction.length)
-                operations.append(item)
+                            instruction.length))
+                else:
+                    append(stop)
             # A word with an execution overlay is planned too, for Python to
             # enter after the overlay declines; calls to it stay stops.
             self.program.install(
