@@ -22,14 +22,14 @@ from tests.simulator.test_kdos_aes import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
-KDOS_LINES = 10_165
-KDOS_BYTES = 356_537
+KDOS_LINES = 10_181
+KDOS_BYTES = 357_300
 KDOS_SHA256 = (
-    "bc1bdf6df7b73665a3c3741c11f18579209adeada56102937204d653dc038b3f"
+    "367426cc10080b2dcb6642974ca30d7c75dcceed96ae2298783fd3aa96c71591"
 )
-SUBMITTED_LINES = 6_810
-SUBMITTED_PAYLOAD_BYTES = 220_834
-CLI_UART_BYTES = 227_644
+SUBMITTED_LINES = 6_815
+SUBMITTED_PAYLOAD_BYTES = 220_995
+CLI_UART_BYTES = 227_810
 MAX_SUBMITTED_LINE = 99
 CANONICAL_EXTERNAL_BYTES = 128 << 20
 CANONICAL_HBW_BYTES = 3 << 20
@@ -182,7 +182,7 @@ def test_complete_kdos_loads_once_and_runs_representative_subsystems() -> None:
 
     loaded_words = runtime.dictionary.words[len(core_words) :]
     assert len(core_words) == 457
-    assert len(loaded_words) == 1_515
+    assert len(loaded_words) == 1_517
     assert loaded_words[0].name == b".R"
     assert tuple(word.name for word in loaded_words[-2:]) == (
         b"_AUTOEXEC-NAME",
@@ -198,7 +198,7 @@ def test_complete_kdos_loads_once_and_runs_representative_subsystems() -> None:
     assert index.flags == DICT_INDEX_BOUND | DICT_INDEX_AUTHORITATIVE
     assert index.slots == 65_536
     unique_bindings = {word.name.upper() for word in runtime.dictionary.words}
-    assert len(runtime.dictionary.words) - len(unique_bindings) == 7
+    assert len(runtime.dictionary.words) - len(unique_bindings) == 8
     assert index.count == len(unique_bindings)
     assert _variable(runtime, "FS-OK") == TRUE
     assert _variable(runtime, "HEAP-INIT") == 1

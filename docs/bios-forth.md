@@ -512,13 +512,15 @@ Checked status values are deterministic:
 | 4 | `EVAL-S-UNFINISHED` | End of source reached with unfinished compiler state |
 | 5 | `EVAL-S-THROW` | KDOS caught a nonzero source-level `THROW`; inspect `EVAL-THROW @` |
 
-The BIOS definition of `EVALUATE-CHECKED` exists before KDOS and therefore
-cannot depend on KDOS's execution-context-local `HANDLER` table.  Once
-`CATCH`/`THROW` exist, KDOS defines a newer word with the same public name.
-That wrapper checkpoints `EVAL-DEPTH`, catches a source exception, asks BIOS to
-restore every abandoned input frame, stores the exact exception in
-`EVAL-THROW`, and returns status 5 normally.  This ordering keeps exception
-ownership in KDOS while making `SOURCE-EVALUATE-CHECKED` transaction-safe.
+The BIOS definitions of `EVALUATE` and `EVALUATE-CHECKED` exist before KDOS
+and therefore cannot depend on KDOS's execution-context-local `HANDLER`
+table.  Once `CATCH`/`THROW` exist, KDOS defines newer words with the same
+public names.  Both checkpoint `EVAL-DEPTH`, catch a source exception, and ask
+BIOS to restore every abandoned input frame.  KDOS's `EVALUATE` then rethrows
+the exception; KDOS's `EVALUATE-CHECKED` stores it in `EVAL-THROW` and returns
+status 5 normally.  This ordering keeps exception ownership in KDOS while
+making `SOURCE-EVALUATE-CHECKED` transaction-safe.  The BIOS's own callers of
+`EVALUATE`, the boot command and `FSLOAD`, keep the BIOS word.
 
 Checked evaluation intentionally permits a colon definition or conditional to
 span calls.  Use `EVALUATE-FINISH` once after the last line.  KDOS packages

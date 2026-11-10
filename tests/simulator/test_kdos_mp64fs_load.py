@@ -46,16 +46,16 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-mp64fs-load-5742-6193.f"
+    / "kdos-mp64fs-load-5742-6209.f"
 )
 
 FIRST_LINE = 5742
-LAST_LINE = 6193
-SLICE_BYTES = 17_210
+LAST_LINE = 6209
+SLICE_BYTES = 17_973
 SLICE_SHA256 = (
-    "9848280b32b5db3387dd94df4e0c7036597d913e3f457d97ee88a29722b3bc9a"
+    "5edc78bd9065d16bfbbb5f55030c36f07b99994de5e45d1d094da3b9f64c7cd5"
 )
-SLICE_GIT_BLOB = "679fb2d92ac20649daa6992ccc9490122e6d5d52"
+SLICE_GIT_BLOB = "04a0a4de50c095ea7be27e45b4d07d5d84bdb962"
 
 # Exact defining-word/name order in kdos.f.  Keeping the defining word in
 # the ledger makes source-layout changes visible even if a replacement happens
@@ -129,6 +129,8 @@ SOURCE_LEDGER = (
     ("CONSTANT", b"EVAL-S-DEPTH"),
     ("CONSTANT", b"EVAL-S-UNFINISHED"),
     ("CONSTANT", b"EVAL-S-THROW"),
+    (":", b"_EVALUATE-GUARDED"),
+    (":", b"EVALUATE"),
     (":", b"EVALUATE-CHECKED"),
     ("VARIABLE", b"_SEC-CUR"),
     ("VARIABLE", b"_SEC-REM"),
@@ -438,7 +440,7 @@ def _select_source(runtime: MegaForthRuntime, source: _HostSource) -> None:
 def test_load_slice_is_exact_and_publishes_complete_source_ledger() -> None:
     runtime = _load_mp64fs_load()
 
-    assert len(SOURCE_LEDGER) == 86
+    assert len(SOURCE_LEDGER) == 88
     assert all(runtime.find(name) is not None for name in DEFINITIONS)
     assert tuple(_constant(runtime, name) for name, _value in CONSTANTS) == (
         tuple(value for _name, value in CONSTANTS)
@@ -502,10 +504,11 @@ def test_load_slice_is_exact_and_publishes_complete_source_ledger() -> None:
     ):
         assert _execute(runtime, name, 0x1000) == (0x1000 + offset,)
 
-    assert sum(
-        word.name == b"EVALUATE-CHECKED"
-        for word in runtime.dictionary.words
-    ) == 2
+    # KDOS shadows both BIOS evaluator words.
+    for shadowed in (b"EVALUATE", b"EVALUATE-CHECKED"):
+        assert sum(
+            word.name == shadowed for word in runtime.dictionary.words
+        ) == 2
     assert runtime.storage.completion == 0
     assert runtime.drain_uart_output() == b""
     assert runtime.spinlocks.owner(2) is None
@@ -1008,6 +1011,111 @@ def test_load_throw_rolls_back_dictionary_then_allows_reuse() -> None:
     assert runtime.storage.completion == completion_before + 2
     assert runtime.storage.image_bytes == media_before
     assert runtime.drain_uart_output() == b""
+
+
+def test_a_catch_across_plain_evaluate_leaves_the_evaluator_ready_to_load() -> None:
+    bad_source = b": BEFORE-EVAL-THROW 17 ;\r\n-77 THROW\r\n"
+    good_source = b": AFTER-EVAL-RECOVERY 55 ;\r\n"
+    image = _formatted_image(16)
+    _write_entry(image, 6, name=b"bad.f\0", start=14, count=1,
+                 used=len(bad_source), entry_type=3)
+    _write_entry(image, 7, name=b"good.f\0", start=15, count=1,
+                 used=len(good_source), entry_type=3)
+    image[14 * SECTOR_SIZE : 15 * SECTOR_SIZE] = _sector_allocation(bad_source, 1)
+    image[15 * SECTOR_SIZE : 16 * SECTOR_SIZE] = _sector_allocation(good_source, 1)
+    runtime = _load_mp64fs_load(image)
+    _mount(runtime)
+    heap_before = _execute(runtime, "HEAP-FREE-BYTES")[0]
+
+    # A word of its own that reaches the parsing word through EVALUATE, and
+    # an ordinary CATCH around it: nothing here knows about the evaluator.
+    runtime.evaluate(
+        b': TRY-BAD S" LOAD bad.f" EVALUATE ; '
+        b": CATCH-BAD ['] TRY-BAD CATCH ;",
+        source_name="catch-across-evaluate",
+    )
+    assert _execute(runtime, "CATCH-BAD") == (u64(-77),)
+
+    # KDOS's EVALUATE gave the evaluator its depth back as the exception
+    # passed, so the BIOS does not take the next load for a nested string
+    # after a failure and skip its lines.
+    assert _variable(runtime, "EVAL-DEPTH") == 0
+    assert _variable(runtime, "_LD-SP") == 0
+    assert runtime.find("BEFORE-EVAL-THROW") is None
+    assert _execute(runtime, "HEAP-FREE-BYTES") == (heap_before,)
+
+    runtime.evaluate(b"LOAD good.f", source_name="load-after-evaluate-catch")
+
+    assert _execute(runtime, "AFTER-EVAL-RECOVERY") == (55,)
+    assert _variable(runtime, "EVAL-DEPTH") == 0
+    assert _execute(runtime, "HEAP-FREE-BYTES") == (heap_before,)
+    assert runtime.drain_uart_output() == b""
+
+
+def test_evaluate_returns_each_nested_level_to_its_own_entry_depth() -> None:
+    runtime = _load_mp64fs_load()
+    runtime.evaluate(
+        b"VARIABLE EV-SEEN  VARIABLE EV-RAN "
+        b": EV-INNER -5 THROW ; "
+        b': EV-MID S" EV-INNER 1 EV-RAN !" EVALUATE ; '
+        b': EV-OUTER S" EV-MID 2 EV-RAN !" EVALUATE ; '
+        b": EV-CATCH-MID ['] EV-MID CATCH EVAL-DEPTH @ EV-SEEN ! ; "
+        b': EV-NESTED S" EV-CATCH-MID 7" EVALUATE ;',
+        source_name="nested-evaluate",
+    )
+
+    # Caught outside both strings: both frames are gone, and neither string's
+    # tail ran.
+    assert _execute(runtime, "CATCH", runtime.find("EV-OUTER").xt) == (u64(-5),)
+    assert _variable(runtime, "EVAL-DEPTH") == 0
+    assert _variable(runtime, "EV-RAN") == 0
+
+    # Caught inside a string: the catcher finds the depth of the string it
+    # runs in, and that string goes on.
+    assert _execute(runtime, "EV-NESTED") == (u64(-5), 7)
+    assert _variable(runtime, "EV-SEEN") == 1
+    assert _variable(runtime, "EVAL-DEPTH") == 0
+
+
+def test_evaluate_without_an_exception_is_the_bios_word() -> None:
+    runtime = _load_mp64fs_load()
+    runtime.evaluate(
+        b': EV-SUM S" 1 2 + 40" EVALUATE ; '
+        b': EV-UNKNOWN S" 5 EV-NO-SUCH-WORD 6" EVALUATE ;',
+        source_name="plain-evaluate",
+    )
+
+    assert _execute(runtime, "EV-SUM") == (3, 40)
+    assert _variable(runtime, "EVAL-DEPTH") == 0
+    assert _variable(runtime, "EVAL-STATUS") == 0
+
+    # An undefined token is a status, not an exception, and stays one.
+    assert _execute(runtime, "EV-UNKNOWN") == (5,)
+    assert _variable(runtime, "EVAL-STATUS") == 1
+    assert _eval_token(runtime) == b"EV-NO-SUCH-WORD"
+    assert _variable(runtime, "EVAL-DEPTH") == 0
+
+
+def test_the_bios_evaluate_itself_still_leaves_its_frame_under_a_throw() -> None:
+    runtime = _load_mp64fs_load()
+    guarded = runtime.find("_EVALUATE-GUARDED")
+    assert guarded is not None
+    bios_evaluate = runtime.dictionary.resolve(
+        guarded.implementation.operations[3].value
+    )
+    shadow = runtime.find("EVALUATE")
+    assert shadow is not None and shadow is not bios_evaluate
+    runtime.evaluate(
+        f': EV-RAW S" -9 THROW" {bios_evaluate.xt} EXECUTE ;'.encode("ascii"),
+        source_name="raw-evaluate",
+    )
+
+    # A word that reaches the BIOS entry, as one compiled before the shadow
+    # would, is outside the wrapper: its catcher must unwind for itself.
+    assert _execute(runtime, "CATCH", runtime.find("EV-RAW").xt) == (u64(-9),)
+    assert _variable(runtime, "EVAL-DEPTH") == 1
+    assert _execute(runtime, "EVALUATOR-UNWIND", 0) == ()
+    assert _variable(runtime, "EVAL-DEPTH") == 0
 
 
 def test_load_stops_at_undefined_status_and_rolls_back_definitions() -> None:

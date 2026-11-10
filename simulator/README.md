@@ -905,9 +905,11 @@ fail-closed cleanup of hidden evaluator depth and unfinished compiler state.
 Nested evaluation consumes the active outer public step budget and cannot
 acquire a fresh allowance.
 
-Exact KDOS source now shadows the early checked entry with its `CATCH` wrapper.
-A caught guest exception records its exact code in `EVAL-THROW`, unwinds to the
-saved evaluator-depth checkpoint, and returns status 5 normally.
+Exact KDOS source now shadows `EVALUATE` and the early checked entry. Both
+run the BIOS `EVALUATE` through `_EVALUATE-GUARDED`, whose `CATCH` unwinds to
+the evaluator depth it noted when a guest exception passes. `EVALUATE`
+rethrows it; `EVALUATE-CHECKED` records its exact code in `EVAL-THROW` and
+returns status 5 normally.
 `SOURCE-EVALUATE-CHECKED` walks LF-delimited input, strips one terminal CR from
 each physical line, skips blank physical lines, accepts a final line without LF,
 stops at the first nonzero status, and calls `EVALUATE-FINISH` at ordinary end
@@ -1454,17 +1456,18 @@ pool descriptor. Reused addresses create an ABA hazard in which a stale handle
 can flush or close a new occupant; pool headers, descriptor cells, `OP-SLOT`,
 parser state, cache, and deferred bindings are global and unlocked.
 
-The adjacent current loader fixture is exact `kdos.f` lines 5742–6193: 452 LF
-records, 17,210 bytes, SHA-256
-`9848280b32b5db3387dd94df4e0c7036597d913e3f457d97ee88a29722b3bc9a`,
-and Git blob `679fb2d92ac20649daa6992ccc9490122e6d5d52`. Its exact 86-definition ledger
+The adjacent current loader fixture is exact `kdos.f` lines 5742–6209: 468 LF
+records, 17,973 bytes, SHA-256
+`5edc78bd9065d16bfbbb5f55030c36f07b99994de5e45d1d094da3b9f64c7cd5`,
+and Git blob `04a0a4de50c095ea7be27e45b4d07d5d84bdb962`. Its exact 88-definition ledger
 installs five loader globals, a 16 × 88-byte nesting stack, evaluator-depth and
 transaction accessors, three initially-no-op deferred transaction actions,
 two-extent read helpers, relative-path scratch and traversal, the module-source
 and module-file records with their accessors and two error constants, the
 built-in MP64FS source, source selection, the resolve, read and report helpers,
 a 16 × 16-byte stack of the source and directory each load started from,
-evaluator status constants, the KDOS `EVALUATE-CHECKED` shadow, the
+evaluator status constants, `_EVALUATE-GUARDED` and the KDOS shadows of
+`EVALUATE` and `EVALUATE-CHECKED` that run through it, the
 whole-source checked walker, status translation, dictionary/error guards,
 `_LOAD-BODY`, and final `LOAD`. Loading the fixture selects the built-in source
 and performs no filesystem or storage work.
@@ -1541,7 +1544,7 @@ separate open matters. Task-resetting `ABORT`/`ABORT"` and host or memory
 faults that do not become guest `THROW` bypass the loader's `CATCH`; cleanup and
 transactionality are not claimed for those exits.
 
-The current Application Loading fixture is exact `kdos.f` lines 6194–6308:
+The current Application Loading fixture is exact `kdos.f` lines 6210–6324:
 115 LF records, 4,240 bytes, SHA-256
 `514fe3ffe462c1571d3e45f75ec274186278a2f0201fb09c1476c142a5244141`,
 and Git blob `e7463dc7365cc67799febd7c676773bb8dd0555c`. It publishes seven application
@@ -1550,8 +1553,8 @@ words—`_APP-MPU-ON`, `_APP-MPU-OFF`, `APP-EVAL`, `_APP-LOAD-WALK`,
 load-time I/O or MPU mutation. `_APP-MPU-ON` overwrites the inert window with
 Bank 0 plus external memory, `_APP-MPU-OFF` zeros it, and ordinary `APP-EVAL`
 observes that active state before teardown. An externally caught guest `THROW`
-bypasses teardown and evaluator unwind, leaving the active limit and abandoned
-depth visible.
+bypasses teardown, leaving the active limit visible; the evaluator's depth is
+back where it was, because `APP-EVAL` calls KDOS's `EVALUATE`.
 
 `APP-LOAD` uses direct current-directory lookup rather than `LOAD`'s slash
 resolver, but reuses the real loader frame, allocation, primary/secondary
@@ -2296,14 +2299,14 @@ physical presentation, and all rich-terminal work remain deferred.
 
 ### KDOS §20 Module System
 
-Exact current lines 9633–10125 add the complete Module System: 493 LF records,
+Exact current lines 9649–10141 add the complete Module System: 493 LF records,
 16,157 bytes, SHA-256
 `e3b84f6fbb348c2275c2e4339bdb92f398e621c437dcc975949611d0e367d265`,
 and Git blob `7b616252e40b75bdd9fa82fbc5fc6c0f2c47ae64`. The fixture includes the
-line-10126 §14 separator and has 494 LF records, 16,229 bytes, SHA-256
+line-10142 §14 separator and has 494 LF records, 16,229 bytes, SHA-256
 `cf818fbb9facbe2a06a825a6ba3cd6738b73d97793f423829b4386bc89b03a9d`,
 and Git blob `881609bc61944004c8f8442eb22a527f132ebbd8`. §14 Startup begins at line
-10127 and is not part of this slice.
+10143 and is not part of this slice.
 
 The source publishes 75 definitions: 46 colons, 16 variables, seven ordinary
 constants, four `CREATE` objects, and two deferred words. Its 859 name bytes,
@@ -2382,18 +2385,18 @@ slice completes the contiguous frontier through EOF.
 
 ### KDOS §14 Startup and EOF
 
-Exact current lines 10126–10165, including the section separator, contain 40 LF
+Exact current lines 10142–10181, including the section separator, contain 40 LF
 records and 1,398 bytes, with SHA-256
 `d75984f7fd3d55cb8c573da5b9f494ff1c1e8bba32b3537fa2270669add3ca8a`
 and Git blob `1354db80222545647369729b93526831ff0a21ec`. The executable lines
-10127–10165 contain 39 LF records and 1,326 bytes, with SHA-256
+10143–10181 contain 39 LF records and 1,326 bytes, with SHA-256
 `07df5026ba571e0d6e232d8c908963a0403756d3859390af3c7de3230f446b85`
 and Git blob `c920305479e61c2a5d51719779ec9c9fba0c2b8f`. The complete current
-10,165-line, 356,537-byte `kdos.f` has SHA-256
-`bc1bdf6df7b73665a3c3741c11f18579209adeada56102937204d653dc038b3f`
-and Git blob `3db6165c7a2a29090eecd02edc4a1df10b76065b`.
-The canonical source-mode CLI filter submits 6,810 non-comment records with
-220,834 payload bytes, or 227,644 UART bytes after one LF delimiter per
+10,181-line, 357,300-byte `kdos.f` has SHA-256
+`367426cc10080b2dcb6642974ca30d7c75dcceed96ae2298783fd3aa96c71591`
+and Git blob `4b12c959495b0385582a30fc564c6d8046fafd0d`.
+The canonical source-mode CLI filter submits 6,815 non-comment records with
+220,995 payload bytes, or 227,810 UART bytes after one LF delimiter per
 record. These are structural source/transport identities, not a fresh
 wall-clock or complete-load qualification.
 
@@ -2447,7 +2450,7 @@ still free, mounted MP64FS, zero modules, balanced stacks, and no held lock. A
 post-boot checked definition returned 42, followed by allocation/free, CRC32,
 ring FIFO, and module-listing checks. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
-457 core words and expects 1,515 KDOS publications and 1,965 unique
+457 core words and expects 1,517 KDOS publications and 1,966 unique
 bindings.
 
 The contiguous unchanged KDOS core now reaches EOF. The integration branch is

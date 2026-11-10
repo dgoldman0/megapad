@@ -173,7 +173,7 @@ class _AccelerationSpec:
 _SPECS = (
     _AccelerationSpec(
         b"EVALUATE-CHECKED",
-        "8d4ec79f585cda10b03ef6e922f550b88e814115e487b484d0716b2fbe510e96",
+        "7bf42fdcd1448a1affb0b556afe4268be6ed70043243b1836267a378c539a25d",
     ),
     _AccelerationSpec(
         b"SOURCE-EVALUATE-CHECKED",
@@ -195,6 +195,16 @@ _SPECS = (
         b"_PS-LINE-LEN",
         "9ef000822d309fbb556936eb8176f7de70627f92dcdd2fe27baf1289790b01d9",
     ),
+)
+
+
+# EVALUATE-CHECKED runs BIOS EVALUATE through this word, which KDOS's
+# EVALUATE shares: CATCH around the primitive, and the evaluator's depth
+# given back when an exception passes.  The checked-line overlay stands for
+# both bodies, so it binds this one by digest as well.
+_EVALUATE_GUARDED_NAME = b"_EVALUATE-GUARDED"
+_EVALUATE_GUARDED_DIGEST = (
+    "aa094eeadd9463b615b5dd1a7cc50c2c9aba47a5cf3cb4dd5a84ea6e292bf468"
 )
 
 
@@ -341,10 +351,13 @@ def _build_checked_line_accelerator(
     word: Word,
     primitives: tuple[frozenset[Word], dict[Word, int]],
 ):
-    evaluate = _require_literal_word(runtime, word, 3, b"EVALUATE")
+    guarded = _require_call(runtime, word, 0, _EVALUATE_GUARDED_NAME)
+    if normalized_colon_digest(runtime, guarded) != _EVALUATE_GUARDED_DIGEST:
+        raise ValueError("KDOS _EVALUATE-GUARDED is not the exact guarded body")
+    evaluate = _require_literal_word(runtime, guarded, 3, b"EVALUATE")
     if not isinstance(evaluate.implementation, PrimitiveDefinition):
-        raise ValueError("KDOS EVALUATE-CHECKED does not bind primitive EVALUATE")
-    eval_status = _require_call(runtime, word, 22, b"EVAL-STATUS").body_address
+        raise ValueError("KDOS _EVALUATE-GUARDED does not bind primitive EVALUATE")
+    eval_status = _require_call(runtime, word, 12, b"EVAL-STATUS").body_address
     eval_status_cell = GuestCell(runtime.memory, eval_status)
     compiler_state = runtime._require_bios_evaluator().compiler_state
     interpret_primitives, defining_primitives = primitives

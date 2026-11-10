@@ -427,11 +427,16 @@ state before the context can be reused. Nested guest evaluation remains
 charged to the active outer public step budget; it does not reset or enlarge
 that budget.
 
-Exact KDOS source shadows the early checked primitive with a guest `CATCH`
-wrapper. Normal evaluator statuses 0 through 3 pass through. A caught nonzero
-guest `THROW` consumes the restored evaluator arguments, records the exact code
-in `EVAL-THROW`, reconstructs abandoned input depth through
-`EVALUATOR-UNWIND`, records status 5, and returns normally.
+Exact KDOS source shadows both `EVALUATE` and the early checked primitive.
+The two shadows share `_EVALUATE-GUARDED`, which notes `EVAL-DEPTH`, runs the
+BIOS `EVALUATE` under a guest `CATCH`, and on a nonzero guest `THROW`
+reconstructs the abandoned input depth through `EVALUATOR-UNWIND`. KDOS's
+`EVALUATE` then rethrows, so a catcher at any distance finds the evaluator at
+the depth it had. KDOS's `EVALUATE-CHECKED` passes normal evaluator statuses
+0 through 3, and for a caught `THROW` consumes the restored evaluator
+arguments, records the exact code in `EVAL-THROW`, records status 5, and
+returns normally. The checked-line overlay stands for the bodies of
+`EVALUATE-CHECKED` and `_EVALUATE-GUARDED` together and binds each by digest.
 
 `SOURCE-EVALUATE-CHECKED ( addr len -- status )` walks LF-delimited physical
 input, strips one terminal CR from each line, skips blank lines, and supports a
@@ -2198,10 +2203,10 @@ the new occupant (an ABA hazard), while a double close can race logical reuse.
 Pool headers, fdesc payloads, `OP-SLOT`, parser state, directory cache, and the
 deferred vectors are global and unlocked.
 
-Exact current lines 5742 through 6193 contain 452 LF records and 17,210 bytes,
+Exact current lines 5742 through 6209 contain 468 LF records and 17,973 bytes,
 with SHA-256
-`9848280b32b5db3387dd94df4e0c7036597d913e3f457d97ee88a29722b3bc9a`
-and Git blob `679fb2d92ac20649daa6992ccc9490122e6d5d52`. Their exact 86-definition
+`5edc78bd9065d16bfbbb5f55030c36f07b99994de5e45d1d094da3b9f64c7cd5`
+and Git blob `04a0a4de50c095ea7be27e45b4d07d5d84bdb962`. Their exact 88-definition
 ledger installs five loader globals, constants for a 16 × 88-byte nesting stack,
 frame/evaluator/transaction accessors, three deferred transaction actions,
 two-extent read helpers, path scratch and traversal, the five-cell
@@ -2209,7 +2214,8 @@ module-source and module-file records with nine accessors and two error
 constants, the built-in MP64FS source and its four operations, the
 `MODULE-SOURCE` selection, the resolve, read and report helpers, a 16 × 16-byte
 stack of the source and directory each load started from, six
-evaluator-status constants, the KDOS checked-evaluator shadow, five
+evaluator-status constants, `_EVALUATE-GUARDED` and the KDOS shadows of
+`EVALUATE` and `EVALUATE-CHECKED` that run through it, five
 whole-source walker cells, `SOURCE-EVALUATE-CHECKED`, `_LD-STATUS-THROW`, the
 checked loader walker, dictionary/error guards, `_LOAD-BODY`, and final `LOAD`.
 Its optional module transaction
@@ -2303,7 +2309,7 @@ This is a KDOS lifecycle repair shared by emulator and simulator, not a direct
 host-filesystem substitute. File-type/flag policy and the runtime-global,
 unlocked loader scratch remain separate open matters.
 
-Exact current lines 6194 through 6308 contain 115 LF records and 4,240 bytes,
+Exact current lines 6210 through 6324 contain 115 LF records and 4,240 bytes,
 with SHA-256
 `514fe3ffe462c1571d3e45f75ec274186278a2f0201fb09c1476c142a5244141`
 and Git blob `e7463dc7365cc67799febd7c676773bb8dd0555c`. The 13-definition ledger
@@ -2318,12 +2324,13 @@ exclusive external-memory end or `MEM-SIZE` as its limit. `_APP-MPU-OFF`
 zeros both registers rather than restoring their prior values. On ordinary
 return, `APP-EVAL` exposes those active values and permanent supervisor
 privilege to the supplied guest bytes, preserves their data-stack and
-dictionary effects, then disables the MPU state. It calls raw `EVALUATE`, so
-undefined and unfinished input retain that evaluator's literal status behavior.
-A guest `THROW` caught outside `APP-EVAL` bypasses `SYS-EXIT`, MPU teardown,
-and evaluator unwind: the configured limit and one abandoned evaluator frame
-remain visible. Focused acceptance pins that defect in a disposable runtime;
-the simulator does not insert an implicit guard.
+dictionary effects, then disables the MPU state. It calls KDOS's `EVALUATE`,
+so undefined and unfinished input retain the BIOS evaluator's literal status
+behavior. A guest `THROW` caught outside `APP-EVAL` bypasses `SYS-EXIT` and
+MPU teardown: the configured limit remains visible. The evaluator's depth
+does not, because `EVALUATE` returned it before the exception left. Focused
+acceptance pins the remaining defect in a disposable runtime; the simulator
+does not insert an implicit guard.
 
 `APP-LOAD` performs a direct current-directory `FIND-BY-NAME`; unlike `LOAD`,
 it does not call `_RESOLVE-PATH`, so slash syntax has no navigation meaning.
@@ -3405,13 +3412,13 @@ deferred.
 
 ### KDOS §20 module-system contract
 
-Exact current lines 9633 through 10125 contain 493 LF records and 16,157
+Exact current lines 9649 through 10141 contain 493 LF records and 16,157
 bytes, with SHA-256
 `e3b84f6fbb348c2275c2e4339bdb92f398e621c437dcc975949611d0e367d265`
 and Git blob `7b616252e40b75bdd9fa82fbc5fc6c0f2c47ae64`. The checked fixture adds the
-line-10126 §14 Startup separator: 494 LF records, 16,229 bytes, SHA-256
+line-10142 §14 Startup separator: 494 LF records, 16,229 bytes, SHA-256
 `cf818fbb9facbe2a06a825a6ba3cd6738b73d97793f423829b4386bc89b03a9d`,
-and Git blob `881609bc61944004c8f8442eb22a527f132ebbd8`. Line 10127 begins Startup and is
+and Git blob `881609bc61944004c8f8442eb22a527f132ebbd8`. Line 10143 begins Startup and is
 not admitted by that sentinel.
 
 The slice publishes 75 words: 46 colons, 16 zero-initialized variables, seven
@@ -3513,16 +3520,16 @@ and no reentry or pre-held shared lock. §20 ends at line 9917; the following
 
 ### Current KDOS §14 startup and EOF contract
 
-Exact current lines 10126 through 10165, including the section separator,
+Exact current lines 10142 through 10181, including the section separator,
 contain 40 LF records and 1,398 bytes, with SHA-256
 `d75984f7fd3d55cb8c573da5b9f494ff1c1e8bba32b3537fa2270669add3ca8a`
 and Git blob `1354db80222545647369729b93526831ff0a21ec`. The executable section from
-line 10127 through EOF contains 39 LF records and 1,326 bytes, with SHA-256
+line 10143 through EOF contains 39 LF records and 1,326 bytes, with SHA-256
 `07df5026ba571e0d6e232d8c908963a0403756d3859390af3c7de3230f446b85`
 and Git blob `c920305479e61c2a5d51719779ec9c9fba0c2b8f`. The complete current file has
-10,165 LF records and 356,537 bytes, with SHA-256
-`bc1bdf6df7b73665a3c3741c11f18579209adeada56102937204d653dc038b3f`
-and Git blob `3db6165c7a2a29090eecd02edc4a1df10b76065b`. At the historical qualification
+10,181 LF records and 357,300 bytes, with SHA-256
+`367426cc10080b2dcb6642974ca30d7c75dcceed96ae2298783fd3aa96c71591`
+and Git blob `4b12c959495b0385582a30fc564c6d8046fafd0d`. At the historical qualification
 revision, the complete `kdos.f` had 9,894 LF records and 341,355 bytes, with
 SHA-256
 `99e71114ed141c14522d687a3bef3110ead94de7b0a055ae693c135a94772fb8`
@@ -3569,8 +3576,8 @@ mounted media, zero modules, balanced stacks, and released locks, followed by
 a checked post-boot definition, allocation/free, CRC32, ring FIFO, and module
 listing. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
-457 core words and expects 1,515 KDOS publications and 1,965 unique
-bindings; it submits 6,810 lines (220,834 payload bytes, 227,644 CLI UART bytes).
+457 core words and expects 1,517 KDOS publications and 1,966 unique
+bindings; it submits 6,815 lines (220,995 payload bytes, 227,810 CLI UART bytes).
 
 The startup filesystem path is literal. `DISK?` false skips `FS-LOAD` and does
 not clear a stale true `FS-OK`. A successful load stores the exact lowercase

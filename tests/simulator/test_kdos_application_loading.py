@@ -43,11 +43,11 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-application-loading-6194-6308.f"
+    / "kdos-application-loading-6210-6324.f"
 )
 
-FIRST_LINE = 6194
-LAST_LINE = 6308
+FIRST_LINE = 6210
+LAST_LINE = 6324
 SLICE_BYTES = 4_240
 SLICE_SHA256 = (
     "514fe3ffe462c1571d3e45f75ec274186278a2f0201fb09c1476c142a5244141"
@@ -240,17 +240,17 @@ def test_caught_app_eval_throw_leaves_the_mpu_window_enabled() -> None:
 
     assert _execute(runtime, "CATCH", wrapper.xt) == (u64(-91),)
 
-    # APP-EVAL has no guarded cleanup.  CATCH resumes past EVALUATE before
-    # SYS-EXIT and _APP-MPU-OFF can run, leaving the otherwise inert window.
+    # APP-EVAL has no guarded cleanup of its own.  CATCH resumes past
+    # EVALUATE before SYS-EXIT and _APP-MPU-OFF can run, leaving the otherwise
+    # inert window.  The evaluator is another matter: APP-EVAL calls KDOS's
+    # EVALUATE, which gave it its depth back before the code reached CATCH.
     assert runtime.mpu_base == 0
     assert runtime.mpu_limit == external_end
-    assert _variable(runtime, "EVAL-DEPTH") == 1
+    assert _variable(runtime, "EVAL-DEPTH") == 0
     assert runtime.privilege_level == 0
     assert runtime.main_context.returns.snapshot() == ()
     assert runtime.drain_uart_output() == b""
 
-    assert _execute(runtime, "EVALUATOR-UNWIND", 0) == ()
-    assert _variable(runtime, "EVAL-DEPTH") == 0
     assert _execute(runtime, "_APP-MPU-OFF") == ()
     assert runtime.mpu_limit == 0
 

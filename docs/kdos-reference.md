@@ -1847,25 +1847,34 @@ On failure, read `EVAL-STATUS @`, `EVAL-LINE @`, `EVAL-COLUMN @`, and
 behind status 5.  Lines are one-based and columns are zero-based.
 The token is a stable copy and remains valid after input-source restoration.
 
-BIOS defines an early `EVALUATE-CHECKED` primitive returning statuses 0–3.
-It cannot own `CATCH`, because KDOS later supplies the execution-context-local
-`HANDLER` table.  Immediately above this whole-buffer compiler, KDOS
-deliberately shadows that BIOS word with the same public name.  The KDOS
-wrapper checkpoints `EVAL-DEPTH @`, runs legacy `EVALUATE` under `CATCH`, and
-on a source exception invokes `EVALUATOR-UNWIND`, stores the code in
-`EVAL-THROW`, and returns status 5 normally.  BIOS evaluator frames retain a
-complete caller TIB, length, and `>IN`, so normal nesting and caught unwinds
-both restore the exact caller source.  Status 5 remains sticky while enclosing
-evaluators unwind, preventing either the failed source tail or an enclosing
-line tail from executing.
+BIOS defines `EVALUATE` and an early `EVALUATE-CHECKED` primitive returning
+statuses 0–3.  Neither can own `CATCH`, because KDOS later supplies the
+execution-context-local `HANDLER` table, and BIOS `EVALUATE` keeps each
+caller's input frame outside the return stack, so a `THROW` that crosses it
+leaves the frame and the evaluator's depth in place.  Immediately above this
+whole-buffer compiler, KDOS deliberately shadows both BIOS words with words of
+the same public names.  They share `_EVALUATE-GUARDED`, which notes
+`EVAL-DEPTH @`, runs the BIOS `EVALUATE` under `CATCH`, and on a source
+exception invokes `EVALUATOR-UNWIND` down to the depth it noted.
 
-A word that catches a `THROW` across plain `EVALUATE` with a `CATCH` of its
-own owes the evaluator the same service: it reads `EVAL-DEPTH @` before the
-`CATCH` and passes that value to `EVALUATOR-UNWIND` after it.  Until it does,
-the evaluator stays one level deep with status 5 recorded, and the BIOS runs
-no `EVALUATE` at a nonzero depth that holds a failure.  The next `LOAD`,
-`REQUIRE` or `APP-LOAD` then evaluates no line of its file and rethrows the
-code still in `EVAL-THROW`.  `ABORT` returns the depth to zero.
+KDOS's `EVALUATE` rethrows the exception.  Whoever catches it, at any
+distance, finds the evaluator at the depth it had when that `EVALUATE` was
+entered, and a later `LOAD`, `REQUIRE` or `APP-LOAD` evaluates its file.
+KDOS's `EVALUATE-CHECKED` stores the code in `EVAL-THROW` and returns
+status 5 normally.  BIOS evaluator frames retain a complete caller TIB,
+length, and `>IN`, so normal nesting and caught unwinds both restore the
+exact caller source.  Status 5 remains sticky while enclosing evaluators
+unwind, preventing either the failed source tail or an enclosing line tail
+from executing.
+
+Three things lie outside the shadow.  The BIOS's own callers of its
+`EVALUATE`, the boot command and `FSLOAD`, reach the BIOS word.  So does any
+word compiled before the shadow; KDOS has none.  And status 5 stays sticky:
+a word that catches a failed load while it is itself running inside a loaded
+file or an evaluated string finds the depth restored but the status
+recorded, so the BIOS ends the line it is on and the enclosing load reports
+the same code.  A catcher at the prompt, or in a word called from it, is at
+depth zero, where the next evaluation starts with a fresh status.
 
 Dictionary changes are not automatically transactional. A caller that
 snapshots `HERE` and `LATEST` must pass that pair to `DICT-ROLLBACK` on failure,
@@ -3395,16 +3404,16 @@ Stack & diagnostics.
 
 ## §14 Startup
 
-Exact current `kdos.f` lines 10126 through 10165, including the section
+Exact current `kdos.f` lines 10142 through 10181, including the section
 separator, contain 40 LF records and 1,398 bytes, with SHA-256
 `d75984f7fd3d55cb8c573da5b9f494ff1c1e8bba32b3537fa2270669add3ca8a`
 and Git blob `1354db80222545647369729b93526831ff0a21ec`. The executable body from
-line 10127 through EOF contains 39 LF records and 1,326 bytes, with SHA-256
+line 10143 through EOF contains 39 LF records and 1,326 bytes, with SHA-256
 `07df5026ba571e0d6e232d8c908963a0403756d3859390af3c7de3230f446b85`
 and Git blob `c920305479e61c2a5d51719779ec9c9fba0c2b8f`. The complete current
-10,165-line, 356,537-byte source has SHA-256
-`bc1bdf6df7b73665a3c3741c11f18579209adeada56102937204d653dc038b3f`
-and Git blob `3db6165c7a2a29090eecd02edc4a1df10b76065b`. At the historical qualification
+10,181-line, 357,300-byte source has SHA-256
+`367426cc10080b2dcb6642974ca30d7c75dcceed96ae2298783fd3aa96c71591`
+and Git blob `4b12c959495b0385582a30fc564c6d8046fafd0d`. At the historical qualification
 revision, the complete 9,894-line, 341,355-byte source had SHA-256
 `99e71114ed141c14522d687a3bef3110ead94de7b0a055ae693c135a94772fb8`
 and Git blob `fd017b16dbd3ef4746d0e3467e980c015cf5a664` at revision
@@ -3492,7 +3501,7 @@ evaluator with canonical XMEM, HBW, VRAM, and valid MP64FS media. It published
 1,452 KDOS words and finished with an authoritative 1,764-binding dictionary
 index. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
-457 core words and expects 1,515 KDOS publications and 1,965 unique
+457 core words and expects 1,517 KDOS publications and 1,966 unique
 bindings. The historical
 run is semantic evidence, not native/exact-full-core timing evidence, and adds
 no `rich-terminal.f`, projection, compositor, viewer, or rich-input work.
@@ -4081,14 +4090,14 @@ rendering, composition, physical viewing, or input work.
 
 ### Hosted source qualification
 
-Exact current `kdos.f` lines 9633 through 10125 contain 493 LF records and
+Exact current `kdos.f` lines 9649 through 10141 contain 493 LF records and
 16,157 bytes, with SHA-256
 `e3b84f6fbb348c2275c2e4339bdb92f398e621c437dcc975949611d0e367d265`
 and Git blob `7b616252e40b75bdd9fa82fbc5fc6c0f2c47ae64`. The checked fixture includes
-the following one-line §14 Startup sentinel at line 10126. That 494-LF-record,
+the following one-line §14 Startup sentinel at line 10142. That 494-LF-record,
 16,229-byte fixture has SHA-256
 `cf818fbb9facbe2a06a825a6ba3cd6738b73d97793f423829b4386bc89b03a9d`
-and Git blob `881609bc61944004c8f8442eb22a527f132ebbd8`. Line 10127 begins §14 Startup.
+and Git blob `881609bc61944004c8f8442eb22a527f132ebbd8`. Line 10143 begins §14 Startup.
 
 The slice publishes 75 definitions: 46 colon words, 16 zero-initialized
 variables, seven ordinary constants, four `CREATE` objects, and two `DEFER`

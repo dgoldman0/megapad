@@ -871,7 +871,7 @@ without fixing them.
   DOT, and DOTACC in the single compute cycle, while the §10 model (and the
   emulator) charges 1, 2, 2, 2, 3, and 3 extra cycles. FP32/FP64 match the
   model.
-- **KDOS loads after a THROW.** Resolved since, in the tests: the loader
+- **KDOS loads after a THROW.** Resolved since: the loader
   restores its own state, and three tests failed for other reasons.
   - `TestAppLoad::test_app_load_throw_restores_loader_and_machine_state`
     and
@@ -879,9 +879,10 @@ without fixing them.
     caught the THROW across a plain `EVALUATE` and left the BIOS evaluator
     one level deep with a failure recorded. The BIOS then ran no later
     `EVALUATE`, so the repeated load evaluated nothing and rethrew the old
-    code at the prompt, where it was uncaught. Their catching word now
-    returns the evaluator to its depth with `EVALUATOR-UNWIND`, as
-    `EVALUATE-CHECKED` does.
+    code at the prompt, where it was uncaught. KDOS now shadows `EVALUATE`
+    with a word that returns the evaluator to its depth when an exception
+    passes, as `EVALUATE-CHECKED` does, and the tests catch as ordinary
+    code would.
   - `TestKDOSDynamicModuleRegistry::test_nested_throw_rolls_back_all_provisional_ids_then_retries`
     expected a finished nested dependency to survive its parent's failure.
     The loader rolls it back with the parent, as KDOS.md says, and the test

@@ -300,25 +300,41 @@ VARIABLE _LD-FROM-SP
 4 CONSTANT EVAL-S-UNFINISHED
 5 CONSTANT EVAL-S-THROW
 
-\ BIOS supplies the primitive EVALUATE-CHECKED before KDOS has an exception
-\ handler.  From this point onward KDOS deliberately shadows that dictionary
-\ entry with the same public name.  The wrapper owns CATCH/HANDLER semantics;
-\ BIOS owns complete input-frame restoration through EVALUATOR-UNWIND.
-\
-\ CATCH restores the input addr/len beneath its throw code.  On a caught
-\ source exception, consume those restored arguments, retain the exact code in
-\ EVAL-THROW, reconstruct every abandoned nested input frame, and return
-\ status 5 normally.  Normal source data-stack effects remain untouched.
-: EVALUATE-CHECKED  ( addr len -- status )
+\ BIOS EVALUATE keeps each caller's input frame outside the return stack, so
+\ a THROW that crosses it leaves the frame, and the evaluator's depth, in
+\ place.  BIOS owns complete input-frame restoration through
+\ EVALUATOR-UNWIND; KDOS owns CATCH/HANDLER semantics, and so it owns giving
+\ the evaluator its depth back when an exception passes.  This word does that
+\ once for both evaluator words below: it notes the depth, runs BIOS EVALUATE
+\ under CATCH, and on an exception reconstructs every abandoned input frame
+\ down to the depth it noted.  CATCH has restored addr/len beneath the code.
+: _EVALUATE-GUARDED  ( i*x addr len -- j*x 0 | i*x addr len exception )
     EVAL-DEPTH @ >R
     ['] EVALUATE CATCH
+    DUP IF R@ EVALUATOR-UNWIND THEN
+    R> DROP ;
+
+\ From this point onward KDOS deliberately shadows the BIOS entries EVALUATE
+\ and EVALUATE-CHECKED with words of the same public names.
+\
+\ EVALUATE rethrows what it guarded.  Whoever catches that exception, at any
+\ distance, finds the evaluator at the depth it had when this word was
+\ entered, as WITH-GUARD's and the loader's callers find their state.
+: EVALUATE  ( i*x addr len -- j*x )
+    _EVALUATE-GUARDED THROW ;
+
+\ EVALUATE-CHECKED reports the exception as a status.  On a caught source
+\ exception, consume the restored arguments, retain the exact code in
+\ EVAL-THROW, and return status 5 normally.  Normal source data-stack effects
+\ remain untouched.
+: EVALUATE-CHECKED  ( addr len -- status )
+    _EVALUATE-GUARDED
     DUP IF
         EVAL-THROW ! 2DROP
-        R@ EVALUATOR-UNWIND
         EVAL-S-THROW DUP EVAL-STATUS !
-        R> DROP EXIT
+        EXIT
     THEN
-    DROP R> DROP EVAL-STATUS @ ;
+    DROP EVAL-STATUS @ ;
 
 VARIABLE _SEC-CUR
 VARIABLE _SEC-REM

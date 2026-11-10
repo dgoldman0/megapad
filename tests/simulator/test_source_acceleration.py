@@ -330,6 +330,29 @@ def test_compile_line_fast_path_retains_immediate_throw_handling() -> None:
     assert accelerated.find("NEVER-PUBLISHED") is None
 
 
+def test_checked_line_overlay_requires_the_exact_guarded_evaluator() -> None:
+    runtime = _load_module_system()
+    guarded = runtime.find("_EVALUATE-GUARDED")
+    assert guarded is not None
+    bios_evaluate = guarded.implementation.operations[3].value
+    # The same EVALUATE-CHECKED text over a guarded word that still runs the
+    # BIOS primitive under CATCH but no longer unwinds the evaluator.  The
+    # overlay stands for both bodies, so it must not install.
+    runtime.evaluate(
+        (
+            f": _EVALUATE-GUARDED  EVAL-DEPTH @ >R [ {bios_evaluate} ] LITERAL "
+            "CATCH R> DROP ;\n"
+            ": EVALUATE-CHECKED  _EVALUATE-GUARDED DUP IF EVAL-THROW ! 2DROP "
+            "EVAL-S-THROW DUP EVAL-STATUS ! EXIT THEN DROP EVAL-STATUS @ ;\n"
+        ).encode("ascii")
+    )
+
+    report = install_kdos_source_accelerators(runtime)
+
+    assert b"EVALUATE-CHECKED" in report.skipped
+    assert b"EVALUATE-CHECKED" not in report.installed
+
+
 def test_changed_word_is_skipped_and_rolled_back_xt_cannot_inherit_overlay() -> None:
     runtime = _load_module_system()
     runtime.evaluate(b": _PS-LINE-LEN 2DROP 77 ;")

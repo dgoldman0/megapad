@@ -43262,11 +43262,11 @@ class TestAppLoad(_KDOSTestBase):
             out = self._run_kdos(
                 [
                     "VARIABLE BAD-APP-IOR",
+                    # An ordinary CATCH across EVALUATE: KDOS's EVALUATE
+                    # gives the evaluator its depth back as the THROW passes.
                     ': TRY-BAD-APP S" APP-LOAD badapp.f" EVALUATE ;',
-                    # The word that catches a THROW across EVALUATE gives
-                    # the evaluator its depth back, as EVALUATE-CHECKED does.
-                    ": CATCH-BAD-APP EVAL-DEPTH @ >R ['] TRY-BAD-APP CATCH",
-                    "  BAD-APP-IOR ! R> EVALUATOR-UNWIND ;",
+                    ": CATCH-BAD-APP ['] TRY-BAD-APP CATCH "
+                    "BAD-APP-IOR ! ;",
                     "CATCH-BAD-APP",
                     '." BAD-APP-IOR=" BAD-APP-IOR @ .',
                     '." AFTER-BAD-APP=" _LD-SP @ . PRIV@ .',
@@ -43979,13 +43979,11 @@ class TestKDOSModuleSystem(_KDOSTestBase):
                     "VARIABLE BAD-IOR VARIABLE BAD-CWD "
                     "VARIABLE BAD-ATTEMPTS",
                     "CWD @ BAD-CWD !",
+                    # The THROW crosses TRY-BAD's EVALUATE.  KDOS's EVALUATE
+                    # gives the evaluator its depth back as it passes, so
+                    # an ordinary CATCH is all the catching word needs.
                     ': TRY-BAD S" REQUIRE mods/retry.f" EVALUATE ;',
-                    # The THROW crosses TRY-BAD's EVALUATE, whose input
-                    # frame the BIOS keeps.  The word that catches gives
-                    # the evaluator its depth back, as EVALUATE-CHECKED
-                    # does; until then the BIOS evaluates nothing more.
-                    ": CATCH-BAD EVAL-DEPTH @ >R ['] TRY-BAD CATCH BAD-IOR !",
-                    "  R> EVALUATOR-UNWIND ;",
+                    ": CATCH-BAD ['] TRY-BAD CATCH BAD-IOR ! ;",
                     "CATCH-BAD",
                     '." BAD-IOR=" BAD-IOR @ .',
                     '." CWD-SAME=" CWD @ BAD-CWD @ = .',
