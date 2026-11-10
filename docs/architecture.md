@@ -394,10 +394,16 @@ The others hold the settings disk at `+0x0280`, the system disk at `+0x0D00`
 and the user disk at `+0x0D80`; the settings disk's and the system disk's
 media are write-protected.  All four share the disk's DMA bus port.
 
-FPGA builds expose the logical media window through the synthesizable
-`DISK_TOTAL_SECTORS` parameter.  The portable top and SoC default it to the
-canonical 65536 sectors; board integrations using a different window must
-override the parameter so `TOTAL_SECTORS` remains truthful.
+FPGA builds expose each unit's logical media window through a synthesizable
+parameter: `DISK_TOTAL_SECTORS` for the boot disk, and
+`SETTINGS_TOTAL_SECTORS`, `SYSTEM_TOTAL_SECTORS` and `USER_TOTAL_SECTORS`
+for the other three.  The portable top and SoC default the boot disk's to
+the canonical 65536 sectors, the settings disk's to 2048, and the system and
+user disks' to the controller's own default of 65536; board integrations
+using a different window must override the parameter so `TOTAL_SECTORS`
+remains truthful.  Each unit has a card slot of its own.  The settings and
+system slots report a card as write-protected whenever one is present; the
+boot and user slots report their write-protect switches.
 
 | Register | Offset | R/W | Description |
 |----------|--------|-----|-------------|

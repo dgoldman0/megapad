@@ -1,40 +1,38 @@
 // ============================================================================
-// mp64_byte_dma_arbiter.v — two byte-DMA masters on one bus master port
+// mp64_byte_dma_arbiter.v — byte-DMA masters on one bus master port
 // ============================================================================
 //
-// The machine's two storage controllers, the system disk's and the settings
-// disk's, reach memory through the disk's one bus master port.  Each
-// controller presents one byte beat at a time and holds its request tuple
-// stable until ACK or ERR.  This arbiter passes one controller's beat to the
-// port and holds that grant until the beat completes, so a tuple the port
-// has seen never changes under it.  Between beats the grant alternates while
-// both controllers ask, so neither waits longer than one of the other's beats
-// and neither reaches its DMA timeout because of the other.  The port's read
-// data reaches both controllers; only the granted one sees ACK or ERR.
+// The machine's storage controllers, one for each storage unit, reach memory
+// through the disk's one bus master port.  Each controller presents one byte
+// beat at a time and holds its request tuple stable until ACK or ERR.  This
+// arbiter passes one controller's beat to the port and holds that grant until
+// the beat completes, so a tuple the port has seen never changes under it.
+// Between beats the grant goes to the next master that asks, in cyclic order
+// after the one served last.  A master therefore waits for at most one beat
+// from each of the others, and none reaches its DMA timeout because of them.
+// The port's read data reaches every master; only the granted one sees ACK
+// or ERR.
+//
+// Master M's request tuple is bit M of M_REQ and M_WEN, bits [M*64 +: 64] of
+// M_ADDR and bits [M*8 +: 8] of M_WDATA; its response is bit M of M_ACK and
+// M_ERR.
 //
 // Coding standard: Verilog-2001, no vendor primitives.
 
-module mp64_byte_dma_arbiter (
-    input  wire        clk,
-    input  wire        rst_n,
+module mp64_byte_dma_arbiter #(
+    parameter integer MASTERS = 2
+)(
+    input  wire                  clk,
+    input  wire                  rst_n,
 
-    // Master 0: the system disk's controller
-    input  wire        m0_req,
-    input  wire [63:0] m0_addr,
-    input  wire [7:0]  m0_wdata,
-    input  wire        m0_wen,
-    output wire [7:0]  m0_rdata,
-    output wire        m0_ack,
-    output wire        m0_err,
-
-    // Master 1: the settings disk's controller
-    input  wire        m1_req,
-    input  wire [63:0] m1_addr,
-    input  wire [7:0]  m1_wdata,
-    input  wire        m1_wen,
-    output wire [7:0]  m1_rdata,
-    output wire        m1_ack,
-    output wire        m1_err,
+    // The masters' request tuples and responses
+    input  wire [MASTERS-1:0]    m_req,
+    input  wire [MASTERS*64-1:0] m_addr,
+    input  wire [MASTERS*8-1:0]  m_wdata,
+    input  wire [MASTERS-1:0]    m_wen,
+    output wire [7:0]            m_rdata,
+    output wire [MASTERS-1:0]    m_ack,
+    output wire [MASTERS-1:0]    m_err,
 
     // The shared bus master port
     output wire        port_req,
@@ -46,34 +44,59 @@ module mp64_byte_dma_arbiter (
     input  wire        port_err
 );
 
+    localparam integer INDEX_BITS = (MASTERS <= 1) ? 1 : $clog2(MASTERS);
+    localparam integer LAST_MASTER = MASTERS - 1;
+
     // HELD: a beat is granted and has not completed; OWNER names its master.
     // LAST names the master whose beat completed most recently.
-    reg held;
-    reg owner;
-    reg last;
+    reg                  held;
+    reg [INDEX_BITS-1:0] owner;
+    reg [INDEX_BITS-1:0] last;
 
-    // With no beat held, master 1 wins while it asks and either master 0
-    // does not, or master 0 had the last beat.
-    wire choose = m1_req && (!m0_req || !last);
-    wire grant  = held ? owner : choose;
+    // With no beat held, the port goes to the first master that asks, in
+    // cyclic order starting after LAST.  The loop visits the masters from the
+    // end of that order to its start, so the first one asking is assigned
+    // last and wins.  With no master asking, CHOOSE names LAST, whose request
+    // is low.
+    reg [INDEX_BITS-1:0] choose;
+    integer              candidate;
+    integer              step;
+    always @(*) begin
+        choose = last;
+        for (step = MASTERS; step >= 1; step = step - 1) begin
+            candidate = {{(32-INDEX_BITS){1'b0}}, last} + step;
+            if (candidate >= MASTERS)
+                candidate = candidate - MASTERS;
+            if (m_req[candidate])
+                choose = candidate[INDEX_BITS-1:0];
+        end
+    end
 
-    assign port_req   = grant ? m1_req   : m0_req;
-    assign port_addr  = grant ? m1_addr  : m0_addr;
-    assign port_wdata = grant ? m1_wdata : m0_wdata;
-    assign port_wen   = grant ? m1_wen   : m0_wen;
+    wire [INDEX_BITS-1:0] grant = held ? owner : choose;
 
-    assign m0_rdata = port_rdata;
-    assign m1_rdata = port_rdata;
-    assign m0_ack   = !grant && port_ack;
-    assign m0_err   = !grant && port_err;
-    assign m1_ack   =  grant && port_ack;
-    assign m1_err   =  grant && port_err;
+    assign port_req   = m_req[grant];
+    assign port_addr  = m_addr[grant*64 +: 64];
+    assign port_wdata = m_wdata[grant*8 +: 8];
+    assign port_wen   = m_wen[grant];
+
+    // GRANTED has the granted master's bit set.
+    reg [MASTERS-1:0] granted;
+    integer           master;
+    always @(*) begin
+        for (master = 0; master < MASTERS; master = master + 1)
+            granted[master] = (master[INDEX_BITS-1:0] == grant);
+    end
+
+    assign m_rdata = port_rdata;
+    assign m_ack   = granted & {MASTERS{port_ack}};
+    assign m_err   = granted & {MASTERS{port_err}};
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             held  <= 1'b0;
-            owner <= 1'b0;
-            last  <= 1'b1;
+            owner <= {INDEX_BITS{1'b0}};
+            // Master 0 has the first beat after reset.
+            last  <= LAST_MASTER[INDEX_BITS-1:0];
         end else if (port_req && (port_ack || port_err)) begin
             held <= 1'b0;
             last <= grant;

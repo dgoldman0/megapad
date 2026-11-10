@@ -1378,7 +1378,7 @@ Proposed layout with SHA-256/512 widened and CRC relocated:
 |---------------|--------|---------------------|------------|
 | 0x000–0x0FF   | 256 B  | UART                | existing   |
 | 0x100–0x1FF   | 256 B  | Timer               | existing   |
-| 0x200–0x27F   | 128 B  | Disk 0: the system disk | existing |
+| 0x200–0x27F   | 128 B  | Disk 0: the boot disk | existing |
 | 0x280–0x2FF   | 128 B  | Disk 1: the settings disk, write-protected; shares disk 0's DMA port | new |
 | 0x300–0x3FF   | 256 B  | SysInfo             | existing   |
 | 0x400–0x4FF   | 256 B  | NIC                 | existing   |
@@ -1397,7 +1397,10 @@ Proposed layout with SHA-256/512 widened and CRC relocated:
 | 0xA20–0xA7F   | 96 B   | **Trace readout portal** | **new** |
 | 0xA80–0xAFF   | 128 B  | *(free — future)*   |            |
 | 0xB00–0xB1F   | 32 B   | RTC                 | existing   |
-| 0xB20–0xFFF   | 1248 B | *(free)*            |            |
+| 0xB20–0xCFF   | 480 B  | *(free)*            |            |
+| 0xD00–0xD7F   | 128 B  | Disk 2: the system disk, write-protected; shares disk 0's DMA port | new |
+| 0xD80–0xDFF   | 128 B  | Disk 3: the user disk; shares disk 0's DMA port | new |
+| 0xE00–0xFFF   | 512 B  | *(free)*            |            |
 
 The string engine (§2) and dictionary search engine (§3) are **ISA
 extensions** (EXT.STRING F9, EXT.DICT FA) — they live inside each CPU

@@ -90,6 +90,22 @@ module tb_soc_smoke;
         .sd1_cs_n      (),
         .sd1_card_present(1'b1),
 
+        // System SD — a card in the slot: present and write-protected
+        .sd2_sck       (),
+        .sd2_mosi      (),
+        .sd2_miso      (1'b1),
+        .sd2_cs_n      (),
+        .sd2_card_present(1'b1),
+
+        // User SD — a card in the slot with its switch off: present and
+        // writable
+        .sd3_sck       (),
+        .sd3_mosi      (),
+        .sd3_miso      (1'b1),
+        .sd3_cs_n      (),
+        .sd3_card_present(1'b1),
+        .sd3_write_protected(1'b0),
+
         // NIC — tied off
         .nic_tx_valid  (nic_tx_valid),
         .nic_tx_data   (nic_tx_data),
@@ -228,21 +244,22 @@ module tb_soc_smoke;
               u_soc.bus_mmio_ack === 1'b1
               && u_soc.bus_mmio_rdata == 64'hF);
 
-        // The storage window holds two controllers: the system disk's at
-        // 0x200-0x27F, with no card, and the settings disk's at 0x280-0x2FF,
-        // whose card is present and write-protected.  STATUS (+1) tells them
-        // apart; before the second controller, 0x281 aliased the first.
+        // Each storage unit's controller answers in its own window: the
+        // boot disk's at 0x200-0x27F, with no card; the settings disk's at
+        // 0x280-0x2FF and the system disk's at 0xD00-0xD7F, whose cards are
+        // present and write-protected; and the user disk's at 0xD80-0xDFF,
+        // whose card is present and writable.  STATUS (+1) tells them apart.
         force u_soc.bus_mmio_wen = 1'b0;
         force u_soc.bus_mmio_size = BUS_BYTE;
         force u_soc.bus_mmio_addr = 12'h201;
         // The controller registers its read: data and ACK follow an edge.
         @(posedge clk);
         #1;
-        check("The system disk's STATUS answers at 0x201 with no card",
+        check("The boot disk's STATUS answers at 0x201 with no card",
               u_soc.bus_mmio_ack === 1'b1
               && u_soc.bus_mmio_rdata[7] === 1'b0
-              && u_soc.mmio_sel_disk === 1'b1
-              && u_soc.mmio_sel_disk1 === 1'b0);
+              && u_soc.bus_mmio_rdata[5] === 1'b0
+              && u_soc.mmio_sel_disk === 4'b0001);
         force u_soc.bus_mmio_addr = 12'h281;
         @(posedge clk);
         #1;
@@ -250,16 +267,47 @@ module tb_soc_smoke;
               u_soc.bus_mmio_ack === 1'b1
               && u_soc.bus_mmio_rdata[7] === 1'b1
               && u_soc.bus_mmio_rdata[5] === 1'b1
-              && u_soc.mmio_sel_disk === 1'b0
-              && u_soc.mmio_sel_disk1 === 1'b1);
+              && u_soc.mmio_sel_disk === 4'b0010);
+        force u_soc.bus_mmio_addr = 12'hD01;
+        @(posedge clk);
+        #1;
+        check("The system disk's STATUS answers at 0xD01, present and protected",
+              u_soc.bus_mmio_ack === 1'b1
+              && u_soc.bus_mmio_rdata[7] === 1'b1
+              && u_soc.bus_mmio_rdata[5] === 1'b1
+              && u_soc.mmio_sel_disk === 4'b0100);
+        force u_soc.bus_mmio_addr = 12'hD81;
+        @(posedge clk);
+        #1;
+        check("The user disk's STATUS answers at 0xD81, present and writable",
+              u_soc.bus_mmio_ack === 1'b1
+              && u_soc.bus_mmio_rdata[7] === 1'b1
+              && u_soc.bus_mmio_rdata[5] === 1'b0
+              && u_soc.mmio_sel_disk === 4'b1000);
         force u_soc.bus_mmio_addr = 12'h27F;
         #1;
-        check("0x27F still decodes to the system disk",
-              u_soc.mmio_sel_disk === 1'b1 && u_soc.mmio_sel_disk1 === 1'b0);
+        check("0x27F still decodes to the boot disk",
+              u_soc.mmio_sel_disk === 4'b0001);
         force u_soc.bus_mmio_addr = 12'h2FF;
         #1;
         check("0x2FF decodes to the settings disk",
-              u_soc.mmio_sel_disk === 1'b0 && u_soc.mmio_sel_disk1 === 1'b1);
+              u_soc.mmio_sel_disk === 4'b0010);
+        force u_soc.bus_mmio_addr = 12'hD7F;
+        #1;
+        check("0xD7F decodes to the system disk",
+              u_soc.mmio_sel_disk === 4'b0100);
+        force u_soc.bus_mmio_addr = 12'hDFF;
+        #1;
+        check("0xDFF decodes to the user disk",
+              u_soc.mmio_sel_disk === 4'b1000);
+        force u_soc.bus_mmio_addr = 12'hCFF;
+        #1;
+        check("0xCFF, below the system disk's window, reaches no disk",
+              u_soc.mmio_sel_disk === 4'b0000);
+        force u_soc.bus_mmio_addr = 12'hE00;
+        #1;
+        check("0xE00, above the user disk's window, reaches no disk",
+              u_soc.mmio_sel_disk === 4'b0000);
 
         // Exercise raw Keccak through the integrated SoC decode/mux rather
         // than only through the standalone SHA front-end bench.

@@ -34,7 +34,9 @@ module mp64_top #(
     parameter ICACHE_LINES      = 256,
     parameter ICACHE_LINE_W     = 128,       // bits per I-cache line
     parameter [31:0] DISK_TOTAL_SECTORS = 32'd65536,
-    parameter [31:0] SETTINGS_TOTAL_SECTORS = 32'd2048
+    parameter [31:0] SETTINGS_TOTAL_SECTORS = 32'd2048,
+    parameter [31:0] SYSTEM_TOTAL_SECTORS = 32'd65536,
+    parameter [31:0] USER_TOTAL_SECTORS = 32'd65536
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -43,7 +45,7 @@ module mp64_top #(
     input  wire        uart_rxd,
     output wire        uart_txd,
 
-    // === SD Card (SPI) ===
+    // === SD card (SPI): the boot disk ===
     output wire        sd_sck,
     output wire        sd_mosi,
     input  wire        sd_miso,
@@ -57,6 +59,21 @@ module mp64_top #(
     input  wire        sd1_miso,
     output wire        sd1_cs_n,
     input  wire        sd1_card_present,
+
+    // === System SD card (SPI): the system disk, always write-protected ===
+    output wire        sd2_sck,
+    output wire        sd2_mosi,
+    input  wire        sd2_miso,
+    output wire        sd2_cs_n,
+    input  wire        sd2_card_present,
+
+    // === User SD card (SPI): the user disk ===
+    output wire        sd3_sck,
+    output wire        sd3_mosi,
+    input  wire        sd3_miso,
+    output wire        sd3_cs_n,
+    input  wire        sd3_card_present,
+    input  wire        sd3_write_protected,
 
     // === External memory PHY ===
     output wire        phy_req,
@@ -97,7 +114,9 @@ module mp64_top #(
         .CORES_PER_CLUSTER  (CORES_PER_CLUSTER),
         .MEM_DEPTH          (MEM_DEPTH),
         .DISK_TOTAL_SECTORS (DISK_TOTAL_SECTORS),
-        .SETTINGS_TOTAL_SECTORS (SETTINGS_TOTAL_SECTORS)
+        .SETTINGS_TOTAL_SECTORS (SETTINGS_TOTAL_SECTORS),
+        .SYSTEM_TOTAL_SECTORS (SYSTEM_TOTAL_SECTORS),
+        .USER_TOTAL_SECTORS (USER_TOTAL_SECTORS)
     ) u_soc (
         .sys_clk       (clk),
         .sys_rst_n     (rst_n),
@@ -133,6 +152,21 @@ module mp64_top #(
         .sd1_miso      (sd1_miso),
         .sd1_cs_n      (sd1_cs_n),
         .sd1_card_present (sd1_card_present),
+
+        // System SD card
+        .sd2_sck       (sd2_sck),
+        .sd2_mosi      (sd2_mosi),
+        .sd2_miso      (sd2_miso),
+        .sd2_cs_n      (sd2_cs_n),
+        .sd2_card_present (sd2_card_present),
+
+        // User SD card
+        .sd3_sck       (sd3_sck),
+        .sd3_mosi      (sd3_mosi),
+        .sd3_miso      (sd3_miso),
+        .sd3_cs_n      (sd3_cs_n),
+        .sd3_card_present (sd3_card_present),
+        .sd3_write_protected (sd3_write_protected),
 
         // NIC PHY
         .nic_tx_valid  (nic_tx_valid),

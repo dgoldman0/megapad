@@ -34,8 +34,11 @@ module mp64_soc #(
     parameter MEM_DEPTH         = 16384,    // per-bank depth (×512-bit rows)
     parameter EXT_MEM_SIZE_PARAM = 0,         // ext bytes; 0 = up to VRAM_BASE
     parameter [31:0] DISK_TOTAL_SECTORS = 32'd65536,
-    // The settings card's logical media window, in 512-byte sectors.
-    parameter [31:0] SETTINGS_TOTAL_SECTORS = 32'd2048
+    // The settings, system and user cards' logical media windows, in
+    // 512-byte sectors.
+    parameter [31:0] SETTINGS_TOTAL_SECTORS = 32'd2048,
+    parameter [31:0] SYSTEM_TOTAL_SECTORS = 32'd65536,
+    parameter [31:0] USER_TOTAL_SECTORS = 32'd65536
 )(
     input  wire        sys_clk,
     input  wire        sys_rst_n,
@@ -57,7 +60,7 @@ module mp64_soc #(
     input  wire        phy_error,
     input  wire        phy_cancel_done,
 
-    // === SD Card (SPI) ===
+    // === SD card (SPI): the boot disk ===
     output wire        sd_sck,
     output wire        sd_mosi,
     input  wire        sd_miso,
@@ -73,6 +76,23 @@ module mp64_soc #(
     input  wire        sd1_miso,
     output wire        sd1_cs_n,
     input  wire        sd1_card_present,
+
+    // === System SD card (SPI): the system disk ===
+    // As the settings slot: the machine reads this card and never writes it.
+    output wire        sd2_sck,
+    output wire        sd2_mosi,
+    input  wire        sd2_miso,
+    output wire        sd2_cs_n,
+    input  wire        sd2_card_present,
+
+    // === User SD card (SPI): the user disk ===
+    // The machine reads and writes this card, as it does the boot disk's.
+    output wire        sd3_sck,
+    output wire        sd3_mosi,
+    input  wire        sd3_miso,
+    output wire        sd3_cs_n,
+    input  wire        sd3_card_present,
+    input  wire        sd3_write_protected,
 
     // === NIC PHY ===
     output wire        nic_tx_valid,
@@ -98,6 +118,21 @@ module mp64_soc #(
                                $clog2(N_BUS_PORTS);
     localparam [N_BUS_PORTS-1:0] WOTS_FIXED_QOS_MASK =
         {1'b1, {(N_BUS_PORTS-1){1'b0}}};
+
+    // The machine's storage units, in unit order: the boot disk, the settings
+    // disk, the system disk and the user disk.  Each has a controller of the
+    // one design and a card slot of its own.  DISK_UNIT_WINDOW gives address
+    // bits 11:7 of each controller's 128-byte MMIO window: 0x200, 0x280,
+    // 0xD00 and 0xD80.  A unit set in DISK_UNIT_PROTECTED sees its card
+    // write-protected whenever one is present; the others report their
+    // slots' write-protect switches.
+    localparam integer DISK_UNITS = 4;
+    localparam [DISK_UNITS*5-1:0] DISK_UNIT_WINDOW =
+        {5'b11011, 5'b11010, 5'b00101, 5'b00100};
+    localparam [DISK_UNITS-1:0] DISK_UNIT_PROTECTED = 4'b0110;
+    localparam [DISK_UNITS*32-1:0] DISK_UNIT_SECTORS =
+        {USER_TOTAL_SECTORS, SYSTEM_TOTAL_SECTORS,
+         SETTINGS_TOTAL_SECTORS, DISK_TOTAL_SECTORS};
     // Checkpoint 3 qualifies reflected/raw CRC, SHA3 streaming, public raw
     // Keccak, and the checked WOTS controller independently.
     localparam [63:0] CRYPTO_CAPS = 64'h0000_0000_0000_000F;
@@ -240,23 +275,18 @@ module mp64_soc #(
 
     // Disk byte-DMA master uses an independent arbiter port.  Unlike sharing
     // a request mux with NIC, this preserves each device's held-request/ACK
-    // ownership when both engines are active.  The system disk's and the
-    // settings disk's controllers share that port through
-    // mp64_byte_dma_arbiter, which holds each beat's grant until it completes.
-    wire        disk0_dma_req;
-    wire [63:0] disk0_dma_addr;
-    wire [7:0]  disk0_dma_wdata;
-    wire        disk0_dma_wen;
-    wire [7:0]  disk0_dma_rdata;
-    wire        disk0_dma_ack;
-    wire        disk0_dma_err;
-    wire        disk1_dma_req;
-    wire [63:0] disk1_dma_addr;
-    wire [7:0]  disk1_dma_wdata;
-    wire        disk1_dma_wen;
-    wire [7:0]  disk1_dma_rdata;
-    wire        disk1_dma_ack;
-    wire        disk1_dma_err;
+    // ownership when both engines are active.  The storage units'
+    // controllers share that port through mp64_byte_dma_arbiter, which holds
+    // each beat's grant until it completes.  Unit U's tuple is bit U of the
+    // request and write-enable vectors and its slice of the address and
+    // data vectors.
+    wire [DISK_UNITS-1:0]    disk_unit_dma_req;
+    wire [DISK_UNITS*64-1:0] disk_unit_dma_addr;
+    wire [DISK_UNITS*8-1:0]  disk_unit_dma_wdata;
+    wire [DISK_UNITS-1:0]    disk_unit_dma_wen;
+    wire [7:0]               disk_unit_dma_rdata;
+    wire [DISK_UNITS-1:0]    disk_unit_dma_ack;
+    wire [DISK_UNITS-1:0]    disk_unit_dma_err;
     wire        disk_dma_req;
     wire [63:0] disk_dma_addr;
     wire [7:0]  disk_dma_wdata;
@@ -1570,8 +1600,15 @@ module mp64_soc #(
     // Peripheral select signals (use remapped address for port I/O)
     wire mmio_sel_uart   = bus_mmio_req && (mmio_addr_eff[11:8] == 4'h0); // 0x000
     wire mmio_sel_timer  = bus_mmio_req && (mmio_addr_eff[11:8] == 4'h1); // 0x100
-    wire mmio_sel_disk   = bus_mmio_req && (mmio_addr_eff[11:7] == 5'b00100); // 0x200-0x27F
-    wire mmio_sel_disk1  = bus_mmio_req && (mmio_addr_eff[11:7] == 5'b00101); // 0x280-0x2FF
+    // Each storage unit's controller answers in its own 128-byte window.
+    wire [DISK_UNITS-1:0] mmio_sel_disk;
+    genvar dsel;
+    generate
+        for (dsel = 0; dsel < DISK_UNITS; dsel = dsel + 1) begin : g_disk_sel
+            assign mmio_sel_disk[dsel] = bus_mmio_req
+                && (mmio_addr_eff[11:7] == DISK_UNIT_WINDOW[dsel*5 +: 5]);
+        end
+    endgenerate
     wire mmio_sel_nic    = bus_mmio_req && (mmio_addr_eff[11:8] == 4'h4); // 0x400
     wire mmio_sel_mbox   = bus_mmio_req &&
                            ((mmio_addr_eff[11:4] == 8'h50) ||
@@ -1668,100 +1705,81 @@ module mp64_soc #(
         .irq   (irq_timer_w)
     );
 
-    // Disk (SD card SPI)
-    wire [7:0]  disk_rdata_raw;
-    wire        disk_ack;
+    // Storage units (SD card SPI): one controller and one card slot each, in
+    // unit order.  The slots' pins are gathered here so that one instance
+    // serves every unit.
+    wire [DISK_UNITS*8-1:0] disk_rdata_raw;
+    wire [DISK_UNITS-1:0]   disk_ack;
+    wire [DISK_UNITS-1:0]   disk_spi_clk;
+    wire [DISK_UNITS-1:0]   disk_spi_mosi;
+    wire [DISK_UNITS-1:0]   disk_spi_cs_n;
+    wire [DISK_UNITS-1:0]   disk_spi_miso =
+        {sd3_miso, sd2_miso, sd1_miso, sd_miso};
+    wire [DISK_UNITS-1:0]   disk_card_present =
+        {sd3_card_present, sd2_card_present, sd1_card_present, sd_card_present};
+    wire [DISK_UNITS-1:0]   disk_slot_write_protected =
+        {sd3_write_protected, 1'b0, 1'b0, sd_write_protected};
+    // A protected unit's card is write-protected while present; an empty
+    // slot shows no protection, as in the emulator and simulator.
+    wire [DISK_UNITS-1:0]   disk_card_write_protected =
+        (DISK_UNIT_PROTECTED & disk_card_present)
+        | (~DISK_UNIT_PROTECTED & disk_slot_write_protected);
 
-    mp64_disk #(
-        .TOTAL_SECTORS  (DISK_TOTAL_SECTORS),
-        .DMA_BASE_ADDR  (64'd0),
-        .DMA_LIMIT_ADDR (BANK0_SIZE),
-        .DMA1_BASE_ADDR ({32'd0, EXT_MEM_BASE}),
-        .DMA1_LIMIT_ADDR(EXT_MEM_LIMIT),
-        .DMA2_BASE_ADDR ({32'd0, MP64_VRAM_BASE_ADDR}),
-        .DMA2_LIMIT_ADDR(VRAM_LIMIT),
-        .DMA3_BASE_ADDR ({32'd0, MP64_HBW_BASE_ADDR}),
-        .DMA3_LIMIT_ADDR(HBW_LIMIT)
-    ) u_disk (
-        .clk   (sys_clk),
-        .rst_n (sys_rst_n),
-        .req   (mmio_sel_disk),
-        .addr  (mmio_addr_eff[5:0]),
-        .wdata (bus_mmio_wdata[7:0]),
-        .wen   (bus_mmio_wen),
-        .rdata (disk_rdata_raw),
-        .ack   (disk_ack),
-        .dma_req   (disk0_dma_req),
-        .dma_addr  (disk0_dma_addr),
-        .dma_wdata (disk0_dma_wdata),
-        .dma_wen   (disk0_dma_wen),
-        .dma_rdata (disk0_dma_rdata),
-        .dma_ack   (disk0_dma_ack),
-        .dma_err   (disk0_dma_err),
-        .card_present          (sd_card_present),
-        .card_write_protected  (sd_write_protected),
-        .spi_clk   (sd_sck),
-        .spi_mosi  (sd_mosi),
-        .spi_miso  (sd_miso),
-        .spi_cs_n  (sd_cs_n)
-    );
+    assign {sd3_sck,  sd2_sck,  sd1_sck,  sd_sck}  = disk_spi_clk;
+    assign {sd3_mosi, sd2_mosi, sd1_mosi, sd_mosi} = disk_spi_mosi;
+    assign {sd3_cs_n, sd2_cs_n, sd1_cs_n, sd_cs_n} = disk_spi_cs_n;
 
-    // Settings disk (second SD card SPI): the same controller.  A card in its
-    // slot is always write-protected; an empty slot shows no protection.
-    wire [7:0]  disk1_rdata_raw;
-    wire        disk1_ack;
+    genvar du;
+    generate
+        for (du = 0; du < DISK_UNITS; du = du + 1) begin : g_disk
+            mp64_disk #(
+                .TOTAL_SECTORS  (DISK_UNIT_SECTORS[du*32 +: 32]),
+                .DMA_BASE_ADDR  (64'd0),
+                .DMA_LIMIT_ADDR (BANK0_SIZE),
+                .DMA1_BASE_ADDR ({32'd0, EXT_MEM_BASE}),
+                .DMA1_LIMIT_ADDR(EXT_MEM_LIMIT),
+                .DMA2_BASE_ADDR ({32'd0, MP64_VRAM_BASE_ADDR}),
+                .DMA2_LIMIT_ADDR(VRAM_LIMIT),
+                .DMA3_BASE_ADDR ({32'd0, MP64_HBW_BASE_ADDR}),
+                .DMA3_LIMIT_ADDR(HBW_LIMIT)
+            ) u_disk (
+                .clk   (sys_clk),
+                .rst_n (sys_rst_n),
+                .req   (mmio_sel_disk[du]),
+                .addr  (mmio_addr_eff[5:0]),
+                .wdata (bus_mmio_wdata[7:0]),
+                .wen   (bus_mmio_wen),
+                .rdata (disk_rdata_raw[du*8 +: 8]),
+                .ack   (disk_ack[du]),
+                .dma_req   (disk_unit_dma_req[du]),
+                .dma_addr  (disk_unit_dma_addr[du*64 +: 64]),
+                .dma_wdata (disk_unit_dma_wdata[du*8 +: 8]),
+                .dma_wen   (disk_unit_dma_wen[du]),
+                .dma_rdata (disk_unit_dma_rdata),
+                .dma_ack   (disk_unit_dma_ack[du]),
+                .dma_err   (disk_unit_dma_err[du]),
+                .card_present          (disk_card_present[du]),
+                .card_write_protected  (disk_card_write_protected[du]),
+                .spi_clk   (disk_spi_clk[du]),
+                .spi_mosi  (disk_spi_mosi[du]),
+                .spi_miso  (disk_spi_miso[du]),
+                .spi_cs_n  (disk_spi_cs_n[du])
+            );
+        end
+    endgenerate
 
-    mp64_disk #(
-        .TOTAL_SECTORS  (SETTINGS_TOTAL_SECTORS),
-        .DMA_BASE_ADDR  (64'd0),
-        .DMA_LIMIT_ADDR (BANK0_SIZE),
-        .DMA1_BASE_ADDR ({32'd0, EXT_MEM_BASE}),
-        .DMA1_LIMIT_ADDR(EXT_MEM_LIMIT),
-        .DMA2_BASE_ADDR ({32'd0, MP64_VRAM_BASE_ADDR}),
-        .DMA2_LIMIT_ADDR(VRAM_LIMIT),
-        .DMA3_BASE_ADDR ({32'd0, MP64_HBW_BASE_ADDR}),
-        .DMA3_LIMIT_ADDR(HBW_LIMIT)
-    ) u_disk1 (
-        .clk   (sys_clk),
-        .rst_n (sys_rst_n),
-        .req   (mmio_sel_disk1),
-        .addr  (mmio_addr_eff[5:0]),
-        .wdata (bus_mmio_wdata[7:0]),
-        .wen   (bus_mmio_wen),
-        .rdata (disk1_rdata_raw),
-        .ack   (disk1_ack),
-        .dma_req   (disk1_dma_req),
-        .dma_addr  (disk1_dma_addr),
-        .dma_wdata (disk1_dma_wdata),
-        .dma_wen   (disk1_dma_wen),
-        .dma_rdata (disk1_dma_rdata),
-        .dma_ack   (disk1_dma_ack),
-        .dma_err   (disk1_dma_err),
-        .card_present          (sd1_card_present),
-        .card_write_protected  (sd1_card_present),
-        .spi_clk   (sd1_sck),
-        .spi_mosi  (sd1_mosi),
-        .spi_miso  (sd1_miso),
-        .spi_cs_n  (sd1_cs_n)
-    );
-
-    mp64_byte_dma_arbiter u_disk_dma_arbiter (
+    mp64_byte_dma_arbiter #(
+        .MASTERS (DISK_UNITS)
+    ) u_disk_dma_arbiter (
         .clk        (sys_clk),
         .rst_n      (sys_rst_n),
-        .m0_req     (disk0_dma_req),
-        .m0_addr    (disk0_dma_addr),
-        .m0_wdata   (disk0_dma_wdata),
-        .m0_wen     (disk0_dma_wen),
-        .m0_rdata   (disk0_dma_rdata),
-        .m0_ack     (disk0_dma_ack),
-        .m0_err     (disk0_dma_err),
-        .m1_req     (disk1_dma_req),
-        .m1_addr    (disk1_dma_addr),
-        .m1_wdata   (disk1_dma_wdata),
-        .m1_wen     (disk1_dma_wen),
-        .m1_rdata   (disk1_dma_rdata),
-        .m1_ack     (disk1_dma_ack),
-        .m1_err     (disk1_dma_err),
+        .m_req      (disk_unit_dma_req),
+        .m_addr     (disk_unit_dma_addr),
+        .m_wdata    (disk_unit_dma_wdata),
+        .m_wen      (disk_unit_dma_wen),
+        .m_rdata    (disk_unit_dma_rdata),
+        .m_ack      (disk_unit_dma_ack),
+        .m_err      (disk_unit_dma_err),
         .port_req   (disk_dma_req),
         .port_addr  (disk_dma_addr),
         .port_wdata (disk_dma_wdata),
@@ -2004,6 +2022,7 @@ module mp64_soc #(
 
     reg [63:0] mmio_rdata_mux;
     reg        mmio_ack_mux;
+    integer    disk_unit;
 
     always @(*) begin
         mmio_rdata_mux = 64'd0;
@@ -2012,8 +2031,11 @@ module mp64_soc #(
         // 8-bit peripherals (zero-extend to 64 bits)
         if (mmio_sel_uart)    begin mmio_rdata_mux = {56'd0, uart_rdata_raw};  mmio_ack_mux = uart_ack;  end
         if (mmio_sel_timer)   begin mmio_rdata_mux = {56'd0, timer_rdata_raw}; mmio_ack_mux = timer_ack; end
-        if (mmio_sel_disk)    begin mmio_rdata_mux = {56'd0, disk_rdata_raw};  mmio_ack_mux = disk_ack;  end
-        if (mmio_sel_disk1)   begin mmio_rdata_mux = {56'd0, disk1_rdata_raw}; mmio_ack_mux = disk1_ack; end
+        for (disk_unit = 0; disk_unit < DISK_UNITS; disk_unit = disk_unit + 1)
+            if (mmio_sel_disk[disk_unit]) begin
+                mmio_rdata_mux = {56'd0, disk_rdata_raw[disk_unit*8 +: 8]};
+                mmio_ack_mux   = disk_ack[disk_unit];
+            end
         if (mmio_sel_nic)     begin mmio_rdata_mux = {56'd0, nic_rdata_raw};   mmio_ack_mux = nic_ack;   end
         if (mmio_sel_mbox)    begin mmio_rdata_mux = {56'd0, mbox_rdata_raw};  mmio_ack_mux = mbox_ack;  end
 

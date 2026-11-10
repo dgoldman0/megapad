@@ -64,7 +64,9 @@ SOC_ELAB_SRC = $(wildcard $(SOC)/*.v $(BUS)/*.v $(MEM)/*.v $(CORE)/*.v \
         sram_sp sram_dp rom clkgate rst_sync platform_sim mul \
         bus_arbiter memory extmem \
         alu bitfield icache cpu_smoke cluster crc_isa sha2_isa field_alu_isa \
-        peripherals rtc disk_controller disk_bus_dma disk_lint crypto sha3_keccak wots aes ntt kem nic \
+        peripherals rtc disk_controller disk_bus_dma disk_lint \
+        byte_dma_arbiter byte_dma_arbiter_lint disk_units_dma \
+        crypto sha3_keccak wots aes ntt kem nic \
         nic_lint nic_bus mailbox trng tile tile_ext fp_exact fma_unit fpu cpu_fp tacc tacc_cycles \
         tamac_integer_vectors_check tamac_fp_vectors_check tacc_vectors \
         opcodes qos cpu_micro multicore_smoke core_bus_mux tile_port_arbiter \
@@ -330,7 +332,7 @@ tb_dict.vvp: tb_dict.v $(CORE)/mp64_cpu.v $(FPU_SRC) $(CORE)/mp64_dict.v \
 # ==========================================================================
 
 phase4: peripherals rtc disk_controller disk_bus_dma byte_dma_arbiter \
-        disk_pair_dma crypto ntt kem nic mailbox \
+        disk_units_dma crypto ntt kem nic mailbox \
         trng tile tacc tacc_vectors
 	@echo ""
 	@echo "--- Phase 4 complete ---"
@@ -372,21 +374,28 @@ tb_disk_bus_dma.vvp: tb_disk_bus_dma.v sd_spi_model.v \
                      ../pkg/mp64_pkg.vh
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
-# --- Two byte-DMA masters on one bus master port ---
-byte_dma_arbiter: tb_byte_dma_arbiter.vvp
+# --- Byte-DMA masters on one bus master port ---
+# The bench runs at each of these master counts: two, a count that is not a
+# power of two, and the machine's four storage units.
+BYTE_DMA_MASTER_COUNTS := 2 3 4
+
+byte_dma_arbiter: $(foreach n,$(BYTE_DMA_MASTER_COUNTS),tb_byte_dma_arbiter_$(n).vvp)
+	@set -e; for bench in $^; do $(VVP) $$bench; done
+
+tb_byte_dma_arbiter_%.vvp: tb_byte_dma_arbiter.v $(BUS)/mp64_byte_dma_arbiter.v
+	$(IVERILOG) $(IVFLAGS) $(INC) -P tb_byte_dma_arbiter.MASTERS=$* -o $@ $^
+
+byte_dma_arbiter_lint:
+	$(VERILATOR) --lint-only --Wall $(BUS)/mp64_byte_dma_arbiter.v
+
+# --- Every storage unit's disk on the disk's one DMA port ---
+disk_units_dma: tb_disk_units_dma.vvp
 	$(VVP) $<
 
-tb_byte_dma_arbiter.vvp: tb_byte_dma_arbiter.v $(BUS)/mp64_byte_dma_arbiter.v
-	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
-
-# --- The system and settings disks on the disk's one DMA port ---
-disk_pair_dma: tb_disk_pair_dma.vvp
-	$(VVP) $<
-
-tb_disk_pair_dma.vvp: tb_disk_pair_dma.v sd_spi_model.v \
-                      $(PERIPH)/mp64_disk.v $(BUS)/mp64_byte_dma_arbiter.v \
-                      $(BUS)/mp64_bus.v $(MEM)/mp64_memory.v \
-                      $(PRIM)/mp64_sram_dp.v ../pkg/mp64_pkg.vh
+tb_disk_units_dma.vvp: tb_disk_units_dma.v sd_spi_model.v \
+                       $(PERIPH)/mp64_disk.v $(BUS)/mp64_byte_dma_arbiter.v \
+                       $(BUS)/mp64_bus.v $(MEM)/mp64_memory.v \
+                       $(PRIM)/mp64_sram_dp.v ../pkg/mp64_pkg.vh
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $(filter %.v,$^)
 
 # --- Crypto (authoritative SHA3/Keccak/WOTS contracts plus AES regression) ---
