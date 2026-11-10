@@ -2190,7 +2190,7 @@ the new occupant (an ABA hazard), while a double close can race logical reuse.
 Pool headers, fdesc payloads, `OP-SLOT`, parser state, directory cache, and the
 deferred vectors are global and unlocked.
 
-Exact current lines 5724 through 6175 contain 452 LF records and 17,210 bytes,
+Exact current lines 5730 through 6181 contain 452 LF records and 17,210 bytes,
 with SHA-256
 `9848280b32b5db3387dd94df4e0c7036597d913e3f457d97ee88a29722b3bc9a`
 and Git blob `679fb2d92ac20649daa6992ccc9490122e6d5d52`. Their exact 86-definition
@@ -2295,7 +2295,7 @@ This is a KDOS lifecycle repair shared by emulator and simulator, not a direct
 host-filesystem substitute. File-type/flag policy and the runtime-global,
 unlocked loader scratch remain separate open matters.
 
-Exact current lines 6176 through 6290 contain 115 LF records and 4,240 bytes,
+Exact current lines 6182 through 6296 contain 115 LF records and 4,240 bytes,
 with SHA-256
 `514fe3ffe462c1571d3e45f75ec274186278a2f0201fb09c1476c142a5244141`
 and Git blob `e7463dc7365cc67799febd7c676773bb8dd0555c`. The 13-definition ledger
@@ -3397,13 +3397,13 @@ deferred.
 
 ### KDOS §20 module-system contract
 
-Exact current lines 9615 through 10107 contain 493 LF records and 16,157
+Exact current lines 9621 through 10113 contain 493 LF records and 16,157
 bytes, with SHA-256
 `e3b84f6fbb348c2275c2e4339bdb92f398e621c437dcc975949611d0e367d265`
 and Git blob `7b616252e40b75bdd9fa82fbc5fc6c0f2c47ae64`. The checked fixture adds the
-line-10108 §14 Startup separator: 494 LF records, 16,229 bytes, SHA-256
+line-10114 §14 Startup separator: 494 LF records, 16,229 bytes, SHA-256
 `cf818fbb9facbe2a06a825a6ba3cd6738b73d97793f423829b4386bc89b03a9d`,
-and Git blob `881609bc61944004c8f8442eb22a527f132ebbd8`. Line 10109 begins Startup and is
+and Git blob `881609bc61944004c8f8442eb22a527f132ebbd8`. Line 10115 begins Startup and is
 not admitted by that sentinel.
 
 The slice publishes 75 words: 46 colons, 16 zero-initialized variables, seven
@@ -3505,16 +3505,16 @@ and no reentry or pre-held shared lock. §20 ends at line 9917; the following
 
 ### Current KDOS §14 startup and EOF contract
 
-Exact current lines 10108 through 10147, including the section separator,
+Exact current lines 10114 through 10153, including the section separator,
 contain 40 LF records and 1,398 bytes, with SHA-256
 `d75984f7fd3d55cb8c573da5b9f494ff1c1e8bba32b3537fa2270669add3ca8a`
 and Git blob `1354db80222545647369729b93526831ff0a21ec`. The executable section from
-line 10109 through EOF contains 39 LF records and 1,326 bytes, with SHA-256
+line 10115 through EOF contains 39 LF records and 1,326 bytes, with SHA-256
 `07df5026ba571e0d6e232d8c908963a0403756d3859390af3c7de3230f446b85`
 and Git blob `c920305479e61c2a5d51719779ec9c9fba0c2b8f`. The complete current file has
-10,147 LF records and 355,722 bytes, with SHA-256
-`90768df9fafdd3392f7e93f0542367ee0104f82ac286e2b6eeb1e42ce427bbd2`
-and Git blob `2cff300d84349d154cbf8837ad0cca9f1935f052`. At the historical qualification
+10,153 LF records and 356,021 bytes, with SHA-256
+`6ee45223697b4b712f8b168c9acf4fb2faa7b9d66472f3c572dddd870bc53e88`
+and Git blob `8899cdb968200fa997afa95d55c492016587a094`. At the historical qualification
 revision, the complete `kdos.f` had 9,894 LF records and 341,355 bytes, with
 SHA-256
 `99e71114ed141c14522d687a3bef3110ead94de7b0a055ae693c135a94772fb8`
@@ -3562,7 +3562,7 @@ a checked post-boot definition, allocation/free, CRC32, ring FIFO, and module
 listing. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
 456 core words and expects 1,514 KDOS publications and 1,963 unique
-bindings; it submits 6,803 lines (220,624 payload bytes, 227,427 CLI UART bytes).
+bindings; it submits 6,806 lines (220,736 payload bytes, 227,542 CLI UART bytes).
 
 The startup filesystem path is literal. `DISK?` false skips `FS-LOAD` and does
 not clear a stale true `FS-OK`. A successful load stores the exact lowercase

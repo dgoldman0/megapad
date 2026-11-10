@@ -29,11 +29,11 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-buffer-tile-3052-3175.f"
+    / "kdos-buffer-tile-3058-3181.f"
 )
 
-FIRST_LINE = 3052
-LAST_LINE = 3175
+FIRST_LINE = 3058
+LAST_LINE = 3181
 SLICE_SHA256 = (
     "91d0fc5a15da85c31f9e4c4fcf17691c2bd32ba306b6b5bc338a7cf8b1ab96c4"
 )
@@ -132,7 +132,7 @@ def test_next_contiguous_fp_buffer_slice_is_now_admitted(
     assert runtime.tile.accumulator == (0, 0, 0, 0)
 
     lines = KDOS_SOURCE.read_bytes().splitlines(keepends=True)
-    next_source = b"".join(lines[LAST_LINE:3282])
+    next_source = b"".join(lines[LAST_LINE:3288])
     assert next_source.count(b"\n") == 107
     assert next_source.startswith(b"\n\\ ====")
     assert next_source.endswith(b"    0 TMODE! ;\n")

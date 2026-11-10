@@ -39,10 +39,10 @@ from tests.simulator.test_kdos_x25519 import _execute
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
-FIXTURE = Path(__file__).with_name("fixtures") / "kdos-ntt-1528-1595.f"
+FIXTURE = Path(__file__).with_name("fixtures") / "kdos-ntt-1534-1601.f"
 
-FIRST_LINE = 1528
-LAST_LINE = 1595
+FIRST_LINE = 1534
+LAST_LINE = 1601
 SLICE_SHA256 = "95769988473110183b3b2adcc90a2eb3bdd812100ab1702f8686d573af1f4194"
 SLICE_GIT_BLOB = "d4f2ce38b6818520b0227f5a2f8c69aef3c408b6"
 DEFINITIONS = (

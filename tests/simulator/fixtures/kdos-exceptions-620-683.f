@@ -48,9 +48,15 @@ _TASK-HANDLERS 4 CELLS 0 FILL
 \ THROW ( n -- )
 \   If n = 0, do nothing (identity).
 \   If n ≠ 0, unwind to most recent CATCH, restoring stacks.
+\   With no CATCH frame in this execution context there is nothing to
+\   unwind to: report the code in decimal and ABORT, which clears both
+\   stacks and returns to the BIOS prompt.
 : THROW  ( n -- )
     ?DUP IF
-        HANDLER @ RP!   ( unwind RSP to handler frame )
+        HANDLER @ ?DUP 0= IF
+            BASE @ SWAP DECIMAL  ." uncaught THROW " .  BASE !  CR ABORT
+        THEN
+        RP!             ( unwind RSP to handler frame )
         R> HANDLER !    ( pop & restore previous handler )
         R> SWAP >R      ( recover saved SP, stash throw-code )
         SP!             ( restore data stack )

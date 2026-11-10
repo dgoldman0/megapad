@@ -37,12 +37,12 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-module-system-9615-10108.f"
+    / "kdos-module-system-9621-10114.f"
 )
 
-FIRST_LINE = 9615
-FIXTURE_LAST_LINE = 10108
-LAST_LINE = 10107
+FIRST_LINE = 9621
+FIXTURE_LAST_LINE = 10114
+LAST_LINE = 10113
 FIXTURE_BYTES = 16_229
 FIXTURE_SHA256 = (
     "cf818fbb9facbe2a06a825a6ba3cd6738b73d97793f423829b4386bc89b03a9d"

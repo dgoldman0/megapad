@@ -13778,6 +13778,22 @@ class TestKDOSExceptions(_KDOSTestBase):
         self.assertEqual(text.count("*** DIVIDE BY ZERO PC="), 1)
         self.assertRegex(text, r"\[FX-ALIVE\s+0\s+0\s+42\s+\]")
 
+    def test_uncaught_throw_reports_and_returns_to_the_prompt(self):
+        """With no CATCH frame THROW reports its code and the prompt answers."""
+        text = self._run_kdos([
+            ": TX-UNCAUGHT  11 22 -77 THROW 33 ;",
+            "HEX TX-UNCAUGHT",
+            'CR ." [TX-ALIVE " BASE @ DECIMAL . HANDLER @ . DEPTH . 6 7 * . ." ]"',
+            "5 THROW",
+            'CR ." [TX-AGAIN " HANDLER @ . DEPTH . ." ]"',
+        ])
+        # The code is reported in decimal although BASE was sixteen, both
+        # stacks are empty, and BASE is kept.
+        self.assertEqual(text.count("uncaught THROW -77 "), 1)
+        self.assertRegex(text, r"\[TX-ALIVE\s+16\s+0\s+0\s+42\s+\]")
+        self.assertEqual(text.count("uncaught THROW 5 "), 1)
+        self.assertRegex(text, r"\[TX-AGAIN\s+0\s+0\s+\]")
+
     def test_catch_no_throw(self):
         """CATCH returns 0 when XT completes normally."""
         text = self._run_kdos([

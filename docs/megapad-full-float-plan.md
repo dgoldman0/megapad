@@ -806,8 +806,7 @@ Progress:
   checked load unwinds like any exception and leaves the handler chain
   intact; with no `CATCH` it returns and the BIOS reports. The hosted
   simulator routes its divide-by-zero and illegal-instruction traps the
-  same way. An uncaught `THROW` on KDOS still runs away without any fault,
-  and `ABORT` inside `CATCH` leaves a stale handler (§7).
+  same way. `ABORT` inside `CATCH` still leaves a stale handler (§7).
 
 ## 6. Testing and resource rules
 
@@ -884,8 +883,10 @@ without fixing them.
     and
     `TestKDOSDynamicModuleRegistry::test_nested_throw_rolls_back_all_provisional_ids_then_retries`
     fail with the same output before and after Phase 7.
-- **Uncaught KDOS `THROW`.** With no `CATCH`, `THROW` does `0 RP!` and
-  runs into wild code (`: T5 5 THROW ; T5` on a fresh KDOS never returns).
+- **Uncaught KDOS `THROW`.** Fixed since: with no `CATCH` frame, `THROW`
+  prints `uncaught THROW` and its code and takes the BIOS `ABORT`
+  (`: T5 5 THROW ; T5` returns to the prompt). It ran `0 RP!` into wild
+  code before.
 - **`ABORT` inside KDOS `CATCH`.** The BIOS `ABORT` (and `ABORT"`) resets
   the stacks without unwinding the KDOS handler chain, so the foreground
   `HANDLER` keeps naming the dead frame. A later `THROW`, or an instruction

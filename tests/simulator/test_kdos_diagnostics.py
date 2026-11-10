@@ -36,12 +36,12 @@ from tests.simulator.test_kdos_crc import _load_crc
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
-FIXTURE = Path(__file__).with_name("fixtures") / "kdos-diagnostics-867-913.f"
+FIXTURE = Path(__file__).with_name("fixtures") / "kdos-diagnostics-873-919.f"
 
 MEGAPAD_REVISION = "b8e1a7e174fb50d7ea3cb5f5f8d10917ed329ec4"
-KDOS_GIT_BLOB = "2cff300d84349d154cbf8837ad0cca9f1935f052"
-FIRST_LINE = 867
-LAST_LINE = 913
+KDOS_GIT_BLOB = "8899cdb968200fa997afa95d55c492016587a094"
+FIRST_LINE = 873
+LAST_LINE = 919
 SLICE_SHA256 = "df3190d5a704349eb60b673be18cf386f12339f177bfcf6bcde6cb3bbb302e92"
 SLICE_GIT_BLOB = "e69def5bf86407a60359e2afc1acd85efeb6cd2f"
 DEFINITIONS = (

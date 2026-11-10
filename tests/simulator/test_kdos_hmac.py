@@ -48,10 +48,10 @@ from tests.simulator.test_kdos_sha3 import _execute
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
-FIXTURE = Path(__file__).with_name("fixtures") / "kdos-hmac-1281-1442.f"
+FIXTURE = Path(__file__).with_name("fixtures") / "kdos-hmac-1287-1448.f"
 
-FIRST_LINE = 1281
-LAST_LINE = 1442
+FIRST_LINE = 1287
+LAST_LINE = 1448
 SLICE_SHA256 = "d8f8acbfba910c3b7ebe5c55d79612a9bc18cb15c3a1ec00d1a3bb5a7e4a1449"
 SLICE_GIT_BLOB = "00f5a0c08e9c25c430da11e6f79f136994f390d8"
 DEFINITIONS = (

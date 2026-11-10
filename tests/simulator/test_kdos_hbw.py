@@ -26,10 +26,10 @@ from tests.simulator.test_kdos_x25519 import _execute
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
-FIXTURE = Path(__file__).with_name("fixtures") / "kdos-hbw-2055-2119.f"
+FIXTURE = Path(__file__).with_name("fixtures") / "kdos-hbw-2061-2125.f"
 
-FIRST_LINE = 2055
-LAST_LINE = 2119
+FIRST_LINE = 2061
+LAST_LINE = 2125
 SLICE_SHA256 = (
     "5fc825c8588b85a499ee34e7fc142b8bba7e74d7efb481bde4183c93476444c9"
 )

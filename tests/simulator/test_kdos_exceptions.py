@@ -19,10 +19,10 @@ PREFIX_FIXTURE = FIXTURE_DIRECTORY / "kdos-prefix-39-69.f"
 PARSE_FIXTURE = FIXTURE_DIRECTORY / "kdos-prefix-71-117.f"
 ALLOCATOR_FIXTURE = FIXTURE_DIRECTORY / "kdos-allocator-118-547.f"
 SNAPSHOT_FIXTURE = FIXTURE_DIRECTORY / "kdos-snapshots-548-619.f"
-EXCEPTION_FIXTURE = FIXTURE_DIRECTORY / "kdos-exceptions-620-677.f"
+EXCEPTION_FIXTURE = FIXTURE_DIRECTORY / "kdos-exceptions-620-683.f"
 
 MEGAPAD_REVISION = "b8e1a7e174fb50d7ea3cb5f5f8d10917ed329ec4"
-KDOS_GIT_BLOB = "2cff300d84349d154cbf8837ad0cca9f1935f052"
+KDOS_GIT_BLOB = "8899cdb968200fa997afa95d55c492016587a094"
 
 PREFIX_FIRST_LINE = 39
 PREFIX_LAST_LINE = 69
@@ -98,11 +98,11 @@ SNAPSHOT_DEFINITIONS = (
 )
 
 EXCEPTION_FIRST_LINE = 620
-EXCEPTION_LAST_LINE = 677
+EXCEPTION_LAST_LINE = 683
 EXCEPTION_SHA256 = (
-    "e6c436d23bacead66f8d54ce247c70cd81edd2c0aebeef5d7638db8e14071a40"
+    "3c50f9884a6ca506d76734487aa3e60087e157c1a34c044f0fcf8a076bc431c8"
 )
-EXCEPTION_GIT_BLOB = "ad070934246e7094bcf8a4c22ded4c068dc3cd4c"
+EXCEPTION_GIT_BLOB = "e197e81fa8c9eaf57da9b612f79c1b9acb45e928"
 EXCEPTION_DEFINITIONS = (
     b"_HANDLERS",
     b"_TASK-HANDLERS",
@@ -349,6 +349,72 @@ def test_throw_unwinds_through_defer_does_and_an_active_do_loop(
     assert context.data.snapshot() == (314, u64(-23))
     assert context.returns.pointer == initial_return_pointer
     assert context.returns.snapshot() == ()
+    _assert_handler_clear(runtime)
+
+
+def test_uncaught_throw_reports_its_code_and_aborts(
+    loaded_exceptions: MegaForthRuntime,
+) -> None:
+    runtime = loaded_exceptions
+    context = runtime.main_context
+    runtime.evaluate(b": EX-UNCAUGHT 11 >R 22 -77 THROW 33 ;")
+    context.data.push(5)
+    runtime.drain_uart_output()
+
+    # No CATCH frame exists, so there is nothing to unwind to.  The code is
+    # reported in decimal whatever BASE holds, and BASE is kept.
+    with pytest.raises(ForthAbort):
+        runtime.evaluate(b"HEX EX-UNCAUGHT")
+
+    assert runtime.drain_uart_output() == b"uncaught THROW -77 \r\n"
+    assert context.data.snapshot() == ()
+    assert context.returns.snapshot() == ()
+    assert runtime.numeric_base == 16
+    _assert_handler_clear(runtime)
+
+    # No dispatch that read RP@ was crossed, so the task goes on: a caught
+    # THROW and a further uncaught one both behave.
+    assert context.reusable
+    runtime.evaluate(b"DECIMAL : EX-CAUGHT -5 THROW ; ' EX-CAUGHT CATCH")
+    assert context.data.snapshot() == (u64(-5),)
+    context.data.clear()
+    with pytest.raises(ForthAbort):
+        runtime.evaluate(b"9 THROW")
+    assert runtime.drain_uart_output() == b"uncaught THROW 9 \r\n"
+    assert context.reusable
+    _assert_handler_clear(runtime)
+
+
+def test_a_throw_after_its_catch_returned_is_uncaught(
+    loaded_exceptions: MegaForthRuntime,
+) -> None:
+    runtime = loaded_exceptions
+    context = runtime.main_context
+    runtime.evaluate(
+        b": EX-QUIET 1 ; "
+        b": EX-LATE ['] EX-QUIET CATCH DROP DROP -13 THROW ;"
+    )
+    runtime.drain_uart_output()
+
+    with pytest.raises(ForthAbort):
+        runtime.execute("EX-LATE")
+
+    assert runtime.drain_uart_output() == b"uncaught THROW -13 \r\n"
+    assert context.data.snapshot() == ()
+    assert context.returns.snapshot() == ()
+
+
+def test_zero_throw_with_no_catch_frame_is_still_nothing(
+    loaded_exceptions: MegaForthRuntime,
+) -> None:
+    runtime = loaded_exceptions
+    runtime.drain_uart_output()
+
+    runtime.evaluate(b"7 0 THROW 8")
+
+    assert runtime.main_context.data.snapshot() == (7, 8)
+    assert runtime.drain_uart_output() == b""
+    runtime.main_context.data.clear()
     _assert_handler_clear(runtime)
 
 

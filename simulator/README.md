@@ -1442,7 +1442,7 @@ pool descriptor. Reused addresses create an ABA hazard in which a stale handle
 can flush or close a new occupant; pool headers, descriptor cells, `OP-SLOT`,
 parser state, cache, and deferred bindings are global and unlocked.
 
-The adjacent current loader fixture is exact `kdos.f` lines 5724–6175: 452 LF
+The adjacent current loader fixture is exact `kdos.f` lines 5730–6181: 452 LF
 records, 17,210 bytes, SHA-256
 `9848280b32b5db3387dd94df4e0c7036597d913e3f457d97ee88a29722b3bc9a`,
 and Git blob `679fb2d92ac20649daa6992ccc9490122e6d5d52`. Its exact 86-definition ledger
@@ -1529,7 +1529,7 @@ separate open matters. Task-resetting `ABORT`/`ABORT"` and host or memory
 faults that do not become guest `THROW` bypass the loader's `CATCH`; cleanup and
 transactionality are not claimed for those exits.
 
-The current Application Loading fixture is exact `kdos.f` lines 6176–6290:
+The current Application Loading fixture is exact `kdos.f` lines 6182–6296:
 115 LF records, 4,240 bytes, SHA-256
 `514fe3ffe462c1571d3e45f75ec274186278a2f0201fb09c1476c142a5244141`,
 and Git blob `e7463dc7365cc67799febd7c676773bb8dd0555c`. It publishes seven application
@@ -2284,14 +2284,14 @@ physical presentation, and all rich-terminal work remain deferred.
 
 ### KDOS §20 Module System
 
-Exact current lines 9615–10107 add the complete Module System: 493 LF records,
+Exact current lines 9621–10113 add the complete Module System: 493 LF records,
 16,157 bytes, SHA-256
 `e3b84f6fbb348c2275c2e4339bdb92f398e621c437dcc975949611d0e367d265`,
 and Git blob `7b616252e40b75bdd9fa82fbc5fc6c0f2c47ae64`. The fixture includes the
-line-10108 §14 separator and has 494 LF records, 16,229 bytes, SHA-256
+line-10114 §14 separator and has 494 LF records, 16,229 bytes, SHA-256
 `cf818fbb9facbe2a06a825a6ba3cd6738b73d97793f423829b4386bc89b03a9d`,
 and Git blob `881609bc61944004c8f8442eb22a527f132ebbd8`. §14 Startup begins at line
-10109 and is not part of this slice.
+10115 and is not part of this slice.
 
 The source publishes 75 definitions: 46 colons, 16 variables, seven ordinary
 constants, four `CREATE` objects, and two deferred words. Its 859 name bytes,
@@ -2370,18 +2370,18 @@ slice completes the contiguous frontier through EOF.
 
 ### KDOS §14 Startup and EOF
 
-Exact current lines 10108–10147, including the section separator, contain 40 LF
+Exact current lines 10114–10153, including the section separator, contain 40 LF
 records and 1,398 bytes, with SHA-256
 `d75984f7fd3d55cb8c573da5b9f494ff1c1e8bba32b3537fa2270669add3ca8a`
 and Git blob `1354db80222545647369729b93526831ff0a21ec`. The executable lines
-10109–10147 contain 39 LF records and 1,326 bytes, with SHA-256
+10115–10153 contain 39 LF records and 1,326 bytes, with SHA-256
 `07df5026ba571e0d6e232d8c908963a0403756d3859390af3c7de3230f446b85`
 and Git blob `c920305479e61c2a5d51719779ec9c9fba0c2b8f`. The complete current
-10,147-line, 355,722-byte `kdos.f` has SHA-256
-`90768df9fafdd3392f7e93f0542367ee0104f82ac286e2b6eeb1e42ce427bbd2`
-and Git blob `2cff300d84349d154cbf8837ad0cca9f1935f052`.
-The canonical source-mode CLI filter submits 6,803 non-comment records with
-220,624 payload bytes, or 227,427 UART bytes after one LF delimiter per
+10,153-line, 356,021-byte `kdos.f` has SHA-256
+`6ee45223697b4b712f8b168c9acf4fb2faa7b9d66472f3c572dddd870bc53e88`
+and Git blob `8899cdb968200fa997afa95d55c492016587a094`.
+The canonical source-mode CLI filter submits 6,806 non-comment records with
+220,736 payload bytes, or 227,542 UART bytes after one LF delimiter per
 record. These are structural source/transport identities, not a fresh
 wall-clock or complete-load qualification.
 
