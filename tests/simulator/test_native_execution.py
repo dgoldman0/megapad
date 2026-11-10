@@ -8,6 +8,7 @@ import pytest
 pytest.importorskip("_megaforth_native")
 
 from shared.cells import MASK64, TRUE  # noqa: E402
+from simulator import native_execution  # noqa: E402
 from simulator.diagnostics import HostedDiagnosticsService  # noqa: E402
 from simulator.dictionary import HEADER_FIXED_BYTES  # noqa: E402
 from simulator.errors import ExecutionError, ForthAbort, StepBudgetExceeded  # noqa: E402
@@ -478,7 +479,9 @@ def test_user_push_equal_to_a_popped_cookie_erases_its_continuation_type():
         assert address not in runtime.main_context.returns._continuations
 
 
-def test_native_allowance_preserves_return_cells_and_continuations():
+def test_native_allowance_preserves_return_cells_and_continuations(monkeypatch):
+    # An interval shorter than the loop, so that the run crosses allowances.
+    monkeypatch.setattr(native_execution, "UNQUANTIZED_NATIVE_INTERVAL_STEPS", 4096)
     runtimes = _runtimes(
         b": INNER 7 >R 1500 BEGIN DUP WHILE 1- REPEAT DROP R> ; "
         b": RUN INNER 3 + ;"
@@ -1009,11 +1012,11 @@ def test_host_quantum_bounds_native_intervals_above_the_unquantized_interval():
     from simulator.native_execution import UNQUANTIZED_NATIVE_INTERVAL_STEPS
     from simulator.runtime import YieldedExecution
 
-    # About 54,000 steps span two yields and completion. Yield points match
+    # About 432,000 steps span two yields and completion. Yield points match
     # the reference, and one native entry covers each whole quantum.
     quantum = 3 * UNQUANTIZED_NATIVE_INTERVAL_STEPS
     traces = []
-    for runtime in _runtimes(b": RUN 9000 BEGIN DUP WHILE 1- REPEAT DROP ;"):
+    for runtime in _runtimes(b": RUN 72000 BEGIN DUP WHILE 1- REPEAT DROP ;"):
         context = runtime.main_context
         before = runtime.native_execution_stats["entries"]
         result = runtime.run_until_blocked("RUN", quantum_steps=quantum)

@@ -41,6 +41,28 @@ own code each fail the file. The simulator selector passes 3,291 tests on
 either executor, and the native tests pass under the address and
 undefined-behaviour sanitizers.
 
+Three changes around the engine follow it. Calls to `CREATE ... DOES>`
+children, which Akashic uses for its component state and its deferred words,
+run in the engine (`OP_DOES`, MegaPad `4d2cbd92`): native entries while Desk
+starts fall from 47,829 to 20,423, and from 757 to 544 for a typed character.
+The Python owner plans a word's operations from a table by type and works out
+a call's entry once for each word (`73bef418`): the first typed character,
+which plans the typing path, shows in 0.12 s where it took 0.19 s. An
+unquantized native entry runs 65,536 steps, a session quantum's span, where
+it ran 8,192: with the faster engine the return to the dispatcher had become
+a fifth to a third of a compute-bound run. With all four changes the eleven
+kernels run 2.0 to 8.1 times faster than before the checkpoint (arithmetic
+2.28 to 0.41 ms, calls in a counted loop 3.78 to 0.52 ms, scattered reads
+2.99 to 0.88 ms), the headless Desktop is ready in 5.2 to 5.5 s where it
+took 6.1 to 6.2 s, and a typed character shows in 0.063 to 0.065 s where it
+took 0.082 to 0.087 s.
+
+What the engine still leaves to Python while the Desktop runs is mostly
+device words: the CRC device's, the spinlock words, the disk unit words,
+`KEY?` and the UART read of the guest's idle poll, and `TYPE`. Each has its
+service in Python, so running one in the engine means giving the engine that
+service's state.
+
 **Quantum checkpoint — September 26, 2026:** MegaPad `182ee52` makes the
 session's host quantum configurable and lets a native entry run to the
 quantum boundary instead of stopping every 8,192 steps inside it. MegaPad
@@ -310,8 +332,9 @@ native work counters; these are separate from semantic diagnostic counters.
 A native entry runs until the next Python-owned operation, the step budget, or
 the dispatcher's host quantum boundary, whichever comes first. Without a host
 quantum (for example, inside nested dispatch), each entry is limited to the
-8,192-step `UNQUANTIZED_NATIVE_INTERVAL_STEPS`. These are internal returns to
-the same dispatcher, not guest-visible boundaries.
+65,536-step `UNQUANTIZED_NATIVE_INTERVAL_STEPS`, the span a native session's
+quantum runs. These are internal returns to the same dispatcher, not
+guest-visible boundaries.
 
 No Forth source cache, terminal-specific replacement, guest timing weakening,
 new applet path, or enlarged watchdog is part of this work.

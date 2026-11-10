@@ -5,6 +5,7 @@ import pytest
 
 pytest.importorskip("_megaforth_native")
 
+from simulator import native_execution
 from simulator.errors import ExecutionError
 from simulator.runtime import ExecutionResult, YieldedExecution
 from simulator.stacks import DataStack, StackOverflow
@@ -98,7 +99,9 @@ def test_native_capture_survives_host_yield_and_resume_or_cancellation(quantum, 
     assert observations[0][4] == ("ExecutionError" if cancel else None)
 
 
-def test_captures_across_native_allowances_still_reach_the_next_callback():
+def test_captures_across_native_allowances_still_reach_the_next_callback(monkeypatch):
+    # An interval shorter than the loop, so that the run crosses allowances.
+    monkeypatch.setattr(native_execution, "UNQUANTIZED_NATIVE_INTERVAL_STEPS", 4096)
     runtimes = _runtimes()
     records = [[], []]
     for runtime, captured in zip(runtimes, records):

@@ -20,8 +20,12 @@ from simulator.timer import HostedTimerService
 
 
 # Without a host quantum, native work still returns to the same dispatcher at
-# this interval. It bounds one native entry, not a guest-visible boundary.
-UNQUANTIZED_NATIVE_INTERVAL_STEPS = 8192
+# this interval. It bounds one native entry, not a guest-visible boundary: the
+# engine holds the interpreter lock for an entry, so the interval is how long
+# other host threads and a keyboard interrupt can be kept waiting. It is the
+# span a native session's quantum already runs without returning. At 8,192
+# steps the return itself was a fifth to a third of a compute-bound run.
+UNQUANTIZED_NATIVE_INTERVAL_STEPS = 65536
 SEMANTIC_API_VERSION = 11
 
 
