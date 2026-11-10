@@ -13876,6 +13876,26 @@ class TestKDOSExceptions(_KDOSTestBase):
         self.assertNotIn("Stack overflow", text)
         self.assertRegex(text, r"\[AB-CAUGHT\s+-9\s+0\s+0\s+\]")
 
+    def test_abort_in_a_background_task_clears_the_foreground_chain_head(self):
+        """QUIT resets the foreground's stack whichever task aborted."""
+        text = self._run_kdos([
+            "VARIABLE BG-RAN",
+            ": BG-ABORTS  1 BG-RAN +!  ABORT ;",
+            ": FG-INNER  ['] BG-ABORTS BACKGROUND  PAUSE  99 ;",
+            ": FG  ['] FG-INNER CATCH ;",
+            "FG",
+            'CR ." [BG-ABORTED " BG-RAN @ . _TASK-HANDLERS @ . ." ]"',
+            "1 TASK-STOP",
+            "7 THROW",
+            'CR ." [BG-AFTER " _TASK-HANDLERS @ . 6 7 * . ." ]"',
+        ])
+        # The foreground sat in a CATCH, yielded, and the task aborted.  The
+        # BIOS took the prompt on the foreground's stack, so the frame that
+        # CATCH had pushed there is gone, and so is its address.
+        self.assertRegex(text, r"\[BG-ABORTED\s+1\s+0\s+\]")
+        self.assertEqual(text.count("uncaught THROW 7 "), 1)
+        self.assertRegex(text, r"\[BG-AFTER\s+0\s+42\s+\]")
+
     def test_catch_no_throw(self):
         """CATCH returns 0 when XT completes normally."""
         text = self._run_kdos([

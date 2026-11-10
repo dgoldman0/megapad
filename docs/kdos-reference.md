@@ -163,7 +163,9 @@ as uncaught, and a machine fault reaches the BIOS report.
 The callback changes nothing else about an abort outside the foreground.
 The BIOS does not end a background task or a worker core's job that
 aborts: `ABORT` resets that core's stack pointers and enters the prompt loop
-from there.
+from there. After a background task's abort the prompt answers on the
+foreground's stack while `TASK-ID` still reports the task, also after
+`TASK-STOP` has taken the task off the schedule.
 
 KDOS installs `_KDOS-FAULT` with the BIOS `FAULT-XT!`, so machine faults are
 exceptions too. An illegal instruction throws -21, an alignment fault -23,
