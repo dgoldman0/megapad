@@ -152,12 +152,15 @@ unwind to. It prints `uncaught THROW ` and the code, in decimal whatever
 `BASE` holds, ends the line, and takes the BIOS `ABORT`, which clears both
 stacks and returns to the prompt; `BASE` keeps its value.
 
-The BIOS `ABORT`, `ABORT"` and its own error recovery reset the stacks
-without telling KDOS, so one taken inside a `CATCH` leaves that frame's
-address in the foreground `HANDLER`. A later `THROW`, or a machine fault
-through `_KDOS-FAULT`, then finds a nonzero handler and unwinds into the
-dead frame. Clearing the handler there needs a hook in the BIOS, which it
-does not have.
+The BIOS `ABORT`, `ABORT"` and `QUIT` reset the return stack without telling
+KDOS, so one taken inside a `CATCH` leaves that frame's address in the
+foreground `HANDLER`. A later `THROW`, or a machine fault through
+`_KDOS-FAULT`, then finds a nonzero handler and unwinds into the dead frame.
+On the emulator the code or the fault then goes unreported, the data stack
+pointer takes a stale cell's value until the BIOS's end-of-line check
+answers `Stack overflow` and resets it, and `HANDLER` keeps a wrong value.
+Clearing the handler when the BIOS resets the stack needs a hook in the
+BIOS, which it does not have.
 
 KDOS installs `_KDOS-FAULT` with the BIOS `FAULT-XT!`, so machine faults are
 exceptions too. An illegal instruction throws -21, an alignment fault -23,
