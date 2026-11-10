@@ -150,9 +150,10 @@ Status values are: 0 success, 1 undefined token, 2 line too long, 3 nesting
 depth exceeded, 4 unfinished compiler state, and 5 a source-level `THROW`
 caught by KDOS.  The BIOS `EVALUATE-CHECKED` primitive returns 0–3 because it
 exists before KDOS's exception system.  After defining `CATCH`, KDOS
-deliberately shadows that public name with a wrapper which checkpoints depth,
-catches `THROW`, invokes `EVALUATOR-UNWIND`, records the exception in
-`EVAL-THROW`, and returns 5 normally.  `EVALUATE-FINISH` performs the
+deliberately shadows that public name, and `EVALUATE`, with wrappers which
+checkpoint depth, catch `THROW` and invoke `EVALUATOR-UNWIND`.  KDOS's
+`EVALUATE` then rethrows; its `EVALUATE-CHECKED` records the exception in
+`EVAL-THROW` and returns 5 normally.  `EVALUATE-FINISH` performs the
 end-of-source check that reports status 4.
 
 `EVAL-STATUS`, `EVAL-LINE`, `EVAL-COLUMN`, `EVAL-DEPTH`, and `EVAL-THROW`
