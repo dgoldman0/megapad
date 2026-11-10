@@ -16,6 +16,7 @@ void register_bindings(pybind11::module_& module);
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <limits>
 #include <memory>
 #include <unordered_map>
@@ -58,6 +59,8 @@ enum Opcode : uint32_t {
     // Legacy tile engine words; their registers travel with each run.
     OP_TILE_MODE_SET, OP_TILE_MODE_STORE, OP_TILE_SOURCE0_STORE,
     OP_TILE_SOURCE1_STORE, OP_TILE_DESTINATION_STORE, OP_TILE_BINARY,
+    // A call to a CREATE ... DOES> child: operand a is the child's body.
+    OP_DOES,
 };
 
 // TADD, TSUB and TMUL, in OP_TILE_BINARY's operand a.
@@ -65,6 +68,14 @@ enum TileBinary : uint32_t { TILE_ADD, TILE_SUBTRACT, TILE_MULTIPLY };
 
 struct Instruction;
 using Plan = std::vector<Instruction>;
+
+// Where a DOES> child continues: the defining word and the index of its
+// first operation after DOES>, with that word's plan once a call has found it.
+struct DoesEntry {
+    Cell xt;
+    Cell ip;
+    Plan* plan = nullptr;
+};
 
 struct Instruction {
     uint32_t opcode;
@@ -77,6 +88,9 @@ struct Instruction {
         // Calls do not use operand b. Plan objects remain at stable map-node
         // addresses across installation/rehash; clear discards every caller.
         Plan* target;
+        // OP_DOES names its entry by index when installed and holds the
+        // entry itself from then on. Entries keep their addresses until clear.
+        DoesEntry* does;
     };
 };
 
@@ -888,12 +902,18 @@ public:
             if (operation.size() != 3)
                 throw py::value_error("operation must be (opcode, a, b)");
             const auto opcode = operation[0].cast<uint32_t>();
-            if (opcode > OP_TILE_BINARY)
+            if (opcode > OP_DOES)
                 throw py::value_error("unknown native semantic opcode");
             plan.push_back(Instruction{opcode, OP_STOP, operation[1].cast<Cell>(),
                                       operation[2].cast<Cell>()});
             if (opcode == OP_CALL || opcode == OP_EXECUTE)
                 plan.back().target = nullptr;
+            if (opcode == OP_DOES) {
+                const Cell index = plan.back().b;
+                if (index >= does_.size())
+                    throw py::value_error("OP_DOES names no installed DOES> entry");
+                plan.back().does = &does_[index];
+            }
         }
         for (size_t i = 0; i + 1 < plan.size(); ++i) {
             auto& first = plan[i];
@@ -921,6 +941,16 @@ public:
     void clear() {
         plans_.clear();
         overlaid_.clear();
+        does_.clear();
+    }
+
+    // Record where the children of one DOES> continue and return the index a
+    // plan names it by. The defining word's plan is found at the first call.
+    Cell does_entry(Cell xt, Cell ip) {
+        if (xt == 0)
+            throw py::value_error("DOES> source execution token must be nonzero");
+        does_.push_back(DoesEntry{xt, ip});
+        return does_.size() - 1;
     }
 
     // Steps run on the direct path since this program was made: how much
@@ -1588,6 +1618,15 @@ private:
             return found == program.plans_.end() ? nullptr : &found->second;
         }
         void enter(Plan* target) noexcept { plan = target; }
+        // The defining word's plan, found here at a DOES> entry's first call.
+        Plan* does_plan(DoesEntry& entry) {
+            if (entry.plan == nullptr) {
+                const auto found = program.plans_.find(entry.xt);
+                if (found == program.plans_.end()) return nullptr;
+                entry.plan = &found->second;
+            }
+            return entry.plan;
+        }
 
         NativeProgram& program;
         MemoryRun& memory;
@@ -1669,6 +1708,7 @@ private:
             code = target->data();
             size = target->size();
         }
+        Plan* does_plan(const DoesEntry& entry) const noexcept { return entry.plan; }
 
         RunState& s;
         Plan* plan;
@@ -1810,6 +1850,30 @@ private:
             path.cookie = cookie;
             path.xt = target_xt;
             path.ip = 0;
+            path.enter(target);
+            return done();
+        }
+        case OP_DOES: {
+            // A CREATE ... DOES> child pushes its body address and calls the
+            // defining word's code after DOES>. Like a constant's call it
+            // costs the call's tick and its own, and both pushes are
+            // preflighted, so a failure leaves Python the exact fault.
+            Plan* target = path.does_plan(*operation.does);
+            auto returns = path.returns();
+            if (target == nullptr || !stack.inputs(0) || !stack.outputs(1) ||
+                !returns.inputs(0) || !returns.outputs(1)) return false;
+            Cell cookie = path.cookie;
+            Cell raw;
+            if (!next_continuation_cookie(cookie, path.xt, raw)) return false;
+            path.s.changed.set(path.rp() - 8,
+                ContinuationUpdate{path.xt, path.ip + 1, raw, path.plan});
+            out[0] = operation.a;
+            path.commit(stack);
+            returns.result[0] = raw;
+            path.commit(returns);
+            path.cookie = cookie;
+            path.xt = operation.does->xt;
+            path.ip = operation.does->ip;
             path.enter(target);
             return done();
         }
@@ -2287,6 +2351,7 @@ private:
     const megapad::hybrid::RoutineCall* routine_call_ = nullptr;
     py::object routine_entry_;
     std::vector<NativeRoutine> routines_;
+    std::deque<DoesEntry> does_;
 };
 }  // namespace
 
@@ -2296,7 +2361,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
     megapad::tile_values::register_bindings(module);
     megapad::dictionary::register_bindings(module);
     megapad::walker::register_bindings(module);
-    module.attr("SEMANTIC_API_VERSION") = 10;
+    module.attr("SEMANTIC_API_VERSION") = 11;
     module.attr("MACHINE_STOPPED_CALL") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_CALL));
     module.attr("MACHINE_STOPPED_RESUME") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_RESUME));
     module.attr("MACHINE_CALLBACK") = py::int_(static_cast<uint32_t>(MACHINE_CALLBACK));
@@ -2309,6 +2374,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
         .def("install", &NativeProgram::install, py::arg("xt"), py::arg("operations"),
              py::arg("overlaid") = false)
         .def("clear", &NativeProgram::clear)
+        .def("does_entry", &NativeProgram::does_entry, py::arg("xt"), py::arg("ip"))
         .def_property_readonly("direct_steps", &NativeProgram::direct_steps)
         .def("bind_tile_guard", &NativeProgram::bind_tile_guard, py::arg("guard"))
         .def("snapshot_stack", &NativeProgram::snapshot_stack,
@@ -2337,6 +2403,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
     EXPORT_OPCODE(OP_TILE_MODE_SET); EXPORT_OPCODE(OP_TILE_MODE_STORE);
     EXPORT_OPCODE(OP_TILE_SOURCE0_STORE); EXPORT_OPCODE(OP_TILE_SOURCE1_STORE);
     EXPORT_OPCODE(OP_TILE_DESTINATION_STORE); EXPORT_OPCODE(OP_TILE_BINARY);
+    EXPORT_OPCODE(OP_DOES);
     module.attr("TILE_ADD") = py::int_(static_cast<uint32_t>(TILE_ADD));
     module.attr("TILE_SUBTRACT") = py::int_(static_cast<uint32_t>(TILE_SUBTRACT));
     module.attr("TILE_MULTIPLY") = py::int_(static_cast<uint32_t>(TILE_MULTIPLY));

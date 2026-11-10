@@ -3,7 +3,7 @@
 The extension and its Python owner are built from the same checkout and use
 one current internal interface. Rebuild the extension after changing this
 boundary with `python setup_simulator_accel.py build_ext --inplace --force`.
-The extension exports `SEMANTIC_API_VERSION = 10`; its Python owner checks this
+The extension exports `SEMANTIC_API_VERSION = 11`; its Python owner checks this
 version before admission. An explicit native request rejects older builds;
 automatic selection keeps the reference executor and the Python dictionary
 when the version mismatches.
@@ -228,6 +228,18 @@ primitive. The original hosted `COREID` and `TASK-ID` callbacks both push zero
 and share the native false opcode. These remain two-tick primitive calls;
 admission binds to the original installed word objects, so later colon or
 host-callback definitions with those names retain their ordinary behavior.
+
+`OP_DOES` is a compiled call to a `CREATE ... DOES>` child. `a` is the child's
+body address, and `b` is the index that `does_entry(xt, ip)` returned for the
+defining word and the index of its first operation after `DOES>`. The
+operation pushes the body address, pushes a continuation exactly as `OP_CALL`
+does, and continues in the defining word's plan at that index. It costs two
+semantic steps, the call's and the created word's own, as the reference
+charges them. Both pushes pass preflight before either commits, and a full
+stack or a defining word without a plan returns to Python unchanged. The
+Python owner plans the defining word with its children's callers, and
+`clear()` drops the entries with the plans. `EXECUTE` of a child's token is
+still Python's.
 
 `OP_SCALAR_FP` uses `(a, b)` for an FC operation byte and its operand count:
 one for unary operations, two for binary operations, three for fused

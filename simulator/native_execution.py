@@ -22,7 +22,7 @@ from simulator.timer import HostedTimerService
 # Without a host quantum, native work still returns to the same dispatcher at
 # this interval. It bounds one native entry, not a guest-visible boundary.
 UNQUANTIZED_NATIVE_INTERVAL_STEPS = 8192
-SEMANTIC_API_VERSION = 10
+SEMANTIC_API_VERSION = 11
 
 
 def load_native_extension(*, required: bool):
@@ -155,6 +155,8 @@ class NativeExecutor:
         self.plans = {}
         self.entry_costs = {}
         self.continuation_frames = {}
+        # The program's entry for each DOES>, by defining word and index.
+        self.does_entries = {}
         # Machine routines planned for direct calls, by execution token, and
         # the routine words by native index.
         self.routine_owner = None
@@ -175,6 +177,7 @@ class NativeExecutor:
         self.plans.clear()
         self.entry_costs.clear()
         self.continuation_frames.clear()
+        self.does_entries.clear()
         self.unbind_routines()
         self.generation = self.runtime.dictionary.execution_generation
 
@@ -355,8 +358,20 @@ class NativeExecutor:
         if isinstance(implementation, rt.ValueDefinition):
             return op.OP_FETCH_VALUE, target.body_address, 0
         if isinstance(implementation, rt.CreatedDefinition):
-            if implementation.action is None:
+            action = implementation.action
+            if action is None:
                 return op.OP_PUSH_CELL, target.body_address, 0
+            # A DOES> child pushes its body and continues in its defining
+            # word, which is planned like any colon word it calls.
+            source = self.runtime.dictionary.live_word(action.source_xt)
+            if source is not None and isinstance(source.implementation, rt.ColonDefinition):
+                key = (action.source_xt, action.entry_ip)
+                entry = self.does_entries.get(key)
+                if entry is None:
+                    entry = self.program.does_entry(action.source_xt, action.entry_ip)
+                    self.does_entries[key] = entry
+                pending.append(source)
+                return op.OP_DOES, target.body_address, entry
         if isinstance(implementation, rt.PrimitiveDefinition):
             admitted = self.primitives.get(target.xt)
             if admitted is not None and admitted[0] is target:
