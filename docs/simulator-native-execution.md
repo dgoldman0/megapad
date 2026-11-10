@@ -5,7 +5,43 @@ rich-terminal vertical `c10058b`. It is independent of the MP64 emulator's
 C++/DBT extension. The Python semantic dispatcher remains the correctness
 reference and owns operations outside each admitted native interval.
 
-**Current checkpoint — September 26, 2026:** MegaPad `182ee52` makes the
+**Current checkpoint — November 10, 2026:** each native operation is now
+written once and compiled for a general and a direct path
+([`simulator/accel/API.md`](../simulator/accel/API.md) describes both). The
+general path is the engine as it was. The direct path uses only what a run
+has already proved: stack cells inside the page last qualified for each
+stack, ordinary scalars inside the hot page, return cells the run typed
+itself, and call sites already bound. It holds the instruction pointer, both
+stack pointers and the step count in host registers. It declines whatever it
+cannot prove, with nothing done, and the general path then performs that
+operation. Guest work, step counts and exit boundaries are unchanged, so
+this helps only the simulator.
+
+`bench_native_dispatch.py`'s eleven kernels run 1.9 to 6.2 times faster with
+the same steps and results: arithmetic 2.26 to 0.58 ms, calls in a counted
+loop 3.63 to 0.61 ms, `EXECUTE` 4.05 to 0.69 ms, reads scattered over four
+pages 2.98 to 1.13 ms, and a kernel that is mostly one block copy 2.26 to
+1.19 ms. With the direct path left out of the build, the engine runs within
+8% of its former speed on kernels without counted loops, and 1.6 to 2.0
+times faster on those with them, because a return cell found untyped is now
+remembered for the run. Through `bench_unified_desktop.py`'s headless typing
+journey, a typed character shows in 0.066 to 0.072 s where it took 0.082 to
+0.087 s, and about nine tenths of the Desktop's native steps take the direct
+path. Each figure is the better of two or more alternating runs on one
+machine that was doing other work. The Desktop's remaining host time is
+mostly Python around the engine.
+
+`tests/simulator/test_native_direct_path.py` compares the reference with the
+engine on sparse pages and on dense memory, at every step budget, across
+short native intervals, at the edges of stacks sized to the cell, on return
+cells typed outside the run, and over 240 random programs. One test
+requires every operation in its body to take the direct path once the first
+pass has qualified it. Six faults planted one at a time in the direct path's
+own code each fail the file. The simulator selector passes 3,291 tests on
+either executor, and the native tests pass under the address and
+undefined-behaviour sanitizers.
+
+**Quantum checkpoint — September 26, 2026:** MegaPad `182ee52` makes the
 session's host quantum configurable and lets a native entry run to the
 quantum boundary instead of stopping every 8,192 steps inside it. MegaPad
 `a649f32` then defaults native sessions to 65,536 steps; the Python reference

@@ -76,6 +76,31 @@ instruction runs. Intermediate popped bytes are still materialized. Stack
 operations may resolve an entire operand span through a qualified page;
 fragmented, absent and cross-page spans retain scalar handling.
 
+Each operation's effect is written once, in `NativeProgram::effect`, and
+compiled for two ways of reaching the machine's state. The general path
+resolves every cell as described above, takes a return cell's kind from the
+run's change record or from Python's continuation dictionary, and binds a call
+site's plan at its first call. It performs every operation. The direct path
+uses only what the run has already proved: stack cells inside the backed page
+last qualified for that stack, ordinary scalars inside the hot ordinary page,
+return cells the run itself has typed, and call sites already bound. It holds
+the instruction pointer, both stack pointers and the step count in host
+registers. Byte-span primitives, tile words and machine routines are the
+general path's alone, and the direct path does not run inside a machine
+callback. It is built on little-endian hosts.
+
+A run tries the direct path at every operation boundary. Whatever that path
+cannot prove it declines without effect, and the general path performs the
+operation; what the general path declines returns to Python at the same
+original boundary. Results, step counts and exit boundaries therefore do not
+depend on which path ran an operation. When an allowance has fewer steps left
+than the costliest fused pair needs, the general path runs them, because it
+checks the allowance exactly. A return cell that Python's dictionary leaves
+untyped is entered in the run's change record as a user cell, so that a later
+look at it needs no dictionary; exported, that entry erases a type that was not
+there. `NativeProgram.direct_steps` counts the steps a program has run on the
+direct path, for tests and profiles.
+
 Address/fetch pairs cover literal and plain created/constant addresses followed
 by `@`, `C@`, `W@` or `L@`. Both operations pass preflight before either commits.
 The pushed address is written before the read, preserving partial aliases

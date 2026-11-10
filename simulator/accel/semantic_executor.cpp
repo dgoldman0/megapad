@@ -285,6 +285,45 @@ public:
         return nullptr;
     }
 
+    // The hot-page case of resolve(address, width, write, true, ...): a backed
+    // span outside the return stack, or null for resolve to decide.
+    uint8_t* ordinary_span(Cell address, unsigned width) const noexcept {
+        if (address > MASK - (width - 1)) return nullptr;
+        const Cell last = address + width - 1;
+        if (address < return_empty_ && last >= return_floor_) return nullptr;
+        const HotPage& hot = ordinary_page_;
+        if (hot.bytes == nullptr || address < hot.base || last - hot.base >= hot.size)
+            return nullptr;
+        return hot.bytes + (address - hot.base);
+    }
+
+    // The part of one stack inside the backed page this run last qualified
+    // for it: guest addresses [low, high). It is empty until a stack operation
+    // has resolved a cell of that stack, and it never reaches past the stack.
+    struct StackWindow {
+        Cell low = MASK;
+        Cell high = 0;
+        std::uintptr_t bias = 0;  // host address of guest address zero
+        uint8_t* at(Cell address) const noexcept {
+            return reinterpret_cast<uint8_t*>(bias + static_cast<std::uintptr_t>(address));
+        }
+    };
+    StackWindow stack_window(bool returns, Cell floor, Cell empty) const noexcept {
+        const HotPage& hot = returns ? return_page_ : data_page_;
+        StackWindow window;
+        if (hot.bytes == nullptr || hot.size == 0 || hot.size > MASK - hot.base)
+            return window;
+        const Cell low = hot.base > floor ? hot.base : floor;
+        const Cell end = hot.base + hot.size;
+        const Cell high = end < empty ? end : empty;
+        if (low >= high) return window;
+        window.low = low;
+        window.high = high;
+        window.bias = reinterpret_cast<std::uintptr_t>(hot.bytes) -
+                      static_cast<std::uintptr_t>(hot.base);
+        return window;
+    }
+
     bool resolve_bytes(Cell address, Cell length, bool require_backing, ByteSpan& span) {
         if (length == 0) return true;
         if (address > MASK - (length - 1)) return false;
@@ -380,6 +419,9 @@ struct ContinuationUpdate {
     Cell caller;
     Cell ip;
     Cell raw;
+    // The caller's plan when this run made the call, so that its return need
+    // not look the caller up again. It lives for the run and is not exported.
+    Plan* plan = nullptr;
 };
 
 // During one native interval RP moves only through checked pushes/pops.
@@ -434,7 +476,11 @@ private:
     void prepare(Cell slot) {
         auto& side = slot < anchor_ ? below_ : above_;
         const Cell index = index_of(slot);
-        if (index >= side.size()) side.resize(index + 1);
+        if (index >= side.size()) grow(side, index + 1);
+    }
+    // Growth is rare and may throw; it stays out of the callers' hot paths.
+    [[gnu::noinline, gnu::cold]] static void grow(std::vector<Change>& side, Cell size) {
+        side.resize(size);
     }
     void assign(Cell slot, ContinuationUpdate value) noexcept {
         auto& side = slot < anchor_ ? below_ : above_;
@@ -559,8 +605,76 @@ static Cell magnitude(Cell value) noexcept {
     return value & SIGN ? Cell{0} - value : value;
 }
 
-static unsigned cost(uint32_t opcode) noexcept {
+static constexpr unsigned cost(uint32_t opcode) noexcept {
     return opcode >= OP_LITERAL && opcode <= OP_ABORT_IF ? 1 : 2;
+}
+
+// The value of an operation that replaces the top cell with a function of
+// it. False for any other opcode.
+[[gnu::always_inline]] static inline bool unary_value(uint32_t opcode, Cell operand,
+                                                       Cell& value) noexcept {
+    switch (opcode) {
+    case OP_NEGATE: value = Cell{0} - operand; return true;
+    case OP_ABS: value = magnitude(operand); return true;
+    case OP_ONE_PLUS: value = operand + 1; return true;
+    case OP_ONE_MINUS: value = operand - 1; return true;
+    case OP_TWO_MULTIPLY: value = operand << 1; return true;
+    case OP_CELLS: value = operand << 3; return true;
+    case OP_CELL_PLUS: value = operand + Cell{8}; return true;
+    case OP_TWO_DIVIDE: value = (operand >> 1) | (operand & SIGN); return true;
+    case OP_INVERT: value = ~operand; return true;
+    case OP_ZERO_EQUAL: value = flag(operand == 0); return true;
+    case OP_ZERO_NOT_EQUAL: value = flag(operand != 0); return true;
+    case OP_ZERO_LESS: value = flag((operand & SIGN) != 0); return true;
+    case OP_ZERO_GREATER: value = flag(operand != 0 && !(operand & SIGN)); return true;
+    case OP_BSWAP:
+        value = 0;
+        for (unsigned i = 0; i < 8; ++i)
+            value |= ((operand >> (i * 8)) & 255) << ((7 - i) * 8);
+        return true;
+    default: return false;
+    }
+}
+
+// The value of an operation that replaces the top two cells with one and
+// cannot fault. ``left`` is the deeper operand. False for any other opcode.
+[[gnu::always_inline]] static inline bool binary_value(uint32_t opcode, Cell left, Cell right,
+                                                        Cell& value) noexcept {
+    switch (opcode) {
+    case OP_ADD: value = left + right; return true;
+    case OP_SUBTRACT: value = left - right; return true;
+    case OP_MULTIPLY: value = left * right; return true;
+    case OP_MIN: value = less_signed(right, left) ? right : left; return true;
+    case OP_MAX: value = less_signed(left, right) ? right : left; return true;
+    case OP_AND: value = left & right; return true;
+    case OP_OR: value = left | right; return true;
+    case OP_XOR: value = left ^ right; return true;
+    case OP_LSHIFT: value = left << (right & 63); return true;
+    case OP_RSHIFT: value = left >> (right & 63); return true;
+    case OP_EQUAL: value = flag(left == right); return true;
+    case OP_NOT_EQUAL: value = flag(left != right); return true;
+    case OP_ULESS: value = flag(left < right); return true;
+    case OP_UGREATER: value = flag(left > right); return true;
+    case OP_LESS: value = flag(less_signed(left, right)); return true;
+    case OP_LESS_EQUAL: value = flag(!less_signed(right, left)); return true;
+    case OP_GREATER: value = flag(less_signed(right, left)); return true;
+    case OP_GREATER_EQUAL: value = flag(!less_signed(left, right)); return true;
+    default: return false;
+    }
+}
+
+// The cell a call leaves on the return stack: the next cookie that cannot be
+// taken for the caller's own execution token. False, with nothing changed,
+// once the sequence is spent.
+static bool next_continuation_cookie(Cell& cookie, Cell caller, Cell& raw) noexcept {
+    Cell next = cookie;
+    do {
+        if (next == MASK) return false;
+        ++next;
+        raw = 0xC07ECAFE00000000ULL ^ next;
+    } while (raw == caller);
+    cookie = next;
+    return true;
 }
 
 // Preflight all stack operands and all output storage before the operation.
@@ -622,8 +736,20 @@ public:
         state_.pointer = destination_;
     }
 
-    // inputs()/execute() initialize every consumed/produced cell. Avoid
-    // clearing scratch and six scatter descriptors at every guest operation.
+    // The pointer passes ``cells`` cells, which keep their bytes.
+    void release(unsigned cells) noexcept { state_.pointer += Cell{8} * cells; }
+    Cell depth() const noexcept { return state_.depth(); }
+    // The cell ``index`` cells below the top; the caller has checked the depth.
+    bool deep(Cell index, Cell& value) {
+        Scalar scalar;
+        if (!memory_.resolve(state_.pointer + index * 8, 8, false, false, scalar))
+            return false;
+        value = scalar.read(8);
+        return true;
+    }
+
+    // inputs() and the operation initialize every consumed/produced cell.
+    // Avoid clearing scratch and six scatter descriptors at every operation.
     std::array<Cell, 4> values;
     std::array<Cell, 6> result;
 
@@ -636,6 +762,112 @@ private:
     uint8_t* contiguous_output_ = nullptr;
     std::array<Scalar, 6> output_;
 };
+
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define MEGAFORTH_DIRECT_PATH 1
+
+// StackOperation's work for cells a run has already qualified: the top of one
+// stack, read and written in place inside its window. It declines whatever
+// reaches outside the window. The window lies within the stack, so its checks
+// also prove the depth and the room that StackOperation checks.
+//
+// It holds copies of the window and the pointer and hands the moved pointer
+// back, so that nothing here refers to the caller's own variables and they
+// can stay in host registers.
+class WindowOperation {
+public:
+    WindowOperation(const MemoryRun::StackWindow& window, Cell pointer) noexcept
+        : window_(window), pointer_(pointer) {}
+
+    // Cells are copied by number, never in a loop: each index below is a
+    // constant, which is what lets the compiler keep the cells in registers.
+    bool inputs(unsigned count) noexcept {
+        consumed_ = count;
+        if (pointer_ < window_.low || pointer_ > window_.high ||
+            window_.high - pointer_ < Cell{8} * count)
+            return false;
+        switch (count) {
+        case 4: std::memcpy(&values[3], window_.at(pointer_ + 24), sizeof(Cell)); [[fallthrough]];
+        case 3: std::memcpy(&values[2], window_.at(pointer_ + 16), sizeof(Cell)); [[fallthrough]];
+        case 2: std::memcpy(&values[1], window_.at(pointer_ + 8), sizeof(Cell)); [[fallthrough]];
+        case 1: std::memcpy(&values[0], window_.at(pointer_), sizeof(Cell)); [[fallthrough]];
+        default: return true;
+        }
+    }
+
+    bool outputs(unsigned count) noexcept {
+        produced_ = count;
+        after_pop_ = pointer_ + Cell{8} * consumed_;
+        return after_pop_ - window_.low >= Cell{8} * count;
+    }
+
+    // Store the outputs, the first of them deepest. Returns the pointer,
+    // which now stands at the last.
+    Cell apply() noexcept {
+        switch (produced_) {
+        case 6: std::memcpy(window_.at(after_pop_ - 48), &result[5], sizeof(Cell)); [[fallthrough]];
+        case 5: std::memcpy(window_.at(after_pop_ - 40), &result[4], sizeof(Cell)); [[fallthrough]];
+        case 4: std::memcpy(window_.at(after_pop_ - 32), &result[3], sizeof(Cell)); [[fallthrough]];
+        case 3: std::memcpy(window_.at(after_pop_ - 24), &result[2], sizeof(Cell)); [[fallthrough]];
+        case 2: std::memcpy(window_.at(after_pop_ - 16), &result[1], sizeof(Cell)); [[fallthrough]];
+        case 1: std::memcpy(window_.at(after_pop_ - 8), &result[0], sizeof(Cell)); [[fallthrough]];
+        default: break;
+        }
+        pointer_ = after_pop_ - Cell{8} * produced_;
+        return pointer_;
+    }
+
+    // Returns the pointer moved past ``cells`` cells, which keep their bytes.
+    Cell pass(unsigned cells) noexcept {
+        pointer_ += Cell{8} * cells;
+        return pointer_;
+    }
+
+    // Cells from the pointer to the window's end, once inputs() has passed.
+    Cell depth() const noexcept { return (window_.high - pointer_) / 8; }
+    bool deep(Cell index, Cell& value) const noexcept {
+        std::memcpy(&value, window_.at(pointer_ + index * 8), sizeof(Cell));
+        return true;
+    }
+
+    std::array<Cell, 4> values;
+    std::array<Cell, 6> result;
+
+private:
+    const MemoryRun::StackWindow window_;
+    Cell pointer_;
+    unsigned consumed_ = 0;
+    unsigned produced_ = 0;
+    Cell after_pop_ = 0;
+};
+// The two stacks' accessors are distinct types, so that a path can tell
+// whose pointer an accessor has moved.
+struct DataWindow : WindowOperation { using WindowOperation::WindowOperation; };
+struct ReturnWindow : WindowOperation { using WindowOperation::WindowOperation; };
+
+// One ordinary scalar inside the hot page, read and written as Scalar is.
+struct DirectCell {
+    uint8_t* bytes = nullptr;
+
+    Cell read(unsigned width) const noexcept {
+        switch (width) {
+        case 1: return *bytes;
+        case 2: { uint16_t value; std::memcpy(&value, bytes, sizeof(value)); return value; }
+        case 4: { uint32_t value; std::memcpy(&value, bytes, sizeof(value)); return value; }
+        default: { Cell value; std::memcpy(&value, bytes, sizeof(value)); return value; }
+        }
+    }
+
+    void write(Cell value, unsigned width) const noexcept {
+        switch (width) {
+        case 1: *bytes = static_cast<uint8_t>(value); return;
+        case 2: { const auto low = static_cast<uint16_t>(value); std::memcpy(bytes, &low, sizeof(low)); return; }
+        case 4: { const auto low = static_cast<uint32_t>(value); std::memcpy(bytes, &low, sizeof(low)); return; }
+        default: std::memcpy(bytes, &value, sizeof(value)); return;
+        }
+    }
+};
+#endif
 
 class NativeProgram {
 public:
@@ -690,6 +922,10 @@ public:
         plans_.clear();
         overlaid_.clear();
     }
+
+    // Steps run on the direct path since this program was made: how much
+    // of the native work took it. Zero where the direct path is not built.
+    Cell direct_steps() const noexcept { return direct_steps_; }
 
     // The owner's check that the tile service still computes with this
     // extension's kernel, called at most once per run, at its first tile word.
@@ -849,23 +1085,22 @@ public:
         try {
             const auto initial = plans_.find(state.xt);
             Plan* plan = initial == plans_.end() ? nullptr : &initial->second;
+            GeneralPath general(*this, memory, state, continuations, plan);
             while (state.steps < remaining_steps) {
-                if (plan == nullptr || state.ip >= plan->size()) break;
-                Instruction& operation = (*plan)[state.ip];
-                if (operation.opcode == OP_STOP ||
-                    cost(operation.opcode) > remaining_steps - state.steps)
-                    break;
-                if (operation.fused != OP_STOP &&
-                    cost(operation.opcode) + cost(operation.fused) <=
-                        remaining_steps - state.steps &&
-                    execute_fused(operation, (*plan)[state.ip + 1], memory, state)) {
-                    state.steps += cost(operation.opcode) + cost(operation.fused);
-                    continue;
+                if (plan == nullptr) break;
+#ifdef MEGAFORTH_DIRECT_PATH
+                // A callback's word returns into the machine through a slot
+                // only return_slot knows, so the direct path stays outside
+                // callbacks.
+                if (state.frames.empty()) {
+                    const Cell before = state.steps;
+                    plan = run_direct(state, memory, plan, remaining_steps);
+                    direct_steps_ += state.steps - before;
+                    if (state.steps >= remaining_steps) break;
                 }
-                state.operation_cost = cost(operation.opcode);
-                if (!execute(operation, memory, state, continuations, plan))
-                    break;
-                state.steps += cost(operation.opcode);
+#endif
+                if (state.ip >= plan->size()) break;
+                if (!step(general, (*plan)[state.ip], remaining_steps)) break;
                 // Machine work this interval cannot finish goes to Python.
                 if (state.machine_handoff != MACHINE_NONE)
                     break;
@@ -881,71 +1116,6 @@ public:
     }
 
 private:
-    static bool execute_fused(const Instruction& first, const Instruction& next,
-                              MemoryRun& memory, RunState& s) {
-        StackOperation stack(memory, s.data);
-        if (first.fused >= OP_FETCH && first.fused <= OP_L_FETCH) {
-            const unsigned width = first.fused == OP_FETCH ? 8 :
-                1U << (first.fused - OP_C_FETCH);
-            Scalar source;
-            if (!stack.inputs(0) || !stack.outputs(1) ||
-                !memory.resolve(first.a, width, false, true, source))
-                return false;
-            // A guest read can alias the address just pushed onto its stack.
-            // Perform that write before reading, after both operations have
-            // passed preflight. A miss leaves the original first op intact.
-            stack.result[0] = first.a;
-            stack.commit();
-            stack.result[0] = source.read(width);
-            stack.commit();
-            s.ip += 2;
-            return true;
-        }
-        if (!stack.inputs(1)) return false;
-        const Cell left = stack.values[0];
-        if (first.opcode == OP_DUP) {
-            if (!stack.outputs(2)) return false;
-            stack.result[0] = left;
-            stack.result[1] = left;
-            stack.commit();
-            s.data.pointer += 8; // BRANCH_ZERO consumes the duplicate.
-            s.ip = left == 0 ? next.a : s.ip + 2;
-            return true;
-        }
-        Scalar pushed;
-        // Even though the literal is consumed immediately, its guest stack
-        // slot must exist and retain its bytes after the fused operation.
-        if (s.data.pointer - s.data.floor < 8 || !stack.outputs(1) ||
-            !memory.resolve(s.data.pointer - 8, 8, true, false, pushed))
-            return false;
-        const Cell right = first.a;
-        Cell value;
-        switch (first.fused) {
-        case OP_ADD: value = left + right; break;
-        case OP_SUBTRACT: value = left - right; break;
-        case OP_MULTIPLY: value = left * right; break;
-        case OP_AND: value = left & right; break;
-        case OP_OR: value = left | right; break;
-        case OP_XOR: value = left ^ right; break;
-        case OP_LSHIFT: value = left << (right & 63); break;
-        case OP_RSHIFT: value = left >> (right & 63); break;
-        case OP_EQUAL: value = flag(left == right); break;
-        case OP_NOT_EQUAL: value = flag(left != right); break;
-        case OP_ULESS: value = flag(left < right); break;
-        case OP_UGREATER: value = flag(left > right); break;
-        case OP_LESS: value = flag(less_signed(left, right)); break;
-        case OP_LESS_EQUAL: value = flag(!less_signed(right, left)); break;
-        case OP_GREATER: value = flag(less_signed(right, left)); break;
-        case OP_GREATER_EQUAL: value = flag(!less_signed(left, right)); break;
-        default: return false;
-        }
-        pushed.write(right, 8);
-        stack.result[0] = value;
-        stack.commit();
-        s.ip += 2;
-        return true;
-    }
-
     static py::tuple result(const RunState& state) {
         py::list updates;
         state.changed.append_to(updates);
@@ -1153,7 +1323,9 @@ private:
         Instruction operation{site.opcode, OP_STOP, site.a, {site.b}};
         const Cell xt = s.xt, ip = s.ip;
         Plan* unchanged = plan;
-        if (!execute(operation, memory, s, continuations, unchanged)) {
+        const Cell steps = s.steps;
+        GeneralPath inline_path(*this, memory, s, continuations, unchanged);
+        if (!effect(inline_path, operation)) {
             // Nothing ran: undo the start and let Python run the callback.
             frame.in_callback = false;
             s.returns.pointer = return_pointer;
@@ -1163,7 +1335,8 @@ private:
         }
         s.xt = xt;
         s.ip = ip;
-        s.steps += 1;
+        // The machine made the call, so the word costs only its own tick.
+        s.steps = steps + 1;
         return return_into_machine(memory, s, continuations, plan, true);
     }
 
@@ -1172,7 +1345,8 @@ private:
     // gives its output cells to its caller, which continues after the call.
     // ``inline_operation`` says no return operation is pending, so a resume
     // that cannot happen here goes to Python as a machine return.
-    bool return_into_machine(MemoryRun& memory, RunState& s, const py::dict& continuations,
+    [[gnu::noinline]] bool return_into_machine(MemoryRun& memory, RunState& s,
+                                               const py::dict& continuations,
                              Plan*& plan, bool inline_operation) {
         MachineFrame& frame = s.frames.back();
         const NativeRoutine& routine = routines_[frame.routine];
@@ -1230,8 +1404,9 @@ private:
 
     enum SlotKind { USER_CELL, CONTINUATION, PYTHON_BOUNDARY };
 
-    SlotKind return_slot(Cell slot, Cell raw, const RunState& s,
-                         const py::dict& continuations, ContinuationUpdate& value) {
+    [[gnu::noinline]] SlotKind return_slot(Cell slot, Cell raw, RunState& s,
+                                           const py::dict& continuations,
+                                           ContinuationUpdate& value) {
         // Only a return into it may consume a callback's machine return slot.
         if (!s.frames.empty() && s.frames.back().in_callback && slot == s.frames.back().slot)
             return PYTHON_BOUNDARY;
@@ -1244,6 +1419,12 @@ private:
         PyObject* entry = PyDict_GetItemWithError(continuations.ptr(), key.ptr());
         if (entry == nullptr) {
             if (PyErr_Occurred()) throw py::error_already_set();
+            // The dictionary does not change during a run, so the answer
+            // holds until this run retypes the cell. Recording it spares the
+            // next look at this cell the dictionary and lets the direct path
+            // read the cell. Exported, the record erases a type that was
+            // not there.
+            s.changed.set(slot, ContinuationUpdate{});
             return USER_CELL;
         }
         if (!PyTuple_CheckExact(entry) || PyTuple_GET_SIZE(entry) != 2)
@@ -1261,26 +1442,6 @@ private:
         value = ContinuationUpdate{continuation.attr("xt").cast<Cell>(),
                                    continuation.attr("ip").cast<Cell>(), raw};
         return CONTINUATION;
-    }
-
-    bool user_return_cells(MemoryRun& memory, const RunState& s,
-                           const py::dict& continuations, unsigned count,
-                           std::array<Cell, 4>& values) {
-        if (s.returns.depth() < count) return false;
-        for (unsigned i = 0; i < count; ++i) {
-            const Cell slot = s.returns.pointer + i * 8;
-            Scalar scalar;
-            ContinuationUpdate continuation;
-            if (!memory.resolve(slot, 8, false, false, scalar)) return false;
-            values[i] = scalar.read(8);
-            if (return_slot(slot, values[i], s, continuations, continuation)
-                    != USER_CELL) return false;
-        }
-        return true;
-    }
-
-    static void erase_return_pair_types(RunState& s, Cell first, Cell second) {
-        s.changed.erase_pair(first, second);
     }
 
     // Keep byte-span allocation and cleanup outside the scalar dispatch loop.
@@ -1376,200 +1537,625 @@ private:
         return s.tile_allowed;
     }
 
-    bool execute(Instruction& operation, MemoryRun& memory, RunState& s,
-                 const py::dict& continuations, Plan*& plan) {
+    // The general way to the machine's state. Every cell is resolved through
+    // the page tables, a return cell's kind comes from this run's record or
+    // from Python's dictionary, and a call site's target is bound here. It
+    // performs every operation the program knows.
+    struct GeneralPath {
+        static constexpr bool complete = true;
+        using Memory = Scalar;
+
+        GeneralPath(NativeProgram& program, MemoryRun& memory, RunState& state,
+                    const py::dict& continuations, Plan*& plan) noexcept
+            : program(program), memory(memory), s(state), continuations(continuations),
+              plan(plan), ip(state.ip), xt(state.xt), cookie(state.cookie),
+              steps(state.steps) {}
+
+        StackOperation data() noexcept { return StackOperation(memory, s.data); }
+        StackOperation returns() noexcept { return StackOperation(memory, s.returns); }
+        // Store an accessor's outputs; its stack's pointer follows.
+        void commit(StackOperation& cells) noexcept { cells.commit(); }
+        // Move a stack's pointer past ``count`` cells, which keep their bytes.
+        void release(StackOperation& cells, unsigned count) noexcept { cells.release(count); }
+        Cell sp() const noexcept { return s.data.pointer; }
+        Cell rp() const noexcept { return s.returns.pointer; }
+        // The cost of the operation about to run, for a callback inside it.
+        void begin(Cell own) noexcept { s.operation_cost = own; }
+        void count(Cell taken) noexcept { steps += taken; }
+        bool ordinary(Cell address, unsigned width, bool write, Memory& cell) {
+            return memory.resolve(address, width, write, true, cell);
+        }
+        SlotKind kind(Cell slot, Cell raw, ContinuationUpdate& value) {
+            return program.return_slot(slot, raw, s, continuations, value);
+        }
+        // The plan a call enters, bound to its site at the first call. An
+        // overlaid word is entered only by Python.
+        Plan* callee(Instruction& operation, Cell target_xt) {
+            Plan* target = operation.target;
+            if (target == nullptr || operation.a != target_xt) {
+                const auto found = program.plans_.find(target_xt);
+                if (found == program.plans_.end() || program.overlaid_.count(target_xt) != 0)
+                    return nullptr;
+                target = &found->second;
+                operation.a = target_xt;
+                operation.target = target;
+            }
+            return target;
+        }
+        Plan* caller(const ContinuationUpdate& continuation) {
+            if (continuation.plan != nullptr) return continuation.plan;
+            const auto found = program.plans_.find(continuation.caller);
+            return found == program.plans_.end() ? nullptr : &found->second;
+        }
+        void enter(Plan* target) noexcept { plan = target; }
+
+        NativeProgram& program;
+        MemoryRun& memory;
+        RunState& s;
+        const py::dict& continuations;
+        Plan*& plan;
+        Cell& ip;
+        Cell& xt;
+        Cell& cookie;
+        Cell& steps;
+    };
+
+#ifdef MEGAFORTH_DIRECT_PATH
+    // The direct way, for what a run has already proved. The instruction
+    // pointer, both stack pointers and the step count are held here, stack
+    // cells are addressed inside the page qualified for each stack, ordinary
+    // memory inside the hot page, a return cell has the kind this run gave
+    // it, and a call enters the plan already bound to its site. Whatever it
+    // cannot prove from these it declines, and the general path decides.
+    struct DirectPath {
+        static constexpr bool complete = false;
+        using Memory = DirectCell;
+
+        DirectPath(RunState& state, const MemoryRun& memory, Plan* plan) noexcept
+            : s(state), plan(plan), code(plan->data()), size(plan->size()),
+              ip(state.ip), xt(state.xt), cookie(state.cookie), steps(state.steps),
+              memory_(memory),
+              data_window_(memory.stack_window(false, state.data.floor, state.data.empty)),
+              return_window_(
+                  memory.stack_window(true, state.returns.floor, state.returns.empty)),
+              data_pointer_(state.data.pointer), return_pointer_(state.returns.pointer) {}
+
+        // Give the run's state what this path has completed.
+        void publish() noexcept {
+            s.ip = ip;
+            s.xt = xt;
+            s.cookie = cookie;
+            s.steps = steps;
+            s.data.pointer = data_pointer_;
+            s.returns.pointer = return_pointer_;
+        }
+
+        DataWindow data() const noexcept { return DataWindow(data_window_, data_pointer_); }
+        ReturnWindow returns() const noexcept {
+            return ReturnWindow(return_window_, return_pointer_);
+        }
+        void commit(DataWindow& cells) noexcept { data_pointer_ = cells.apply(); }
+        void commit(ReturnWindow& cells) noexcept { return_pointer_ = cells.apply(); }
+        void release(DataWindow& cells, unsigned count) noexcept {
+            data_pointer_ = cells.pass(count);
+        }
+        void release(ReturnWindow& cells, unsigned count) noexcept {
+            return_pointer_ = cells.pass(count);
+        }
+        Cell sp() const noexcept { return data_pointer_; }
+        Cell rp() const noexcept { return return_pointer_; }
+        void begin(Cell) noexcept {}
+        void count(Cell taken) noexcept { steps += taken; }
+        bool ordinary(Cell address, unsigned width, bool, Memory& cell) const noexcept {
+            cell.bytes = memory_.ordinary_span(address, width);
+            return cell.bytes != nullptr;
+        }
+        // A cell this run has not typed is the general path's to look up.
+        SlotKind kind(Cell slot, Cell raw, ContinuationUpdate& value) const noexcept {
+            const ContinuationUpdate* known = s.changed.find(slot);
+            if (known == nullptr) return PYTHON_BOUNDARY;
+            value = *known;
+            if (value.caller == 0) return USER_CELL;
+            return value.raw == raw ? CONTINUATION : PYTHON_BOUNDARY;
+        }
+        Plan* callee(const Instruction& operation, Cell target_xt) const noexcept {
+            return operation.a == target_xt ? operation.target : nullptr;
+        }
+        Plan* caller(const ContinuationUpdate& continuation) const noexcept {
+            return continuation.plan;
+        }
+        void enter(Plan* target) noexcept {
+            plan = target;
+            code = target->data();
+            size = target->size();
+        }
+
+        RunState& s;
+        Plan* plan;
+        Instruction* code;
+        Cell size;
+        Cell ip;
+        Cell xt;
+        Cell cookie;
+        Cell steps;
+
+    private:
+        const MemoryRun& memory_;
+        const MemoryRun::StackWindow data_window_;
+        const MemoryRun::StackWindow return_window_;
+        Cell data_pointer_;
+        Cell return_pointer_;
+    };
+#endif
+
+    // The top ``count`` return cells an accessor has read are all the user's.
+    // Like the accessors, it names each cell by a constant.
+    template <class Path, class Stack>
+    static bool user_cells(Path& path, const Stack& returns, unsigned count) {
+        const auto user = [&](unsigned index) -> bool {
+            ContinuationUpdate continuation;
+            return path.kind(path.rp() + Cell{8} * index, returns.values[index],
+                             continuation) == USER_CELL;
+        };
+        switch (count) {
+        case 4: if (!user(3)) return false; [[fallthrough]];
+        case 3: if (!user(2)) return false; [[fallthrough]];
+        case 2: if (!user(1)) return false; [[fallthrough]];
+        case 1: if (!user(0)) return false; [[fallthrough]];
+        default: return true;
+        }
+    }
+
+    // One operation's effect, written once. ``Path`` says how the machine's
+    // state is reached. Either the whole effect happens and the instruction
+    // pointer moves, or nothing changes and the answer is false. The direct
+    // path then leaves the operation to the general one, and the general
+    // path leaves it to Python, which performs it from the same boundary.
+    // Every precondition is therefore proved before the first change, and a
+    // completed effect has counted the operation's steps.
+    //
+    // An accessor is asked for a count of cells that is constant where it is
+    // written, and the path, not the accessor, moves a stack's pointer. Both
+    // let the direct path keep the cells and the pointers in host registers.
+    // The helpers below are inlined into every operation that uses them.
+    template <class Path>
+    bool effect(Path& path, Instruction& operation) {
         const auto opcode = operation.opcode;
-        StackOperation stack(memory, s.data);
+        auto stack = path.data();
         auto& v = stack.values;
         auto& out = stack.result;
-        unsigned produced = 0;
-        Scalar scalar;
+        typename Path::Memory cell;
+
+        // A completed effect counts its steps last. The opcode is known in
+        // each case below, so the direct path adds a constant.
+        const auto done = [&]() __attribute__((always_inline)) -> bool {
+            path.count(cost(opcode));
+            return true;
+        };
+        // The usual ending: the operation leaves ``produced`` cells in place
+        // of the ones it read. Outputs are bottom-to-top.
+        const auto leave = [&](unsigned produced) __attribute__((always_inline)) -> bool {
+            if (!stack.outputs(produced)) return false;
+            path.commit(stack);
+            ++path.ip;
+            return done();
+        };
+        const auto unary = [&](uint32_t which) __attribute__((always_inline)) -> bool {
+            return stack.inputs(1) && unary_value(which, v[0], out[0]) && leave(1);
+        };
+        const auto binary = [&](uint32_t which) __attribute__((always_inline)) -> bool {
+            return stack.inputs(2) && binary_value(which, v[1], v[0], out[0]) && leave(1);
+        };
+        const auto fetch = [&](unsigned width) __attribute__((always_inline)) -> bool {
+            if (!stack.inputs(1) || !path.ordinary(v[0], width, false, cell)) return false;
+            out[0] = cell.read(width);
+            return leave(1);
+        };
+        // I and J: the index of the loop whose two cells end ``count`` cells
+        // down, all of them the user's.
+        const auto loop_index = [&](unsigned count) __attribute__((always_inline)) -> bool {
+            auto returns = path.returns();
+            if (!stack.inputs(0) || !returns.inputs(count) ||
+                !user_cells(path, returns, count)) return false;
+            out[0] = returns.values[count - 2];
+            return leave(1);
+        };
+        // A store to ordinary memory. The address is on top, and ``value``
+        // gives what is written once the cell is found.
+        const auto store = [&](unsigned taken, unsigned width, auto&& value)
+                __attribute__((always_inline)) -> bool {
+            if (!stack.inputs(taken) || !stack.outputs(0) ||
+                !path.ordinary(v[0], width, true, cell)) return false;
+            const Cell written = value();
+            path.commit(stack);
+            cell.write(written, width);
+            ++path.ip;
+            return done();
+        };
 
         switch (opcode) {
         case OP_BRANCH:
-            s.ip = operation.a;
-            return true;
+            path.ip = operation.a;
+            return done();
         case OP_BRANCH_ZERO:
             if (!stack.inputs(1) || !stack.outputs(0)) return false;
-            stack.commit();
-            s.ip = v[0] == 0 ? operation.a : s.ip + 1;
-            return true;
+            path.commit(stack);
+            path.ip = v[0] == 0 ? operation.a : path.ip + 1;
+            return done();
+        case OP_ABORT_IF:
+            // A true flag aborts, which Python performs from this boundary.
+            if (!stack.inputs(1) || !stack.outputs(0) || v[0] != 0) return false;
+            path.commit(stack);
+            ++path.ip;
+            return done();
         case OP_CALL: case OP_EXECUTE: {
             Cell target_xt = operation.a;
             if (opcode == OP_EXECUTE) {
                 if (!stack.inputs(1) || !stack.outputs(0)) return false;
                 target_xt = v[0];
             }
-            Plan* target = operation.target;
-            if (target == nullptr || operation.a != target_xt) {
-                const auto found = plans_.find(target_xt);
-                if (found == plans_.end() || overlaid_.count(target_xt) != 0) return false;
-                target = &found->second;
-                operation.a = target_xt;
-                operation.target = target;
-            }
-            if (target->empty() ||
-                s.returns.pointer - s.returns.floor < 8)
-                return false;
-            const Cell slot = s.returns.pointer - 8;
-            if (!memory.resolve(slot, 8, true, false, scalar)) return false;
-            Cell cookie = s.cookie;
+            Plan* target = path.callee(operation, target_xt);
+            auto returns = path.returns();
+            if (target == nullptr || target->empty() ||
+                !returns.inputs(0) || !returns.outputs(1)) return false;
+            Cell cookie = path.cookie;
             Cell raw;
-            do {
-                if (cookie == MASK) return false;
-                ++cookie;
-                raw = 0xC07ECAFE00000000ULL ^ cookie;
-            } while (raw == s.xt);
+            if (!next_continuation_cookie(cookie, path.xt, raw)) return false;
             // Allocate the retained side record before committing any effect.
-            s.changed.set(slot,
-                ContinuationUpdate{s.xt, s.ip + 1, raw});
-            if (opcode == OP_EXECUTE) stack.commit();
-            scalar.write(raw, 8);
-            s.cookie = cookie;
-            s.returns.pointer = slot;
-            s.xt = target_xt;
-            s.ip = 0;
-            plan = target;
-            return true;
+            path.s.changed.set(path.rp() - 8,
+                ContinuationUpdate{path.xt, path.ip + 1, raw, path.plan});
+            if (opcode == OP_EXECUTE) path.commit(stack);
+            returns.result[0] = raw;
+            path.commit(returns);
+            path.cookie = cookie;
+            path.xt = target_xt;
+            path.ip = 0;
+            path.enter(target);
+            return done();
         }
         case OP_RETURN: {
-            if (!s.frames.empty() && s.frames.back().in_callback &&
-                    s.returns.pointer == s.frames.back().slot) {
-                // A changed slot no longer holds this machine return.
-                if (!memory.resolve(s.returns.pointer, 8, false, false, scalar) ||
-                        scalar.read(8) != s.frames.back().raw)
-                    return false;
-                return return_into_machine(memory, s, continuations, plan, false);
+            if constexpr (Path::complete) {
+                RunState& s = path.s;
+                if (!s.frames.empty() && s.frames.back().in_callback &&
+                        s.returns.pointer == s.frames.back().slot) {
+                    // A changed slot no longer holds this machine return.
+                    Scalar slot;
+                    if (!path.memory.resolve(s.returns.pointer, 8, false, false, slot) ||
+                            slot.read(8) != s.frames.back().raw)
+                        return false;
+                    return return_into_machine(path.memory, s, path.continuations,
+                                               path.plan, false) && done();
+                }
             }
+            auto returns = path.returns();
             ContinuationUpdate continuation;
-            if (s.returns.depth() == 0 ||
-                !memory.resolve(s.returns.pointer, 8, false, false, scalar) ||
-                return_slot(s.returns.pointer, scalar.read(8), s, continuations,
-                            continuation) != CONTINUATION)
+            if (!returns.inputs(1) ||
+                path.kind(path.rp(), returns.values[0], continuation) != CONTINUATION)
                 return false;
-            const auto caller = plans_.find(continuation.caller);
-            if (caller == plans_.end()) return false;
-            s.returns.pointer += 8;
-            s.xt = continuation.caller;
-            s.ip = continuation.ip;
-            plan = &caller->second;
-            return true;
+            Plan* caller = path.caller(continuation);
+            if (caller == nullptr) return false;
+            path.release(returns, 1);
+            path.xt = continuation.caller;
+            path.ip = continuation.ip;
+            path.enter(caller);
+            return done();
         }
         case OP_R_PUSH: {
+            auto returns = path.returns();
             if (!stack.inputs(1) || !stack.outputs(0) ||
-                s.returns.pointer - s.returns.floor < 8) return false;
-            const Cell slot = s.returns.pointer - 8;
-            if (!memory.resolve(slot, 8, true, false, scalar)) return false;
+                !returns.inputs(0) || !returns.outputs(1)) return false;
             // A user push deletes type metadata even when its value happens to
             // equal the old cookie. Retain that deletion across native exits.
-            s.changed.set(slot, ContinuationUpdate{0, 0, 0});
-            scalar.write(v[0], 8);
-            s.returns.pointer = slot;
-            stack.commit();
-            ++s.ip;
-            return true;
+            path.s.changed.set(path.rp() - 8, ContinuationUpdate{});
+            returns.result[0] = v[0];
+            path.commit(returns);
+            path.commit(stack);
+            ++path.ip;
+            return done();
         }
         case OP_R_POP: case OP_R_PEEK: {
-            ContinuationUpdate continuation;
-            if (!stack.inputs(0) || !stack.outputs(1) || s.returns.depth() == 0 ||
-                !memory.resolve(s.returns.pointer, 8, false, false, scalar) ||
-                return_slot(s.returns.pointer, scalar.read(8), s, continuations,
-                            continuation) != USER_CELL) return false;
-            out[0] = scalar.read(8);
-            if (opcode == OP_R_POP) s.returns.pointer += 8;
-            stack.commit();
-            ++s.ip;
-            return true;
+            auto returns = path.returns();
+            if (!stack.inputs(0) || !stack.outputs(1) || !returns.inputs(1) ||
+                !user_cells(path, returns, 1)) return false;
+            out[0] = returns.values[0];
+            if (opcode == OP_R_POP) path.release(returns, 1);
+            path.commit(stack);
+            ++path.ip;
+            return done();
         }
-        case OP_DO: case OP_QUESTION_DO: {
+        case OP_DO: case OP_QUESTION_DO: case OP_R_PUSH_PAIR: {
+            // DO and 2>R put the deeper data cell deeper on the return stack:
+            // a loop's limit lies below its index. Both stacks are preflighted
+            // before either changes, so a failure leaves Python the exact
+            // reference fault.
             if (!stack.inputs(2) || !stack.outputs(0)) return false;
             if (opcode == OP_QUESTION_DO && v[0] == v[1]) {
-                stack.commit();
-                s.ip = operation.a;
-                return true;
+                path.commit(stack);
+                path.ip = operation.a;
+                return done();
             }
-            StackOperation returns(memory, s.returns);
-            if (!returns.inputs(0) || !returns.outputs(2)) return false;
-            returns.result[0] = v[1]; // limit below index, on the same stack
-            returns.result[1] = v[0];
-            erase_return_pair_types(s, s.returns.pointer - 16,
-                                    s.returns.pointer - 8);
-            returns.commit();
-            stack.commit();
-            ++s.ip;
-            return true;
-        }
-        case OP_R_PUSH_PAIR: {
-            // 2>R: the deeper data cell goes deeper on the return stack. Both
-            // stacks are preflighted before either changes, so a failure
-            // leaves Python the exact reference fault.
-            if (!stack.inputs(2) || !stack.outputs(0)) return false;
-            StackOperation returns(memory, s.returns);
+            auto returns = path.returns();
             if (!returns.inputs(0) || !returns.outputs(2)) return false;
             returns.result[0] = v[1];
             returns.result[1] = v[0];
-            erase_return_pair_types(s, s.returns.pointer - 16, s.returns.pointer - 8);
-            returns.commit();
-            stack.commit();
-            ++s.ip;
-            return true;
+            path.s.changed.erase_pair(path.rp() - 16, path.rp() - 8);
+            path.commit(returns);
+            path.commit(stack);
+            ++path.ip;
+            return done();
         }
         case OP_R_POP_PAIR: case OP_R_PEEK_PAIR: {
             // 2R> and 2R@ take two user cells, never a continuation or a
             // machine return, and push the deeper one first.
-            std::array<Cell, 4> cells{};
-            if (!stack.inputs(0) || !stack.outputs(2) ||
-                !user_return_cells(memory, s, continuations, 2, cells)) return false;
-            out[0] = cells[1];
-            out[1] = cells[0];
-            if (opcode == OP_R_POP_PAIR) s.returns.pointer += 16;
-            stack.commit();
-            ++s.ip;
-            return true;
+            auto returns = path.returns();
+            if (!stack.inputs(0) || !stack.outputs(2) || !returns.inputs(2) ||
+                !user_cells(path, returns, 2)) return false;
+            out[0] = returns.values[1];
+            out[1] = returns.values[0];
+            if (opcode == OP_R_POP_PAIR) path.release(returns, 2);
+            path.commit(stack);
+            ++path.ip;
+            return done();
         }
         case OP_LOOP: case OP_PLUS_LOOP: case OP_UNLOOP: {
             const bool plus = opcode == OP_PLUS_LOOP;
-            if (!stack.inputs(plus ? 1 : 0) || !stack.outputs(0)) return false;
-            std::array<Cell, 4> cells{};
-            if (!user_return_cells(memory, s, continuations, 2, cells))
-                return false;
-            const Cell next = cells[0] + (plus ? v[0] : Cell{1});
-            const bool repeat = opcode != OP_UNLOOP && next != cells[1];
-            if (repeat && !memory.resolve(s.returns.pointer, 8, true, false, scalar))
-                return false;
-            stack.commit();
-            if (repeat) scalar.write(next, 8);
-            else s.returns.pointer += 16; // retain the last index bytes
-            s.ip = repeat ? operation.a : s.ip + 1;
-            return true;
+            auto returns = path.returns();
+            if (!(plus ? stack.inputs(1) : stack.inputs(0)) || !stack.outputs(0) ||
+                !returns.inputs(2) || !user_cells(path, returns, 2)) return false;
+            const Cell next = returns.values[0] + (plus ? v[0] : Cell{1});
+            if (opcode != OP_UNLOOP && next != returns.values[1]) {
+                // Only the index is written, so only its cell must take one.
+                auto index = path.returns();
+                if (!index.inputs(1) || !index.outputs(1)) return false;
+                path.commit(stack);
+                index.result[0] = next;
+                path.commit(index);
+                path.ip = operation.a;
+                return done();
+            }
+            path.commit(stack);
+            path.release(returns, 2); // retain the last index bytes
+            ++path.ip;
+            return done();
         }
-        case OP_I: case OP_J: {
-            std::array<Cell, 4> cells{};
-            if (!stack.inputs(0) ||
-                !user_return_cells(memory, s, continuations,
-                                   opcode == OP_I ? 2 : 4, cells)) return false;
-            out[0] = cells[opcode == OP_I ? 0 : 2]; produced = 1;
-            break;
-        }
+        case OP_I: return loop_index(2);
+        case OP_J: return loop_index(4);
+        case OP_LITERAL: case OP_PUSH_CELL:
+            if (!stack.inputs(0)) return false;
+            out[0] = operation.a;
+            return leave(1);
+        case OP_STRING_LITERAL:
+            if (!stack.inputs(0)) return false;
+            out[0] = operation.a;
+            out[1] = operation.b;
+            return leave(2);
         case OP_TRUE: case OP_FALSE:
             if (!stack.inputs(0)) return false;
-            out[0] = opcode == OP_TRUE ? MASK : 0; produced = 1;
-            break;
-        case OP_SP_FETCH: case OP_RP_FETCH:
+            out[0] = opcode == OP_TRUE ? MASK : 0;
+            return leave(1);
+        case OP_SP_FETCH:
             if (!stack.inputs(0)) return false;
-            out[0] = opcode == OP_SP_FETCH ? s.data.pointer : s.returns.pointer;
-            produced = 1;
-            break;
+            out[0] = path.sp();
+            return leave(1);
+        case OP_RP_FETCH:
+            if (!stack.inputs(0)) return false;
+            out[0] = path.rp();
+            if (!leave(1)) return false;
+            // Export captures before Python observes a fault or suspension. A
+            // failed push takes the reference path, which registers RP@ before
+            // raising its ordinary overflow fault.
+            ++path.s.pointer_captures;
+            return true;
         case OP_FPCSR_FETCH:
             if (!stack.inputs(0)) return false;
-            out[0] = s.fpcsr; produced = 1;
-            break;
-        case OP_ABORT_IF:
-            // A true flag aborts, which Python performs from this boundary.
-            if (!stack.inputs(1) || !stack.outputs(0) || v[0] != 0) return false;
-            stack.commit();
-            ++s.ip;
-            return true;
+            out[0] = path.s.fpcsr;
+            return leave(1);
+        case OP_FPCSR_STORE:
+            if (!stack.inputs(1) || !stack.outputs(0)) return false;
+            path.commit(stack);
+            path.s.fpcsr = v[0] & 0x1f7;
+            ++path.ip;
+            return done();
+        case OP_SCALAR_FP: {
+            if (operation.a > 0xff || operation.b < 1 || operation.b > 3)
+                return false;
+            const auto fc = static_cast<unsigned>(operation.a);
+            const auto arity = static_cast<unsigned>(operation.b);
+            // FCMP has no cell result and is not a hosted BIOS scalar word.
+            // Decline all malformed descriptors and reserved rounding modes
+            // before any stack/flag effects. Python retains its partial pops
+            // and instruction-fault flow at this original call boundary.
+            const auto code = fc & 0x3f;
+            const unsigned expected_arity =
+                code <= 3 || code == 5 || code == 6 ||
+                    (code >= 0x11 && code <= 0x13) ? 2 :
+                code == 7 || code == 8 ? 3 :
+                code == 4 || code == 0x14 || code >= 0x20 ? 1 : 0;
+            if (arity != expected_arity ||
+                megapad::scalar_fp::validate(fc, 0, path.s.fpcsr) != nullptr ||
+                !(arity == 1 ? stack.inputs(1) : arity == 2 ? stack.inputs(2) :
+                  stack.inputs(3)) || !stack.outputs(1))
+                return false;
+            const Cell rd = arity == 2 ? v[1] : v[0];
+            const Cell rs = arity == 3 ? v[2] : v[0];
+            const Cell rt = arity == 3 ? v[1] : 0;
+            const auto outcome = megapad::scalar_fp::execute(fc, rd, rs, rt, path.s.fpcsr);
+            out[0] = outcome.value;
+            path.commit(stack);
+            path.s.fpcsr |= outcome.flags;
+            ++path.ip;
+            return done();
+        }
+        case OP_FETCH_VALUE:
+            if (!stack.inputs(0) || !path.ordinary(operation.a, 8, false, cell)) return false;
+            out[0] = cell.read(8);
+            return leave(1);
+        case OP_STORE_VALUE:
+            if (!stack.inputs(1) || !stack.outputs(0) ||
+                !path.ordinary(operation.a, 8, true, cell)) return false;
+            path.commit(stack);
+            cell.write(v[0], 8);
+            ++path.ip;
+            return done();
+        case OP_DUP:
+            if (!stack.inputs(1)) return false;
+            out[0] = v[0];
+            out[1] = v[0];
+            return leave(2);
+        case OP_QUESTION_DUP:
+            if (!stack.inputs(1)) return false;
+            out[0] = v[0];
+            out[1] = v[0];
+            return v[0] != 0 ? leave(2) : leave(1);
+        case OP_DROP:
+            return stack.inputs(1) && leave(0);
+        case OP_TWO_DROP:
+            return stack.inputs(2) && leave(0);
+        case OP_SWAP:
+            if (!stack.inputs(2)) return false;
+            out[0] = v[0];
+            out[1] = v[1];
+            return leave(2);
+        case OP_OVER:
+            if (!stack.inputs(2)) return false;
+            out[0] = v[1];
+            out[1] = v[0];
+            out[2] = v[1];
+            return leave(3);
+        case OP_NIP:
+            if (!stack.inputs(2)) return false;
+            out[0] = v[0];
+            return leave(1);
+        case OP_TUCK:
+            if (!stack.inputs(2)) return false;
+            out[0] = v[0];
+            out[1] = v[1];
+            out[2] = v[0];
+            return leave(3);
+        case OP_ROT:
+            if (!stack.inputs(3)) return false;
+            out[0] = v[1];
+            out[1] = v[0];
+            out[2] = v[2];
+            return leave(3);
+        case OP_MINUS_ROT:
+            if (!stack.inputs(3)) return false;
+            out[0] = v[0];
+            out[1] = v[2];
+            out[2] = v[1];
+            return leave(3);
+        case OP_TWO_DUP:
+            if (!stack.inputs(2)) return false;
+            out[0] = v[1];
+            out[1] = v[0];
+            out[2] = v[1];
+            out[3] = v[0];
+            return leave(4);
+        case OP_TWO_OVER:
+            if (!stack.inputs(4)) return false;
+            out[0] = v[3];
+            out[1] = v[2];
+            out[2] = v[1];
+            out[3] = v[0];
+            out[4] = v[3];
+            out[5] = v[2];
+            return leave(6);
+        case OP_TWO_SWAP:
+            if (!stack.inputs(4)) return false;
+            out[0] = v[1];
+            out[1] = v[0];
+            out[2] = v[3];
+            out[3] = v[2];
+            return leave(4);
+        case OP_PICK:
+            if (!stack.inputs(1) || stack.depth() < 2 || v[0] > stack.depth() - 2 ||
+                !stack.deep(v[0] + 1, out[0])) return false;
+            return leave(1);
+        case OP_NEGATE: return unary(OP_NEGATE);
+        case OP_ABS: return unary(OP_ABS);
+        case OP_ONE_PLUS: return unary(OP_ONE_PLUS);
+        case OP_ONE_MINUS: return unary(OP_ONE_MINUS);
+        case OP_TWO_MULTIPLY: return unary(OP_TWO_MULTIPLY);
+        case OP_TWO_DIVIDE: return unary(OP_TWO_DIVIDE);
+        case OP_CELLS: return unary(OP_CELLS);
+        case OP_CELL_PLUS: return unary(OP_CELL_PLUS);
+        case OP_INVERT: return unary(OP_INVERT);
+        case OP_ZERO_EQUAL: return unary(OP_ZERO_EQUAL);
+        case OP_ZERO_NOT_EQUAL: return unary(OP_ZERO_NOT_EQUAL);
+        case OP_ZERO_LESS: return unary(OP_ZERO_LESS);
+        case OP_ZERO_GREATER: return unary(OP_ZERO_GREATER);
+        case OP_BSWAP: return unary(OP_BSWAP);
+        case OP_ADD: return binary(OP_ADD);
+        case OP_SUBTRACT: return binary(OP_SUBTRACT);
+        case OP_MULTIPLY: return binary(OP_MULTIPLY);
+        case OP_MIN: return binary(OP_MIN);
+        case OP_MAX: return binary(OP_MAX);
+        case OP_AND: return binary(OP_AND);
+        case OP_OR: return binary(OP_OR);
+        case OP_XOR: return binary(OP_XOR);
+        case OP_LSHIFT: return binary(OP_LSHIFT);
+        case OP_RSHIFT: return binary(OP_RSHIFT);
+        case OP_EQUAL: return binary(OP_EQUAL);
+        case OP_NOT_EQUAL: return binary(OP_NOT_EQUAL);
+        case OP_ULESS: return binary(OP_ULESS);
+        case OP_UGREATER: return binary(OP_UGREATER);
+        case OP_LESS: return binary(OP_LESS);
+        case OP_LESS_EQUAL: return binary(OP_LESS_EQUAL);
+        case OP_GREATER: return binary(OP_GREATER);
+        case OP_GREATER_EQUAL: return binary(OP_GREATER_EQUAL);
+        case OP_UMULTIPLY: {
+            if (!stack.inputs(2)) return false;
+            const __uint128_t product = static_cast<__uint128_t>(v[1]) * v[0];
+            out[0] = static_cast<Cell>(product);
+            out[1] = static_cast<Cell>(product >> 64);
+            return leave(2);
+        }
+        case OP_DIVIDE: case OP_MODULO: case OP_DIVMOD: {
+            // Division by zero and the one overflowing quotient fault, which
+            // Python raises.
+            if (!stack.inputs(2) || v[0] == 0 ||
+                (opcode != OP_MODULO && v[1] == SIGN && v[0] == MASK)) return false;
+            Cell quotient = magnitude(v[1]) / magnitude(v[0]);
+            if ((v[1] ^ v[0]) & SIGN) quotient = Cell{0} - quotient;
+            const Cell remainder = v[1] - quotient * v[0];
+            out[0] = opcode == OP_DIVIDE ? quotient : remainder;
+            out[1] = quotient;
+            return opcode == OP_DIVMOD ? leave(2) : leave(1);
+        }
+        case OP_WITHIN:
+            if (!stack.inputs(3)) return false;
+            out[0] = flag(v[2] - v[1] < v[0] - v[1]);
+            return leave(1);
+        case OP_FETCH: return fetch(8);
+        case OP_C_FETCH: return fetch(1);
+        case OP_W_FETCH: return fetch(2);
+        case OP_L_FETCH: return fetch(4);
+        case OP_COUNT:
+            if (!stack.inputs(1) || !path.ordinary(v[0], 1, false, cell)) return false;
+            out[0] = v[0] + 1;
+            out[1] = cell.read(1);
+            return leave(2);
+        case OP_STORE: return store(2, 8, [&] { return v[1]; });
+        case OP_C_STORE: return store(2, 1, [&] { return v[1]; });
+        case OP_W_STORE: return store(2, 2, [&] { return v[1]; });
+        case OP_L_STORE: return store(2, 4, [&] { return v[1]; });
+        case OP_PLUS_STORE: return store(2, 8, [&] { return cell.read(8) + v[1]; });
+        case OP_OFF: return store(1, 8, [] { return Cell{0}; });
+        case OP_ON: return store(1, 8, [] { return MASK; });
+        default:
+            if constexpr (Path::complete) return rare_effect(path, operation, stack) && done();
+            else return false;
+        }
+    }
+
+    // The operations only the general path performs: they resolve byte
+    // spans, ask the tile service's owner, or enter a machine routine.
+    [[gnu::noinline]] bool rare_effect(GeneralPath& path, Instruction& operation,
+                                       StackOperation& stack) {
+        const auto opcode = operation.opcode;
+        RunState& s = path.s;
+        auto& v = stack.values;
+        switch (opcode) {
         case OP_TILE_MODE_SET:
             if (!tile_admitted(s) || !stack.inputs(0) || !stack.outputs(0)) return false;
             stack.commit();
@@ -1587,237 +2173,112 @@ private:
             ++s.ip;
             return true;
         case OP_TILE_BINARY:
-            return tile_admitted(s) && execute_tile_binary(operation, memory, s, stack);
-        case OP_FPCSR_STORE:
-            if (!stack.inputs(1) || !stack.outputs(0)) return false;
-            stack.commit();
-            s.fpcsr = v[0] & 0x1f7;
-            ++s.ip;
-            return true;
-        case OP_SCALAR_FP: {
-            if (operation.a > 0xff || operation.b < 1 || operation.b > 3)
-                return false;
-            const auto fc = static_cast<unsigned>(operation.a);
-            const auto arity = static_cast<unsigned>(operation.b);
-            // FCMP has no cell result and is not a hosted BIOS scalar word.
-            // Decline all malformed descriptors and reserved rounding modes
-            // before any stack/flag effects. Python retains its partial pops
-            // and instruction-fault flow at this original call boundary.
-            const auto code = fc & 0x3f;
-            const unsigned expected_arity =
-                code <= 3 || code == 5 || code == 6 ||
-                    (code >= 0x11 && code <= 0x13) ? 2 :
-                code == 7 || code == 8 ? 3 :
-                code == 4 || code == 0x14 || code >= 0x20 ? 1 : 0;
-            if (arity != expected_arity ||
-                megapad::scalar_fp::validate(fc, 0, s.fpcsr) != nullptr ||
-                !stack.inputs(arity) || !stack.outputs(1))
-                return false;
-            const Cell rd = arity == 2 ? v[1] : v[0];
-            const Cell rs = arity == 3 ? v[2] : v[0];
-            const Cell rt = arity == 3 ? v[1] : 0;
-            const auto outcome = megapad::scalar_fp::execute(fc, rd, rs, rt, s.fpcsr);
-            out[0] = outcome.value;
-            stack.commit();
-            s.fpcsr |= outcome.flags;
-            ++s.ip;
-            return true;
-        }
-        case OP_LITERAL: case OP_PUSH_CELL:
-            if (!stack.inputs(0)) return false;
-            out[0] = operation.a; produced = 1;
-            break;
-        case OP_STRING_LITERAL:
-            if (!stack.inputs(0)) return false;
-            out[0] = operation.a; out[1] = operation.b; produced = 2;
-            break;
-        case OP_FETCH_VALUE:
-            if (!stack.inputs(0) ||
-                !memory.resolve(operation.a, 8, false, true, scalar)) return false;
-            out[0] = scalar.read(8); produced = 1;
-            break;
-        case OP_STORE_VALUE:
-            if (!stack.inputs(1) || !stack.outputs(0) ||
-                !memory.resolve(operation.a, 8, true, true, scalar)) return false;
-            stack.commit();
-            scalar.write(v[0], 8);
-            ++s.ip;
-            return true;
-        case OP_DUP: case OP_QUESTION_DUP:
-            if (!stack.inputs(1)) return false;
-            out[0] = v[0]; out[1] = v[0];
-            produced = opcode == OP_DUP || v[0] != 0 ? 2 : 1;
-            break;
-        case OP_DROP: case OP_TWO_DROP:
-            if (!stack.inputs(opcode == OP_DROP ? 1 : 2)) return false;
-            break;
-        case OP_SWAP:
-            if (!stack.inputs(2)) return false;
-            out[0] = v[0]; out[1] = v[1]; produced = 2;
-            break;
-        case OP_OVER:
-            if (!stack.inputs(2)) return false;
-            out[0] = v[1]; out[1] = v[0]; out[2] = v[1]; produced = 3;
-            break;
-        case OP_NIP:
-            if (!stack.inputs(2)) return false;
-            out[0] = v[0]; produced = 1;
-            break;
-        case OP_TUCK:
-            if (!stack.inputs(2)) return false;
-            out[0] = v[0]; out[1] = v[1]; out[2] = v[0]; produced = 3;
-            break;
-        case OP_ROT: case OP_MINUS_ROT:
-            if (!stack.inputs(3)) return false;
-            out[0] = opcode == OP_ROT ? v[1] : v[0];
-            out[1] = opcode == OP_ROT ? v[0] : v[2];
-            out[2] = opcode == OP_ROT ? v[2] : v[1]; produced = 3;
-            break;
-        case OP_TWO_DUP:
-            if (!stack.inputs(2)) return false;
-            out[0] = v[1]; out[1] = v[0]; out[2] = v[1]; out[3] = v[0];
-            produced = 4;
-            break;
-        case OP_TWO_OVER:
-            if (!stack.inputs(4)) return false;
-            out[0] = v[3]; out[1] = v[2]; out[2] = v[1]; out[3] = v[0];
-            out[4] = v[3]; out[5] = v[2]; produced = 6;
-            break;
-        case OP_TWO_SWAP:
-            if (!stack.inputs(4)) return false;
-            out[0] = v[1]; out[1] = v[0]; out[2] = v[3]; out[3] = v[2];
-            produced = 4;
-            break;
-        case OP_PICK:
-            if (!stack.inputs(1) || s.data.depth() < 2 ||
-                v[0] > s.data.depth() - 2 ||
-                !memory.resolve(s.data.pointer + (v[0] + 1) * 8,
-                                8, false, false, scalar)) return false;
-            out[0] = scalar.read(8); produced = 1;
-            break;
-        case OP_NEGATE: case OP_ABS: case OP_ONE_PLUS: case OP_ONE_MINUS:
-        case OP_TWO_MULTIPLY: case OP_TWO_DIVIDE: case OP_INVERT:
-        case OP_ZERO_EQUAL: case OP_ZERO_NOT_EQUAL: case OP_ZERO_LESS:
-        case OP_ZERO_GREATER: case OP_BSWAP: case OP_CELLS: case OP_CELL_PLUS:
-            if (!stack.inputs(1)) return false;
-            produced = 1;
-            switch (opcode) {
-            case OP_NEGATE: out[0] = Cell{0} - v[0]; break;
-            case OP_ABS: out[0] = magnitude(v[0]); break;
-            case OP_ONE_PLUS: out[0] = v[0] + 1; break;
-            case OP_ONE_MINUS: out[0] = v[0] - 1; break;
-            case OP_TWO_MULTIPLY: out[0] = v[0] << 1; break;
-            case OP_CELLS: out[0] = v[0] << 3; break;
-            case OP_CELL_PLUS: out[0] = v[0] + Cell{8}; break;
-            case OP_TWO_DIVIDE: out[0] = (v[0] >> 1) | (v[0] & SIGN); break;
-            case OP_INVERT: out[0] = ~v[0]; break;
-            case OP_ZERO_EQUAL: out[0] = flag(v[0] == 0); break;
-            case OP_ZERO_NOT_EQUAL: out[0] = flag(v[0] != 0); break;
-            case OP_ZERO_LESS: out[0] = flag((v[0] & SIGN) != 0); break;
-            case OP_ZERO_GREATER: out[0] = flag(v[0] != 0 && !(v[0] & SIGN)); break;
-            case OP_BSWAP:
-                out[0] = 0;
-                for (unsigned i = 0; i < 8; ++i)
-                    out[0] |= ((v[0] >> (i * 8)) & 255) << ((7 - i) * 8);
-                break;
-            default: return false;
-            }
-            break;
-        case OP_ADD: case OP_SUBTRACT: case OP_MULTIPLY: case OP_UMULTIPLY:
-        case OP_DIVIDE: case OP_MODULO: case OP_DIVMOD:
-        case OP_MIN: case OP_MAX: case OP_AND: case OP_OR: case OP_XOR:
-        case OP_LSHIFT: case OP_RSHIFT: case OP_EQUAL: case OP_NOT_EQUAL:
-        case OP_ULESS: case OP_UGREATER: case OP_LESS: case OP_LESS_EQUAL:
-        case OP_GREATER: case OP_GREATER_EQUAL:
-            if (!stack.inputs(2)) return false;
-            produced = 1;
-            switch (opcode) {
-            case OP_ADD: out[0] = v[1] + v[0]; break;
-            case OP_SUBTRACT: out[0] = v[1] - v[0]; break;
-            case OP_MULTIPLY: out[0] = v[1] * v[0]; break;
-            case OP_UMULTIPLY: {
-                const __uint128_t product = static_cast<__uint128_t>(v[1]) * v[0];
-                out[0] = static_cast<Cell>(product);
-                out[1] = static_cast<Cell>(product >> 64); produced = 2;
-                break;
-            }
-            case OP_DIVIDE: case OP_MODULO: case OP_DIVMOD: {
-                if (v[0] == 0 || (opcode != OP_MODULO && v[1] == SIGN && v[0] == MASK))
-                    return false;
-                Cell quotient = magnitude(v[1]) / magnitude(v[0]);
-                if ((v[1] ^ v[0]) & SIGN) quotient = Cell{0} - quotient;
-                const Cell remainder = v[1] - quotient * v[0];
-                out[0] = opcode == OP_DIVIDE ? quotient : remainder;
-                if (opcode == OP_DIVMOD) { out[1] = quotient; produced = 2; }
-                break;
-            }
-            case OP_MIN: out[0] = less_signed(v[0], v[1]) ? v[0] : v[1]; break;
-            case OP_MAX: out[0] = less_signed(v[1], v[0]) ? v[0] : v[1]; break;
-            case OP_AND: out[0] = v[1] & v[0]; break;
-            case OP_OR: out[0] = v[1] | v[0]; break;
-            case OP_XOR: out[0] = v[1] ^ v[0]; break;
-            case OP_LSHIFT: out[0] = v[1] << (v[0] & 63); break;
-            case OP_RSHIFT: out[0] = v[1] >> (v[0] & 63); break;
-            case OP_EQUAL: out[0] = flag(v[1] == v[0]); break;
-            case OP_NOT_EQUAL: out[0] = flag(v[1] != v[0]); break;
-            case OP_ULESS: out[0] = flag(v[1] < v[0]); break;
-            case OP_UGREATER: out[0] = flag(v[1] > v[0]); break;
-            case OP_LESS: out[0] = flag(less_signed(v[1], v[0])); break;
-            case OP_LESS_EQUAL: out[0] = flag(!less_signed(v[0], v[1])); break;
-            case OP_GREATER: out[0] = flag(less_signed(v[0], v[1])); break;
-            case OP_GREATER_EQUAL: out[0] = flag(!less_signed(v[1], v[0])); break;
-            default: return false;
-            }
-            break;
-        case OP_WITHIN:
-            if (!stack.inputs(3)) return false;
-            out[0] = flag(v[2] - v[1] < v[0] - v[1]); produced = 1;
-            break;
-        case OP_FETCH: case OP_C_FETCH: case OP_W_FETCH: case OP_L_FETCH: {
-            const unsigned width = opcode == OP_FETCH ? 8 :
-                opcode == OP_C_FETCH ? 1 : opcode == OP_W_FETCH ? 2 : 4;
-            if (!stack.inputs(1) || !memory.resolve(v[0], width, false, true, scalar))
-                return false;
-            out[0] = scalar.read(width); produced = 1;
-            break;
-        }
-        case OP_COUNT:
-            if (!stack.inputs(1) || !memory.resolve(v[0], 1, false, true, scalar))
-                return false;
-            out[0] = v[0] + 1; out[1] = scalar.read(1); produced = 2;
-            break;
+            return tile_admitted(s) && execute_tile_binary(operation, path.memory, s, stack);
         case OP_COMPARE: case OP_FILL: case OP_CMOVE: case OP_CMOVE_UP: case OP_MOVE:
-            return execute_bulk(opcode, memory, s, stack);
+            return execute_bulk(opcode, path.memory, s, stack);
         case OP_CALL_ROUTINE:
-            return call_routine(operation, memory, s, continuations, plan);
-        case OP_STORE: case OP_C_STORE: case OP_W_STORE: case OP_L_STORE:
-        case OP_OFF: case OP_ON: case OP_PLUS_STORE: {
-            const bool unary = opcode == OP_OFF || opcode == OP_ON;
-            const unsigned width = opcode == OP_C_STORE ? 1 :
-                opcode == OP_W_STORE ? 2 : opcode == OP_L_STORE ? 4 : 8;
-            if (!stack.inputs(unary ? 1 : 2) || !stack.outputs(0) ||
-                !memory.resolve(v[0], width, true, true, scalar)) return false;
-            const Cell value = opcode == OP_OFF ? 0 : opcode == OP_ON ? MASK :
-                opcode == OP_PLUS_STORE ? scalar.read(8) + v[1] : v[1];
-            stack.commit();
-            scalar.write(value, width);
-            ++s.ip;
-            return true;
-        }
+            return call_routine(operation, path.memory, s, path.continuations, path.plan);
         default:
             return false;
         }
-        if (!stack.outputs(produced)) return false;
-        stack.commit();
-        // Export captures before Python observes a fault or suspension. A
-        // failed push takes the reference path, which registers RP@ before
-        // raising its ordinary overflow fault.
-        if (opcode == OP_RP_FETCH) ++s.pointer_captures;
-        ++s.ip;
+    }
+
+    // A pair the planner fused, done as one when both halves can finish. A
+    // false answer leaves the first half to run alone.
+    template <class Path>
+    bool fused_effect(Path& path, const Instruction& first, const Instruction& next) {
+        auto stack = path.data();
+        const Cell pair = cost(first.opcode) + cost(first.fused);
+        if (first.fused >= OP_FETCH && first.fused <= OP_L_FETCH) {
+            const unsigned width = first.fused == OP_FETCH ? 8 :
+                1U << (first.fused - OP_C_FETCH);
+            typename Path::Memory source;
+            if (!stack.inputs(0) || !stack.outputs(1) ||
+                !path.ordinary(first.a, width, false, source))
+                return false;
+            // A guest read can alias the address just pushed onto its stack.
+            // Perform that write before reading, after both operations have
+            // passed preflight. A miss leaves the original first op intact.
+            stack.result[0] = first.a;
+            path.commit(stack);
+            stack.result[0] = source.read(width);
+            path.commit(stack);
+            path.ip += 2;
+            path.count(pair);
+            return true;
+        }
+        if (!stack.inputs(1)) return false;
+        const Cell left = stack.values[0];
+        if (first.opcode == OP_DUP) {
+            if (!stack.outputs(2)) return false;
+            stack.result[0] = left;
+            stack.result[1] = left;
+            path.commit(stack);
+            path.release(stack, 1); // BRANCH_ZERO consumes the duplicate.
+            path.ip = left == 0 ? next.a : path.ip + 2;
+            path.count(pair);
+            return true;
+        }
+        // Even though the literal is consumed immediately, its guest stack
+        // slot must exist and retain its bytes below the result.
+        Cell value;
+        if (!stack.outputs(2) || !binary_value(first.fused, left, first.a, value))
+            return false;
+        stack.result[0] = value;
+        stack.result[1] = first.a;
+        path.commit(stack);
+        path.release(stack, 1);
+        path.ip += 2;
+        path.count(pair);
         return true;
     }
 
+    // Run ``operation``, the one at the instruction pointer, or the pair it
+    // heads. False leaves everything as it was: the operation is one this
+    // program stops at, or the allowance does not cover it, or the path
+    // cannot perform it.
+    template <class Path>
+    bool step(Path& path, Instruction& operation, Cell limit) {
+        const Cell left = limit - path.steps;
+        const Cell own = cost(operation.opcode);
+        if (operation.opcode == OP_STOP || own > left) return false;
+        if (operation.fused != OP_STOP && own + cost(operation.fused) <= left &&
+            fused_effect(path, operation, *(&operation + 1)))
+            return true;
+        path.begin(own);
+        return effect(path, operation);
+    }
+
+#ifdef MEGAFORTH_DIRECT_PATH
+    // Run on the direct path until an operation needs the general one, the
+    // plan ends or the step allowance is spent. ``state`` holds the completed
+    // prefix on every way out, an allocation failure in the change record
+    // included. Returns the plan execution stands in.
+    //
+    // Flattening inlines the path's accessors into every operation. One left
+    // out of line would force the values it reaches into memory.
+    [[gnu::flatten]] Plan* run_direct(RunState& state, const MemoryRun& memory, Plan* plan,
+                                      const Cell limit) {
+        DirectPath path(state, memory, plan);
+        // No operation costs more than a primitive's steps, so no fused pair
+        // costs more than twice that. With that many steps left, step's
+        // checks of the allowance cannot fail and the compiler drops them.
+        // The general path runs the last few steps of an interval.
+        constexpr Cell WIDEST = 2 * cost(OP_DUP);
+        try {
+            while (path.ip < path.size && limit - path.steps >= WIDEST &&
+                   step(path, path.code[path.ip], limit)) {}
+        } catch (...) {
+            path.publish();
+            throw;
+        }
+        path.publish();
+        return path.plan;
+    }
+#endif
+
     Cell page_size_;
+    Cell direct_steps_ = 0;
     py::object continuation_type_;
     std::vector<Region> regions_;
     std::unordered_map<Cell, Plan> plans_;
@@ -1848,6 +2309,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
         .def("install", &NativeProgram::install, py::arg("xt"), py::arg("operations"),
              py::arg("overlaid") = false)
         .def("clear", &NativeProgram::clear)
+        .def_property_readonly("direct_steps", &NativeProgram::direct_steps)
         .def("bind_tile_guard", &NativeProgram::bind_tile_guard, py::arg("guard"))
         .def("snapshot_stack", &NativeProgram::snapshot_stack,
              py::arg("bounds"), py::arg("continuations") = py::none())
