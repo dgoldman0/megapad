@@ -33,11 +33,11 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-dictionary-index-2407-2495.f"
+    / "kdos-dictionary-index-2419-2507.f"
 )
 
-FIRST_LINE = 2407
-LAST_LINE = 2495
+FIRST_LINE = 2419
+LAST_LINE = 2507
 SLICE_SHA256 = (
     "c0a96826bdf91ede3a101e5c0ff32e97cd1a7074d99812c38e0dc2b66a84e054"
 )
@@ -426,7 +426,7 @@ def test_index_doubles_at_three_quarters_and_frees_the_old_table() -> None:
     assert _execute(runtime, "DICT-INDEX@") == (
         EXTERNAL_BASE,
         1_024,
-        764,
+        766,
         DICT_INDEX_BOUND | DICT_INDEX_AUTHORITATIVE,
     )
     assert runtime.dictionary_index.notification == (768, grow)
@@ -436,7 +436,7 @@ def test_index_doubles_at_three_quarters_and_frees_the_old_table() -> None:
     # A general allocation first, so the grown table does not start at the
     # floor.  The 767th name stays in the boot table.
     assert _execute(runtime, "XMEM-ALLOT", 100) == (floor,)
-    _define_words(runtime, "BELOW", 3)
+    _define_words(runtime, "BELOW", 1)
     assert _execute(runtime, "DICT-INDEX@")[:3] == (EXTERNAL_BASE, 1_024, 767)
 
     _define_words(runtime, "CROSS", 1)
@@ -470,7 +470,7 @@ def test_xmem_reset_rebinds_a_grown_table_at_the_floor() -> None:
     assert _execute(runtime, "DICT-INDEX@") == (
         floor,
         2_048,
-        786,
+        788,
         DICT_INDEX_BOUND | DICT_INDEX_AUTHORITATIVE,
     )
     assert _pointer(runtime, "XMEM-HERE") == raised

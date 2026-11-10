@@ -5824,10 +5824,12 @@ class TestBIOSTACC(unittest.TestCase):
         return tuple(base + offset for offset in (0, 64, 128, 192, 512))
 
     def test_tacc_dictionary_tail_chain(self):
-        """WOTS, AES's block-mode words, SHA-384 and the storage unit words
-        append after the unchanged full-TACC dictionary tail."""
+        """WOTS, AES's block-mode words, SHA-384, the storage unit words and
+        the QUIT callback append after the unchanged full-TACC dictionary
+        tail."""
         labels = self._labels
         chain = (
+            ("d_quit_xt_store", "d_unit_disk_flush_gen_checked"),
             ("d_unit_disk_flush_gen_checked", "d_unit_disk_write_gen_checked"),
             ("d_unit_disk_write_gen_checked", "d_unit_disk_read_gen_checked"),
             ("d_unit_disk_read_gen_checked", "d_unit_disk_caps"),
@@ -5864,9 +5866,7 @@ class TestBIOSTACC(unittest.TestCase):
             ("d_tamac", "d_caller_span_status"),
             ("d_caller_span_status", "d_entropy_ready"),
         )
-        self.assertEqual(
-            labels["latest_entry"], labels["d_unit_disk_flush_gen_checked"],
-        )
+        self.assertEqual(labels["latest_entry"], labels["d_quit_xt_store"])
         for current, previous in chain:
             link = int.from_bytes(
                 self._code[labels[current]:labels[current] + 8],
@@ -5883,7 +5883,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 558)
+        self.assertEqual(len(seen), 559)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -6133,6 +6133,59 @@ class TestBIOSInstructionFaults(unittest.TestCase):
         self.assertIn("A=-21 0 ", text)
         self.assertIn("B=-10 0 ", text)
         self.assertIn("C=-23 0 ", text)
+
+
+class TestBIOSQuitCallback(unittest.TestCase):
+    """QUIT runs the callback installed with QUIT-XT! once it has reset the
+    return stack, which ABORT, ABORT" and QUIT all reach."""
+
+    def setUp(self):
+        self._bios_harness = TestBIOS(methodName="test_print_zero")
+        self._bios_harness.setUp()
+
+    def _run(self, lines):
+        sys_obj, buf = self._bios_harness._boot_bios()
+        text = self._bios_harness._run_forth(
+            sys_obj, buf, ["VARIABLE KEEP 7 KEEP !"] + lines)
+        self.assertNotIn("Megapad-64 Forth BIOS", text)
+        return text
+
+    def test_abort_abort_quote_and_quit_each_run_the_callback_once(self):
+        text = self._run([
+            "VARIABLE RUNS : NOTE 1 RUNS +! ; ' NOTE QUIT-XT!",
+            ": DEEP 1 2 3 >R ABORT ; DEEP",
+            '." A=" RUNS @ . DEPTH . KEEP @ .',
+            ': TOLD 4 5 TRUE ABORT" told" ; TOLD',
+            '." B=" RUNS @ . DEPTH .',
+            ": LEFT 6 >R QUIT ; LEFT",
+            '." C=" RUNS @ . DEPTH .',
+            "1 0 /",
+            '." D=" RUNS @ . DEPTH .',
+            "0 QUIT-XT! ABORT",
+            '." E=" RUNS @ . DEPTH .',
+        ])
+        self.assertIn("A=1 0 7 ", text)
+        # Once in the echoed line and once as the message.
+        self.assertEqual(text.count("told"), 2)
+        self.assertIn("B=2 0 ", text)
+        self.assertIn("C=3 0 ", text)
+        # The recovery after a machine fault ends in ABORT as well.
+        self.assertIn("*** DIVIDE BY ZERO PC=", text)
+        self.assertIn("D=4 0 ", text)
+        # Zero removes the callback.
+        self.assertIn("E=4 0 ", text)
+
+    def test_the_callback_runs_on_the_reset_return_stack(self):
+        text = self._run([
+            "VARIABLE AT-QUIT : NOTE RP@ AT-QUIT ! ; ' NOTE QUIT-XT!",
+            "VARIABLE AT-PROMPT : HERE-NOW RP@ AT-PROMPT ! ; HERE-NOW",
+            ": DEEPER 1 >R 2 >R 3 >R ABORT ; DEEPER",
+            '." SAME=" AT-QUIT @ AT-PROMPT @ = . DEPTH .',
+            "0 QUIT-XT!",
+        ])
+        # A word called from the prompt and the callback called from QUIT
+        # both sit one return address below the top of the stack.
+        self.assertIn("SAME=-1 0 ", text)
 
 
 class TestBIOSIdle(unittest.TestCase):
@@ -13794,6 +13847,35 @@ class TestKDOSExceptions(_KDOSTestBase):
         self.assertEqual(text.count("uncaught THROW 5 "), 1)
         self.assertRegex(text, r"\[TX-AGAIN\s+0\s+0\s+\]")
 
+    def test_abort_inside_catch_leaves_no_frame_for_a_later_throw(self):
+        """ABORT under a CATCH clears the chain head through BIOS QUIT."""
+        text = self._run_kdos([
+            ': AB-IN  11 22 TRUE ABORT" inside" ;',
+            ": AB-CATCH  ['] AB-IN CATCH ;",
+            "AB-CATCH",
+            'CR ." [AB-AFTER " HANDLER @ . DEPTH . ." ]"',
+            ": AB-D1 7 THROW ; : AB-D2 AB-D1 ; : AB-D3 AB-D2 ; : AB-D4 AB-D3 ;",
+            "AB-D4",
+            'CR ." [AB-THROWN " HANDLER @ . DEPTH . 6 7 * . ." ]"',
+            "1 0 /",
+            'CR ." [AB-FAULTED " HANDLER @ . DEPTH . ." ]"',
+            ": AB-LIVE  -9 THROW ;",
+            "' AB-LIVE CATCH",
+            'CR ." [AB-CAUGHT " . HANDLER @ . DEPTH . ." ]"',
+        ])
+        # The frame CATCH pushed died with the return stack, and the chain
+        # head no longer names it.
+        self.assertIn("inside", text)
+        self.assertRegex(text, r"\[AB-AFTER\s+0\s+0\s+\]")
+        # So a THROW from four words down is uncaught and says so, a fault
+        # reaches the BIOS report, and each time the next line answers.
+        self.assertEqual(text.count("uncaught THROW 7 "), 1)
+        self.assertRegex(text, r"\[AB-THROWN\s+0\s+0\s+42\s+\]")
+        self.assertEqual(text.count("*** DIVIDE BY ZERO PC="), 1)
+        self.assertRegex(text, r"\[AB-FAULTED\s+0\s+0\s+\]")
+        self.assertNotIn("Stack overflow", text)
+        self.assertRegex(text, r"\[AB-CAUGHT\s+-9\s+0\s+0\s+\]")
+
     def test_catch_no_throw(self):
         """CATCH returns 0 when XT completes normally."""
         text = self._run_kdos([
@@ -16184,7 +16266,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 558)
+        self.assertEqual(len(seen), 559)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -17807,12 +17889,10 @@ class TestBIOSEntropyFill(unittest.TestCase):
 
     def test_dictionary_append_preserves_every_older_link(self):
         """WOTS, then AES's block-mode words, then SHA-384, then the storage
-        unit words append without changing any older dictionary link."""
+        unit words, then the QUIT callback append without changing any older
+        dictionary link."""
         labels = self._bios_labels
-        self.assertEqual(
-            labels["latest_entry"],
-            labels["d_unit_disk_flush_gen_checked"],
-        )
+        self.assertEqual(labels["latest_entry"], labels["d_quit_xt_store"])
         for current, previous in (
             ("d_disk_units", "d_sha384_final"),
             ("d_sha384_final", "d_sha384_init"),

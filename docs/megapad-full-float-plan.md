@@ -806,7 +806,7 @@ Progress:
   checked load unwinds like any exception and leaves the handler chain
   intact; with no `CATCH` it returns and the BIOS reports. The hosted
   simulator routes its divide-by-zero and illegal-instruction traps the
-  same way. `ABORT` inside `CATCH` still leaves a stale handler (§7).
+  same way.
 
 ## 6. Testing and resource rules
 
@@ -890,11 +890,11 @@ without fixing them.
   prints `uncaught THROW` and its code and takes the BIOS `ABORT`
   (`: T5 5 THROW ; T5` returns to the prompt). It ran `0 RP!` into wild
   code before.
-- **`ABORT` inside KDOS `CATCH`.** The BIOS `ABORT` (and `ABORT"`) resets
-  the stacks without unwinding the KDOS handler chain, so the foreground
-  `HANDLER` keeps naming the dead frame. A later `THROW`, or an instruction
-  fault through `_KDOS-FAULT`, then unwinds to it. Standard Forth makes
-  `ABORT` a `-1 THROW`; KDOS would need a BIOS abort hook to do the same.
+- **`ABORT` inside KDOS `CATCH`.** Fixed since: BIOS `QUIT`, where `ABORT`
+  and `ABORT"` end, runs a callback installed with `QUIT-XT!`, and KDOS's
+  clears the chain head of the context whose stack was reset. The head
+  kept naming the dead frame before, and a later `THROW` or instruction
+  fault unwound into it.
 - **`test_system.py` memory in one process.** Run as one pytest process,
   the file's memory grows past the 3.5 GiB guard around the network-stack
   tests, although each test alone stays under 500 MiB. Run it in chunks of

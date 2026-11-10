@@ -31,12 +31,12 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-micro-clusters-7699-7806.f"
+    / "kdos-micro-clusters-7711-7818.f"
 )
 
-FIRST_LINE = 7699
-FIXTURE_LAST_LINE = 7806
-LAST_LINE = 7805
+FIRST_LINE = 7711
+FIXTURE_LAST_LINE = 7818
+LAST_LINE = 7817
 FIXTURE_BYTES = 3_755
 FIXTURE_SHA256 = (
     "ab779a33407b88f24c44bd058ce9c389e90531c80506ef0b16a6aab43c6062cc"

@@ -47,12 +47,12 @@ from tests.simulator.test_kdos_diagnostics import _load_diagnostics
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
-FIXTURE = Path(__file__).with_name("fixtures") / "kdos-aes-920-1088.f"
+FIXTURE = Path(__file__).with_name("fixtures") / "kdos-aes-932-1100.f"
 
 MEGAPAD_REVISION = "b8e1a7e174fb50d7ea3cb5f5f8d10917ed329ec4"
-KDOS_GIT_BLOB = "8899cdb968200fa997afa95d55c492016587a094"
-FIRST_LINE = 920
-LAST_LINE = 1088
+KDOS_GIT_BLOB = "3db6165c7a2a29090eecd02edc4a1df10b76065b"
+FIRST_LINE = 932
+LAST_LINE = 1100
 SLICE_SHA256 = "e60ede1c4ad4370dd50f79a763a8835e6421700e4c0e8ea1b04b6331b13179cf"
 SLICE_GIT_BLOB = "568faa0aa53cd94a88151474d509b34c1a7eec97"
 DEFINITIONS = (

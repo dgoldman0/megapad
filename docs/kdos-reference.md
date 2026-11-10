@@ -152,15 +152,18 @@ unwind to. It prints `uncaught THROW ` and the code, in decimal whatever
 `BASE` holds, ends the line, and takes the BIOS `ABORT`, which clears both
 stacks and returns to the prompt; `BASE` keeps its value.
 
-The BIOS `ABORT`, `ABORT"` and `QUIT` reset the return stack without telling
-KDOS, so one taken inside a `CATCH` leaves that frame's address in the
-foreground `HANDLER`. A later `THROW`, or a machine fault through
-`_KDOS-FAULT`, then finds a nonzero handler and unwinds into the dead frame.
-On the emulator the code or the fault then goes unreported, the data stack
-pointer takes a stale cell's value until the BIOS's end-of-line check
-answers `Stack overflow` and resets it, and `HANDLER` keeps a wrong value.
-Clearing the handler when the BIOS resets the stack needs a hook in the
-BIOS, which it does not have.
+`ABORT`, `ABORT"` and `QUIT` reset the return stack, and every `CATCH` frame
+on it goes with it. All three end in BIOS `QUIT`, which runs the callback
+KDOS installs with `QUIT-XT!`. That callback, `_KDOS-QUIT`, clears the chain
+head of the context that was running, and on core 0 the foreground head as
+well, because the stack `QUIT` resets there is the foreground's. After an
+abort inside a `CATCH`, a `THROW` therefore finds no frame and is reported
+as uncaught, and a machine fault reaches the BIOS report.
+
+The callback changes nothing else about an abort outside the foreground.
+The BIOS does not end a background task or a worker core's job that
+aborts: `ABORT` resets that core's stack pointers and enters the prompt loop
+from there.
 
 KDOS installs `_KDOS-FAULT` with the BIOS `FAULT-XT!`, so machine faults are
 exceptions too. An illegal instruction throws -21, an alignment fault -23,
@@ -3392,16 +3395,16 @@ Stack & diagnostics.
 
 ## §14 Startup
 
-Exact current `kdos.f` lines 10114 through 10153, including the section
+Exact current `kdos.f` lines 10126 through 10165, including the section
 separator, contain 40 LF records and 1,398 bytes, with SHA-256
 `d75984f7fd3d55cb8c573da5b9f494ff1c1e8bba32b3537fa2270669add3ca8a`
 and Git blob `1354db80222545647369729b93526831ff0a21ec`. The executable body from
-line 10115 through EOF contains 39 LF records and 1,326 bytes, with SHA-256
+line 10127 through EOF contains 39 LF records and 1,326 bytes, with SHA-256
 `07df5026ba571e0d6e232d8c908963a0403756d3859390af3c7de3230f446b85`
 and Git blob `c920305479e61c2a5d51719779ec9c9fba0c2b8f`. The complete current
-10,153-line, 356,021-byte source has SHA-256
-`6ee45223697b4b712f8b168c9acf4fb2faa7b9d66472f3c572dddd870bc53e88`
-and Git blob `8899cdb968200fa997afa95d55c492016587a094`. At the historical qualification
+10,165-line, 356,537-byte source has SHA-256
+`bc1bdf6df7b73665a3c3741c11f18579209adeada56102937204d653dc038b3f`
+and Git blob `3db6165c7a2a29090eecd02edc4a1df10b76065b`. At the historical qualification
 revision, the complete 9,894-line, 341,355-byte source had SHA-256
 `99e71114ed141c14522d687a3bef3110ead94de7b0a055ae693c135a94772fb8`
 and Git blob `fd017b16dbd3ef4746d0e3467e980c015cf5a664` at revision
@@ -3489,7 +3492,7 @@ evaluator with canonical XMEM, HBW, VRAM, and valid MP64FS media. It published
 1,452 KDOS words and finished with an authoritative 1,764-binding dictionary
 index. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
-456 core words and expects 1,514 KDOS publications and 1,963 unique
+457 core words and expects 1,515 KDOS publications and 1,965 unique
 bindings. The historical
 run is semantic evidence, not native/exact-full-core timing evidence, and adds
 no `rich-terminal.f`, projection, compositor, viewer, or rich-input work.
@@ -4078,14 +4081,14 @@ rendering, composition, physical viewing, or input work.
 
 ### Hosted source qualification
 
-Exact current `kdos.f` lines 9621 through 10113 contain 493 LF records and
+Exact current `kdos.f` lines 9633 through 10125 contain 493 LF records and
 16,157 bytes, with SHA-256
 `e3b84f6fbb348c2275c2e4339bdb92f398e621c437dcc975949611d0e367d265`
 and Git blob `7b616252e40b75bdd9fa82fbc5fc6c0f2c47ae64`. The checked fixture includes
-the following one-line §14 Startup sentinel at line 10114. That 494-LF-record,
+the following one-line §14 Startup sentinel at line 10126. That 494-LF-record,
 16,229-byte fixture has SHA-256
 `cf818fbb9facbe2a06a825a6ba3cd6738b73d97793f423829b4386bc89b03a9d`
-and Git blob `881609bc61944004c8f8442eb22a527f132ebbd8`. Line 10115 begins §14 Startup.
+and Git blob `881609bc61944004c8f8442eb22a527f132ebbd8`. Line 10127 begins §14 Startup.
 
 The slice publishes 75 definitions: 46 colon words, 16 zero-initialized
 variables, seven ordinary constants, four `CREATE` objects, and two `DEFER`

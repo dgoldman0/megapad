@@ -58,10 +58,10 @@ from tests.simulator.test_kdos_aes import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
-FIXTURE = Path(__file__).with_name("fixtures") / "kdos-sha3-1089-1233.f"
+FIXTURE = Path(__file__).with_name("fixtures") / "kdos-sha3-1101-1245.f"
 
-FIRST_LINE = 1089
-LAST_LINE = 1233
+FIRST_LINE = 1101
+LAST_LINE = 1245
 SLICE_SHA256 = "a37aa3609e32f4b7fc966c575dbc2f5f0a59362a89c18ea076b0143e52c622f2"
 SLICE_GIT_BLOB = "d547de0490759ee0ebb6bfed1e070488b409dcfa"
 DEFINITIONS = (

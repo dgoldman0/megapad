@@ -25,7 +25,7 @@ from simulator.aes import (
     AES_TAG,
 )
 from simulator.dictionary import MAX_NAME_BYTES
-from simulator.errors import DivideByZeroFault, ExecutionError, ForthAbort
+from simulator.errors import DivideByZeroFault, ExecutionError
 from simulator.entropy import (
     TRNG_RAND8,
     TRNG_RAND64,
@@ -657,6 +657,13 @@ def _fault_xt_store(
     runtime.set_fault_xt(context.data.pop())
 
 
+def _quit_xt_store(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    runtime.set_quit_xt(context.data.pop())
+
+
 def _idle_ms(
     runtime: MegaForthRuntime,
     idle_until_xt: int,
@@ -894,10 +901,8 @@ def _compare(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     context.data.push((left_length > right_length) - (left_length < right_length))
 
 
-def _abort(context: ExecutionContext) -> None:
-    context.data.clear()
-    context.returns.clear()
-    raise ForthAbort("Forth ABORT", origin_context=context)
+def _abort(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    runtime.abort_task(context, "Forth ABORT")
 
 
 def _format_signed_cell(value: int, base: int) -> bytes:
@@ -2817,7 +2822,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"COMPARE", lambda context: _compare(runtime, context)),
         (b"JIT-ON", _semantic_noop),
         (b"JIT-OFF", _semantic_noop),
-        (b"ABORT", _abort),
+        (b"ABORT", lambda context: _abort(runtime, context)),
         (b"EMIT", lambda context: _emit(runtime, context)),
         (b"CR", lambda context: _carriage_return(runtime, context)),
         (b".", lambda context: _dot(runtime, context)),
@@ -3186,6 +3191,13 @@ def install_core(runtime: MegaForthRuntime) -> None:
     # Appended last, so that every earlier word keeps its execution token.
     # Akashic's Library applet defines its capability handlers with it.
     runtime.define_directive(b":NONAME", DirectiveKind.NONAME)
+
+    # The QUIT callback follows.  KDOS installs one that clears its
+    # exception-chain head when ABORT resets the stacks.
+    runtime.define_primitive(
+        b"QUIT-XT!",
+        lambda context: _quit_xt_store(runtime, context),
+    )
 
 
 def _scalar_float_word(service, shape: str, op: int | None):

@@ -44,11 +44,11 @@ from tests.simulator.test_kdos_x25519 import (
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = Path(__file__).with_name("fixtures") / (
-    "kdos-hybrid-1652-2060.f"
+    "kdos-hybrid-1664-2072.f"
 )
 
-FIRST_LINE = 1652
-LAST_LINE = 2060
+FIRST_LINE = 1664
+LAST_LINE = 2072
 SLICE_SHA256 = (
     "58576925d341dd4b03bbc5c37863ac6ec5ecbb76c6189e1b2ffd3f481124c38c"
 )

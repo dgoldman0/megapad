@@ -28,11 +28,11 @@ from tests.simulator.test_kdos_storage_block_volume import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
-FIXTURE = Path(__file__).with_name("fixtures") / "kdos-screen-tail-8577-8806.f"
+FIXTURE = Path(__file__).with_name("fixtures") / "kdos-screen-tail-8589-8818.f"
 
-FIRST_LINE = 8577
-FIXTURE_LAST_LINE = 8806
-LAST_LINE = 8805
+FIRST_LINE = 8589
+FIXTURE_LAST_LINE = 8818
+LAST_LINE = 8817
 FIXTURE_BYTES = 7_844
 FIXTURE_SHA256 = (
     "b4b1421ed629128bdbfd0b63870cdd57707407659140765a97689ed6afb04726"

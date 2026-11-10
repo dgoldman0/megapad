@@ -71,8 +71,12 @@ class ForthAbort(ExecutionError):
         message: str,
         *,
         origin_context: object | None = None,
+        quit_callback_ran: bool = False,
     ) -> None:
         self.origin_context = origin_context
+        # Whether the callback installed with QUIT-XT! ran once the task's
+        # stacks were clear, as BIOS QUIT runs it.
+        self.quit_callback_ran = quit_callback_ran
         super().__init__(message)
 
     def bind_origin(self, context: object) -> bool:

@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The `bios.asm` dictionary link chain contains **558** entries.  The numbered
+The `bios.asm` dictionary link chain contains **559** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -421,7 +421,7 @@ byte independently.
 | 139 | `2R>` | `( -- x1 x2 )` `R:( x1 x2 -- )` | ✓ | Compile inline: pop pair from return stack (20 bytes) |
 | 140 | `2R@` | `( -- x1 x2 )` `R:( x1 x2 -- x1 x2 )` | ✓ | Compile inline: copy pair from return stack (19 bytes) |
 
-### Input Source & Interpreter (15 words)
+### Input Source & Interpreter (16 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
@@ -439,7 +439,8 @@ byte independently.
 | — | `EVAL-THROW` | `( -- addr )` | | Address of exact source exception code retained for status 5 |
 | — | `EVAL-TOKEN` | `( -- addr len )` | | Stable copy of the failing token; empty for non-token failures |
 | 144 | `>NUMBER` | `( ud addr len -- ud' addr' len' )` | | Convert string chars to number using BASE. Stops at first non-digit. ud treated as single 64-bit value |
-| 145 | `QUIT` | `( -- )` | | Reset return stack, enter outer interpreter loop (does not return) |
+| 145 | `QUIT` | `( -- )` | | Reset return stack, run the `QUIT-XT!` callback if one is installed, enter outer interpreter loop (does not return) |
+| 557 | `QUIT-XT!` | `( xt -- )` | | Install the callback `QUIT` runs once it has reset the return stack, which `ABORT` and `ABORT"` reach as well; the callback takes and leaves nothing; 0 removes it |
 
 ### Comments (2 words)
 
@@ -1199,10 +1200,14 @@ machine reset.
 ### Newest Dictionary Chain Segment (last → earlier)
 
 The complete authoritative link chain is the `.dq` chain in `bios.asm`.
-The SHA-384 words close the newest appended segment:
+`QUIT-XT!` closes the newest appended segment, after the storage unit words:
 
 ```
-SHA384-FINAL → SHA384-INIT → AES-CBC-IV! → AES-MODE!
+QUIT-XT!
+→ UNIT-DISK-FLUSH-GEN-CHECKED → UNIT-DISK-WRITE-GEN-CHECKED
+→ UNIT-DISK-READ-GEN-CHECKED → UNIT-DISK-CAPS → UNIT-DISK-MEDIA-GEN
+→ UNIT-DISK-SECTORS → UNIT-DISK@ → DISK-UNITS
+→ SHA384-FINAL → SHA384-INIT → AES-CBC-IV! → AES-MODE!
 → WOTS-CHAIN → LATEST! → DICT-ROLLBACK → DICT-INDEX-NOTIFY! → DICT-INDEX@
 → DICT-INDEX!
 → IDLE-MS → IDLE-UNTIL → FAULT-XT! → DICT-FAULT-XT! → DICT-LIMIT@ → DICT-BASE@ → DICT-BOUNDS-OFF → DICT-BOUNDS!

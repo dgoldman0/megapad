@@ -27,6 +27,18 @@
 
 ' _KDOS-FAULT FAULT-XT!
 
+\ BIOS QUIT calls this hook once it has reset the return stack, where ABORT,
+\ ABORT" and QUIT all end.  Every CATCH frame of the context that was running
+\ died with that stack, so its chain head must not keep a frame's address for
+\ a later THROW or fault to unwind into.  On core 0 the stack QUIT resets is
+\ the foreground's, so the foreground head goes as well when a background
+\ slot was the one running.
+: _KDOS-QUIT  ( -- )
+    0 HANDLER !
+    COREID 0= IF 0 _TASK-HANDLERS ! THEN ;
+
+' _KDOS-QUIT QUIT-XT!
+
 \ Preserve the BIOS task ABI while adding KDOS-owned exception cleanup.  BIOS
 \ cannot clear _TASK-HANDLERS because that table is allocated when KDOS loads.
 \ Scheduling a slot is also replacement, so reset on both start and stop.  Slot

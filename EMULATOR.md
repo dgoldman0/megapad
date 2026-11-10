@@ -469,7 +469,7 @@ buffer), then tokenises and interprets:
 `>R` `R>` `R@` `2>R` `2R>` `2R@`
 
 **Input source & interpreter**
-`SOURCE` `>IN` `EVALUATE` `>NUMBER` `QUIT`
+`SOURCE` `>IN` `EVALUATE` `>NUMBER` `QUIT` `QUIT-XT!`
 
 **Comments**
 `\` `(`

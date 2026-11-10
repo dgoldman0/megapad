@@ -196,6 +196,8 @@ boot:
     str r11, r1
     ldi64 r11, var_fault_xt
     str r11, r1
+    ldi64 r11, var_quit_xt
+    str r11, r1
 
     ; The caller-owned dictionary index may point into external RAM which
     ; survives a warm reset.  A fresh BIOS must never inherit either that
@@ -450,6 +452,15 @@ boot_bad_core_topology:
 forth_quit:
     ; Reset RSP to top of RAM each time
     mov r15, r2
+    ; Whatever the abandoned return stack held is gone.  ABORT, ABORT" and
+    ; QUIT all pass here, so the callback installed with QUIT-XT! runs now:
+    ; KDOS drops the exception frames that lived on that stack.
+    ldi64 r11, var_quit_xt
+    ldn r11, r11
+    cmpi r11, 0
+    breq forth_quit_no_callback
+    call.l r11
+forth_quit_no_callback:
     ; Restore HERE if a temp IF block was active (prevent dict leak)
     ldi64 r11, var_interp_if_depth
     ldn r0, r11
@@ -3074,6 +3085,16 @@ w_fault_xt_store:
     ldn r1, r14
     addi r14, 8
     ldi64 r11, var_fault_xt
+    str r11, r1
+    ret.l
+
+; QUIT-XT! ( xt -- )
+; Install the callback QUIT runs once it has reset the return stack; 0
+; removes it.  The callback takes and leaves nothing.  See forth_quit.
+w_quit_xt_store:
+    ldn r1, r14
+    addi r14, 8
+    ldi64 r11, var_quit_xt
     str r11, r1
     ret.l
 
@@ -24592,12 +24613,22 @@ d_unit_disk_write_gen_checked:
     ret.l
 
 ; === UNIT-DISK-FLUSH-GEN-CHECKED ===
-latest_entry:
 d_unit_disk_flush_gen_checked:
     .dq d_unit_disk_write_gen_checked
     .db 27
     .ascii "UNIT-DISK-FLUSH-GEN-CHECKED"
     ldi64 r11, w_unit_disk_flush_gen_checked
+    call.l r11
+    ret.l
+
+; The QUIT callback appends after the storage unit words.
+; === QUIT-XT! ===
+latest_entry:
+d_quit_xt_store:
+    .dq d_unit_disk_flush_gen_checked
+    .db 8
+    .ascii "QUIT-XT!"
+    ldi64 r11, w_quit_xt_store
     call.l r11
     ret.l
 
@@ -24626,6 +24657,8 @@ var_dict_limit:
 var_dict_fault_xt:
     .dq 0
 var_fault_xt:
+    .dq 0
+var_quit_xt:
     .dq 0
 ; Caller-backed open-addressed dictionary index state.  Flags use the public
 ; DICT-INDEX@ bit assignments documented by w_dict_index_store above.

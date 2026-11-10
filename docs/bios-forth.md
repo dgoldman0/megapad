@@ -493,7 +493,8 @@ text.
 | `EVAL-THROW` | `( -- addr )` | Address of the exact source-level exception code retained when the KDOS checked wrapper returns status 5. |
 | `EVAL-TOKEN` | `( -- addr len )` | Stable counted view of the failing token; empty for line/depth/unfinished/throw failures. |
 | `>NUMBER` | `( ud addr len -- ud' addr' len' )` | Convert characters to a number, accumulating into *ud*.  Stops at the first non-digit. |
-| `QUIT` | `( -- )` | Clear the return stack and enter the outer interpreter loop (the REPL).  Does not return. |
+| `QUIT` | `( -- )` | Clear the return stack, run the callback installed with `QUIT-XT!`, and enter the outer interpreter loop (the REPL).  Does not return. |
+| `QUIT-XT!` | `( xt -- )` | Install the callback `QUIT` runs once it has reset the return stack; 0 removes it, and boot clears it.  `ABORT` and `ABORT"` end in `QUIT`, and so does the recovery after an unhandled machine fault on core 0, so the callback runs for each.  It takes and leaves nothing, and it runs on the core that reset its stack.  KDOS installs one that clears its exception-chain head, since every `CATCH` frame on the abandoned return stack is gone. |
 
 **Example — dynamic evaluation:**
 ```forth
@@ -936,7 +937,7 @@ queues, and interrupts remain unadmitted; direct NIC MMIO still faults.
 | `TRUE` | `( -- -1 )` | Push the canonical true flag (all bits set). |
 | `FALSE` | `( -- 0 )` | Push the canonical false flag. |
 | `LATEST` | `( -- addr )` | Address of the most recent dictionary entry header. |
-| `ABORT` | `( -- )` | Clear both stacks and restart the outer interpreter. |
+| `ABORT` | `( -- )` | Clear both stacks and restart the outer interpreter through `QUIT`, which runs the `QUIT-XT!` callback. |
 | `ABORT"` | interpret: `( flag "msg" -- )`; compile: `( "msg" -- )` | Immediate and state-smart. At the interpreter it always parses the message and consumes `flag`: false is a silent no-op, while true prints the message and executes `ABORT`. During compilation it retains the inline message and compiles that conditional behavior for a flag supplied at runtime. |
 | `TALIGN` | `( -- )` | Align HERE to the next 64-byte boundary. |
 | `FSLOAD` | `( "filename" -- )` | **Disk boot word.**  Reads the MP64FS directory, validates the file extent and RAM span, transfers it in guarded batches, and EVALUATEs each line.  The standard image uses it for the KDOS core; KDOS `REQUIRE` owns later userland modules. |

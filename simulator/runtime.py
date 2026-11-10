@@ -161,6 +161,15 @@ class ExecutionContext:
             )
 
     def _mark_host_control_fault(self, error: BaseException) -> None:
+        if (
+            isinstance(error, ForthAbort)
+            and error.quit_callback_ran
+            and error.origin_context is self
+        ):
+            # BIOS QUIT told the owner of the exception chain that this
+            # task's return stack was reset, so no frontier the dispatch
+            # observed is still in use.
+            return
         if self._host_control_fault is None:
             self._host_control_fault = type(error).__name__
 
@@ -905,6 +914,8 @@ class MegaForthRuntime:
         self._dictionary_limit = 0
         self._dictionary_fault_xt = 0
         self._fault_xt = 0
+        self._quit_xt = 0
+        self._quit_callback_contexts: list[ExecutionContext] = []
         # The MS@ time that ends the current IDLE-UNTIL wait, if any.
         self._idle_deadline_ms: int | None = None
         # Hardware user mode was removed from MegaPad, but its public BIOS
@@ -1076,6 +1087,12 @@ class MegaForthRuntime:
         """Return the raw callback installed through ``FAULT-XT!``."""
 
         return self._fault_xt
+
+    @property
+    def quit_xt(self) -> int:
+        """Return the raw callback installed through ``QUIT-XT!``."""
+
+        return self._quit_xt
 
     @property
     def privilege_level(self) -> int:
@@ -1788,6 +1805,72 @@ class MegaForthRuntime:
         self._require_session_owner_access("change the fault callback")
         self._require_no_suspension("change the fault callback")
         self._fault_xt = u64(xt)
+
+    def set_quit_xt(self, xt: int) -> None:
+        """Install the callback QUIT runs, including zero to remove it."""
+
+        self._require_session_owner_access("change the QUIT callback")
+        self._require_no_suspension("change the QUIT callback")
+        self._quit_xt = u64(xt)
+
+    def abort_task(self, context: ExecutionContext, message: str) -> NoReturn:
+        """Perform the BIOS ``ABORT`` for one task and leave to the host.
+
+        Native ABORT resets both stacks and enters QUIT.  QUIT runs the
+        callback installed with ``QUIT-XT!`` before it takes the next line,
+        and KDOS clears its exception-chain head there, so no CATCH frame's
+        address outlives the stack that held it and the task goes on.  With
+        no callback installed the dispatch boundaries fail the context
+        closed, as before, when the aborted dispatch had observed ``RP@``.
+        """
+
+        context.data.clear()
+        context.returns.clear()
+        raise ForthAbort(
+            message,
+            origin_context=context,
+            quit_callback_ran=self._run_quit_callback(context),
+        )
+
+    def _run_quit_callback(self, context: ExecutionContext) -> bool:
+        xt = self._quit_xt
+        if xt == 0 or not context.reusable:
+            return False
+        if any(running is context for running in self._quit_callback_contexts):
+            # The callback itself aborted.  The BIOS would run it again
+            # without end; here the abort leaves without a second run.
+            return False
+        try:
+            word = self._resolve_dispatch_word(xt)
+        except KeyError:
+            raise ExecutionError(
+                f"QUIT callback is not a live execution token: 0x{xt:016x}"
+            ) from None
+        meter = next(
+            (
+                frame.meter
+                for frame in reversed(self._active_dispatches)
+                if frame.context is context
+            ),
+            None,
+        )
+        if meter is None:
+            meter = next(
+                (
+                    state.meter
+                    for state in reversed(self._active_input_states)
+                    if state.context is context
+                ),
+                None,
+            )
+        if meter is None:
+            meter = _StepMeter(None, self._account_semantic_step)
+        self._quit_callback_contexts.append(context)
+        try:
+            self._execute_guarded(word, context, meter)
+        finally:
+            self._quit_callback_contexts.pop()
+        return True
 
     def configure_dictionary_bounds(
         self,
@@ -3141,12 +3224,7 @@ class MegaForthRuntime:
                 return
             if state.context.data.pop() != 0:
                 self.write_uart_bytes(payload)
-                state.context.data.clear()
-                state.context.returns.clear()
-                raise ForthAbort(
-                    'Forth ABORT"',
-                    origin_context=state.context,
-                )
+                self.abort_task(state.context, 'Forth ABORT"')
             return
         if kind is DirectiveKind.COLON:
             if state.compiler is not None:
@@ -3909,9 +3987,7 @@ class MegaForthRuntime:
         context: ExecutionContext,
     ) -> NoReturn:
         self.write_uart_bytes(abort.report)
-        context.data.clear()
-        context.returns.clear()
-        raise ForthAbort(abort.message, origin_context=context)
+        self.abort_task(context, abort.message)
 
     def _begin_guest_fault(
         self,
@@ -4346,12 +4422,7 @@ class MegaForthRuntime:
             elif isinstance(operation, AbortIf):
                 if context.data.pop() != 0:
                     self.write_uart_bytes(operation.payload)
-                    context.data.clear()
-                    context.returns.clear()
-                    raise ForthAbort(
-                        'Forth ABORT"',
-                        origin_context=context,
-                    )
+                    self.abort_task(context, 'Forth ABORT"')
                 ip += 1
             elif isinstance(operation, Return):
                 flow = self._machine_return_flow(context, meter, root_id, machine_can_yield)

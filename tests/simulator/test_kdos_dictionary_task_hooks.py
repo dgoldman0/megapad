@@ -18,19 +18,20 @@ from tests.simulator.test_kdos_exceptions import _load_exceptions
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = Path(__file__).with_name("fixtures") / (
-    "kdos-dictionary-task-hooks-684-736.f"
+    "kdos-dictionary-task-hooks-684-748.f"
 )
 
 MEGAPAD_REVISION = "b8e1a7e174fb50d7ea3cb5f5f8d10917ed329ec4"
-KDOS_GIT_BLOB = "8899cdb968200fa997afa95d55c492016587a094"
+KDOS_GIT_BLOB = "3db6165c7a2a29090eecd02edc4a1df10b76065b"
 FIRST_LINE = 684
-LAST_LINE = 736
-SLICE_SHA256 = "36d101dc608d15fbb7453558d2dfd337183a5ac946fde6677526db02c0548142"
-SLICE_GIT_BLOB = "ec55064d082be862d3c9be2da3a7cabe03150245"
+LAST_LINE = 748
+SLICE_SHA256 = "c02e1659a51d072d5deb4ee57f619b505dfcbb725f0c10445d758988eb676d2f"
+SLICE_GIT_BLOB = "0a3a5f80a22d46b618ab15b3ce2dbeb813eedaa7"
 DEFINITIONS = (
     b"U-DICT-E-FULL",
     b"_KDOS-DICT-FAULT",
     b"_KDOS-FAULT",
+    b"_KDOS-QUIT",
     b"_BIOS-BACKGROUND-XT",
     b"_BIOS-BACKGROUND2-XT",
     b"_BIOS-BACKGROUND3-XT",
@@ -136,6 +137,9 @@ def test_hook_load_captures_the_live_pre_shadow_bios_task_words(
     fault = runtime.find("_KDOS-FAULT")
     assert fault is not None
     assert runtime.fault_xt == fault.xt
+    quit_hook = runtime.find("_KDOS-QUIT")
+    assert quit_hook is not None
+    assert runtime.quit_xt == quit_hook.xt
 
 
 def test_instruction_faults_throw_their_codes_through_catch(
@@ -170,6 +174,194 @@ def test_an_uncaught_instruction_fault_reports_and_aborts(
     assert _handler_cells(runtime) == (0, 0, 0, 0)
     runtime.evaluate(b"6 7 *")
     assert runtime.main_context.data.snapshot() == (42,)
+
+
+def _backends() -> list[str]:
+    try:
+        import _megaforth_native  # noqa: F401
+    except ImportError:
+        return ["python"]
+    return ["python", "native"]
+
+
+@pytest.fixture(params=_backends())
+def hooks_on_each_executor(request: pytest.FixtureRequest) -> MegaForthRuntime:
+    runtime, _bios_words = _load_hooks(
+        MegaForthRuntime(execution_backend=request.param)
+    )
+    return runtime
+
+
+@pytest.mark.parametrize(
+    ("abort_word", "printed"),
+    (
+        # The word, the compiled string form, and the interpreted string
+        # form reached through EVALUATE.
+        (b": QH-ABORT 123 >R 456 ABORT ;", b""),
+        (b': QH-ABORT 123 >R 456 TRUE ABORT" told to stop" ;', b"told to stop"),
+        (b": QH-ABORT 123 >R QH-LINE 24 EVALUATE ;", b"in a string"),
+    ),
+)
+def test_an_abort_inside_catch_leaves_no_frame_behind_and_the_task_goes_on(
+    hooks_on_each_executor: MegaForthRuntime,
+    abort_word: bytes,
+    printed: bytes,
+) -> None:
+    runtime = hooks_on_each_executor
+    context = runtime.main_context
+    line = b'TRUE ABORT" in a string"'
+    assert len(line) == 24
+    runtime.define_created("QH-LINE", initial_body=line)
+    runtime.evaluate(abort_word + b" : QH-CATCH ['] QH-ABORT CATCH ;")
+    context.data.push(789)
+    runtime.drain_uart_output()
+
+    with pytest.raises(ForthAbort) as aborted:
+        runtime.evaluate(b"QH-CATCH")
+
+    # BIOS QUIT ran KDOS's callback once the stacks were reset, so the
+    # foreground chain head no longer names the frame CATCH had pushed.
+    assert aborted.value.quit_callback_ran
+    assert runtime.drain_uart_output() == printed
+    assert context.data.snapshot() == ()
+    assert context.returns.snapshot() == ()
+    assert _handler_cells(runtime) == (0, 0, 0, 0)
+    assert context.reusable
+    assert context.host_control_fault is None
+
+    # A THROW at the prompt is uncaught and says so, a fault is reported by
+    # the BIOS, and the next line answers.
+    with pytest.raises(ForthAbort):
+        runtime.evaluate(b"7 THROW")
+    assert runtime.drain_uart_output() == b"uncaught THROW 7 \r\n"
+    with pytest.raises(ForthAbort, match="signed division trapped on zero"):
+        runtime.evaluate(b"1 0 /")
+    assert runtime.drain_uart_output() == b"\r\n*** DIVIDE BY ZERO CORE=00\r\n"
+    runtime.evaluate(b": QH-AGAIN -9 THROW ; ' QH-AGAIN CATCH 6 7 *")
+    assert context.data.snapshot() == (u64(-9), 42)
+    assert _handler_cells(runtime) == (0, 0, 0, 0)
+    assert context.reusable
+
+
+def test_the_quit_callback_clears_the_foreground_head_and_no_other(
+    hooks_on_each_executor: MegaForthRuntime,
+) -> None:
+    runtime = hooks_on_each_executor
+    table = runtime.find("_TASK-HANDLERS")
+    assert table is not None
+    for index, value in enumerate((101, 102, 103, 104)):
+        runtime.memory.write64(table.body_address + index * 8, value)
+
+    # The hosted profile runs core 0's foreground task, whose head is slot
+    # zero; the background slots' frames live on stacks QUIT does not reset.
+    runtime.execute("_KDOS-QUIT")
+
+    assert _handler_cells(runtime) == (0, 102, 103, 104)
+    assert runtime.main_context.data.snapshot() == ()
+    assert runtime.main_context.returns.snapshot() == ()
+
+
+def test_the_quit_callback_runs_once_the_stacks_are_clear(
+    hooks_on_each_executor: MegaForthRuntime,
+) -> None:
+    runtime = hooks_on_each_executor
+    runtime.evaluate(
+        b"VARIABLE QH-DEPTH  VARIABLE QH-RP  VARIABLE QH-TOP-RP "
+        b": QH-NOTE DEPTH QH-DEPTH ! RP@ QH-RP ! ; "
+        b": QH-TOP RP@ QH-TOP-RP ! ; QH-TOP "
+        b": QH-DEEP 1 2 3 4 >R >R ABORT ; "
+        b"-1 QH-DEPTH ! ' QH-NOTE QUIT-XT!"
+    )
+
+    with pytest.raises(ForthAbort):
+        runtime.evaluate(b"5 6 QH-DEEP")
+
+    # Neither stack holds what the aborted word had put there: the callback
+    # sees an empty data stack and the return stack of a word called from
+    # the top level.
+    cells = {
+        name: runtime.memory.read64(runtime.find(name).body_address)
+        for name in ("QH-DEPTH", "QH-RP", "QH-TOP-RP")
+    }
+    assert cells["QH-DEPTH"] == 0
+    assert cells["QH-RP"] == cells["QH-TOP-RP"]
+
+
+def test_the_abort_that_ends_an_unhandled_fault_runs_the_quit_callback(
+    hooks_on_each_executor: MegaForthRuntime,
+) -> None:
+    runtime = hooks_on_each_executor
+    context = runtime.main_context
+    # With the fault callback removed, a fault under a CATCH is not thrown:
+    # the BIOS reports it and aborts, and that abort ends in QUIT too.
+    runtime.evaluate(
+        b"0 FAULT-XT! : QF-DIV 1 2 1 0 / ; : QF-CATCH ['] QF-DIV CATCH ;"
+    )
+    runtime.drain_uart_output()
+
+    with pytest.raises(ForthAbort, match="signed division trapped on zero") as aborted:
+        runtime.evaluate(b"QF-CATCH")
+
+    assert aborted.value.quit_callback_ran
+    assert runtime.drain_uart_output() == b"\r\n*** DIVIDE BY ZERO CORE=00\r\n"
+    assert _handler_cells(runtime) == (0, 0, 0, 0)
+    assert context.reusable
+    runtime.evaluate(b"6 7 *")
+    assert context.data.snapshot() == (42,)
+
+
+def test_without_a_quit_callback_an_abort_inside_catch_fails_the_task_closed(
+    hooks_on_each_executor: MegaForthRuntime,
+) -> None:
+    runtime = hooks_on_each_executor
+    context = runtime.main_context
+    runtime.evaluate(
+        b": QH-ABORT 123 >R 456 ABORT ; : QH-CATCH ['] QH-ABORT CATCH ; "
+        b"0 QUIT-XT!"
+    )
+    assert runtime.quit_xt == 0
+
+    with pytest.raises(ForthAbort) as aborted:
+        runtime.evaluate(b"QH-CATCH")
+
+    # Nothing cleared the chain head, so the frame's address is still there
+    # and the context may not be used again.
+    assert not aborted.value.quit_callback_ran
+    assert _handler_cells(runtime)[0] != 0
+    assert not context.reusable
+    assert context.host_control_fault == "ForthAbort"
+
+
+def test_a_quit_callback_that_aborts_runs_once(
+    hooks_on_each_executor: MegaForthRuntime,
+) -> None:
+    runtime = hooks_on_each_executor
+    context = runtime.main_context
+    runtime.evaluate(
+        b"VARIABLE QH-RUNS  : QH-BAD 1 QH-RUNS +! ABORT ; ' QH-BAD QUIT-XT! "
+        b": QH-ABORT ABORT ; : QH-CATCH ['] QH-ABORT CATCH ;"
+    )
+
+    with pytest.raises(ForthAbort) as aborted:
+        runtime.evaluate(b"QH-CATCH")
+
+    assert not aborted.value.quit_callback_ran
+    assert not context.reusable
+    runs = runtime.find("QH-RUNS")
+    assert runs is not None
+    assert runtime.memory.read64(runs.body_address) == 1
+
+
+def test_an_unresolved_quit_callback_is_an_execution_target_error(
+    hooks_on_each_executor: MegaForthRuntime,
+) -> None:
+    runtime = hooks_on_each_executor
+    runtime.main_context.data.push(0xDEAD_BEEF)
+    runtime.execute("QUIT-XT!")
+    assert runtime.quit_xt == 0xDEAD_BEEF
+
+    with pytest.raises(ExecutionError, match="not a live execution token"):
+        runtime.evaluate(b"ABORT")
 
 
 @pytest.mark.parametrize("slot", (1, 2, 3))
