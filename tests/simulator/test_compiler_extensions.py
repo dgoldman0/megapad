@@ -212,7 +212,7 @@ def test_recurse_is_compile_only_and_rejects_temporary_interpret_control() -> No
 
     with pytest.raises(
         SourceError,
-        match="RECURSE requires a named colon definition",
+        match="RECURSE requires a colon definition",
     ):
         runtime.evaluate(b"1 IF RECURSE THEN")
 

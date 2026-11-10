@@ -320,6 +320,33 @@ NUL without consulting the active TIB length, so stale bytes can be read after
 a bare or unterminated form. At the 255-byte interpret limit, hosted leaves the
 remaining source visible to the outer evaluator just as the native clamp does.
 
+Hosted `:NONAME` builds no header, as on the BIOS. It pushes `HERE`, which is
+the definition's execution token, and `;` ends the definition; the definition
+has no name, no link and no place in the search order, and `LATEST` does not
+move. The runtime keeps the definition's IR by that token. At `;` the
+definition claims one code-slot cell at the token and then its `S"` payloads,
+so `HERE` advances by eight bytes plus those payloads, where the BIOS
+advances it by the length of the machine code. `RECURSE`, `DOES>`, string
+literals and the control words compile as in a named definition, and the
+token runs through `EXECUTE`, source-defined `DEFER`/`IS`, tables of tokens
+and `DOES>` children.
+
+The code slot holds a mark that belongs to that one definition. The token
+stays executable while the mark stands and no dictionary word owns the
+address. Storage given back with the code untouched therefore leaves the
+token working, as the machine code would be on the BIOS, and a definition or
+store laid over the slot ends it; a later use reports an unknown execution
+token. A body that moves `HERE` before its `;`, and a `:NONAME` at the
+address of a live word's code slot, are compile errors. Like hosted `:`,
+hosted `:NONAME` is a directive: inside a definition it is the same nested
+definition error, where the BIOS compiles a call to it. The reference
+interpreter runs an anonymous body on both executors. The native engine
+plans the named words the body calls and does not plan the body, so one
+`EXECUTE` of an anonymous token from native code costs about 37 microseconds
+on the development host, against about 0.02 for a named word; the native
+line walker hands a line that holds `:NONAME`, and every line of an open
+anonymous body, to Python.
+
 The simulator preserves the semantic behavior of `CREATE`, `DOES>`, `>BODY`,
 `POSTPONE`, `:NONAME`, quotations, `DEFER`/`IS`, nested evaluation,
 `CATCH`/`THROW`, `ALLOT`, dictionary zones, and `DICT-ROLLBACK`.  It may express
@@ -3534,7 +3561,7 @@ mounted media, zero modules, balanced stacks, and released locks, followed by
 a checked post-boot definition, allocation/free, CRC32, ring FIFO, and module
 listing. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
-455 core words and expects 1,514 KDOS publications and 1,962 unique
+456 core words and expects 1,514 KDOS publications and 1,963 unique
 bindings; it submits 6,803 lines (220,624 payload bytes, 227,427 CLI UART bytes).
 
 The startup filesystem path is literal. `DISK?` false skips `FS-LOAD` and does

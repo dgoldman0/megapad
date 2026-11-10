@@ -152,6 +152,7 @@ A line is evaluated natively only when both hold:
    - a `VALUE` read that overlaps a stack cell the line has written;
    - interpreted `."`, or the BIOS `PROVIDED` directive;
    - an open interpret-mode `IF` or `[IF]` skip;
+   - an open `:NONAME` definition, which the walker never holds;
    - an armed index notification that this line could make due;
    - a nonzero status at nonzero evaluator depth, or depth 16;
    - a step budget that the line could exceed;

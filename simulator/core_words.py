@@ -3183,6 +3183,10 @@ def install_core(runtime: MegaForthRuntime) -> None:
         lambda context: _unit_disk_flush_checked(runtime, context),
     )
 
+    # Appended last, so that every earlier word keeps its execution token.
+    # Akashic's Library applet defines its capability handlers with it.
+    runtime.define_directive(b":NONAME", DirectiveKind.NONAME)
+
 
 def _scalar_float_word(service, shape: str, op: int | None):
     """Bind one BIOS-shaped scalar FP word to the hosted service."""

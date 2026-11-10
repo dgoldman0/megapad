@@ -72,7 +72,13 @@ class NativeSourceWalker:
         self._status_throw = status_throw
         self._native = extension.NativeLineWalker(
             native,
-            {kind.name: kind.value for kind in DirectiveKind},
+            # The walker compiles named definitions only.  It is not told of
+            # :NONAME, so it hands a line that holds one to Python.
+            {
+                kind.name: kind.value
+                for kind in DirectiveKind
+                if kind is not DirectiveKind.NONAME
+            },
             [
                 (word.xt, word.name.decode("ascii"))
                 for word in (*interpret_primitives, *defining_primitives)
@@ -155,7 +161,10 @@ class NativeSourceWalker:
                 return False
         return (
             compiler_state.conditional_skip is None
-            and (compiler is None or not compiler.temporary)
+            and (
+                compiler is None
+                or not (compiler.temporary or compiler.anonymous)
+            )
             and runtime._suspended_execution is None
             and type(context.data) is DataStack
             and type(context.returns) is ReturnStack

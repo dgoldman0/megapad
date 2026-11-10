@@ -327,7 +327,9 @@ protocol, cells, evaluator_cells, evaluate_checked_xt, status_throw_xt,
 bootstrap_base, bank0_base, bank0_limit)` runs one loader overlay's loop:
 `WALK_SOURCE` for `SOURCE-EVALUATE-CHECKED` or `WALK_LOADER` for `_LD-WALK`.
 `simulator/native_walker.py` is its only intended client. `directive_values`
-maps every `DirectiveKind` name to its value; `primitives` binds the admitted
+maps the name of every `DirectiveKind` the walker handles to its value, which
+is every kind but `NONAME`; a directive whose value is absent from the map
+sends its line to Python. `primitives` binds the admitted
 interpret-time and defining primitives by XT, and the walker captures each
 record's identity at construction.
 

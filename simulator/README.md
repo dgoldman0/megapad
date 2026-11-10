@@ -53,6 +53,11 @@ The implemented slices provide:
   `LITERAL` compiling a value computed between them, plus
   the exact `[ 0 C, ]` admission that compiles MP64 `IDL` as semantic `Idle`
   IR without leaking a native byte into hosted dictionary storage;
+- headerless `:NONAME` definitions: the word pushes `HERE` as the execution
+  token, `;` claims a code slot and the body's string literals at that
+  address, and neither the search order nor `LATEST` changes; the token runs
+  through `EXECUTE`, `DEFER`/`IS` and `DOES>` for as long as its code slot
+  stands, on both executors, in the reference interpreter;
 - a runtime-owned one-core IDL suspension boundary with opaque continuation
   handles, one-shot interrupt/DMA wake receipts, cumulative step budgets,
   cancellation, and original return-stack guard restoration;
@@ -2430,7 +2435,7 @@ still free, mounted MP64FS, zero modules, balanced stacks, and no held lock. A
 post-boot checked definition returned 42, followed by allocation/free, CRC32,
 ring FIFO, and module-listing checks. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
-455 core words and expects 1,514 KDOS publications and 1,962 unique
+456 core words and expects 1,514 KDOS publications and 1,963 unique
 bindings.
 
 The contiguous unchanged KDOS core now reaches EOF. The integration branch is

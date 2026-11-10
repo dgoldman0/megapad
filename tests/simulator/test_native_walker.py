@@ -192,6 +192,24 @@ def test_definitions_span_lines_and_python_lines_in_between(runtimes) -> None:
     assert lines == (5, 2)
 
 
+def test_an_anonymous_definition_stays_with_python(runtimes) -> None:
+    observed, lines = _same(runtimes, (
+        b": NAMED-BEFORE 1 ;\n"
+        b":NONAME ( n -- n' )\n"
+        b"  DUP 0= IF\n"
+        b"    DROP S\" anon\" NIP\n"
+        b"  THEN ;\n"
+        b"CONSTANT ANON\n"
+        b": NAMED-AFTER 2 ;\n"
+        b"0 ANON EXECUTE NAMED-BEFORE NAMED-AFTER\n"
+    ))
+    assert observed[1] == (4, 1, 2, 0)
+    # The walker compiles named definitions only.  The line that opens the
+    # anonymous one and each line of its body go to Python, as does the last
+    # line, which runs guest words.
+    assert lines == (3, 5)
+
+
 def test_interpreted_words_and_numbers_match(runtimes) -> None:
     observed, lines = _same(runtimes, (
         b"11 22 + CONSTANT C1\n"

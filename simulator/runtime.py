@@ -105,6 +105,12 @@ from simulator.timer import HostedTimerService
 from simulator.terminal_geometry import HostedTerminalGeometryState
 
 
+# A :NONAME definition has no dictionary header.  Diagnostics show it under
+# this name.  Its hosted code slot holds this mark under the definition's
+# serial, so that the runtime sees compilation over the slot.
+_ANONYMOUS_NAME = b"<noname>"
+_ANONYMOUS_SLOT_MARK = 0x4E4F_4E41
+
 _BIOS_EVALUATE_MAX_BYTES = 255
 _BIOS_EVALUATE_MAX_DEPTH = 16
 _BIOS_EVAL_TOKEN_CAPACITY = 256
@@ -335,6 +341,7 @@ class DirectiveKind(Enum):
     RECURSE = auto()
     PLUS_LOOP = auto()
     TO = auto()
+    NONAME = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -435,10 +442,16 @@ class _Compiler:
     controls: list[_ControlFrame] = field(default_factory=list)
     literal_pool: bytearray = field(default_factory=bytearray)
     temporary_checkpoint: DictionaryCheckpoint | None = None
+    # The execution token :NONAME pushed, for a definition with no header.
+    anonymous_xt: int | None = None
 
     @property
     def temporary(self) -> bool:
         return self.temporary_checkpoint is not None
+
+    @property
+    def anonymous(self) -> bool:
+        return self.anonymous_xt is not None
 
 
 @dataclass(slots=True)
@@ -905,6 +918,12 @@ class MegaForthRuntime:
         self._bios_evaluator: _BiosEvaluatorState | None = None
         self._active_dispatches: list[_DispatchFrame] = []
         self._transient_words: dict[int, Word] = {}
+        # :NONAME definitions by execution token, each with the tag written
+        # into its code slot.  They have no header, so the dictionary holds
+        # no record of them; see _resolve_dispatch_word.
+        self._anonymous_words: dict[int, tuple[Word, int]] = {}
+        self._anonymous_serial = 0
+        self._anonymous_sweep_size = 0
         self._colon_accelerators: dict[int, _ColonAccelerator] = {}
         # The hybrid composition installs the owner of declared machine routines.
         self._machine_owner = None
@@ -3143,6 +3162,27 @@ class MegaForthRuntime:
             )
             state.compiler = _Compiler(name, self._token_location(state))
             return
+        if kind is DirectiveKind.NONAME:
+            if state.compiler is not None:
+                self._compile_error(state, "nested : is not supported")
+            # Native :NONAME builds no header.  It pushes HERE, which is the
+            # definition's execution token, and compiles from there.  Hosted
+            # IR stays buffered until ';', which claims the code slot at that
+            # same address.
+            self._preflight_dictionary_growth(CELL_BYTES, state.context)
+            xt = self.dictionary.here
+            if self.dictionary.live_word(xt) is not None:
+                self._compile_error(
+                    state,
+                    ":NONAME would overlap a live execution token",
+                )
+            state.context.data.push(xt)
+            state.compiler = _Compiler(
+                _ANONYMOUS_NAME,
+                self._token_location(state),
+                anonymous_xt=xt,
+            )
+            return
 
         if kind is DirectiveKind.LEFT_BRACKET:
             if state.compiler is not None:
@@ -3216,6 +3256,9 @@ class MegaForthRuntime:
                 )
             if compiler.controls:
                 self._compile_error(state, "; has unresolved control flow")
+            if compiler.anonymous_xt is not None:
+                self._publish_anonymous_word(compiler, state)
+                return
             operations = tuple((*compiler.operations, Return()))
             word = self._define_dictionary_word(
                 compiler.name,
@@ -3305,7 +3348,7 @@ class MegaForthRuntime:
             if compiler.temporary:
                 self._compile_error(
                     state,
-                    "RECURSE requires a named colon definition",
+                    "RECURSE requires a colon definition",
                 )
             compiler.operations.append(CallSelf())
         elif kind is DirectiveKind.BEGIN:
@@ -4609,12 +4652,91 @@ class MegaForthRuntime:
         return word
 
     def _resolve_dispatch_word(self, xt: int) -> Word:
-        """Resolve a live word, including an active anonymous IF body."""
+        """Resolve a live word, an active interpret-time ``IF`` body or a
+        ``:NONAME`` definition."""
 
         transient = self._transient_words.get(xt)
         if transient is not None:
             return transient
+        if self._anonymous_words:
+            anonymous = self._anonymous_word(xt)
+            if anonymous is not None:
+                return anonymous
         return self.dictionary.resolve(xt)
+
+    def _publish_anonymous_word(
+        self,
+        compiler: _Compiler,
+        state: _EvaluationState,
+    ) -> None:
+        """Finish one ``:NONAME`` definition at the token it pushed.
+
+        Native BIOS compiles the body at ``HERE`` with no header, so the
+        definition has an execution token and no name, link or place in the
+        search order, and ``LATEST`` does not move.  Hosted IR materializes
+        a code slot and the literal pool at that token, as an interpret-time
+        ``IF`` does, and the definition is kept here by its token.
+
+        The token stays executable for as long as its code slot holds the
+        tag written below, which is how long the native machine code would
+        survive: a rollback alone leaves it, and later compilation over it
+        ends it.
+        """
+
+        xt = compiler.anonymous_xt
+        assert xt is not None
+        if self.dictionary.here != xt:
+            self._compile_error(
+                state,
+                ":NONAME body moved HERE away from its execution token",
+            )
+        tag = ((self._anonymous_serial + 1) << 32) | _ANONYMOUS_SLOT_MARK
+        body = tag.to_bytes(CELL_BYTES, "little") + bytes(compiler.literal_pool)
+        self._preflight_dictionary_growth(len(body), state.context)
+        try:
+            # Emitted at HERE as compiled data is, so a body allocation the
+            # bytes land on is revoked first.
+            self.dictionary.write_transient(body)
+            self.dictionary.allot(len(body))
+        except OverflowError as exc:
+            self._request_dictionary_fault(state.context, str(exc))
+        self._anonymous_serial += 1
+        word = Word(
+            name=_ANONYMOUS_NAME,
+            header_address=xt,
+            xt=xt,
+            immediate=False,
+            implementation=ColonDefinition(
+                tuple((*compiler.operations, Return()))
+            ),
+        )
+        self._anonymous_words[xt] = (word, tag)
+        state.compiler = None
+        # Definitions that later compilation ended leave the table when they
+        # are next looked up.  One pass each time the table doubles drops
+        # those nothing looks up again.
+        if len(self._anonymous_words) > 2 * self._anonymous_sweep_size:
+            for candidate in tuple(self._anonymous_words):
+                self._anonymous_word(candidate)
+            self._anonymous_sweep_size = len(self._anonymous_words)
+
+    def _anonymous_word(self, xt: int) -> Word | None:
+        """The live ``:NONAME`` definition at this token, if there is one."""
+
+        entry = self._anonymous_words.get(xt)
+        if entry is None:
+            return None
+        word, tag = entry
+        try:
+            live = self.memory.read64(xt) == tag
+        except ExecutionError:
+            live = False
+        if live and self.dictionary.live_word(xt) is None:
+            return word
+        # Its code slot was compiled over, or a dictionary word now owns the
+        # token.
+        del self._anonymous_words[xt]
+        return None
 
     def _meter_for_public_call(
         self,
