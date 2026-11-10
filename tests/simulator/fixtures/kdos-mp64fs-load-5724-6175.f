@@ -8,7 +8,8 @@ VARIABLE LD-CUR
 VARIABLE LD-LEN
 VARIABLE LD-LINE
 \ Nesting support: save/restore walker state for nested LOAD/REQUIRE.
-\ Includes CWD so relative-path loads restore the working directory.  Each
+\ Includes CWD, so a directory the loaded text changes to does not outlive
+\ the load; _LD-FROM-END gives back the one a path resolution left.  Each
 \ frame owns evaluator-depth and HERE/LATEST checkpoints plus a private module
 \ transaction pointer.  Only the module-ID hooks are no-ops until §20 binds
 \ them; dictionary rollback is intrinsic to every guarded loader frame.
@@ -73,10 +74,10 @@ VARIABLE _LD-RUN-ADDR
     _LD-RUN-ADDR @ _LD-RUN-CNT @ SECTOR * + ;
 : _LD-SLOT-BYTES  ( slot -- bytes )
     DIRENT DUP DE.COUNT SWAP DE.EXT1-CNT + SECTOR * ;
-\ _LD-READ-SLOT ( slot -- )  Concatenate both validated extents in LD-BUF.
-: _LD-READ-SLOT  ( slot -- )
-    DIRENT
-    DUP DE.SEC OVER DE.COUNT LD-BUF @ _LD-READ-RUN
+\ _LD-READ-SLOT ( addr slot -- )  Concatenate both validated extents at ADDR.
+: _LD-READ-SLOT  ( addr slot -- )
+    DIRENT SWAP >R
+    DUP DE.SEC OVER DE.COUNT R> _LD-READ-RUN
     OVER DE.EXT1-CNT DUP IF
         2 PICK DE.EXT1-SEC SWAP ROT _LD-READ-RUN 2DROP
     ELSE
@@ -86,9 +87,10 @@ VARIABLE _LD-RUN-ADDR
 \  Paths like "../markup/html.f" or "lib/util.f" are split on '/'.
 \  Each intermediate component adjusts CWD (".." goes to parent,
 \  anything else CDs into a subdirectory).  The final component
-\  (the filename) is left in NAMEBUF for FIND-BY-NAME.  CWD is
-\  saved by _LD-SAVE and restored by _LD-RESTORE so that nested
-\  loads always return to the caller's working directory.
+\  (the filename) is left in NAMEBUF for FIND-BY-NAME.  The loader
+\  keeps the directory a load started from and gives it back when the
+\  load ends (_LD-FROM-SAVE, _LD-FROM-END), so that nested loads always
+\  return to the caller's working directory.
 CREATE _RP-PATH 128 ALLOT    \ copy of full path from PATHBUF (up to 128 B)
 CREATE _RP-COMP 24 ALLOT     \ current component being processed (≤ 23 chars)
 VARIABLE _RP-I                \ scan position within _RP-PATH
@@ -159,6 +161,127 @@ VARIABLE _RP-I                \ scan position within _RP-PATH
             DROP TRUE                    \ done
         THEN
     UNTIL ;
+
+\ ── Module sources ──────────────────────────────────────────────────
+\
+\  LOAD and REQUIRE find and read a file through the current module
+\  source.  KDOS's own MP64FS is the built-in source.  A filesystem layer
+\  that mounts another volume builds a source of its own and selects it
+\  with MODULE-SOURCE!, and modules then come from that volume.  The
+\  contract is docs/module-source-contract.md.
+\
+\  A source is five cells, which its owner keeps alive while it is
+\  selected or a load that started from it is under way:
+\    +0   resolve  ( c-addr u file source -- ior )
+\    +8   read     ( addr file source -- ior )
+\    +16  dir@     ( source -- token )
+\    +24  dir!     ( token source -- )
+\    +32  context, for the owner
+\  RESOLVE finds the file a path names from the source's current
+\  directory, makes that file's directory current, and fills FILE:
+\    +0   identity, two cells; both zero when the source has none
+\    +16  bytes of source text
+\    +24  bytes READ needs at ADDR, at least the text
+\    +32  the source's own handle
+\  READ follows its RESOLVE with no other call to the source between
+\  them, and at most once.  The loader takes DIR@ before it resolves and
+\  gives that token back to DIR! exactly once, when the load ends, so a
+\  nested load returns to its caller's directory.
+40 CONSTANT /MODULE-SOURCE
+: MS.RESOLVE  ( source -- addr ) ;
+: MS.READ     ( source -- addr )   8 + ;
+: MS.DIR@     ( source -- addr )  16 + ;
+: MS.DIR!     ( source -- addr )  24 + ;
+: MS.CONTEXT  ( source -- addr )  32 + ;
+40 CONSTANT /MODULE-FILE
+: MF.ID       ( file -- addr ) ;
+: MF.USED     ( file -- addr )  16 + ;
+: MF.RESERVE  ( file -- addr )  24 + ;
+: MF.HANDLE   ( file -- addr )  32 + ;
+-4110 CONSTANT MS-E-NOT-FOUND
+-4111 CONSTANT MS-E-NO-FILESYSTEM
+
+\ KDOS's MP64FS as a source.  The current directory is CWD, and a file's
+\ handle is its directory slot.  Its identity is that slot with the
+\ file's first extent, length, time and checksum.  _RESOLVE-PATH walks
+\ the path, so RESOLVE leaves it in PATHBUF and NAMEBUF.
+VARIABLE _FMS-FILE
+: _FS-MS-RESOLVE  ( c-addr u file source -- ior )
+    DROP _FMS-FILE ! _PATH!
+    FS-ENSURE
+    FS-OK @ 0= IF MS-E-NO-FILESYSTEM EXIT THEN
+    _RESOLVE-PATH
+    FIND-BY-NAME DUP -1 = IF DROP MS-E-NOT-FOUND EXIT THEN
+    DUP _FMS-FILE @ MF.HANDLE !
+    DUP _LD-SLOT-BYTES _FMS-FILE @ MF.RESERVE !
+    DUP DIRENT                          ( slot de )
+    DUP DE.USED _FMS-FILE @ MF.USED !
+    DUP DE.CRC 32 LSHIFT OVER DE.USED OR _FMS-FILE @ MF.ID !
+    DUP DE.MTIME 32 LSHIFT SWAP DE.SEC 16 LSHIFT OR OR
+    _FMS-FILE @ MF.ID 8 + !
+    0 ;
+: _FS-MS-READ  ( addr file source -- ior )
+    DROP MF.HANDLE @ _LD-READ-SLOT 0 ;
+: _FS-MS-DIR@  ( source -- token )  DROP CWD @ ;
+: _FS-MS-DIR!  ( token source -- )  DROP CWD ! ;
+CREATE FS-MODULE-SOURCE
+    ' _FS-MS-RESOLVE ,  ' _FS-MS-READ ,
+    ' _FS-MS-DIR@ ,     ' _FS-MS-DIR! ,
+    0 ,
+VARIABLE MODULE-SOURCE
+FS-MODULE-SOURCE MODULE-SOURCE !
+
+\ MODULE-SOURCE! ( source -- )  Select the source that later loads use.
+\   A load under way when the selection changes leaves it in place when it
+\   ends; a load that fails selects the source it started from again.
+: MODULE-SOURCE!  ( source -- )
+    ?CORE0 MODULE-SOURCE ! ;
+
+\ The file the current source resolved last.  The loader reads it before
+\ it evaluates anything, so nested loads may fill the record again.
+CREATE _LD-FILE /MODULE-FILE ALLOT
+: _LD-PATH  ( -- c-addr u )
+    PATHBUF 0
+    BEGIN
+        DUP 127 < IF 2DUP + C@ 0<> ELSE FALSE THEN
+    WHILE 1+ REPEAT ;
+: _LD-RESOLVE  ( -- ior )
+    _LD-FILE /MODULE-FILE 0 FILL
+    _LD-PATH _LD-FILE MODULE-SOURCE @ DUP MS.RESOLVE @ EXECUTE ;
+: _LD-READ  ( -- )
+    LD-BUF @ _LD-FILE MODULE-SOURCE @ DUP MS.READ @ EXECUTE THROW ;
+\ _LD-FOUND? ( ior module? -- flag )  True when RESOLVE found the file.
+\   A missing filesystem and a path that names no file are reported
+\   here, for LOAD or for REQUIRE; any other failure is thrown.
+: _LD-FOUND?  ( ior module? -- flag )
+    OVER 0= IF 2DROP TRUE EXIT THEN
+    OVER MS-E-NO-FILESYSTEM = IF
+        2DROP ."  No filesystem" CR FALSE EXIT
+    THEN
+    OVER MS-E-NOT-FOUND <> IF DROP THROW THEN
+    NIP IF ."  Module not found: " ELSE ."  Not found: " THEN
+    PATHBUF .ZSTR CR FALSE ;
+
+\ Each LOAD and REQUIRE keeps the source and directory it started from,
+\ and gives the directory back to that source when it ends.  A source the
+\ load selected stays selected when the load succeeds; a failed load
+\ selects the source it started from again.
+CREATE _LD-FROM-STK _LD-MAXLVL 16 * ALLOT
+VARIABLE _LD-FROM-SP
+0 _LD-FROM-SP !
+: _LD-FROM-SAVE  ( -- )
+    _LD-FROM-SP @ _LD-MAXLVL 16 * >= ABORT" REQUIRE nested too deep"
+    MODULE-SOURCE @ DUP _LD-FROM-SP @ _LD-FROM-STK + !
+    DUP MS.DIR@ @ EXECUTE _LD-FROM-SP @ _LD-FROM-STK + 8 + !
+    16 _LD-FROM-SP +! ;
+\ _LD-FROM-END ( exception -- )  End one load and rethrow what it threw.
+: _LD-FROM-END  ( exception -- )
+    _LD-FROM-SP @ 0= ABORT" REQUIRE nesting underflow"
+    -16 _LD-FROM-SP +!
+    _LD-FROM-SP @ _LD-FROM-STK +        ( exception entry )
+    OVER IF DUP @ MODULE-SOURCE ! THEN
+    DUP 8 + @ SWAP @ DUP MS.DIR! @ EXECUTE
+    THROW ;
 
 \ ── Checked source compiler ─────────────────────────────────────────
 \
@@ -305,30 +428,25 @@ VARIABLE _SEC-LINE
     ['] _LD-WALK _LD-GUARDED ;
 
 : _LD-READ-WALK  ( -- )
-    LD-CUR @ _LD-READ-SLOT
+    _LD-READ
     _LD-WALK ;
 
-: LOAD  ( "filename" -- )
-    FS-ENSURE
-    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
-    PARSE-NAME
-    \ Save walker state (including CWD) before resolving path.
+: _LOAD-BODY  ( -- )
+    _LD-RESOLVE FALSE _LD-FOUND? 0= IF EXIT THEN
+    _LD-FILE MF.USED @ 0= IF ."  Empty file" CR EXIT THEN
     _LD-SAVE
-    _RESOLVE-PATH
-    FIND-BY-NAME DUP -1 = IF
-        DROP ."  Not found: " NAMEBUF .ZSTR CR
-        _LD-RESTORE EXIT
-    THEN
-    DUP DIRENT DE.USED DUP 0= IF
-        2DROP ."  Empty file" CR
-        _LD-RESTORE EXIT
-    THEN
-    LD-SZ !                              ( slot )
+    _LD-FILE MF.USED @ LD-SZ !
     \ Source text is temporary.  ALLOCATE routes it to XMEM when present;
-    \ the full sector-rounded span bounds DMA and is reclaimed after walk.
-    DUP _LD-SLOT-BYTES ALLOCATE IF
-        2DROP ."  File buffer allocation failed" CR
+    \ the span the source asks for bounds its read and is reclaimed after
+    \ the walk.
+    _LD-FILE MF.RESERVE @ ALLOCATE IF
+        DROP ."  File buffer allocation failed" CR
         _LD-RESTORE EXIT
     THEN
-    LD-BUF ! LD-CUR !
+    LD-BUF !
     ['] _LD-READ-WALK _LD-GUARDED ;
+
+: LOAD  ( "filename" -- )
+    PARSE-NAME
+    _LD-FROM-SAVE
+    ['] _LOAD-BODY CATCH _LD-FROM-END ;

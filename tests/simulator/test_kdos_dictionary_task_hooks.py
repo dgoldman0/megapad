@@ -18,13 +18,13 @@ from tests.simulator.test_kdos_exceptions import _load_exceptions
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = Path(__file__).with_name("fixtures") / (
-    "kdos-dictionary-task-hooks-676-728.f"
+    "kdos-dictionary-task-hooks-678-730.f"
 )
 
 MEGAPAD_REVISION = "b8e1a7e174fb50d7ea3cb5f5f8d10917ed329ec4"
-KDOS_GIT_BLOB = "1fcb78cc7dd02d9810d00501e563fef54850e92b"
-FIRST_LINE = 676
-LAST_LINE = 728
+KDOS_GIT_BLOB = "2cff300d84349d154cbf8837ad0cca9f1935f052"
+FIRST_LINE = 678
+LAST_LINE = 730
 SLICE_SHA256 = "36d101dc608d15fbb7453558d2dfd337183a5ac946fde6677526db02c0548142"
 SLICE_GIT_BLOB = "ec55064d082be862d3c9be2da3a7cabe03150245"
 DEFINITIONS = (

@@ -43,16 +43,16 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-application-loading-6056-6170.f"
+    / "kdos-application-loading-6176-6290.f"
 )
 
-FIRST_LINE = 6056
-LAST_LINE = 6170
-SLICE_BYTES = 4_231
+FIRST_LINE = 6176
+LAST_LINE = 6290
+SLICE_BYTES = 4_240
 SLICE_SHA256 = (
-    "b42f5c10635f43ff41e4dd719987f21ab5bcbb229d3985ad0cc854d2bba7ffc1"
+    "514fe3ffe462c1571d3e45f75ec274186278a2f0201fb09c1476c142a5244141"
 )
-SLICE_GIT_BLOB = "bf344d51bdea5287d4af87c920d563a33adc1a85"
+SLICE_GIT_BLOB = "e7463dc7365cc67799febd7c676773bb8dd0555c"
 
 SOURCE_LEDGER = (
     (":", b"_APP-MPU-ON"),
@@ -84,7 +84,7 @@ def _verified_slice() -> bytes:
     assert _git_blob_id(complete_kdos) == KDOS_GIT_BLOB
     lines = complete_kdos.splitlines(keepends=True)
     assert lines[FIRST_LINE - 2] == (
-        b"    ['] _LD-READ-WALK _LD-GUARDED ;\n"
+        b"    ['] _LOAD-BODY CATCH _LD-FROM-END ;\n"
     )
     assert source == b"".join(lines[FIRST_LINE - 1 : LAST_LINE])
     assert lines[LAST_LINE] == b"\\ =====================================================================\n"

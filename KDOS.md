@@ -14,6 +14,11 @@ thrown evaluation.  Its dynamic module registry retains complete,
 case-sensitive IDs in the Bank 0 heap, independent of filename limits and
 XMEM resets; chained entries are limited by available memory rather than a
 fixed module count. `REQUIRE` pre-registers an ID to break dependency cycles.
+`LOAD` and `REQUIRE` find and read a file through the current module source:
+KDOS's own MP64FS at boot, or the source a filesystem layer selects with
+`MODULE-SOURCE!` (`docs/module-source-contract.md`).  The registry also keeps
+the identity of each file whose module is loaded, so a later `REQUIRE` of
+that file does not read it.
 Successful nested ID chains remain provisional by merging into their parent.
 If evaluation exits through a catchable guest `THROW`, evaluator and directory
 state are restored, every ID owned by that frame (including merged nested IDs)
@@ -220,6 +225,9 @@ secret boundary, or security proof.
 - **DEFER/IS**: Deferred word mechanism — OPEN is a DEFER word for VFS interception
 - **Bitmap allocator**: BIT-FREE?, BIT-SET, BIT-CLR, FIND-FREE (contiguous sector search)
 - **Refactored file I/O**: FWRITE/FREAD with cursor advancement and used_bytes tracking
+- **Module sources**: `LOAD` and `REQUIRE` resolve and read through a five-cell
+  source record (`MODULE-SOURCE!`, built-in `FS-MODULE-SOURCE`), so another
+  filesystem can serve modules; contract in `docs/module-source-contract.md`
 - **Module registry**: core-0-only `PROVIDED`, `PROVIDED-SPAN`, `MODULE?`, `REQUIRE`, and
   `MODULES` over exact 1–246-byte IDs, with dynamic Bank 0 chains,
   allocation-neutral duplicates, cycle-breaking pre-registration, and

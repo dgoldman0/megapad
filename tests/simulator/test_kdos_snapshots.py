@@ -15,12 +15,12 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE_DIRECTORY = Path(__file__).with_name("fixtures")
 BASE_FIXTURE = FIXTURE_DIRECTORY / "kdos-prefix-39-69.f"
-PARSE_FIXTURE = FIXTURE_DIRECTORY / "kdos-prefix-71-115.f"
-ALLOCATOR_FIXTURE = FIXTURE_DIRECTORY / "kdos-allocator-116-545.f"
-SNAPSHOT_FIXTURE = FIXTURE_DIRECTORY / "kdos-snapshots-546-617.f"
+PARSE_FIXTURE = FIXTURE_DIRECTORY / "kdos-prefix-71-117.f"
+ALLOCATOR_FIXTURE = FIXTURE_DIRECTORY / "kdos-allocator-118-547.f"
+SNAPSHOT_FIXTURE = FIXTURE_DIRECTORY / "kdos-snapshots-548-619.f"
 
 MEGAPAD_REVISION = "b8e1a7e174fb50d7ea3cb5f5f8d10917ed329ec4"
-KDOS_GIT_BLOB = "1fcb78cc7dd02d9810d00501e563fef54850e92b"
+KDOS_GIT_BLOB = "2cff300d84349d154cbf8837ad0cca9f1935f052"
 
 SLICES = (
     (
@@ -33,21 +33,21 @@ SLICES = (
     (
         PARSE_FIXTURE,
         71,
-        115,
-        "a59c8811eef09b2a1bd31b5c0801b68a29cf1434c67bdc17a63d15e60d69a99c",
-        "fbfea6100b2dff8925dde073a7bd35a3f88544dc",
+        117,
+        "5037768c1c53629d345051987cb9f65e4f50f307920b6c748b92c5a2c210af76",
+        "febb454655f0891801837976ab9610ee12e3523e",
     ),
     (
         ALLOCATOR_FIXTURE,
-        116,
-        545,
+        118,
+        547,
         "0a7d819a0a17ab96378771f69e6ca3dbf2bc2570028977a713bcba0742e22106",
         "46dcb6e2c82d57904f7d92d43292bf3670ba5347",
     ),
     (
         SNAPSHOT_FIXTURE,
-        546,
-        617,
+        548,
+        619,
         "9380a7828dfaae383501cee5566f058b783c85ce450763e091d52e7d19c17d56",
         "3a78ac1da4d8df75dfa0d31bd3b49dee029592ea",
     ),

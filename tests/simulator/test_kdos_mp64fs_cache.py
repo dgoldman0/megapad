@@ -25,11 +25,11 @@ from tests.simulator.test_kdos_storage_compat import _patterned_image
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
-    Path(__file__).with_name("fixtures") / "kdos-mp64fs-cache-5103-5245.f"
+    Path(__file__).with_name("fixtures") / "kdos-mp64fs-cache-5105-5247.f"
 )
 
-FIRST_LINE = 5103
-LAST_LINE = 5245
+FIRST_LINE = 5105
+LAST_LINE = 5247
 SLICE_SHA256 = (
     "936494892f8968e08a5009aab45c4c4c0f307a53cf109594ce70891bae3e7f4c"
 )

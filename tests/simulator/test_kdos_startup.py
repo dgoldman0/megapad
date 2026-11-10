@@ -28,18 +28,18 @@ from tests.simulator.test_kdos_storage_block_volume import _variable
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
-FIXTURE = Path(__file__).with_name("fixtures") / "kdos-startup-9965-10005.f"
+FIXTURE = Path(__file__).with_name("fixtures") / "kdos-startup-10108-10147.f"
 
-FIRST_LINE = 9965
-LAST_LINE = 10005
-FIXTURE_BYTES = 1_432
+FIRST_LINE = 10108
+LAST_LINE = 10147
+FIXTURE_BYTES = 1_398
 FIXTURE_SHA256 = (
-    "d14948c62ff524ed67fe0743f1f3976d3430c1754809bf339c45ac8bd3569f82"
+    "d75984f7fd3d55cb8c573da5b9f494ff1c1e8bba32b3537fa2270669add3ca8a"
 )
-FIXTURE_GIT_BLOB = "64644994439ac09da0bd19db31866c404d380582"
-KDOS_BYTES = 348_738
+FIXTURE_GIT_BLOB = "1354db80222545647369729b93526831ff0a21ec"
+KDOS_BYTES = 355_722
 KDOS_SHA256 = (
-    "75372ff377117029ecb8d24483622f5a736b25232f3e9de80351f6caa609c768"
+    "90768df9fafdd3392f7e93f0542367ee0104f82ac286e2b6eeb1e42ce427bbd2"
 )
 
 HOSTED_WORD_FIXED_BYTES = 17
@@ -160,7 +160,7 @@ def _assert_restored_startup_frames(
     loader_before: tuple[int, ...],
 ) -> None:
     assert _variable(runtime, "_LD-SP") == 0
-    assert _variable(runtime, "_REQ-SP") == 0
+    assert _variable(runtime, "_LD-FROM-SP") == 0
     assert _variable(runtime, "EVAL-DEPTH") == 0
     assert _loader_globals(runtime) == loader_before
     assert runtime.spinlocks.owner(5) is None

@@ -1437,23 +1437,36 @@ pool descriptor. Reused addresses create an ABA hazard in which a stale handle
 can flush or close a new occupant; pool headers, descriptor cells, `OP-SLOT`,
 parser state, cache, and deferred bindings are global and unlocked.
 
-The adjacent current loader fixture is exact `kdos.f` lines 5611–5944: 334 LF
-records, 11,980 bytes, SHA-256
-`6a30453c933ac8666c1b798a98a4fb3e6a331afeb4c2d3048299a83a0ea79a7c`,
-and Git blob `f2bea50138ca04e235358debd734a4fc234e002a`. Its exact 55-definition ledger
+The adjacent current loader fixture is exact `kdos.f` lines 5724–6175: 452 LF
+records, 17,210 bytes, SHA-256
+`9848280b32b5db3387dd94df4e0c7036597d913e3f457d97ee88a29722b3bc9a`,
+and Git blob `679fb2d92ac20649daa6992ccc9490122e6d5d52`. Its exact 86-definition ledger
 installs five loader globals, a 16 × 88-byte nesting stack, evaluator-depth and
 transaction accessors, three initially-no-op deferred transaction actions,
-two-extent read helpers, relative-path scratch and traversal, evaluator status
-constants, the KDOS `EVALUATE-CHECKED` shadow, the whole-source checked walker,
-status translation, dictionary/error guards, and final `LOAD`. Loading the
-fixture performs no filesystem or storage work.
+two-extent read helpers, relative-path scratch and traversal, the module-source
+and module-file records with their accessors and two error constants, the
+built-in MP64FS source, source selection, the resolve, read and report helpers,
+a 16 × 16-byte stack of the source and directory each load started from,
+evaluator status constants, the KDOS `EVALUATE-CHECKED` shadow, the
+whole-source checked walker, status translation, dictionary/error guards,
+`_LOAD-BODY`, and final `LOAD`. Loading the fixture selects the built-in source
+and performs no filesystem or storage work.
 
 `LOAD` must be reached through an active source cursor because `PARSE-NAME`
-consumes its filename from that cursor. It calls `FS-ENSURE` before parsing; a
-false marker prints `No filesystem` and leaves the would-be filename for the
-enclosing interpreter. Once mounted, a missing file, empty file, or allocation
-failure restores the saved loader globals and CWD without reads or transaction
-hooks. Each current eleven-cell frame saves `LD-BUF`, `LD-SZ`, `LD-CUR`,
+consumes its filename from that cursor. It parses first, keeps the current
+module source and that source's directory, and has the source resolve the path
+(`docs/module-source-contract.md`). The built-in source calls `FS-ENSURE`; a
+false marker prints `No filesystem` with the filename already consumed. Once
+mounted, a missing file prints `Not found:` and the path as written. That
+miss, an empty file, or an allocation failure leaves the loader globals as
+they were and gives CWD back without reads or transaction hooks. A frame is
+pushed only after the path has resolved to a nonempty file. Five focused
+tests serve `LOAD` from a source of their own that records each call: they
+pin the order of calls across nested relative loads, the return of every
+directory token exactly once, both reports, a thrown resolve or read failure,
+a load that selects another source and keeps it unless it fails, and the
+built-in source's record for a path it is given.
+Each current eleven-cell frame saves `LD-BUF`, `LD-SZ`, `LD-CUR`,
 `LD-LEN`, `LD-LINE`, `EVAL-LINE`, CWD, an evaluator-depth checkpoint, a
 transaction head, and its `HERE`/`LATEST` dictionary checkpoint. Nesting is bounded at 16 frames
 by the source-defined `ABORT"`.
@@ -1462,11 +1475,13 @@ Within the admitted domain, every path component and final name is at most 23
 bytes, total path storage is at most 127 bytes, cached metadata is valid and
 stable, and source is LF-delimited with no retained CR bytes. Every physical
 line is at most 255 bytes and compiler state is complete at file end. `LOAD`
-allocates the combined sector-rounded primary and secondary extents, reads and
-concatenates both complete runs, but evaluates only cached `DE.USED`. The
-allocation padding is therefore represented and transferred without becoming
-source. Nested relative loading observes the containing directory and restores
-each caller's CWD and walker globals. A final source line need not end in LF.
+allocates the span its source asks for, which for the built-in source is the
+combined sector-rounded primary and secondary extents; that source reads and
+concatenates both complete runs, and the loader evaluates only cached
+`DE.USED`. The allocation padding is therefore represented and transferred
+without becoming source. Nested relative loading observes the containing
+directory, and each load's end gives its caller's directory back to the
+source and restores the walker globals. A final source line need not end in LF.
 
 The optional transaction actions remain bound to `_LD-TXN-NOOP` until the
 later module registry replaces them. Dictionary rollback does not depend on
@@ -1477,9 +1492,9 @@ frame, calls after-release, and rethrows. Thus even pre-registry `LOAD` removes
 definitions published by a caught failing frame.
 
 Several source defects deliberately remain visible. `_RESOLVE-PATH` prints an
-intermediate-component error but returns no failure status; `LOAD` then looks
-up the rejected component left in `NAMEBUF` and can load it instead of the
-requested final path. Component and final-name copies are not length-bounded,
+intermediate-component error but returns no failure status; the built-in
+source then looks up the rejected component left in `NAMEBUF`, and `LOAD` can
+load it instead of the requested final path. Component and final-name copies are not length-bounded,
 which is why the admitted path domain above is narrow. Hosted semantic lookup
 also cannot reproduce native linked-header corruption caused by an overflowing
 copy, so oversized paths are not a differential claim.
@@ -1509,10 +1524,10 @@ separate open matters. Task-resetting `ABORT`/`ABORT"` and host or memory
 faults that do not become guest `THROW` bypass the loader's `CATCH`; cleanup and
 transactionality are not claimed for those exits.
 
-The current Application Loading fixture is exact `kdos.f` lines 5945–6059:
-115 LF records, 4,231 bytes, SHA-256
-`b42f5c10635f43ff41e4dd719987f21ab5bcbb229d3985ad0cc854d2bba7ffc1`,
-and Git blob `bf344d51bdea5287d4af87c920d563a33adc1a85`. It publishes seven application
+The current Application Loading fixture is exact `kdos.f` lines 6176–6290:
+115 LF records, 4,240 bytes, SHA-256
+`514fe3ffe462c1571d3e45f75ec274186278a2f0201fb09c1476c142a5244141`,
+and Git blob `e7463dc7365cc67799febd7c676773bb8dd0555c`. It publishes seven application
 words—`_APP-MPU-ON`, `_APP-MPU-OFF`, `APP-EVAL`, `_APP-LOAD-WALK`,
 `_APP-LOAD-USER`, `_APP-LOAD-RUN`, and `APP-LOAD`—plus six ANSI helpers without
 load-time I/O or MPU mutation. `_APP-MPU-ON` overwrites the inert window with
@@ -2264,36 +2279,45 @@ physical presentation, and all rich-terminal work remain deferred.
 
 ### KDOS §20 Module System
 
-Exact current lines 9384–9853 add the complete Module System: 470 LF records,
-14,414 bytes, SHA-256
-`73adf1e903e12f891908750aeeced70d4888dfb6087af6372a99eca1495ecd74`,
-and Git blob `231b452a63ad3d70fc635f3e4b40a7033627fc68`. The fixture includes the
-line-9854 §14 separator and has 471 LF records, 14,486 bytes, SHA-256
-`6213a62e8bbc1ada04565d775a436cebc2ace9b5c9b32f27302b13568d9d92b6`,
-and Git blob `be9ab02eced24379053654034ff4199bef57dbf3`. §14 Startup begins at line
-9855 and is not part of this slice.
+Exact current lines 9615–10107 add the complete Module System: 493 LF records,
+16,157 bytes, SHA-256
+`e3b84f6fbb348c2275c2e4339bdb92f398e621c437dcc975949611d0e367d265`,
+and Git blob `7b616252e40b75bdd9fa82fbc5fc6c0f2c47ae64`. The fixture includes the
+line-10108 §14 separator and has 494 LF records, 16,229 bytes, SHA-256
+`cf818fbb9facbe2a06a825a6ba3cd6738b73d97793f423829b4386bc89b03a9d`,
+and Git blob `881609bc61944004c8f8442eb22a527f132ebbd8`. §14 Startup begins at line
+10109 and is not part of this slice.
 
-The source publishes 69 definitions: 40 colons, 17 variables, six ordinary
-constants, three `CREATE` objects, two deferred words, and one `XBUF`-produced
-constant. Its 776 name bytes, 329 body bytes, and 1,173 fixed hosted bytes
-advance the canonical dictionary by exactly 2,278 bytes. Load creates the
-zeroed 16-cell inline bucket vector and `( inline, 16, 0, 0, lock-5 )`
-registry, writes `PROVIDED\0`, binds module allocation to the Bank-0 DMA heap,
-and replaces all three loader transaction hooks. The canonical XMEM path also
-reserves the persistent 128-byte `_REQ-CWD-STK`, advancing and protecting the
-XMEM frontier without clearing its bytes. It constructs no module node and
-performs no filesystem, lock, hash, UART, RTC, rendering, or rich-terminal
-operation at load time.
+The source publishes 75 definitions: 46 colons, 16 variables, seven ordinary
+constants, four `CREATE` objects, and two deferred words. Its 859 name bytes,
+353 body bytes, and 1,275 fixed hosted bytes advance the canonical dictionary
+by exactly 2,487 bytes. Load creates the zeroed 16-cell inline bucket vector
+and the six-cell `( inline, 16, 0, 0, lock-5, 0 )` registry, whose last cell
+counts the loaded files apart from the module names, writes `PROVIDED\0`,
+binds module allocation to the Bank-0 DMA heap, and replaces all three loader
+transaction hooks. It reserves no extended memory: `REQUIRE` shares with
+`LOAD` the stack of sources and directories that the loader fixture places in
+the dictionary. It constructs no module node and performs no filesystem, lock,
+hash, UART, RTC, rendering, or rich-terminal operation at load time.
 
-Eight seconds-scale tests pin that ledger and exercise exact case-sensitive
+Thirteen seconds-scale tests pin that ledger and exercise exact case-sensitive
 FNV-1a identities, duplicate-neutral insertion, ordinary bounds and node OOM,
 stable-node 16-to-32-bucket growth, retryable growth OOM, frame-wide commit and
 rollback, lexical prescan boundaries, pre-registration OOM cleanup and retry,
-an ordinary mounted in-memory MP64FS self-cycle, duplicate `REQUIRE`, exact
-`MODULES` bytes, and nested child success joining the parent's registry and
-dictionary rollback closure. Nested success merges its provisional IDs into
-the parent, so a later parent failure rolls back the nested IDs and all
-dictionary definitions added since the parent's checkpoint.
+an ordinary mounted in-memory MP64FS self-cycle that reads its file once,
+duplicate `REQUIRE`, exact `MODULES` bytes, and nested child success joining
+the parent's registry and dictionary rollback closure. Nested success merges
+its provisional IDs into the parent, so a later parent failure rolls back the
+nested IDs and all dictionary definitions added since the parent's checkpoint.
+Five of them concern the registry's records of loaded files. Four drive
+`REQUIRE` through a module source the test serves from a table of paths,
+which records every call: a file whose module is loaded is resolved and not
+read; a second file of a loaded module is read once; a file without an
+identity is read every time and evaluated once; a failed load removes the
+files it recorded; equal identities from two sources stay apart; and bucket
+growth counts names and files together. The fifth, on MP64FS, shows that a
+file record which cannot be allocated rolls its module name back, and that a
+loaded MP64FS file is found by its directory entry and not read again.
 
 Current source retains these limits:
 
@@ -2310,14 +2334,16 @@ Current source retains these limits:
 - Ordinary IDs are limited to 1–246 bytes, but the upper check is signed. A
   high-bit length bypasses it and enters unchecked hashing, allocation, and
   copying; that is an unsafe source discrepancy, not a supported signed range.
-- Duplicate `REQUIRE` skips evaluation only after filesystem ensure/lookup,
-  transfer allocation/read, loader-frame save, and prescan. It is neutral for
-  persistent registry/dictionary state, not free of I/O or allocator scratch
-  effects. Identity is independent of path and content, so any already stored
-  prescan ID suppresses the selected file.
-- `REQUIRE` retains raw filesystem lookup and has no file-type/flags gate, but
-  it now shares `LOAD`'s checked per-line/final completion and guards read,
-  prescan, and evaluation under the common cleanup lifecycle.
+- Duplicate `REQUIRE` of a file whose source gives an identity ends when the
+  source has resolved the path: the registry holds that identity beside the
+  module, and the loader neither allocates nor reads. The source's own lookup
+  still runs. A file without an identity is allocated, read, and prescanned
+  before evaluation is skipped. Module identity is independent of path and
+  content, so any already stored prescan ID suppresses the selected file.
+- `REQUIRE` finds its file through the current module source. The built-in
+  MP64FS source keeps the raw filesystem lookup and has no file-type/flags
+  gate. `REQUIRE` shares `LOAD`'s checked per-line/final completion and guards
+  read, prescan, and evaluation under the common cleanup lifecycle.
 - A failure caught as guest `THROW` removes provisional IDs and restores the
   active loader frame's saved `HERE`/`LATEST`. Successful nested ID chains merge into the parent and
   therefore roll back with a later parent failure. Output, allocator/registry
@@ -2339,18 +2365,18 @@ slice completes the contiguous frontier through EOF.
 
 ### KDOS §14 Startup and EOF
 
-Exact current lines 9854–9894, including the section separator, contain 41 LF
-records and 1,432 bytes, with SHA-256
-`d14948c62ff524ed67fe0743f1f3976d3430c1754809bf339c45ac8bd3569f82`
-and Git blob `64644994439ac09da0bd19db31866c404d380582`. The executable lines
-9855–9894 contain 40 LF records and 1,360 bytes, with SHA-256
-`480ab7b30f349044fdfd2c10257aee4525348819e15938396865ce332efa71fb`
-and Git blob `5f5d1922439468bbd5884505b3c5801e8d295269`. The complete current
-9,894-line, 343,551-byte `kdos.f` has SHA-256
-`b9e6ab1f3fa6331d14db4c94b7ed6978b78b2acd45c311fdecf566dcce4e00ae`
-and Git blob `4580b4075b3114ef6e5b2c8121b6e4fa1cfb2c70`.
-The canonical source-mode CLI filter submits 6,681 non-comment records with
-215,630 payload bytes, or 222,311 UART bytes after one LF delimiter per
+Exact current lines 10108–10147, including the section separator, contain 40 LF
+records and 1,398 bytes, with SHA-256
+`d75984f7fd3d55cb8c573da5b9f494ff1c1e8bba32b3537fa2270669add3ca8a`
+and Git blob `1354db80222545647369729b93526831ff0a21ec`. The executable lines
+10109–10147 contain 39 LF records and 1,326 bytes, with SHA-256
+`07df5026ba571e0d6e232d8c908963a0403756d3859390af3c7de3230f446b85`
+and Git blob `c920305479e61c2a5d51719779ec9c9fba0c2b8f`. The complete current
+10,147-line, 355,722-byte `kdos.f` has SHA-256
+`90768df9fafdd3392f7e93f0542367ee0104f82ac286e2b6eeb1e42ce427bbd2`
+and Git blob `2cff300d84349d154cbf8837ad0cca9f1935f052`.
+The canonical source-mode CLI filter submits 6,803 non-comment records with
+220,624 payload bytes, or 227,427 UART bytes after one LF delimiter per
 record. These are structural source/transport identities, not a fresh
 wall-clock or complete-load qualification.
 
@@ -2369,7 +2395,8 @@ Five focused cases pin exact no-disk output/state, invalid attached media, a
 valid 15-sector filesystem without autoexec, a tiny mounted autoexec through
 the ordinary module loader including duplicate suppression, and checked DMA
 heap-probe failure without freeing a non-address. The filesystem path uses
-ambient `CWD`, performs two name lookups on the successful autoexec path, and
+ambient `CWD`, performs two name lookups on the successful autoexec path, its
+own and the module source's, and
 adds no file-type, flags, CRC, encryption, or root-directory gate. The
 `Running` line precedes body validation. This tiny module proves the startup
 seam; it does not qualify the standard repository `autoexec.f` or its
@@ -2401,10 +2428,10 @@ across 1,771 live history entries, including seven shadows. It reached six
 buffers, 23 kernels, three pipelines, nine screens, an intact heap, all HBW
 still free, mounted MP64FS, zero modules, balanced stacks, and no held lock. A
 post-boot checked definition returned 42, followed by allocation/free, CRC32,
-ring FIFO, and module-listing checks. Current source-ledger accounting expects
-1,460 KDOS publications and 1,772 unique bindings, but the full regular-load
-selector has not been rerun; that work remains deferred by the rich-terminal
-gate.
+ring FIFO, and module-listing checks. The current regular-load test,
+`tests/simulator/test_kdos_regular_load.py`, loads the present file over
+455 core words and expects 1,514 KDOS publications and 1,962 unique
+bindings.
 
 The contiguous unchanged KDOS core now reaches EOF. The integration branch is
 now synchronized with the current `rich-terminal.f` and adds its five missing

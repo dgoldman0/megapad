@@ -28,10 +28,10 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 FP16_FORMAT = ieee_fp.FP16.ew
 BF16_FORMAT = ieee_fp.BF16.ew
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
-FIXTURE = Path(__file__).with_name("fixtures") / "kdos-buffer-fp-3174-3280.f"
+FIXTURE = Path(__file__).with_name("fixtures") / "kdos-buffer-fp-3176-3282.f"
 
-FIRST_LINE = 3174
-LAST_LINE = 3280
+FIRST_LINE = 3176
+LAST_LINE = 3282
 SLICE_SHA256 = (
     "cea60476207e132760c32cf2fb82773d6325d6d1895f0e7d73c40bf667b75065"
 )
@@ -149,7 +149,7 @@ def test_next_contiguous_kernel_pipeline_slice_is_now_admitted(
     assert runtime.tile.control == 0
 
     lines = KDOS_SOURCE.read_bytes().splitlines(keepends=True)
-    next_source = b"".join(lines[LAST_LINE:3818])
+    next_source = b"".join(lines[LAST_LINE:3820])
     assert len(next_source) == 16_586
     assert next_source.count(b"\n") == 538
     assert next_source.startswith(b"\n\\ ====")

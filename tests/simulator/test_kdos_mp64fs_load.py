@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import struct
 from pathlib import Path
 
 from shared.cells import TRUE, u64
@@ -11,7 +12,7 @@ from shared.storage import (
     STORAGE_CMD_READ,
     STORAGE_RESULT_MEDIA_REMOVED,
 )
-from simulator.runtime import MegaForthRuntime
+from simulator.runtime import ExecutionContext, MegaForthRuntime
 from simulator.storage import HostedStorageService
 from tests.simulator.test_bios_mp64fs import (
     _formatted_image,
@@ -45,16 +46,16 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-mp64fs-load-5722-6055.f"
+    / "kdos-mp64fs-load-5724-6175.f"
 )
 
-FIRST_LINE = 5722
-LAST_LINE = 6055
-SLICE_BYTES = 11_980
+FIRST_LINE = 5724
+LAST_LINE = 6175
+SLICE_BYTES = 17_210
 SLICE_SHA256 = (
-    "6a30453c933ac8666c1b798a98a4fb3e6a331afeb4c2d3048299a83a0ea79a7c"
+    "9848280b32b5db3387dd94df4e0c7036597d913e3f457d97ee88a29722b3bc9a"
 )
-SLICE_GIT_BLOB = "f2bea50138ca04e235358debd734a4fc234e002a"
+SLICE_GIT_BLOB = "679fb2d92ac20649daa6992ccc9490122e6d5d52"
 
 # Exact defining-word/name order in kdos.f.  Keeping the defining word in
 # the ledger makes source-layout changes visible even if a replacement happens
@@ -92,6 +93,36 @@ SOURCE_LEDGER = (
     (":", b"_RP-IS-DOTDOT?"),
     (":", b"_RP-CD-COMP"),
     (":", b"_RESOLVE-PATH"),
+    ("CONSTANT", b"/MODULE-SOURCE"),
+    (":", b"MS.RESOLVE"),
+    (":", b"MS.READ"),
+    (":", b"MS.DIR@"),
+    (":", b"MS.DIR!"),
+    (":", b"MS.CONTEXT"),
+    ("CONSTANT", b"/MODULE-FILE"),
+    (":", b"MF.ID"),
+    (":", b"MF.USED"),
+    (":", b"MF.RESERVE"),
+    (":", b"MF.HANDLE"),
+    ("CONSTANT", b"MS-E-NOT-FOUND"),
+    ("CONSTANT", b"MS-E-NO-FILESYSTEM"),
+    ("VARIABLE", b"_FMS-FILE"),
+    (":", b"_FS-MS-RESOLVE"),
+    (":", b"_FS-MS-READ"),
+    (":", b"_FS-MS-DIR@"),
+    (":", b"_FS-MS-DIR!"),
+    ("CREATE", b"FS-MODULE-SOURCE"),
+    ("VARIABLE", b"MODULE-SOURCE"),
+    (":", b"MODULE-SOURCE!"),
+    ("CREATE", b"_LD-FILE"),
+    (":", b"_LD-PATH"),
+    (":", b"_LD-RESOLVE"),
+    (":", b"_LD-READ"),
+    (":", b"_LD-FOUND?"),
+    ("CREATE", b"_LD-FROM-STK"),
+    ("VARIABLE", b"_LD-FROM-SP"),
+    (":", b"_LD-FROM-SAVE"),
+    (":", b"_LD-FROM-END"),
     ("CONSTANT", b"EVAL-S-OK"),
     ("CONSTANT", b"EVAL-S-UNDEFINED"),
     ("CONSTANT", b"EVAL-S-LINE-TOO-LONG"),
@@ -114,6 +145,7 @@ SOURCE_LEDGER = (
     (":", b"_LD-GUARDED"),
     (":", b"_LD-WALK-GUARDED"),
     (":", b"_LD-READ-WALK"),
+    (":", b"_LOAD-BODY"),
     (":", b"LOAD"),
 )
 
@@ -122,6 +154,10 @@ DEFINITIONS = tuple(name for _definer, name in SOURCE_LEDGER)
 CONSTANTS = (
     ("_LD-FRAME", 88),
     ("_LD-MAXLVL", 16),
+    ("/MODULE-SOURCE", 40),
+    ("/MODULE-FILE", 40),
+    ("MS-E-NOT-FOUND", u64(-4110)),
+    ("MS-E-NO-FILESYSTEM", u64(-4111)),
     ("EVAL-S-OK", 0),
     ("EVAL-S-UNDEFINED", 1),
     ("EVAL-S-LINE-TOO-LONG", 2),
@@ -141,6 +177,8 @@ VARIABLES = (
     "_LD-RUN-CNT",
     "_LD-RUN-ADDR",
     "_RP-I",
+    "_FMS-FILE",
+    "_LD-FROM-SP",
     "_SEC-CUR",
     "_SEC-REM",
     "_SEC-RAW-LEN",
@@ -257,10 +295,150 @@ def _sector_allocation(source: bytes, sectors: int) -> bytes:
     return source + (poison * repeats)[: capacity - len(source)]
 
 
+MS_E_NOT_FOUND = u64(-4110)
+MS_E_NO_FILESYSTEM = u64(-4111)
+MODULE_FILE_BYTES = 40
+
+
+class _HostSource:
+    """A module source the test serves from a table of paths.
+
+    It keeps one current directory and records every call the loader makes.
+    Each DIR@ hands out a new token, and DIR! accepts a token once, so a
+    token that comes back twice, or never, fails the test.
+    """
+
+    def __init__(
+        self,
+        runtime: MegaForthRuntime,
+        name: str,
+        files: dict[bytes, bytes],
+        *,
+        identities: dict[bytes, tuple[int, int]] | None = None,
+        reserve_slack: int = 0,
+    ) -> None:
+        self.runtime = runtime
+        self.files = dict(files)
+        self.identities = dict(identities or {})
+        self.reserve_slack = reserve_slack
+        self.directory: tuple[bytes, ...] = ()
+        self.calls: list[tuple[object, ...]] = []
+        self.live_tokens: dict[int, tuple[bytes, ...]] = {}
+        self.handles: dict[int, bytes] = {}
+        self.resolve_ior = 0
+        self.read_ior = 0
+        self.context = 0x00C0_FFEE
+        self._next = 0x5000
+        words = tuple(
+            runtime.define_primitive(f"{name}-{suffix}", callback)
+            for suffix, callback in (
+                ("RESOLVE", self._resolve),
+                ("READ", self._read),
+                ("DIR@", self._directory_fetch),
+                ("DIR!", self._directory_store),
+            )
+        )
+        self.operations = tuple(word.xt for word in words)
+        record = b"".join(
+            value.to_bytes(8, "little")
+            for value in (*self.operations, self.context)
+        )
+        self.address = runtime.define_created(
+            name,
+            initial_body=record,
+        ).body_address
+
+    def _fresh(self) -> int:
+        self._next += 1
+        return self._next
+
+    def reads(self) -> list[bytes]:
+        return [call[1] for call in self.calls if call[0] == "read"]
+
+    def resolves(self) -> list[bytes]:
+        return [call[1] for call in self.calls if call[0] == "resolve"]
+
+    def _resolve(self, context: ExecutionContext) -> None:
+        source = context.data.pop()
+        record = context.data.pop()
+        length = context.data.pop()
+        address = context.data.pop()
+        assert source == self.address
+        memory = self.runtime.memory
+        path = memory.read_bytes(address, length)
+        self.calls.append(
+            ("resolve", path, memory.read_bytes(record, MODULE_FILE_BYTES))
+        )
+        if self.resolve_ior:
+            context.data.push(self.resolve_ior)
+            return
+        directory = () if path.startswith(b"/") else self.directory
+        *folders, leaf = path.lstrip(b"/").split(b"/")
+        for folder in folders:
+            directory = (
+                directory[:-1] if folder == b".." else (*directory, folder)
+            )
+        # A failed resolve may leave any directory current.
+        self.directory = directory
+        full = b"/".join((*directory, leaf))
+        text = self.files.get(full)
+        if text is None:
+            context.data.push(MS_E_NOT_FOUND)
+            return
+        handle = self._fresh()
+        self.handles[handle] = full
+        low, high = self.identities.get(full, (0, 0))
+        for offset, value in (
+            (0, low),
+            (8, high),
+            (16, len(text)),
+            (24, len(text) + self.reserve_slack),
+            (32, handle),
+        ):
+            memory.write64(record + offset, value)
+        context.data.push(0)
+
+    def _read(self, context: ExecutionContext) -> None:
+        source = context.data.pop()
+        record = context.data.pop()
+        address = context.data.pop()
+        assert source == self.address
+        memory = self.runtime.memory
+        full = self.handles[memory.read64(record + 32)]
+        self.calls.append(("read", full, address))
+        if self.read_ior:
+            context.data.push(self.read_ior)
+            return
+        # READ may use all of the span it asked for.
+        memory.write_bytes(
+            address,
+            self.files[full] + b"\xEE" * self.reserve_slack,
+        )
+        context.data.push(0)
+
+    def _directory_fetch(self, context: ExecutionContext) -> None:
+        assert context.data.pop() == self.address
+        token = self._fresh()
+        self.live_tokens[token] = self.directory
+        self.calls.append(("dir@", token))
+        context.data.push(token)
+
+    def _directory_store(self, context: ExecutionContext) -> None:
+        assert context.data.pop() == self.address
+        token = context.data.pop()
+        self.directory = self.live_tokens.pop(token)
+        self.calls.append(("dir!", token))
+
+
+def _select_source(runtime: MegaForthRuntime, source: _HostSource) -> None:
+    assert _execute(runtime, "MODULE-SOURCE!", source.address) == ()
+    assert _variable(runtime, "MODULE-SOURCE") == source.address
+
+
 def test_load_slice_is_exact_and_publishes_complete_source_ledger() -> None:
     runtime = _load_mp64fs_load()
 
-    assert len(SOURCE_LEDGER) == 55
+    assert len(SOURCE_LEDGER) == 86
     assert all(runtime.find(name) is not None for name in DEFINITIONS)
     assert tuple(_constant(runtime, name) for name, _value in CONSTANTS) == (
         tuple(value for _name, value in CONSTANTS)
@@ -271,6 +449,9 @@ def test_load_slice_is_exact_and_publishes_complete_source_ledger() -> None:
         ("_LD-STK", "_LD-SP", 88 * 16),
         ("_RP-PATH", "_RP-COMP", 128),
         ("_RP-COMP", "_RP-I", 24),
+        ("FS-MODULE-SOURCE", "MODULE-SOURCE", 40),
+        ("_LD-FILE", "_LD-PATH", 40),
+        ("_LD-FROM-STK", "_LD-FROM-SP", 16 * 16),
     )
     for name, following, size in sized_bodies:
         word = runtime.find(name)
@@ -289,6 +470,37 @@ def test_load_slice_is_exact_and_publishes_complete_source_ledger() -> None:
         hook = runtime.find(name)
         assert hook is not None
         assert runtime.memory.read64(hook.body_address) == noop.xt
+
+    builtin = runtime.find("FS-MODULE-SOURCE")
+    assert builtin is not None
+    assert tuple(
+        runtime.memory.read64(builtin.body_address + offset)
+        for offset in range(0, 40, 8)
+    ) == (
+        *(
+            runtime.find(name).xt  # type: ignore[union-attr]
+            for name in (
+                "_FS-MS-RESOLVE",
+                "_FS-MS-READ",
+                "_FS-MS-DIR@",
+                "_FS-MS-DIR!",
+            )
+        ),
+        0,
+    )
+    assert _variable(runtime, "MODULE-SOURCE") == builtin.body_address
+    for name, offset in (
+        ("MS.RESOLVE", 0),
+        ("MS.READ", 8),
+        ("MS.DIR@", 16),
+        ("MS.DIR!", 24),
+        ("MS.CONTEXT", 32),
+        ("MF.ID", 0),
+        ("MF.USED", 16),
+        ("MF.RESERVE", 24),
+        ("MF.HANDLE", 32),
+    ):
+        assert _execute(runtime, name, 0x1000) == (0x1000 + offset,)
 
     assert sum(
         word.name == b"EVALUATE-CHECKED"
@@ -587,12 +799,13 @@ def test_load_clean_guards_misses_empty_and_missing_path_restore_state() -> None
     _install_loader_trace(runtime)
     loader_before = _seed_loader_globals(runtime)
 
-    runtime.evaluate(b"LOAD 41", source_name="load-without-filesystem")
-    assert runtime.main_context.data.snapshot() == (41,)
+    runtime.evaluate(b"LOAD 41 42", source_name="load-without-filesystem")
+    assert runtime.main_context.data.snapshot() == (42,)
     runtime.main_context.data.clear()
     assert runtime.drain_uart_output() == b" No filesystem\r\n"
     assert _loader_globals(runtime) == loader_before
     assert _variable(runtime, "_LD-SP") == 0
+    assert _variable(runtime, "_LD-FROM-SP") == 0
     assert _variable(runtime, "LOAD-HOOK-TRACE") == 0
 
     image = _formatted_image(16)
@@ -622,11 +835,12 @@ def test_load_clean_guards_misses_empty_and_missing_path_restore_state() -> None
     )
     assert runtime.drain_uart_output() == (
         b" Path component not found: missing-dir\r\n"
-        b" Not found: missing-dir\r\n"
+        b" Not found: missing-dir/ignored.f\r\n"
     )
 
     assert _loader_globals(runtime) == loader_before
     assert _variable(runtime, "_LD-SP") == 0
+    assert _variable(runtime, "_LD-FROM-SP") == 0
     assert _variable(runtime, "CWD") == 0xFF
     assert _variable(runtime, "LOAD-HOOK-TRACE") == 0
     assert _execute(runtime, "HEAP-FREE-BYTES") == (heap_before,)
@@ -984,3 +1198,321 @@ def test_second_extent_read_failure_runs_guarded_cleanup() -> None:
     assert runtime.main_context.returns.snapshot() == ()
     assert runtime.drain_uart_output() == b""
     assert runtime.spinlocks.owner(2) is None
+
+
+def test_load_reads_nested_relative_paths_through_the_selected_source() -> None:
+    runtime = _load_mp64fs_load()
+    source = _HostSource(
+        runtime,
+        "HOST-SOURCE",
+        {
+            b"lib/outer.f": (
+                b": HOST-OUTER 11 ;\n"
+                b"LOAD inner.f\n"
+                b"LOAD ../top.f\n"
+                b": HOST-AFTER 14 ;\n"
+            ),
+            b"lib/inner.f": b": HOST-INNER 12 ;\n",
+            b"top.f": b": HOST-TOP 13 ;\n",
+        },
+        reserve_slack=24,
+    )
+    _select_source(runtime, source)
+    _install_loader_trace(runtime)
+    loader_before = _seed_loader_globals(runtime)
+    heap_before = _execute(runtime, "HEAP-FREE-BYTES")[0]
+    completion_before = runtime.storage.completion
+
+    runtime.evaluate(b"LOAD lib/outer.f", source_name="load-from-host-source")
+
+    assert _execute(runtime, "HOST-OUTER") == (11,)
+    assert _execute(runtime, "HOST-INNER") == (12,)
+    assert _execute(runtime, "HOST-TOP") == (13,)
+    assert _execute(runtime, "HOST-AFTER") == (14,)
+    kinds = [call[0] for call in source.calls]
+    assert kinds == [
+        "dir@", "resolve", "read",
+        "dir@", "resolve", "read", "dir!",
+        "dir@", "resolve", "read", "dir!",
+        "dir!",
+    ]
+    # Each nested load resolves from its caller's directory, and every
+    # resolve starts from a cleared file record.
+    assert [call[1:] for call in source.calls if call[0] == "resolve"] == [
+        (b"lib/outer.f", bytes(MODULE_FILE_BYTES)),
+        (b"inner.f", bytes(MODULE_FILE_BYTES)),
+        (b"../top.f", bytes(MODULE_FILE_BYTES)),
+    ]
+    assert source.reads() == [b"lib/outer.f", b"lib/inner.f", b"top.f"]
+    tokens = [call[1] for call in source.calls if call[0] == "dir@"]
+    assert [call[1] for call in source.calls if call[0] == "dir!"] == [
+        tokens[1],
+        tokens[2],
+        tokens[0],
+    ]
+    assert source.live_tokens == {}
+    assert source.directory == ()
+    assert _variable(runtime, "MODULE-SOURCE") == source.address
+    assert _variable(runtime, "LOAD-HOOK-TRACE") == 131313
+    assert _execute(runtime, "HEAP-FREE-BYTES") == (heap_before,)
+    assert _variable(runtime, "_LD-SP") == 0
+    assert _variable(runtime, "_LD-FROM-SP") == 0
+    assert _variable(runtime, "EVAL-DEPTH") == 0
+    assert _loader_globals(runtime) == loader_before
+    # KDOS's own filesystem took no part.
+    assert _variable(runtime, "CWD") == 0xFF
+    assert _variable(runtime, "FS-OK") == 0
+    assert runtime.storage.completion == completion_before
+    assert runtime.drain_uart_output() == b""
+    assert runtime.main_context.data.snapshot() == ()
+    assert runtime.main_context.returns.snapshot() == ()
+
+
+def test_load_reports_a_sources_misses_and_throws_its_other_failures() -> None:
+    runtime = _load_mp64fs_load()
+    source = _HostSource(
+        runtime,
+        "HOST-SOURCE",
+        {b"lib/empty.f": b"", b"lib/real.f": b": HOST-REAL 5 ;\n"},
+    )
+    _select_source(runtime, source)
+    _install_loader_trace(runtime)
+    loader_before = _seed_loader_globals(runtime)
+    heap_before = _execute(runtime, "HEAP-FREE-BYTES")[0]
+
+    def settled() -> None:
+        assert source.live_tokens == {}
+        assert source.directory == ()
+        assert source.reads() == []
+        assert _variable(runtime, "MODULE-SOURCE") == source.address
+        assert _variable(runtime, "LOAD-HOOK-TRACE") == 0
+        assert _execute(runtime, "HEAP-FREE-BYTES") == (heap_before,)
+        assert _variable(runtime, "_LD-SP") == 0
+        assert _variable(runtime, "_LD-FROM-SP") == 0
+        assert _loader_globals(runtime) == loader_before
+        assert runtime.main_context.returns.snapshot() == ()
+
+    # The source leaves lib current when it finds no file there.
+    runtime.evaluate(b"LOAD lib/missing.f 7", source_name="host-miss")
+    assert runtime.main_context.data.snapshot() == (7,)
+    runtime.main_context.data.clear()
+    assert runtime.drain_uart_output() == b" Not found: lib/missing.f\r\n"
+    settled()
+
+    runtime.evaluate(b"LOAD lib/empty.f", source_name="host-empty")
+    assert runtime.drain_uart_output() == b" Empty file\r\n"
+    settled()
+
+    source.resolve_ior = MS_E_NO_FILESYSTEM
+    runtime.evaluate(b"LOAD lib/real.f", source_name="host-no-filesystem")
+    assert runtime.drain_uart_output() == b" No filesystem\r\n"
+    settled()
+
+    source.resolve_ior = u64(-37)
+    runtime.evaluate(b"' LOAD CATCH lib/real.f", source_name="host-other")
+    assert runtime.main_context.data.snapshot() == (u64(-37),)
+    runtime.main_context.data.clear()
+    assert runtime.drain_uart_output() == b""
+    settled()
+    assert runtime.find("HOST-REAL") is None
+    assert source.resolves() == [b"lib/missing.f"] + [b"lib/empty.f"] + [
+        b"lib/real.f"
+    ] * 2
+
+    source.resolve_ior = 0
+    runtime.evaluate(b"LOAD lib/real.f", source_name="host-after-failures")
+    assert _execute(runtime, "HOST-REAL") == (5,)
+    assert source.live_tokens == {}
+    assert source.directory == ()
+
+
+def test_a_sources_read_failure_takes_the_guarded_cleanup() -> None:
+    runtime = _load_mp64fs_load()
+    source = _HostSource(
+        runtime,
+        "HOST-SOURCE",
+        {b"lib/unread.f": b": HOST-UNREAD 5 ;\n"},
+    )
+    _select_source(runtime, source)
+    _install_loader_trace(runtime)
+    loader_before = _seed_loader_globals(runtime)
+    heap_before = _execute(runtime, "HEAP-FREE-BYTES")[0]
+    dictionary_before = (runtime.dictionary.here, runtime.dictionary.latest)
+    source.read_ior = u64(-99)
+
+    runtime.evaluate(b"' LOAD CATCH lib/unread.f", source_name="host-read")
+
+    assert runtime.main_context.data.snapshot() == (u64(-99),)
+    runtime.main_context.data.clear()
+    assert source.reads() == [b"lib/unread.f"]
+    assert runtime.find("HOST-UNREAD") is None
+    assert (runtime.dictionary.here, runtime.dictionary.latest) == (
+        dictionary_before
+    )
+    assert source.live_tokens == {}
+    assert source.directory == ()
+    assert _variable(runtime, "MODULE-SOURCE") == source.address
+    assert _variable(runtime, "LOAD-HOOK-TRACE") == 23
+    assert _execute(runtime, "HEAP-FREE-BYTES") == (heap_before,)
+    assert _variable(runtime, "_LD-SP") == 0
+    assert _variable(runtime, "_LD-FROM-SP") == 0
+    assert _variable(runtime, "EVAL-DEPTH") == 0
+    assert _loader_globals(runtime) == loader_before
+    assert runtime.drain_uart_output() == b""
+    assert runtime.main_context.returns.snapshot() == ()
+
+
+def test_a_load_keeps_the_source_it_selects_unless_it_fails() -> None:
+    runtime = _load_mp64fs_load()
+    first = _HostSource(
+        runtime,
+        "HOST-FIRST",
+        {
+            b"boot/switch.f": (
+                b": BEFORE-SWITCH 1 ;\n"
+                b"HOST-SECOND MODULE-SOURCE!\n"
+                b"LOAD next.f\n"
+            ),
+            b"boot/fail.f": b"HOST-SECOND MODULE-SOURCE!\n-77 THROW\n",
+        },
+    )
+    second = _HostSource(
+        runtime,
+        "HOST-SECOND",
+        {b"next.f": b": FROM-SECOND 2 ;\n"},
+    )
+    _select_source(runtime, first)
+
+    runtime.evaluate(b"' LOAD CATCH boot/fail.f", source_name="failed-switch")
+
+    assert runtime.main_context.data.snapshot() == (u64(-77),)
+    runtime.main_context.data.clear()
+    assert _variable(runtime, "MODULE-SOURCE") == first.address
+    assert first.live_tokens == {}
+    assert first.directory == ()
+    assert second.calls == []
+    assert _variable(runtime, "_LD-FROM-SP") == 0
+
+    runtime.evaluate(b"LOAD boot/switch.f", source_name="kept-switch")
+
+    assert _execute(runtime, "BEFORE-SWITCH") == (1,)
+    assert _execute(runtime, "FROM-SECOND") == (2,)
+    assert _variable(runtime, "MODULE-SOURCE") == second.address
+    # The first source has its directory back although it is not selected.
+    assert first.live_tokens == {}
+    assert first.directory == ()
+    assert [call[0] for call in second.calls] == [
+        "dir@",
+        "resolve",
+        "read",
+        "dir!",
+    ]
+    assert second.live_tokens == {}
+    assert _variable(runtime, "_LD-SP") == 0
+    assert _variable(runtime, "_LD-FROM-SP") == 0
+    assert runtime.drain_uart_output() == b""
+
+
+def test_builtin_source_resolves_the_path_it_is_given() -> None:
+    image = _formatted_image(20)
+    _write_entry(
+        image,
+        7,
+        name=b"pkg\0",
+        start=0,
+        count=0,
+        entry_type=8,
+        parent=0xFF,
+    )
+    text = b"\\ p\n" * 125 + b": BUILTIN-READ 42 ;\n"
+    assert len(text) > SECTOR_SIZE
+    allocation = _sector_allocation(text, 2)
+    offset = _write_entry(
+        image,
+        8,
+        name=b"mod.f\0",
+        start=14,
+        count=1,
+        used=len(text),
+        entry_type=3,
+        parent=7,
+        secondary_start=17,
+        secondary_count=1,
+    )
+    struct.pack_into("<II", image, offset + 36, 0x0102_0304, 0xA1B2_C3D4)
+    image[14 * SECTOR_SIZE : 15 * SECTOR_SIZE] = allocation[:SECTOR_SIZE]
+    image[17 * SECTOR_SIZE : 18 * SECTOR_SIZE] = allocation[SECTOR_SIZE:]
+    runtime = _load_mp64fs_load()
+    builtin = _execute(runtime, "FS-MODULE-SOURCE")[0]
+    record = runtime.define_created(
+        "TEST-FILE-RECORD",
+        initial_body=b"\xA5" * MODULE_FILE_BYTES,
+    ).body_address
+    path = b"pkg/mod.f"
+    span = runtime.define_created("TEST-PATH", initial_body=path).body_address
+    missing = runtime.define_created(
+        "TEST-MISSING-PATH",
+        initial_body=b"pkg/none.f",
+    ).body_address
+
+    assert _execute(
+        runtime,
+        "_FS-MS-RESOLVE",
+        span,
+        len(path),
+        record,
+        builtin,
+    ) == (MS_E_NO_FILESYSTEM,)
+
+    runtime.storage.attach(image)
+    _mount(runtime)
+    runtime.evaluate(b"PARSE-NAME something-else.f", source_name="stale-name")
+    completion_before = runtime.storage.completion
+
+    assert _execute(
+        runtime,
+        "_FS-MS-RESOLVE",
+        span,
+        len(path),
+        record,
+        builtin,
+    ) == (0,)
+
+    assert tuple(
+        runtime.memory.read64(record + offset) for offset in range(0, 40, 8)
+    ) == (
+        (0xA1B2_C3D4 << 32) | len(text),
+        (0x0102_0304 << 32) | (14 << 16) | 8,
+        len(text),
+        2 * SECTOR_SIZE,
+        8,
+    )
+    assert _variable(runtime, "CWD") == 7
+    assert _execute(runtime, "_FS-MS-DIR@", builtin) == (7,)
+    assert runtime.memory.read_bytes(
+        _execute(runtime, "PATHBUF")[0],
+        len(path) + 1,
+    ) == path + b"\0"
+    assert runtime.storage.completion == completion_before
+
+    buffer, status = _execute(runtime, "ALLOCATE", 2 * SECTOR_SIZE)
+    assert status == 0
+    loader_buffer = _variable(runtime, "LD-BUF")
+    assert _execute(runtime, "_FS-MS-READ", buffer, record, builtin) == (0,)
+    assert runtime.memory.read_bytes(buffer, len(text)) == text
+    assert _variable(runtime, "LD-BUF") == loader_buffer != buffer
+    assert runtime.storage.completion == completion_before + 2
+
+    assert _execute(runtime, "_FS-MS-DIR!", 0xFF, builtin) == ()
+    assert _variable(runtime, "CWD") == 0xFF
+    assert _execute(
+        runtime,
+        "_FS-MS-RESOLVE",
+        missing,
+        len(b"pkg/none.f"),
+        record,
+        builtin,
+    ) == (MS_E_NOT_FOUND,)
+    assert _variable(runtime, "CWD") == 7
+    assert runtime.drain_uart_output() == b""
+    assert runtime.main_context.returns.snapshot() == ()

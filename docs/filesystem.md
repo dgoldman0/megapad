@@ -95,14 +95,17 @@ Task-resetting `ABORT`/`ABORT"` and backend faults that do not become guest
 `THROW` bypass that path and are outside this lifecycle repair.
 The module loader does not enforce file type or directory flags, and output,
 allocator/registry effects outside the provisional-ID chain, objects, and
-media effects remain non-atomic. Duplicate `REQUIRE` still allocates, reads,
-and prescans the file before it skips evaluation, so it is not an I/O-free
-cache hit.
+media effects remain non-atomic. Duplicate `REQUIRE` of an MP64FS file reads
+no file data: the registry holds the identity of every file whose module is
+loaded (its directory slot, first sector, length, time, and checksum field),
+and the loader stops once the path has resolved to such a file. The directory
+lookup itself still runs.
 
 Final §14 Startup conditionally calls `FS-LOAD` only when `DISK?` reports
 attached media. On a valid load it copies the exact lowercase ten bytes
-`autoexec.f` into `NAMEBUF`, explicitly zeroes the remaining 14 bytes, and
-searches the ambient `CWD`; `_MOD-LOAD-BODY` performs a second lookup before
+`autoexec.f` into `PATHBUF` and `NAMEBUF`, zero-padded, and
+searches the ambient `CWD`; `_MOD-LOAD-BODY` has the current module source
+resolve the path, a second lookup, before
 transfer/evaluation. Startup adds no root-directory reset and neither lookup
 checks file type, flags, CRC, encryption, or directory policy. It prints
 `Running autoexec.f...` before empty/body/allocation/evaluator validation.
@@ -348,8 +351,10 @@ target for other entries.
 
 ### Path Resolution
 
-Path interpretation is command-specific. Host `diskutil` paths and KDOS's
-`_RESOLVE-PATH` helper for `LOAD`/`REQUIRE` use `/`-separated traversal;
+Path interpretation is command-specific. `LOAD` and `REQUIRE` hand their
+path to the current module source (`module-source-contract.md`). Host
+`diskutil` paths and the `_RESOLVE-PATH` helper of KDOS's built-in MP64FS
+source use `/`-separated traversal;
 leading `/` starts at root and a `..` directory component moves to the parent.
 The public `CD` word below does **not** use that resolver: it recognizes only
 the complete tokens `..` and `/`, and otherwise treats its token as one direct

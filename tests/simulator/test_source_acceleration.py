@@ -66,7 +66,7 @@ def _loader_state(runtime: MegaForthRuntime):
             _variable(runtime, name)
             for name in (
                 "_LD-SP",
-                "_REQ-SP",
+                "_LD-FROM-SP",
                 "EVAL-DEPTH",
                 "CWD",
                 "LD-BUF",

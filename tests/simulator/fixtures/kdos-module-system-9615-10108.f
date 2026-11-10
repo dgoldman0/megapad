@@ -22,28 +22,38 @@
 CREATE _MOD-INLINE  _MOD-INLINE-BUCKETS CELLS ALLOT
 _MOD-INLINE _MOD-INLINE-BUCKETS CELLS 0 FILL
 
-\ Registry descriptor: bucket pointer, bucket count, entry count,
-\ heap-owned-bucket flag, lock number.
+\ Registry descriptor: bucket pointer, bucket count, module count,
+\ heap-owned-bucket flag, lock number, loaded-file count.
 CREATE _MOD-REG
     _MOD-INLINE ,
     _MOD-INLINE-BUCKETS ,
     0 ,
     0 ,
     HT-LOCK ,
+    0 ,
 
 : _MOD-BUCKETS       ( -- addr )  _MOD-REG      @ ;
 : _MOD-BUCKET-COUNT  ( -- n )     _MOD-REG  8 + @ ;
 : _MOD-COUNT         ( -- n )     _MOD-REG 16 + @ ;
 : _MOD-BUCKETS-HEAP? ( -- flag )  _MOD-REG 24 + @ ;
 : _MOD-LOCK          ( -- n )     _MOD-REG 32 + @ ;
+: _MOD-FILES         ( -- n )     _MOD-REG 40 + @ ;
+\ Growth follows every entry, the modules and the loaded files.
+: _MOD-ENTRIES       ( -- n )     _MOD-COUNT _MOD-FILES + ;
 
 \ Stable entry: bucket-next, provisional-next, hash, exact length, ID bytes.
+\ An entry whose hash carries _MOD-FILE-BIT, one bit above every name's
+\ hash, records a loaded file ("Loaded files" below).  No name finds it.
 32 CONSTANT /MOD-NODE
 : _MN-NEXT  ( node -- addr ) ;
 : _MN-PROV  ( node -- addr )  8 + ;
 : _MN-HASH  ( node -- addr ) 16 + ;
 : _MN-LEN   ( node -- addr ) 24 + ;
 : _MN-ID    ( node -- addr ) 32 + ;
+1 32 LSHIFT CONSTANT _MOD-FILE-BIT
+\ _MOD-TALLY ( hash -- addr )  The count an entry with this hash is in.
+: _MOD-TALLY  ( hash -- addr )
+    _MOD-FILE-BIT AND IF _MOD-REG 40 + ELSE _MOD-REG 16 + THEN ;
 
 \ Private allocation seam.  Production bindings deliberately use the Bank-0
 \ heap; DEFER keeps deterministic entry/rehash failure qualification possible.
@@ -96,12 +106,8 @@ VARIABLE _MF-H
 \ _MOD-INSERT ( id-addr id-len -- node inserted? ior )
 \ Publish only a complete node.  Duplicate lookup occurs before allocation and
 \ is repeated under the publication lock, so duplicates remain allocation-free.
-: _MOD-INSERT  ( id-addr id-len -- node inserted? ior )
-    ?CORE0
-    DUP 0= OVER _MOD-ID-MAX > OR IF
-        2DROP 0 FALSE _MOD-E-BAD-ID EXIT
-    THEN
-    2DUP _MOD-HASH                         ( id-addr id-len hash )
+\ _MOD-INSERT-HASHED does the work for a caller that brings the hash cell.
+: _MOD-INSERT-HASHED  ( id-addr id-len hash -- node inserted? ior )
     _MOD-LOCK LOCK
     2 PICK 2 PICK 2 PICK _MOD-FIND-LOCKED ( id-addr id-len hash node )
     _MOD-LOCK UNLOCK
@@ -129,9 +135,16 @@ VARIABLE _MF-H
     OVER _MOD-BUCKET                        ( ... candidate bucket-addr )
     DUP @ 2 PICK _MN-NEXT !
     OVER SWAP !
-    1 _MOD-REG 16 + +!
+    1 2 PICK _MOD-TALLY +!
     _MOD-LOCK UNLOCK
     >R 2DROP DROP R> TRUE 0 ;
+
+: _MOD-INSERT  ( id-addr id-len -- node inserted? ior )
+    ?CORE0
+    DUP 0= OVER _MOD-ID-MAX > OR IF
+        2DROP 0 FALSE _MOD-E-BAD-ID EXIT
+    THEN
+    2DUP _MOD-HASH _MOD-INSERT-HASHED ;
 
 \ Best-effort retained growth.  Load factor may affect lookup time but never
 \ entry capacity.  Nodes stay at stable addresses while only bucket links move.
@@ -143,7 +156,7 @@ VARIABLE _MG-NEXT
 : _MOD-GROW-TARGET  ( -- buckets | 0 )
     _MOD-LOCK LOCK
     _MOD-BUCKET-COUNT DUP
-    BEGIN _MOD-COUNT OVER 2* > WHILE 2* REPEAT
+    BEGIN _MOD-ENTRIES OVER 2* > WHILE 2* REPEAT
     2DUP = IF 2DROP 0 ELSE NIP THEN
     _MOD-LOCK UNLOCK ;
 
@@ -154,7 +167,7 @@ VARIABLE _MG-NEXT
 
     _MOD-LOCK LOCK
     _MOD-BUCKET-COUNT 2 PICK >=
-    _MOD-COUNT _MOD-BUCKET-COUNT 2* <= OR IF
+    _MOD-ENTRIES _MOD-BUCKET-COUNT 2* <= OR IF
         _MOD-LOCK UNLOCK
         NIP _MOD-FREE EXIT
     THEN
@@ -203,6 +216,12 @@ VARIABLE _MOD-GROW-READY
         DROP
     THEN ;
 
+\ _MOD-JOIN ( node inserted? ior -- inserted? )  Throw an insert's failure;
+\ otherwise a new entry joins the loader's provisional list.
+: _MOD-JOIN  ( node inserted? ior -- inserted? )
+    DUP IF >R 2DROP R> THROW THEN
+    DROP DUP >R _MOD-ADOPT R> ;
+
 VARIABLE _MU-TARGET
 VARIABLE _MU-LINK
 
@@ -212,7 +231,7 @@ VARIABLE _MU-LINK
     BEGIN _MU-LINK @ @ DUP WHILE
         DUP _MU-TARGET @ = IF
             _MN-NEXT @ _MU-LINK @ !
-            -1 _MOD-REG 16 + +!
+            -1 _MU-TARGET @ _MN-HASH @ _MOD-TALLY +!
             EXIT
         THEN
         _MN-NEXT _MU-LINK !
@@ -354,9 +373,7 @@ VARIABLE _PS-LINE-U
 \ Neither word leaves insertion status on the public data stack.
 : PROVIDED-SPAN  ( id-addr id-len -- )
     ?CORE0
-    _MOD-INSERT
-    DUP IF >R 2DROP R> THROW THEN
-    DROP _MOD-ADOPT ;
+    _MOD-INSERT _MOD-JOIN DROP ;
 
 : PROVIDED  ( "name" -- )
     _MOD-PARSE-ID PROVIDED-SPAN ;
@@ -368,79 +385,83 @@ VARIABLE _PS-LINE-U
     DUP 0= OVER _MOD-ID-MAX > OR IF 2DROP _MOD-E-BAD-ID THROW THEN
     _MOD-FIND 0<> ;
 
-\ _MOD-LOAD-BODY ( -- )  Load file whose name is already in NAMEBUF.
-\   This is the core of LOAD without the PARSE-NAME call.
-\   CWD must already point to the target directory (set by
-\   _RESOLVE-PATH when the REQUIRE argument contains '/').
-\   After reading the file, pre-scans for PROVIDED.  If the module
-\   is already loaded, skips execution entirely (zero side effects).
+\ ── Loaded files ─────────────────────────────────────────────────────
+\ REQUIRE reads a file to find its PROVIDED line, so a module that many
+\ others name would be read once for each of them.  The registry therefore
+\ also holds the identity of every file whose module is loaded: the source
+\ that resolved it and the two cells that source gave.  Such a node sets
+\ one bit above every name's hash, so no name finds it, and it joins the
+\ loader's provisional list as a name does, so a failed load takes it out.
+CREATE _MOD-FILE-KEY 24 ALLOT
+
+\ _MOD-FILE-KEY? ( -- flag )  Build the resolved file's key; false when
+\ its source gave no identity.
+: _MOD-FILE-KEY?  ( -- flag )
+    _LD-FILE MF.ID @ _LD-FILE MF.ID 8 + @ OR 0= IF FALSE EXIT THEN
+    MODULE-SOURCE @ _MOD-FILE-KEY !
+    _LD-FILE MF.ID _MOD-FILE-KEY 8 + 16 CMOVE
+    TRUE ;
+: _MOD-FILE-HASH  ( -- hash )
+    _MOD-FILE-KEY 24 _MOD-HASH _MOD-FILE-BIT OR ;
+
+\ _MOD-FILE-LOADED? ( -- flag )  True when the resolved file's module is
+\ loaded, or is loading further up.
+: _MOD-FILE-LOADED?  ( -- flag )
+    _MOD-FILE-KEY? 0= IF FALSE EXIT THEN
+    _MOD-FILE-KEY 24 _MOD-FILE-HASH
+    _MOD-LOCK LOCK
+    _MOD-FIND-LOCKED
+    _MOD-LOCK UNLOCK
+    0<> ;
+
+\ _MOD-FILE-NOTE ( -- )  Record the resolved file beside its module name.
+: _MOD-FILE-NOTE  ( -- )
+    _MOD-FILE-KEY? 0= IF EXIT THEN
+    _MOD-FILE-KEY 24 _MOD-FILE-HASH _MOD-INSERT-HASHED _MOD-JOIN DROP ;
+
+\ _MOD-LOAD-BODY ( -- )  Load the file whose path PARSE-NAME left.
+\   The current module source resolves the path and makes the file's
+\   directory current.  A file whose module is loaded is not read again.
+\   After reading a file, the loader pre-scans it for PROVIDED.  If that
+\   module is already loaded, it skips execution entirely (zero side
+\   effects) and remembers the file.
 : _MOD-READ-WALK  ( -- )
-    LD-CUR @ _LD-READ-SLOT
+    _LD-READ
     \ Pre-register the exact source-buffer slice before executing anything.
     _MOD-PRESCAN IF
-        _MOD-INSERT                     ( node inserted? ior )
-        DUP IF
-            >R 2DROP R> THROW
-        THEN
-        DROP                            ( node inserted? )
-        DUP 0= IF
-            2DROP EXIT
-        THEN
-        _MOD-ADOPT
+        _MOD-INSERT _MOD-JOIN           ( inserted? )
+        _MOD-FILE-NOTE
+        0= IF EXIT THEN
     ELSE
         2DROP
     THEN
     _LD-WALK ;
 : _MOD-LOAD-BODY  ( -- )
-    FS-ENSURE
-    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
-    FIND-BY-NAME DUP -1 = IF
-        DROP ."  Module not found: " NAMEBUF .ZSTR CR EXIT
-    THEN
-    DUP DIRENT DE.USED DUP 0= IF
-        2DROP ."  Empty module" CR EXIT
-    THEN
+    _LD-RESOLVE TRUE _LD-FOUND? 0= IF EXIT THEN
+    _LD-FILE MF.USED @ 0= IF ."  Empty module" CR EXIT THEN
+    _MOD-FILE-LOADED? IF EXIT THEN
     _LD-SAVE
-    LD-SZ !                              ( slot )
+    _LD-FILE MF.USED @ LD-SZ !
     \ Module source is a reclaimable loader allocation, not permanent XMEM.
-    DUP _LD-SLOT-BYTES ALLOCATE IF
-        2DROP ."  Module buffer allocation failed" CR
+    _LD-FILE MF.RESERVE @ ALLOCATE IF
+        DROP ."  Module buffer allocation failed" CR
         _LD-RESTORE EXIT
     THEN
-    LD-BUF ! LD-CUR !
+    LD-BUF !
     ['] _MOD-READ-WALK _LD-GUARDED ;
 
 \ REQUIRE ( "name" -- )  Load a module file.
-\   The file's own PROVIDED line is the sole guard against duplicate
-\   loading.  REQUIRE just resolves the path and loads the file.
+\   The file's own PROVIDED line guards against loading a module twice,
+\   and a file whose module is loaded is not read again.
 \   Accepts relative paths: REQUIRE ../lib/util.f
-\   Path components adjust CWD; the final name is looked up in
-\   the resolved directory.  CWD is restored after loading.
-_LD-MAXLVL 8 * XBUF _REQ-CWD-STK
-VARIABLE _REQ-SP  0 _REQ-SP !
-
-: _REQ-SAVE-CWD  ( -- )
-    _REQ-SP @ _LD-MAXLVL 8 * >= ABORT" REQUIRE nested too deep"
-    CWD @ _REQ-SP @ _REQ-CWD-STK + !
-    8 _REQ-SP +! ;
-
-: _REQ-RESTORE-CWD  ( -- )
-    _REQ-SP @ 0= ABORT" REQUIRE nesting underflow"
-    -8 _REQ-SP +!
-    _REQ-SP @ _REQ-CWD-STK + @ CWD ! ;
-
-: _REQUIRE-BODY  ( -- )
-    _RESOLVE-PATH
-    _MOD-LOAD-BODY ;
-
+\   The current module source resolves the path from its current
+\   directory, which is the requiring file's during a load, and the
+\   directory is restored after loading.
 : REQUIRE  ( "name" -- )
     ?CORE0
     PARSE-NAME
-    FS-ENSURE                  \ load FS before path resolution
-    _REQ-SAVE-CWD
-    ['] _REQUIRE-BODY CATCH
-    _REQ-RESTORE-CWD           \ restore before returning or rethrowing
-    THROW ;
+    _LD-FROM-SAVE
+    ['] _MOD-LOAD-BODY CATCH _LD-FROM-END ;
 
 VARIABLE _ML-NODE
 
@@ -449,8 +470,10 @@ VARIABLE _ML-NODE
     _MOD-BUCKET-COUNT 0 DO
         _MOD-BUCKETS I CELLS + @ _ML-NODE !
         BEGIN _ML-NODE @ WHILE
-            ."   "
-            _ML-NODE @ DUP _MN-ID SWAP _MN-LEN @ TYPE CR
+            _ML-NODE @ _MN-HASH @ _MOD-FILE-BIT AND 0= IF
+                ."   "
+                _ML-NODE @ DUP _MN-ID SWAP _MN-LEN @ TYPE CR
+            THEN
             _ML-NODE @ _MN-NEXT @ _ML-NODE !
         REPEAT
     LOOP

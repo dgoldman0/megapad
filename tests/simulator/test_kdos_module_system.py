@@ -23,6 +23,7 @@ from tests.simulator.test_kdos_aes import (
 )
 from tests.simulator.test_kdos_hash_tables import _load_hash_tables
 from tests.simulator.test_kdos_mp64fs_lifecycle import _store
+from tests.simulator.test_kdos_mp64fs_load import _HostSource, _select_source
 from tests.simulator.test_kdos_mp64fs_mutation import _mount
 from tests.simulator.test_kdos_pipeline_bundles import _registry_state
 from tests.simulator.test_kdos_storage_block_volume import (
@@ -36,47 +37,53 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-module-system-9495-9965.f"
+    / "kdos-module-system-9615-10108.f"
 )
 
-FIRST_LINE = 9495
-FIXTURE_LAST_LINE = 9965
-LAST_LINE = 9964
-FIXTURE_BYTES = 14_486
+FIRST_LINE = 9615
+FIXTURE_LAST_LINE = 10108
+LAST_LINE = 10107
+FIXTURE_BYTES = 16_229
 FIXTURE_SHA256 = (
-    "6213a62e8bbc1ada04565d775a436cebc2ace9b5c9b32f27302b13568d9d92b6"
+    "cf818fbb9facbe2a06a825a6ba3cd6738b73d97793f423829b4386bc89b03a9d"
 )
-FIXTURE_GIT_BLOB = "be9ab02eced24379053654034ff4199bef57dbf3"
-SLICE_BYTES = 14_414
+FIXTURE_GIT_BLOB = "881609bc61944004c8f8442eb22a527f132ebbd8"
+SLICE_BYTES = 16_157
 SLICE_SHA256 = (
-    "73adf1e903e12f891908750aeeced70d4888dfb6087af6372a99eca1495ecd74"
+    "e3b84f6fbb348c2275c2e4339bdb92f398e621c437dcc975949611d0e367d265"
 )
-SLICE_GIT_BLOB = "231b452a63ad3d70fc635f3e4b40a7033627fc68"
+SLICE_GIT_BLOB = "7b616252e40b75bdd9fa82fbc5fc6c0f2c47ae64"
 
 CELL_BYTES = 8
 HOSTED_WORD_FIXED_BYTES = 17
-HOSTED_DICTIONARY_GROWTH = 2_278
+HOSTED_DICTIONARY_GROWTH = 2_487
 MODULE_LOCK_ID = 5
 INLINE_BUCKETS = 16
 MODULE_NODE_HEADER_BYTES = 32
 MODULE_ID_MAX = 246
-REQUEST_CWD_STACK_BYTES = 128
+MODULE_FILE_BIT = 1 << 32
+MODULE_FILE_KEY_BYTES = 24
+XMEM_POISON_BYTES = 128
 
 SOURCE_LEDGER = (
     ("CONSTANT", b"_MOD-INLINE-BUCKETS", 0),
     ("CREATE", b"_MOD-INLINE", 128),
-    ("CREATE", b"_MOD-REG", 40),
+    ("CREATE", b"_MOD-REG", 48),
     (":", b"_MOD-BUCKETS", 0),
     (":", b"_MOD-BUCKET-COUNT", 0),
     (":", b"_MOD-COUNT", 0),
     (":", b"_MOD-BUCKETS-HEAP?", 0),
     (":", b"_MOD-LOCK", 0),
+    (":", b"_MOD-FILES", 0),
+    (":", b"_MOD-ENTRIES", 0),
     ("CONSTANT", b"/MOD-NODE", 0),
     (":", b"_MN-NEXT", 0),
     (":", b"_MN-PROV", 0),
     (":", b"_MN-HASH", 0),
     (":", b"_MN-LEN", 0),
     (":", b"_MN-ID", 0),
+    ("CONSTANT", b"_MOD-FILE-BIT", 0),
+    (":", b"_MOD-TALLY", 0),
     ("DEFER", b"_MOD-ALLOCATE", CELL_BYTES),
     ("DEFER", b"_MOD-FREE", CELL_BYTES),
     ("CONSTANT", b"_MOD-E-NOMEM", 0),
@@ -90,6 +97,7 @@ SOURCE_LEDGER = (
     ("VARIABLE", b"_MF-H", CELL_BYTES),
     (":", b"_MOD-FIND-LOCKED", 0),
     (":", b"_MOD-FIND", 0),
+    (":", b"_MOD-INSERT-HASHED", 0),
     (":", b"_MOD-INSERT", 0),
     ("VARIABLE", b"_MG-NEW", CELL_BYTES),
     ("VARIABLE", b"_MG-N", CELL_BYTES),
@@ -101,6 +109,7 @@ SOURCE_LEDGER = (
     ("VARIABLE", b"_MOD-GROW-READY", CELL_BYTES),
     (":", b"_MOD-TRY-PENDING-GROWTH", 0),
     (":", b"_MOD-ADOPT", 0),
+    (":", b"_MOD-JOIN", 0),
     ("VARIABLE", b"_MU-TARGET", CELL_BYTES),
     ("VARIABLE", b"_MU-LINK", CELL_BYTES),
     (":", b"_MOD-UNLINK-LOCKED", 0),
@@ -121,13 +130,13 @@ SOURCE_LEDGER = (
     (":", b"PROVIDED-SPAN", 0),
     (":", b"PROVIDED", 0),
     (":", b"MODULE?", 0),
+    ("CREATE", b"_MOD-FILE-KEY", MODULE_FILE_KEY_BYTES),
+    (":", b"_MOD-FILE-KEY?", 0),
+    (":", b"_MOD-FILE-HASH", 0),
+    (":", b"_MOD-FILE-LOADED?", 0),
+    (":", b"_MOD-FILE-NOTE", 0),
     (":", b"_MOD-READ-WALK", 0),
     (":", b"_MOD-LOAD-BODY", 0),
-    ("XBUF", b"_REQ-CWD-STK", 0),
-    ("VARIABLE", b"_REQ-SP", CELL_BYTES),
-    (":", b"_REQ-SAVE-CWD", 0),
-    (":", b"_REQ-RESTORE-CWD", 0),
-    (":", b"_REQUIRE-BODY", 0),
     (":", b"REQUIRE", 0),
     ("VARIABLE", b"_ML-NODE", CELL_BYTES),
     (":", b"_MOD-LIST-BODY", 0),
@@ -144,6 +153,7 @@ CONSTANTS = {
     "_MOD-E-BAD-ID": u64(-4101),
     "_MOD-EVAL-LINE-MAX": 255,
     "_MOD-ID-MAX": MODULE_ID_MAX,
+    "_MOD-FILE-BIT": MODULE_FILE_BIT,
 }
 
 
@@ -277,6 +287,39 @@ def _module_image(files: tuple[tuple[bytes, bytes], ...]) -> bytearray:
     return image
 
 
+def _module_counts(runtime: MegaForthRuntime) -> tuple[int, int, int]:
+    """Module names, loaded files, and the entries growth follows."""
+
+    return tuple(
+        _execute(runtime, name)[0]
+        for name in ("_MOD-COUNT", "_MOD-FILES", "_MOD-ENTRIES")
+    )  # type: ignore[return-value]
+
+
+def _file_key(source: _HostSource, identity: tuple[int, int]) -> bytes:
+    return b"".join(
+        value.to_bytes(8, "little") for value in (source.address, *identity)
+    )
+
+
+def _file_entry(runtime: MegaForthRuntime, key: bytes) -> int:
+    file_hash = _fnv1a32(key) | MODULE_FILE_BIT
+    node = runtime.memory.read64(_execute(runtime, "_MOD-BUCKET", file_hash)[0])
+    while node:
+        if (
+            runtime.memory.read64(node + 16) == file_hash
+            and runtime.memory.read64(node + 24) == len(key)
+            and runtime.memory.read_bytes(
+                node + MODULE_NODE_HEADER_BYTES,
+                len(key),
+            )
+            == key
+        ):
+            return node
+        node = runtime.memory.read64(node)
+    return 0
+
+
 def test_module_slice_is_exact_linked_initialized_and_load_effects_are_exact() -> None:
     runtime = _load_hash_tables()
     runtime.inject_uart_input(b"\x00M")
@@ -299,7 +342,10 @@ def test_module_slice_is_exact_linked_initialized_and_load_effects_are_exact() -
     xmem_floor_before = _variable(runtime, "XMEM-FLOOR")
     assert xmem_here_before == xmem_floor_before
     assert _variable(runtime, "XMEM-FL") == 0
-    runtime.memory.fill(xmem_here_before, REQUEST_CWD_STACK_BYTES, 0xA5)
+    runtime.memory.fill(xmem_here_before, XMEM_POISON_BYTES, 0xA5)
+    free_list_before = tuple(
+        _variable(runtime, name) for name in ("FL-NEED", "FL-PREV", "FL-CURR")
+    )
     heap_before = tuple(
         _variable(runtime, name)
         for name in ("HEAP-BASE", "HEAP-FREE", "HEAP-INIT")
@@ -320,19 +366,18 @@ def test_module_slice_is_exact_linked_initialized_and_load_effects_are_exact() -
 
     runtime = _evaluate_module_system(runtime)
 
-    assert len(SOURCE_LEDGER) == 69
-    assert sum(definer == ":" for definer, _name, _body in SOURCE_LEDGER) == 40
+    assert len(SOURCE_LEDGER) == 75
+    assert sum(definer == ":" for definer, _name, _body in SOURCE_LEDGER) == 46
     assert sum(
         definer == "VARIABLE" for definer, _name, _body in SOURCE_LEDGER
-    ) == 17
-    assert sum(definer == "CREATE" for definer, _name, _body in SOURCE_LEDGER) == 3
+    ) == 16
+    assert sum(definer == "CREATE" for definer, _name, _body in SOURCE_LEDGER) == 4
     assert sum(definer == "DEFER" for definer, _name, _body in SOURCE_LEDGER) == 2
     assert sum(
-        definer in ("CONSTANT", "XBUF")
-        for definer, _name, _body in SOURCE_LEDGER
+        definer == "CONSTANT" for definer, _name, _body in SOURCE_LEDGER
     ) == 7
-    assert sum(len(name) for _definer, name, _body in SOURCE_LEDGER) == 776
-    assert sum(body for _definer, _name, body in SOURCE_LEDGER) == 329
+    assert sum(len(name) for _definer, name, _body in SOURCE_LEDGER) == 859
+    assert sum(body for _definer, _name, body in SOURCE_LEDGER) == 353
     assert sum(
         HOSTED_WORD_FIXED_BYTES + len(name) + body
         for _definer, name, body in SOURCE_LEDGER
@@ -358,7 +403,7 @@ def test_module_slice_is_exact_linked_initialized_and_load_effects_are_exact() -
             ColonDefinition
             if definer == ":"
             else ConstantDefinition
-            if definer in ("CONSTANT", "XBUF")
+            if definer == "CONSTANT"
             else CreatedDefinition
         )
         assert isinstance(word.implementation, expected_type)
@@ -372,13 +417,18 @@ def test_module_slice_is_exact_linked_initialized_and_load_effects_are_exact() -
     inline = _body(runtime, "_MOD-INLINE")
     registry = _body(runtime, "_MOD-REG")
     assert runtime.memory.read_bytes(inline, 128) == bytes(128)
-    assert tuple(runtime.memory.read64(registry + offset) for offset in range(0, 40, 8)) == (
+    assert tuple(runtime.memory.read64(registry + offset) for offset in range(0, 48, 8)) == (
         inline,
         INLINE_BUCKETS,
         0,
         0,
         MODULE_LOCK_ID,
+        0,
     )
+    assert runtime.memory.read_bytes(
+        _body(runtime, "_MOD-FILE-KEY"),
+        MODULE_FILE_KEY_BYTES,
+    ) == b"\xA5" * MODULE_FILE_KEY_BYTES
     assert runtime.memory.read_bytes(_body(runtime, "_PS-TAG"), 9) == b"PROVIDED\0"
     assert runtime.memory.read64(_body(runtime, "_MOD-ALLOCATE")) == runtime.find(
         "DMA-ALLOCATE"
@@ -395,20 +445,16 @@ def test_module_slice_is_exact_linked_initialized_and_load_effects_are_exact() -
         assert target_word is not None
         assert runtime.memory.read64(_body(runtime, hook)) == target_word.xt
 
-    request_stack = _constant(runtime, "_REQ-CWD-STK")
-    assert request_stack == xmem_here_before
-    assert _variable(runtime, "XMEM-HERE") == (
-        xmem_here_before + REQUEST_CWD_STACK_BYTES
-    )
-    assert _variable(runtime, "XMEM-FLOOR") == (
-        xmem_here_before + REQUEST_CWD_STACK_BYTES
-    )
+    # The slice takes no extended memory: the loader's own stack of
+    # sources and directories lies in the dictionary, with its frames.
+    assert _variable(runtime, "XMEM-HERE") == xmem_here_before
+    assert _variable(runtime, "XMEM-FLOOR") == xmem_floor_before
     assert _variable(runtime, "XMEM-FL") == 0
-    assert _variable(runtime, "FL-NEED") == REQUEST_CWD_STACK_BYTES
-    assert _variable(runtime, "FL-PREV") == 0
-    assert _variable(runtime, "FL-CURR") == 0
-    assert runtime.memory.read_bytes(request_stack, REQUEST_CWD_STACK_BYTES) == (
-        b"\xA5" * REQUEST_CWD_STACK_BYTES
+    assert tuple(
+        _variable(runtime, name) for name in ("FL-NEED", "FL-PREV", "FL-CURR")
+    ) == free_list_before
+    assert runtime.memory.read_bytes(xmem_here_before, XMEM_POISON_BYTES) == (
+        b"\xA5" * XMEM_POISON_BYTES
     )
     assert tuple(
         _variable(runtime, name)
@@ -708,7 +754,7 @@ def test_require_releases_every_frame_when_prescan_registration_is_out_of_memory
     assert _stack_eval(runtime, b"MODULE? oom.module") == (0,)
     assert _execute(runtime, "_MOD-COUNT") == (0,)
     assert _variable(runtime, "_LD-SP") == 0
-    assert _variable(runtime, "_REQ-SP") == 0
+    assert _variable(runtime, "_LD-FROM-SP") == 0
     assert _variable(runtime, "EVAL-DEPTH") == 0
     assert _loader_globals(runtime) == loader_before
     assert runtime.storage.image_bytes == media_before
@@ -724,7 +770,7 @@ def test_require_releases_every_frame_when_prescan_registration_is_out_of_memory
     assert _stack_eval(runtime, b"MODULE? oom.module") == (TRUE,)
     assert _execute(runtime, "_MOD-COUNT") == (1,)
     assert _variable(runtime, "_LD-SP") == 0
-    assert _variable(runtime, "_REQ-SP") == 0
+    assert _variable(runtime, "_LD-FROM-SP") == 0
     assert _variable(runtime, "EVAL-DEPTH") == 0
     assert _loader_globals(runtime) == loader_before
     assert runtime.storage.image_bytes == media_before
@@ -745,14 +791,19 @@ def test_require_breaks_an_uppercase_self_cycle_and_skips_duplicate_evaluation()
     runtime.storage.attach(image)
     _mount(runtime)
     media_before = runtime.storage.image_bytes
+    completion_before = runtime.storage.completion
 
     runtime.evaluate(b"REQUIRE cycle.f", source_name="require-cycle-first.f")
 
     assert _variable(runtime, "CYCLE-LOAD-COUNT") == 2
+    # The file requires itself and is still read once: its own REQUIRE
+    # finds the file's record, made before the first line was evaluated.
+    assert runtime.storage.completion == completion_before + 1
+    assert _module_counts(runtime) == (1, 1, 2)
     assert _stack_eval(runtime, b"MODULE? cycle.demo") == (TRUE,)
     assert _execute(runtime, "_MOD-COUNT") == (1,)
     assert _variable(runtime, "_LD-SP") == 0
-    assert _variable(runtime, "_REQ-SP") == 0
+    assert _variable(runtime, "_LD-FROM-SP") == 0
     assert _variable(runtime, "CWD") == 0xFF
     here_after_first = runtime.dictionary.here
     heap_after_first = _execute(runtime, "HEAP-FREE-BYTES")
@@ -764,6 +815,7 @@ def test_require_breaks_an_uppercase_self_cycle_and_skips_duplicate_evaluation()
     runtime.evaluate(b"REQUIRE cycle.f", source_name="require-cycle-second.f")
 
     assert _variable(runtime, "CYCLE-LOAD-COUNT") == 2
+    assert runtime.storage.completion == completion_before + 1
     assert runtime.dictionary.here == here_after_first
     assert _execute(runtime, "HEAP-FREE-BYTES") == heap_after_first
     assert (
@@ -772,7 +824,7 @@ def test_require_breaks_an_uppercase_self_cycle_and_skips_duplicate_evaluation()
     ) == xmem_after_first
     assert _execute(runtime, "_MOD-COUNT") == (1,)
     assert _variable(runtime, "_LD-SP") == 0
-    assert _variable(runtime, "_REQ-SP") == 0
+    assert _variable(runtime, "_LD-FROM-SP") == 0
     assert runtime.storage.image_bytes == media_before
 
     assert _execute(runtime, "MODULES") == ()
@@ -824,9 +876,286 @@ def test_nested_dependency_joins_parent_dictionary_and_registry_rollback() -> No
         runtime.dictionary.latest,
     ) == dictionary_before
     assert _variable(runtime, "_LD-SP") == 0
-    assert _variable(runtime, "_REQ-SP") == 0
+    assert _variable(runtime, "_LD-FROM-SP") == 0
     assert _variable(runtime, "EVAL-DEPTH") == 0
     assert _variable(runtime, "CWD") == 0xFF
     assert runtime.storage.image_bytes == media_before
     assert runtime.spinlocks.owner(MODULE_LOCK_ID) is None
     assert runtime.spinlocks.owner(2) is None
+
+
+def test_require_reads_a_loaded_file_once_and_counts_names_apart_from_files() -> None:
+    runtime = _load_module_system()
+    runtime.evaluate(
+        b"VARIABLE C-LOADS VARIABLE ALIAS-RAN VARIABLE BARE-LOADS "
+        b"VARIABLE PLAIN-LOADS",
+        source_name="require-counters.f",
+    )
+    identities = {
+        b"a.f": (0x0A, 1),
+        b"lib/b.f": (0x0B, 1),
+        b"c.f": (0x0C, 1),
+        b"alias.f": (0x0D, 1),
+        b"plain.f": (0x0E, 1),
+    }
+    source = _HostSource(
+        runtime,
+        "HOST-SOURCE",
+        {
+            b"a.f": (
+                b"PROVIDED mod.a\n"
+                b"REQUIRE lib/b.f\n"
+                b"REQUIRE c.f\n"
+                b": A-WORD 101 ;\n"
+            ),
+            b"lib/b.f": b"PROVIDED mod.b\nREQUIRE ../c.f\n: B-WORD 102 ;\n",
+            b"c.f": b"PROVIDED mod.c\n1 C-LOADS +!\n: C-WORD 103 ;\n",
+            b"alias.f": b"PROVIDED mod.c\n1 ALIAS-RAN +!\n",
+            b"bare.f": b"PROVIDED mod.bare\n1 BARE-LOADS +!\n",
+            b"plain.f": b"1 PLAIN-LOADS +!\n",
+        },
+        identities=identities,
+    )
+    _select_source(runtime, source)
+
+    runtime.evaluate(b"REQUIRE a.f", source_name="require-host-first.f")
+
+    assert _execute(runtime, "A-WORD") == (101,)
+    assert _execute(runtime, "B-WORD") == (102,)
+    assert _execute(runtime, "C-WORD") == (103,)
+    assert _variable(runtime, "C-LOADS") == 1
+    # a.f's own REQUIRE of c.f finds the file b.f loaded and does not read.
+    assert source.resolves() == [b"a.f", b"lib/b.f", b"../c.f", b"c.f"]
+    assert source.reads() == [b"a.f", b"lib/b.f", b"c.f"]
+    assert _module_counts(runtime) == (3, 3, 6)
+
+    here_after_first = runtime.dictionary.here
+    heap_after_first = _execute(runtime, "HEAP-FREE-BYTES")
+    runtime.evaluate(
+        b"REQUIRE a.f REQUIRE lib/b.f REQUIRE c.f",
+        source_name="require-host-again.f",
+    )
+
+    assert len(source.resolves()) == 7
+    assert source.reads() == [b"a.f", b"lib/b.f", b"c.f"]
+    assert runtime.dictionary.here == here_after_first
+    assert _execute(runtime, "HEAP-FREE-BYTES") == heap_after_first
+    assert _module_counts(runtime) == (3, 3, 6)
+
+    # A second file of a loaded module is read once to find that out.
+    runtime.evaluate(b"REQUIRE alias.f", source_name="require-alias.f")
+    assert source.reads()[3:] == [b"alias.f"]
+    assert _variable(runtime, "ALIAS-RAN") == 0
+    assert _module_counts(runtime) == (3, 4, 7)
+    runtime.evaluate(b"REQUIRE alias.f", source_name="require-alias-again.f")
+    assert source.reads()[3:] == [b"alias.f"]
+
+    # A file whose source gives no identity is read every time, and its
+    # PROVIDED line still keeps it from running twice.
+    runtime.evaluate(
+        b"REQUIRE bare.f REQUIRE bare.f",
+        source_name="require-without-identity.f",
+    )
+    assert source.reads()[4:] == [b"bare.f", b"bare.f"]
+    assert _variable(runtime, "BARE-LOADS") == 1
+    assert _module_counts(runtime) == (4, 4, 8)
+
+    # A file with no PROVIDED line names no module, so it runs every time.
+    runtime.evaluate(
+        b"REQUIRE plain.f REQUIRE plain.f",
+        source_name="require-without-provided.f",
+    )
+    assert source.reads()[6:] == [b"plain.f", b"plain.f"]
+    assert _variable(runtime, "PLAIN-LOADS") == 2
+    assert _module_counts(runtime) == (4, 4, 8)
+
+    for path in (b"a.f", b"lib/b.f", b"c.f", b"alias.f"):
+        key = _file_key(source, identities[path])
+        entry = _file_entry(runtime, key)
+        assert entry != 0
+        assert runtime.memory.read64(entry + 8) == 0
+        # No name lookup finds a file's entry, even by its exact bytes.
+        query = _span(runtime, f"FILE-KEY-{identities[path][0]:02X}", key)
+        assert _find(runtime, query, len(key)) == 0
+    assert _file_entry(runtime, _file_key(source, identities[b"plain.f"])) == 0
+
+    assert _execute(runtime, "MODULES") == ()
+    lines = runtime.drain_uart_output().split(b"\r\n")
+    assert lines[0] == b" Loaded modules:"
+    assert sorted(lines[1:-2]) == [
+        b"  mod.a",
+        b"  mod.b",
+        b"  mod.bare",
+        b"  mod.c",
+    ]
+    assert lines[-2:] == [b"4  module(s)", b""]
+    assert source.live_tokens == {}
+    assert source.directory == ()
+    assert _variable(runtime, "_LD-SP") == 0
+    assert _variable(runtime, "_LD-FROM-SP") == 0
+    assert _variable(runtime, "EVAL-DEPTH") == 0
+    assert runtime.spinlocks.owner(MODULE_LOCK_ID) is None
+    assert runtime.spinlocks.owner(1) is None
+
+
+def test_a_failed_require_forgets_the_files_it_noted() -> None:
+    runtime = _load_module_system()
+    source = _HostSource(
+        runtime,
+        "HOST-SOURCE",
+        {
+            b"parent.f": (
+                b"PROVIDED host.parent\n"
+                b"REQUIRE child.f\n"
+                b"-77 THROW\n"
+            ),
+            b"child.f": b"PROVIDED host.child\n: HOST-CHILD 73 ;\n",
+        },
+        identities={b"parent.f": (1, 7), b"child.f": (2, 7)},
+    )
+    _select_source(runtime, source)
+    heap_before = _execute(runtime, "HEAP-FREE-BYTES")
+    dictionary_before = (runtime.dictionary.here, runtime.dictionary.latest)
+
+    result = _stack_eval(runtime, b"' REQUIRE CATCH parent.f")
+
+    assert result == (u64(-77),)
+    assert _module_counts(runtime) == (0, 0, 0)
+    assert runtime.find("HOST-CHILD") is None
+    assert _execute(runtime, "HEAP-FREE-BYTES") == heap_before
+    assert (
+        runtime.dictionary.here,
+        runtime.dictionary.latest,
+    ) == dictionary_before
+    assert source.live_tokens == {}
+    assert source.directory == ()
+    assert _variable(runtime, "_LD-SP") == 0
+    assert _variable(runtime, "_LD-FROM-SP") == 0
+
+    runtime.evaluate(b"REQUIRE child.f", source_name="require-after-failure.f")
+
+    assert source.reads() == [b"parent.f", b"child.f", b"child.f"]
+    assert _execute(runtime, "HOST-CHILD") == (73,)
+    assert _module_counts(runtime) == (1, 1, 2)
+    assert runtime.spinlocks.owner(MODULE_LOCK_ID) is None
+
+
+def test_file_identities_belong_to_the_source_that_gave_them() -> None:
+    runtime = _load_module_system()
+    first = _HostSource(
+        runtime,
+        "HOST-FIRST",
+        {b"x.f": b"PROVIDED host.x\n: HOST-X 1 ;\n"},
+        identities={b"x.f": (5, 5)},
+    )
+    second = _HostSource(
+        runtime,
+        "HOST-SECOND",
+        {b"y.f": b"PROVIDED host.y\n: HOST-Y 2 ;\n"},
+        identities={b"y.f": (5, 5)},
+    )
+
+    _select_source(runtime, first)
+    runtime.evaluate(b"REQUIRE x.f", source_name="require-first-source.f")
+    _select_source(runtime, second)
+    runtime.evaluate(b"REQUIRE y.f", source_name="require-second-source.f")
+
+    assert second.reads() == [b"y.f"]
+    assert _execute(runtime, "HOST-X") == (1,)
+    assert _execute(runtime, "HOST-Y") == (2,)
+    assert _module_counts(runtime) == (2, 2, 4)
+
+    runtime.evaluate(b"REQUIRE y.f", source_name="require-second-again.f")
+    _select_source(runtime, first)
+    runtime.evaluate(b"REQUIRE x.f", source_name="require-first-again.f")
+
+    assert first.reads() == [b"x.f"]
+    assert second.reads() == [b"y.f"]
+    assert _module_counts(runtime) == (2, 2, 4)
+
+
+def test_registry_growth_follows_names_and_files_together() -> None:
+    runtime = _load_module_system()
+    files = {
+        f"m{index:02d}.f".encode("ascii"): (
+            f"PROVIDED grow.{index:02d}\n".encode("ascii")
+        )
+        for index in range(17)
+    }
+    source = _HostSource(
+        runtime,
+        "HOST-SOURCE",
+        files,
+        identities={
+            name: (index + 1, 9) for index, name in enumerate(files)
+        },
+    )
+    _select_source(runtime, source)
+
+    for index, name in enumerate(files):
+        runtime.evaluate(b"REQUIRE " + name, source_name="require-growth.f")
+        if index == 15:
+            # Sixteen names would not fill sixteen buckets twice over;
+            # with their files they do, exactly.
+            assert _module_counts(runtime) == (16, 16, 32)
+            assert _execute(runtime, "_MOD-BUCKET-COUNT") == (16,)
+
+    assert _module_counts(runtime) == (17, 17, 34)
+    assert _execute(runtime, "_MOD-BUCKET-COUNT") == (32,)
+    assert _execute(runtime, "_MOD-BUCKETS-HEAP?") == (1,)
+    assert _variable(runtime, "_MOD-GROW-PENDING") == 0
+    for index, name in enumerate(files):
+        assert _stack_eval(
+            runtime,
+            f"MODULE? grow.{index:02d}".encode("ascii"),
+        ) == (TRUE,)
+        assert _file_entry(runtime, _file_key(source, (index + 1, 9))) != 0
+        runtime.evaluate(b"REQUIRE " + name, source_name="require-grown.f")
+    assert source.reads() == list(files)
+    assert runtime.spinlocks.owner(MODULE_LOCK_ID) is None
+
+
+def test_require_rolls_back_the_name_when_the_file_note_is_out_of_memory() -> None:
+    module_source = b"PROVIDED note.module\n: NOTE-WORD 1 ;\n"
+    image = _module_image(((b"note.f", module_source),))
+    runtime = _load_module_system()
+    runtime.storage.attach(image)
+    _mount(runtime)
+    loader_before = _loader_globals(runtime)
+    file_entry_bytes = MODULE_NODE_HEADER_BYTES + MODULE_FILE_KEY_BYTES
+    assert MODULE_NODE_HEADER_BYTES + len(b"note.module") != file_entry_bytes
+    runtime.evaluate(
+        b": FAIL-FILE-NOTE DUP "
+        + str(file_entry_bytes).encode("ascii")
+        + b" = IF DROP 0 -1 ELSE DMA-ALLOCATE THEN ; "
+        b"' FAIL-FILE-NOTE IS _MOD-ALLOCATE",
+        source_name="module-file-note-oom-seam.f",
+    )
+
+    result = _stack_eval(runtime, b"' REQUIRE CATCH note.f")
+
+    assert result == (u64(-4100),)
+    assert runtime.find("NOTE-WORD") is None
+    assert _stack_eval(runtime, b"MODULE? note.module") == (0,)
+    assert _module_counts(runtime) == (0, 0, 0)
+    assert _variable(runtime, "_LD-SP") == 0
+    assert _variable(runtime, "_LD-FROM-SP") == 0
+    assert _variable(runtime, "EVAL-DEPTH") == 0
+    assert _loader_globals(runtime) == loader_before
+    assert runtime.spinlocks.owner(MODULE_LOCK_ID) is None
+
+    runtime.evaluate(
+        b"' DMA-ALLOCATE IS _MOD-ALLOCATE",
+        source_name="module-file-note-retry-seam.f",
+    )
+    runtime.evaluate(b"REQUIRE note.f", source_name="module-file-note-retry.f")
+    assert _execute(runtime, "NOTE-WORD") == (1,)
+    assert _module_counts(runtime) == (1, 1, 2)
+
+    # KDOS's own filesystem gives an identity too: the second REQUIRE
+    # finds the file by its directory entry and reads no data.
+    completion_after_load = runtime.storage.completion
+    runtime.evaluate(b"REQUIRE note.f", source_name="module-file-note-again.f")
+    assert runtime.storage.completion == completion_after_load
+    assert _module_counts(runtime) == (1, 1, 2)
+    assert _loader_globals(runtime) == loader_before

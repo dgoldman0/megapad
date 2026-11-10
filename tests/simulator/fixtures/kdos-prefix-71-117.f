@@ -7,22 +7,24 @@ VARIABLE NAMEBUF  23 ALLOT
 \   so that paths like "lib/crypto/aes.f" (>23 chars total) are preserved.
 VARIABLE PATHBUF  127 ALLOT
 
-\ PARSE-NAME ( "name" -- )
-\   Parse next whitespace-delimited word.  Stores full path (up to 127
-\   chars) in PATHBUF, and the first 23 chars in NAMEBUF (for direct
-\   dirent lookups).  Sets PN-LEN to the clamped NAMEBUF length.
+\ _PATH! ( c-addr u -- )
+\   Store a path: all of it (up to 127 chars) in PATHBUF, and its first
+\   23 chars in NAMEBUF (for direct dirent lookups).  Sets PN-LEN to the
+\   clamped NAMEBUF length.  The path may already lie in PATHBUF.
 VARIABLE PN-LEN
 
-: PARSE-NAME  ( "name" -- )
+: _PATH!  ( c-addr u -- )
+    127 MIN >R                          \ R: pathlen (up to 127)
+    PATHBUF R@ MOVE                     \ copy full path into PATHBUF
+    PATHBUF R@ + 128 R@ - 0 FILL        \ clear an older path's tail
     NAMEBUF 24 0 FILL
-    PATHBUF 128 0 FILL
-    BL WORD DUP C@                     ( waddr rawlen )
-    DUP 127 MIN >R                     \ R: pathlen (up to 127)
-    DROP 1+                             ( src )  \ drop rawlen, skip count byte
-    DUP PATHBUF R@ CMOVE               \ copy full path into PATHBUF
     R> 23 MIN PN-LEN !                  \ clamp for NAMEBUF
-    NAMEBUF PN-LEN @                    ( src dst len )
-    CMOVE ;
+    PATHBUF NAMEBUF PN-LEN @ CMOVE ;
+
+\ PARSE-NAME ( "name" -- )
+\   Parse next whitespace-delimited word and store it as _PATH! does.
+: PARSE-NAME  ( "name" -- )
+    BL WORD COUNT _PATH! ;
 
 \ -- Stack safety utilities --
 

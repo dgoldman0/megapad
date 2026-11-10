@@ -50,11 +50,11 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-documentation-browser-6408-6538.f"
+    / "kdos-documentation-browser-6528-6658.f"
 )
 
-FIRST_LINE = 6408
-LAST_LINE = 6538
+FIRST_LINE = 6528
+LAST_LINE = 6658
 SLICE_BYTES = 3_945
 SLICE_SHA256 = (
     "442e5e39598d71a589bf19d6345c5bb042d678ba9f51607a878ae5030fbdcee6"

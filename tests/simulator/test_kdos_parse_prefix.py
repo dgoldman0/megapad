@@ -17,10 +17,10 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE_DIRECTORY = Path(__file__).with_name("fixtures")
 BASE_FIXTURE = FIXTURE_DIRECTORY / "kdos-prefix-39-69.f"
-PARSE_FIXTURE = FIXTURE_DIRECTORY / "kdos-prefix-71-115.f"
+PARSE_FIXTURE = FIXTURE_DIRECTORY / "kdos-prefix-71-117.f"
 
 MEGAPAD_REVISION = "b8e1a7e174fb50d7ea3cb5f5f8d10917ed329ec4"
-KDOS_GIT_BLOB = "1fcb78cc7dd02d9810d00501e563fef54850e92b"
+KDOS_GIT_BLOB = "2cff300d84349d154cbf8837ad0cca9f1935f052"
 
 BASE_FIRST_LINE = 39
 BASE_LAST_LINE = 69
@@ -28,13 +28,14 @@ BASE_SHA256 = "e3918ffeab18446da9e9b190b4d0b82382a3ed5e9fcc220680b5164ab261d01c"
 BASE_GIT_BLOB = "ecef2fef19b54559367f1a162a97558776ab6ee8"
 
 PARSE_FIRST_LINE = 71
-PARSE_LAST_LINE = 115
-PARSE_SHA256 = "a59c8811eef09b2a1bd31b5c0801b68a29cf1434c67bdc17a63d15e60d69a99c"
-PARSE_GIT_BLOB = "fbfea6100b2dff8925dde073a7bd35a3f88544dc"
+PARSE_LAST_LINE = 117
+PARSE_SHA256 = "5037768c1c53629d345051987cb9f65e4f50f307920b6c748b92c5a2c210af76"
+PARSE_GIT_BLOB = "febb454655f0891801837976ab9610ee12e3523e"
 PARSE_DEFINITIONS = (
     b"NAMEBUF",
     b"PATHBUF",
     b"PN-LEN",
+    b"_PATH!",
     b"PARSE-NAME",
     b"NEEDS",
     b"ASSERT",
@@ -118,15 +119,18 @@ def test_variable_allot_layout_matches_the_unchanged_prefix(
     namebuf = runtime.find("NAMEBUF")
     pathbuf = runtime.find("PATHBUF")
     pn_len = runtime.find("PN-LEN")
+    store_path = runtime.find("_PATH!")
     parse_name = runtime.find("PARSE-NAME")
     assert namebuf is not None
     assert pathbuf is not None
     assert pn_len is not None
+    assert store_path is not None
     assert parse_name is not None
 
     assert pathbuf.header_address == namebuf.body_address + 8 + 23
     assert pn_len.header_address == pathbuf.body_address + 8 + 127
-    assert parse_name.header_address == pn_len.body_address + 8
+    assert store_path.header_address == pn_len.body_address + 8
+    assert parse_name.header_address > store_path.header_address
 
 
 def test_parse_name_retains_full_path_and_clamps_component(
@@ -163,6 +167,47 @@ def test_parse_name_clamps_127_bytes_and_clears_previous_tails(
     assert runtime.memory.read64(_body(runtime, "PN-LEN")) == 1
     assert runtime.memory.read_bytes(name_address, 24) == b"z" + bytes(23)
     assert runtime.memory.read_bytes(path_address, 128) == b"z" + bytes(127)
+
+
+def test_path_store_accepts_any_span_and_one_already_in_pathbuf(
+    loaded_parse_prefix: MegaForthRuntime,
+) -> None:
+    runtime = loaded_parse_prefix
+    name_address = _body(runtime, "NAMEBUF")
+    path_address = _body(runtime, "PATHBUF")
+    pn_length_address = _body(runtime, "PN-LEN")
+    runtime.evaluate(b"PARSE-NAME " + b"y" * 100)
+
+    path = b"lib/crypto/implementations/aes-256.f"
+    span = runtime.define_created("PATH-SPAN", initial_body=path).body_address
+    runtime.main_context.data.push(span)
+    runtime.main_context.data.push(len(path))
+    runtime.evaluate(b"_PATH!")
+
+    assert runtime.main_context.data.snapshot() == ()
+    assert runtime.memory.read64(pn_length_address) == 23
+    assert runtime.memory.read_bytes(name_address, 24) == path[:23] + b"\0"
+    assert runtime.memory.read_bytes(path_address, 128) == (
+        path + bytes(128 - len(path))
+    )
+
+    # The loader hands a source the path PATHBUF already holds.
+    runtime.main_context.data.push(path_address)
+    runtime.main_context.data.push(3)
+    runtime.evaluate(b"_PATH!")
+
+    assert runtime.memory.read64(pn_length_address) == 3
+    assert runtime.memory.read_bytes(name_address, 24) == b"lib" + bytes(21)
+    assert runtime.memory.read_bytes(path_address, 128) == b"lib" + bytes(125)
+
+    runtime.main_context.data.push(span)
+    runtime.main_context.data.push(0)
+    runtime.evaluate(b"_PATH!")
+
+    assert runtime.memory.read64(pn_length_address) == 0
+    assert runtime.memory.read_bytes(name_address, 24) == bytes(24)
+    assert runtime.memory.read_bytes(path_address, 128) == bytes(128)
+    assert runtime.main_context.returns.snapshot() == ()
 
 
 def test_word_publishes_a_transient_counted_string_at_unchanged_here(

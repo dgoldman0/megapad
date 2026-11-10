@@ -2021,7 +2021,9 @@ the field to preserve the stale comment.
 | `OPEN` | `( "name" -- fdesc \| 0 )` | Ensure and find a cached name, allocate the lowest FD, and snapshot its directory fields with cursor zero; return zero on gate, miss, or exhaustion. |
 | `FFLUSH` | `( fdesc -- )` | Store low-u32 `F.USED` into the cached entry selected by `F.SLOT`, then call `FS-SYNC`; it does not write payload. |
 | `FCLOSE` | `( fdesc -- )` | Ignore zero; when `FS-OK` is true flush used metadata before release, otherwise silently release without persistence. |
-| `LOAD` | `( "path" -- )` | Resolve an MP64FS Forth source path, concatenate its validated primary/secondary extents, check every physical-line evaluation and final compiler state, and commit only complete source. |
+| `LOAD` | `( "path" -- )` | Resolve a Forth source path through the current module source, which is KDOS's MP64FS unless another is selected, read the file, check every physical-line evaluation and final compiler state, and commit only complete source. |
+| `MODULE-SOURCE!` | `( source -- )` | Select the module source that later `LOAD` and `REQUIRE` use. Core 0 only. The records and the four operations a source supplies are defined in `module-source-contract.md`. |
+| `FS-MODULE-SOURCE` | `( -- source )` | The built-in module source: the MP64FS volume KDOS mounted at boot. `MODULE-SOURCE` holds it at startup. |
 | `SOURCE-EVALUATE-CHECKED` | `( addr len -- status )` | Compile a complete in-memory source buffer with deterministic status and diagnostics; stop at first failure. |
 | `PWD` | `( -- )` | Print root or at most the eight path components nearest CWD. It does not ensure/check the filesystem. |
 | `CD` | `( "component" -- )` | Move to exact `..`, root `/`, or one direct type-8 child; embedded slash syntax is not resolved. |
@@ -3367,13 +3369,16 @@ Stack & diagnostics.
 
 ## §14 Startup
 
-Exact current `kdos.f` lines 9918 through 9958, including the section
-separator, contain 41 LF records and 1,432 bytes, with SHA-256
-`d14948c62ff524ed67fe0743f1f3976d3430c1754809bf339c45ac8bd3569f82`
-and Git blob `64644994439ac09da0bd19db31866c404d380582`. The executable body from
-line 9919 through EOF contains 40 LF records and 1,360 bytes, with SHA-256
-`480ab7b30f349044fdfd2c10257aee4525348819e15938396865ce332efa71fb`
-and Git blob `5f5d1922439468bbd5884505b3c5801e8d295269`. At the historical qualification
+Exact current `kdos.f` lines 10108 through 10147, including the section
+separator, contain 40 LF records and 1,398 bytes, with SHA-256
+`d75984f7fd3d55cb8c573da5b9f494ff1c1e8bba32b3537fa2270669add3ca8a`
+and Git blob `1354db80222545647369729b93526831ff0a21ec`. The executable body from
+line 10109 through EOF contains 39 LF records and 1,326 bytes, with SHA-256
+`07df5026ba571e0d6e232d8c908963a0403756d3859390af3c7de3230f446b85`
+and Git blob `c920305479e61c2a5d51719779ec9c9fba0c2b8f`. The complete current
+10,147-line, 355,722-byte source has SHA-256
+`90768df9fafdd3392f7e93f0542367ee0104f82ac286e2b6eeb1e42ce427bbd2`
+and Git blob `2cff300d84349d154cbf8837ad0cca9f1935f052`. At the historical qualification
 revision, the complete 9,894-line, 341,355-byte source had SHA-256
 `99e71114ed141c14522d687a3bef3110ead94de7b0a055ae693c135a94772fb8`
 and Git blob `fd017b16dbd3ef4746d0e3467e980c015cf5a664` at revision
@@ -3433,9 +3438,10 @@ The literal startup path has important limits:
   code without calling `DMA-FREE` on the returned non-address; success frees
   the temporary block. A `HEAP-SETUP` throw also escapes.
 - A false `DISK?` skips `FS-LOAD` but does not clear a stale true `FS-OK`.
-  Autoexec lookup uses ambient `CWD`, not forced root, copies ten bytes and
-  explicitly clears the remaining 14 `NAMEBUF` bytes, and performs a second
-  lookup inside `_MOD-LOAD-BODY`.
+  Autoexec lookup uses ambient `CWD`, not forced root, stores the ten-byte
+  name zero-padded in `PATHBUF` and `NAMEBUF` through `_PATH!`, and performs a
+  second lookup when `_MOD-LOAD-BODY` has the current module source resolve
+  that path.
 - Neither lookup validates file type, flags, CRC, encryption, or directory
   policy. The `Running autoexec.f...` line is emitted before empty, allocation,
   evaluator, or module-identity failure is known.
@@ -3458,9 +3464,10 @@ Its already-run bounded moderate selector fed 6,693 nonblank,
 non-pure-comment physical lines through the persistent checked pseudo-BIOS
 evaluator with canonical XMEM, HBW, VRAM, and valid MP64FS media. It published
 1,452 KDOS words and finished with an authoritative 1,764-binding dictionary
-index. Current source-ledger accounting expects 1,460 KDOS publications and
-1,772 unique bindings, but the full regular-load selector has not been rerun;
-that qualification remains deferred by the rich-terminal gate. The historical
+index. The current regular-load test,
+`tests/simulator/test_kdos_regular_load.py`, loads the present file over
+455 core words and expects 1,514 KDOS publications and 1,962 unique
+bindings. The historical
 run is semantic evidence, not native/exact-full-core timing evidence, and adds
 no `rich-terminal.f`, projection, compositor, viewer, or rich-input work.
 
@@ -4048,49 +4055,54 @@ rendering, composition, physical viewing, or input work.
 
 ### Hosted source qualification
 
-Exact current `kdos.f` lines 9448 through 9917 contain 470 LF records and
-14,414 bytes, with SHA-256
-`73adf1e903e12f891908750aeeced70d4888dfb6087af6372a99eca1495ecd74`
-and Git blob `231b452a63ad3d70fc635f3e4b40a7033627fc68`. The checked fixture includes
-the following one-line §14 Startup sentinel at line 9918. That 471-LF-record,
-14,486-byte fixture has SHA-256
-`6213a62e8bbc1ada04565d775a436cebc2ace9b5c9b32f27302b13568d9d92b6`
-and Git blob `be9ab02eced24379053654034ff4199bef57dbf3`. Line 9919 begins §14 Startup.
+Exact current `kdos.f` lines 9615 through 10107 contain 493 LF records and
+16,157 bytes, with SHA-256
+`e3b84f6fbb348c2275c2e4339bdb92f398e621c437dcc975949611d0e367d265`
+and Git blob `7b616252e40b75bdd9fa82fbc5fc6c0f2c47ae64`. The checked fixture includes
+the following one-line §14 Startup sentinel at line 10108. That 494-LF-record,
+16,229-byte fixture has SHA-256
+`cf818fbb9facbe2a06a825a6ba3cd6738b73d97793f423829b4386bc89b03a9d`
+and Git blob `881609bc61944004c8f8442eb22a527f132ebbd8`. Line 10109 begins §14 Startup.
 
-The slice publishes 69 definitions: 40 colon words, 17 zero-initialized
-variables, six ordinary constants, three `CREATE` objects, two `DEFER` words,
-and one constant produced by `XBUF`. Their 776 name bytes, 329 dictionary-body
-bytes, and 1,173 fixed hosted header/semantic-slot bytes advance the canonical
-hosted dictionary by exactly 2,278 bytes. `_MOD-INLINE` contributes 128 zero
-bytes; `_MOD-REG` initializes to the inline address, 16 buckets, zero entries,
-an inline ownership flag of zero, and lock 5; `_PS-TAG` contains
-`PROVIDED` plus NUL. `_MOD-ALLOCATE`/`_MOD-FREE` bind to Bank-0
-`DMA-ALLOCATE`/`DMA-FREE`, and the three existing loader transaction hooks bind
-to the module commit, rollback, and after-release actions.
+The slice publishes 75 definitions: 46 colon words, 16 zero-initialized
+variables, seven ordinary constants, four `CREATE` objects, and two `DEFER`
+words. Their 859 name bytes, 353 dictionary-body bytes, and 1,275 fixed hosted
+header/semantic-slot bytes advance the canonical hosted dictionary by exactly
+2,487 bytes. `_MOD-INLINE` contributes 128 zero bytes; `_MOD-REG` initializes
+to the inline address, 16 buckets, zero module names, an inline ownership flag
+of zero, lock 5, and zero loaded files; `_PS-TAG` contains `PROVIDED` plus
+NUL. `_MOD-ALLOCATE`/`_MOD-FREE` bind to Bank-0 `DMA-ALLOCATE`/`DMA-FREE`, and
+the three existing loader transaction hooks bind to the module commit,
+rollback, and after-release actions.
 
-The canonical XMEM-present load additionally allocates the 128-byte
-`_REQ-CWD-STK` through `XBUF`, advancing both `XMEM-HERE` and `XMEM-FLOOR` by
-128 while retaining the preexisting bytes. With an empty free list it leaves
-`FL-NEED = 128`, `FL-PREV = 0`, and `FL-CURR = 0`. No registry node or heap
-bucket is allocated at load time. Apart from dictionary publication, that one
-XMEM reservation, deferred rebinding, and ordinary timer progress, loading
-performs no filesystem/media access, hash, lock, parser input, UART output,
-RTC mutation, scheduling, rendering, or rich-terminal work. The noncanonical
-no-XMEM fallback would place those 128 bytes in the dictionary instead and
-would therefore grow the hosted dictionary by 2,406 bytes; it is not the
-qualified composition.
+The load allocates no extended memory. `REQUIRE` keeps the source and
+directory each load started from on the stack that the loader defines for
+`LOAD`, which lies in the dictionary with the loader's frames. No registry
+node or heap bucket is allocated at load time. Apart from dictionary
+publication, deferred rebinding, and ordinary timer progress, loading performs
+no filesystem/media access, hash, lock, parser input, UART output, RTC
+mutation, scheduling, rendering, or rich-terminal work.
 
-Eight focused tests qualify exact/case-sensitive identity, FNV-1a hashing,
+Thirteen focused tests qualify exact/case-sensitive identity, FNV-1a hashing,
 duplicate neutrality, ordinary ID bounds, node OOM, stable-node rehash growth,
 retry after best-effort bucket-allocation failure, full loader-frame
 commit/rollback, prescan token and line boundaries, pre-registration OOM
-cleanup before source execution, a real pathless in-memory MP64FS self-cycle,
-  duplicate `REQUIRE`, exact `MODULES` output, and nested child success joining
-  the parent's registry and dictionary rollback closure. Successful nested
-  provisional IDs merge into their parent and roll back, together with nested
-  definitions, if the parent later fails. The tests use the ordinary source
-  definitions and existing filesystem/loader words; the simulator adds no
-  module shortcut or new runtime capability.
+cleanup before source execution, a real pathless in-memory MP64FS self-cycle
+that reads its file once, duplicate `REQUIRE`, exact `MODULES` output, and
+nested child success joining the parent's registry and dictionary rollback
+closure. Successful nested provisional IDs merge into their parent and roll
+back, together with nested definitions, if the parent later fails. Five tests
+concern the entries for loaded files. Four drive `REQUIRE` through a module
+source that the test serves and that records each call. They show that a file
+whose module is loaded is resolved and not read, that a second file of a
+loaded module is read once, that a file without an identity is read every
+time and evaluated once, that a failed load removes the file entries it made,
+that identities stay with the source that gave them, and that bucket growth
+counts names and files together. The fifth, on MP64FS, shows that a file
+entry which cannot be allocated rolls its module name back and that a loaded
+MP64FS file is not read again. The tests use the ordinary source definitions
+and existing filesystem/loader words; the simulator adds no module shortcut
+or new runtime capability.
 
 ### Public identity contract
 
@@ -4110,7 +4122,7 @@ signed high-bit length discrepancy is recorded below and is not admitted.
 | `PROVIDED` | `( "id" -- )` | Register the exact ID.  A duplicate is an allocation-neutral no-op.  A new entry leaves no result; an entry-allocation failure throws. |
 | `PROVIDED-SPAN` | `( id-addr id-len -- )` | Register the exact caller-owned byte span with the same duplicate, allocation, and active-loader transaction semantics as `PROVIDED`. |
 | `MODULE?` | `( "id" -- flag )` | Return one flag indicating whether the exact ID is pending or committed. |
-| `REQUIRE` | `( "path" -- )` | Resolve and load a Forth source file. When its first exact-uppercase, first-token `PROVIDED` ID is already present, skip evaluation as a stack-neutral no-op. A newly evaluated source may intentionally leave its own data-stack results. |
+| `REQUIRE` | `( "path" -- )` | Resolve a Forth source path through the current module source and load the file. A file whose module is loaded, known by the identity its source gives, is not read again. When a file's first exact-uppercase, first-token `PROVIDED` ID is already present, skip evaluation as a stack-neutral no-op. A newly evaluated source may intentionally leave its own data-stack results. |
 | `MODULES` | `( -- )` | Print every exact registered ID and the exact count, leaving no data-stack cells.  Enumeration order is unspecified. |
 
 All five public operations are core-0-only.  Registration bookkeeping never
@@ -4202,11 +4214,14 @@ cleanup or transactionality for those exits.
   Arbitrary accepted bytes can include blanks, NULs, newlines, or terminal
   controls; some such IDs cannot be reconstructed through parsed `MODULE?`
   and `MODULES` emits them without escaping.
-- A duplicate `REQUIRE` is evaluation-neutral, not I/O-neutral: it still runs
-  `FS-ENSURE`, resolves and looks up the path, allocates and reads the complete
-  transfer, saves a loader frame, and prescans it before releasing the frame.
-  Storage completion state and other raw-loader side effects can therefore
-  change even though dictionary, registry, and persistent allocation do not.
+- A duplicate `REQUIRE` still has its module source resolve the path; the
+  built-in source runs `FS-ENSURE` and looks the name up. When the registry
+  holds the identity the source gives the file, the load ends there, with no
+  allocation, read, loader frame, or prescan, and the storage completion
+  state is unchanged. A file whose source gives no identity is allocated,
+  read, and prescanned before its frame is released, so raw-loader side
+  effects can change even though dictionary, registry, and persistent
+  allocation do not.
 - The loader does not require a module file type or flags; that boot/module
   policy remains open. The pinned pre-decision source performed read and
   prescan before `_LD-WALK-GUARDED`, allowing an early storage, descriptor, or
@@ -4218,13 +4233,15 @@ cleanup or transactionality for those exits.
   provisional module IDs and the active-zone dictionary checkpoint; output, allocator/registry effects
   outside that ID chain, and storage mutation are not retroactively made atomic
   by this decision.
-- Relative path handling inherits `_RESOLVE-PATH` and fixed parser storage.
-  A missing intermediate component reports through that resolver but does not
-  establish a transactional failure boundary before `_MOD-LOAD-BODY`
-  continues; oversized component sequences can overrun the fixed path scratch.
+- Relative path handling on the built-in MP64FS source inherits
+  `_RESOLVE-PATH` and fixed parser storage. A missing intermediate component
+  reports through that resolver but does not stop the source, which goes on
+  to look up the rejected component's name; oversized component sequences can
+  overrun the fixed path scratch.
   Qualification covers direct root filenames and a bounded nested dependency,
   not those malformed paths.
-- Registry buckets, loader globals, prescan scratch, CWD stack state, and list
+- Registry buckets, loader globals, prescan scratch, the loader's stack of
+  sources and directories, and list
   scratch are runtime-global and not reentrant. Module operations are public
   only on core 0. Registry lock 5 is also the global hash-table writer lock.
   `MODULES` holds it and then UART lock 1 while it exposes raw ID bytes in

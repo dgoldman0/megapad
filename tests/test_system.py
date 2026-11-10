@@ -43886,13 +43886,13 @@ class TestKDOSModuleSystem(_KDOSTestBase):
                     '." CWD-SAME=" CWD @ BAD-CWD @ = .',
                     '." ROLLED-BACK=" MODULE? retry.f 0= .',
                     '." AFTER-BAD=" _LD-SP @ .',
-                    '." REQ-AFTER-BAD=" _REQ-SP @ .',
+                    '." REQ-AFTER-BAD=" _LD-FROM-SP @ .',
                     "REQUIRE mods/retry.f",
                     "RETRY-TAIL .",
                     '." LOADED=" MODULE? retry.f .',
                     '." ATTEMPTS=" BAD-ATTEMPTS @ .',
                     '." AFTER-RETRY=" _LD-SP @ .',
-                    '." REQ-AFTER-RETRY=" _REQ-SP @ .',
+                    '." REQ-AFTER-RETRY=" _LD-FROM-SP @ .',
                 ],
                 max_steps=600_000_000,
                 storage_image=img,
@@ -44244,7 +44244,7 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
             '_IB-S1 @ . _IB-T1 @ . _IB-S2 @ . _IB-T2 @ .',
             '_MOD-COUNT _IB-COUNT @ = . HEAP-FREE-BYTES _IB-HEAP @ = .',
             'HERE _IB-HERE @ = . DEPTH _IB-DEPTH @ = .',
-            'EVAL-DEPTH @ . _LD-SP @ . _REQ-SP @ . ." ]"',
+            'EVAL-DEPTH @ . _LD-SP @ . _LD-FROM-SP @ . ." ]"',
         ])
 
         self.assertRegex(
@@ -44297,7 +44297,7 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
                 '_RI-DSTABLE @ . _RI-VSTABLE @ .',
                 'HERE _RI-HERE1 @ = . HEAP-FREE-BYTES _RI-HEAP1 @ = .',
                 '_RI-HIT @ 1 = . . DEPTH _RI-DEPTH0 @ = .',
-                'EVAL-DEPTH @ . _LD-SP @ . _REQ-SP @ . HEAP-CHECK . ." ]"',
+                'EVAL-DEPTH @ . _LD-SP @ . _LD-FROM-SP @ . HEAP-CHECK . ." ]"',
             ])
             text = self._run_kdos(lines, storage_image=image)
         finally:
@@ -44366,7 +44366,7 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
                 "REQUIRE cycle3-b.f",
                 "REQUIRE cycle3-c.f",
                 'CR ." [CR-CYCLES " _CR-MISS @ . _MOD-COUNT .',
-                '_MOD-BUCKET-COUNT . DEPTH . _LD-SP @ . _REQ-SP @ .',
+                '_MOD-BUCKET-COUNT . DEPTH . _LD-SP @ . _LD-FROM-SP @ .',
                 'HEAP-FREE-BYTES _CR-HEAP @ = .',
                 'CYCLE2-A . CYCLE2-B . CYCLE3-A . CYCLE3-B . CYCLE3-C .',
                 '." ]"',
@@ -44436,7 +44436,7 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
                 ': _RR-CHECKED S" REQUIRE rollback/outer.f" '
                 'EVALUATE-CHECKED ;',
                 "DEPTH _RR-DEPTH ! EVAL-DEPTH @ _RR-EVAL ! CWD @ _RR-CWD !",
-                "_LD-SP @ _RR-LD-SP ! _REQ-SP @ _RR-REQ-SP !",
+                "_LD-SP @ _RR-LD-SP ! _LD-FROM-SP @ _RR-REQ-SP !",
                 "HEAP-FREE-BYTES _RR-HEAP ! HEAP-FRAG _RR-FRAG !",
                 "_MOD-COUNT _RR-COUNT !",
                 "_RR-CHECKED _RR-STATUS ! EVAL-THROW @ _RR-THROW !",
@@ -44464,7 +44464,7 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
                 'CR ." [RR-ROLLBACK " _RR-STATUS @ . _RR-THROW @ .',
                 '_RR-BAD @ . DEPTH _RR-DEPTH @ = .',
                 'EVAL-DEPTH @ _RR-EVAL @ = . CWD @ _RR-CWD @ = .',
-                '_LD-SP @ _RR-LD-SP @ = . _REQ-SP @ _RR-REQ-SP @ = .',
+                '_LD-SP @ _RR-LD-SP @ = . _LD-FROM-SP @ _RR-REQ-SP @ = .',
                 '_RR-HEAP-DELTA @ . _RR-INNER-BLOCK @ .',
                 '_RR-FRAG-FAIL @ _RR-FRAG @ - .',
                 '_RR-HEAP-EXACT @ . _MOD-COUNT _RR-COUNT @ 1+ = .',
@@ -44486,7 +44486,7 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
                 '_RR-BAD @ . _MOD-COUNT . _MOD-BUCKET-COUNT .',
                 'DEPTH _RR-DEPTH @ = .',
                 'EVAL-DEPTH @ _RR-EVAL @ = . CWD @ _RR-CWD @ = .',
-                '_LD-SP @ _RR-LD-SP @ = . _REQ-SP @ _RR-REQ-SP @ = .',
+                '_LD-SP @ _RR-LD-SP @ = . _LD-FROM-SP @ _RR-REQ-SP @ = .',
                 '_RR-HEAP-RETRY @ _RR-HEAP-FAIL @ < .',
                 '_RR-HERE-RETRY @ _RR-HERE-FAIL @ > .',
                 '_RR-HEAP-STABLE @ . _RR-HERE-STABLE @ .',
@@ -44544,7 +44544,7 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
                 '_OR-FAILS @ . MODULE? oom.direct.registry 0= .',
                 '_MOD-COUNT _OR-COUNT @ = .',
                 'HEAP-FREE-BYTES _OR-HEAP @ = .',
-                'DEPTH . EVAL-DEPTH @ . _LD-SP @ . _REQ-SP @ . ." ]"',
+                'DEPTH . EVAL-DEPTH @ . _LD-SP @ . _LD-FROM-SP @ . ." ]"',
                 "_OR-DIRECT _OR-RETRY !",
                 'CR ." [OR-DIRECT-RETRY " _OR-RETRY @ .',
                 'MODULE? oom.direct.registry .',
@@ -44561,13 +44561,13 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
                 'MODULE? oom.loader.registry 0= .',
                 '_MOD-COUNT _OR-COUNT @ = .',
                 'HEAP-FREE-BYTES _OR-HEAP @ = . HERE _OR-HERE @ = .',
-                'DEPTH . EVAL-DEPTH @ . _LD-SP @ . _REQ-SP @ . ." ]"',
+                'DEPTH . EVAL-DEPTH @ . _LD-SP @ . _LD-FROM-SP @ . ." ]"',
                 "_OR-LOAD _OR-RETRY !",
                 'CR ." [OR-LOAD-RETRY " _OR-RETRY @ .',
                 '_OR-LOAD-HIT @ . MODULE? oom.loader.registry .',
                 '_MOD-COUNT _OR-COUNT @ 1+ = .',
                 'HEAP-FREE-BYTES _OR-HEAP @ < . OOM-LOADER-VALUE .',
-                'DEPTH . EVAL-DEPTH @ . _LD-SP @ . _REQ-SP @ . ." ]"',
+                'DEPTH . EVAL-DEPTH @ . _LD-SP @ . _LD-FROM-SP @ . ." ]"',
             ], storage_image=image)
         finally:
             os.unlink(image)
@@ -44593,7 +44593,12 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
         )
 
     def test_rehash_oom_retains_entry_duplicate_is_neutral_and_insert_recovers(self):
-        """Failed growth keeps the node; a duplicate is allocation-neutral."""
+        """Failed growth keeps the node; a duplicate is allocation-neutral.
+
+        A file of a registered module is a duplicate too: it runs nothing,
+        the loader records the file once, and the same REQUIRE again
+        allocates nothing.
+        """
         module_ids = [f"rehash.registry.{i:03d}" for i in range(1, 35)]
         image = self._make_module_image({
             "rehash-dup.f": (
@@ -44607,7 +44612,8 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
             "VARIABLE _RH-C33 VARIABLE _RH-B33 VARIABLE _RH-G33",
             "VARIABLE _RH-SDUP VARIABLE _RH-HDUP VARIABLE _RH-H33",
             "VARIABLE _RH-BDUP VARIABLE _RH-GDUP VARIABLE _RH-DUP-HIT",
-            "VARIABLE _RH-MISS",
+            "VARIABLE _RH-MISS VARIABLE _RH-SREQ VARIABLE _RH-FREQ",
+            "VARIABLE _RH-SREQ2 VARIABLE _RH-HREQ VARIABLE _RH-FREQ2",
             ": _RH-ALLOCATE  ( u -- addr ior )",
             "  DUP _RH-FAIL-SIZE @ = _RH-FAILS @ 0= AND IF",
             "    DROP 1 _RH-FAILS +! 0 -99 EXIT",
@@ -44627,12 +44633,19 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
             "MODULE? rehash.registry.033 _RH-P33 !",
             "_MOD-COUNT _RH-C33 ! _MOD-BUCKET-COUNT _RH-B33 !",
             "_MOD-GROW-PENDING @ _RH-G33 !",
-            "HEAP-FREE-BYTES _RH-H33 ! _RH-DUP _RH-SDUP !",
+            # The same ID again allocates nothing and leaves growth pending.
+            "HEAP-FREE-BYTES _RH-H33 ! _RH-ADD33 _RH-SDUP !",
             "HEAP-FREE-BYTES _RH-H33 @ = _RH-HDUP !",
             "_MOD-BUCKET-COUNT _RH-BDUP !",
             "_MOD-GROW-PENDING @ _RH-GDUP !",
             "_RH-ADD34 _RH-S34 !",
             "' DMA-ALLOCATE IS _MOD-ALLOCATE",
+            # The file's module is registered, so its text does not run.
+            # The loader records the file, one entry, and a second REQUIRE
+            # of it ends before anything is allocated.
+            "_RH-DUP _RH-SREQ ! _MOD-FILES _RH-FREQ !",
+            "HEAP-FREE-BYTES _RH-H33 ! _RH-DUP _RH-SREQ2 !",
+            "HEAP-FREE-BYTES _RH-H33 @ = _RH-HREQ ! _MOD-FILES _RH-FREQ2 !",
             "0 _RH-MISS !",
         ])
         lines.extend(
@@ -44644,6 +44657,8 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
             '_RH-C33 @ . _RH-B33 @ . _RH-G33 @ .',
             '_RH-SDUP @ . _RH-DUP-HIT @ . _RH-HDUP @ .',
             '_RH-BDUP @ . _RH-GDUP @ . ." ]"',
+            'CR ." [RH-FILE " _RH-SREQ @ . _RH-FREQ @ . _RH-SREQ2 @ .',
+            '_RH-HREQ @ . _RH-FREQ2 @ . _RH-DUP-HIT @ . ." ]"',
             'CR ." [RH-RECOVER " _RH-S34 @ . _RH-FAILS @ .',
             'MODULE? rehash.registry.033 . MODULE? rehash.registry.034 .',
             '_MOD-COUNT . _MOD-BUCKET-COUNT . _MOD-GROW-PENDING @ .',
@@ -44658,6 +44673,10 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
             self._marker_payload(text, "RH-FAIL"),
             r"\[RH-FAIL\s+0\s+1\s+-1\s+33\s+16\s+1\s+0\s+0\s+"
             r"-1\s+16\s+1\s+\]",
+        )
+        self.assertRegex(
+            self._marker_payload(text, "RH-FILE"),
+            r"\[RH-FILE\s+0\s+1\s+0\s+-1\s+1\s+0\s+\]",
         )
         self.assertRegex(
             self._marker_payload(text, "RH-RECOVER"),
@@ -44711,7 +44730,7 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
             'XMEM-HERE @ _XR-XFLOOR @ = . ULAND @ . _XR-MISS @ .',
             '_MOD-COUNT . _MOD-BUCKET-COUNT .',
             'HEAP-FREE-BYTES _XR-HDUP @ = . HEAP-CHECK .',
-            'DEPTH . EVAL-DEPTH @ . _LD-SP @ . _REQ-SP @ . ." ]"',
+            'DEPTH . EVAL-DEPTH @ . _LD-SP @ . _LD-FROM-SP @ . ." ]"',
         ])
         text = self._run_kdos(lines)
 
@@ -44759,7 +44778,7 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
                 'HEAP-FREE-BYTES _NX-H0 @ < .',
                 'HEAP-FREE-BYTES _NX-H1 @ = . HERE _NX-HERE @ = .',
                 'NOXMEM-REGISTRY-VALUE . HEAP-CHECK .',
-                'DEPTH . EVAL-DEPTH @ . _LD-SP @ . _REQ-SP @ . ." ]"',
+                'DEPTH . EVAL-DEPTH @ . _LD-SP @ . _LD-FROM-SP @ . ." ]"',
             ])
             text = self._run_kdos(
                 lines,

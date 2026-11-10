@@ -77,22 +77,24 @@ VARIABLE NAMEBUF  23 ALLOT
 \   so that paths like "lib/crypto/aes.f" (>23 chars total) are preserved.
 VARIABLE PATHBUF  127 ALLOT
 
-\ PARSE-NAME ( "name" -- )
-\   Parse next whitespace-delimited word.  Stores full path (up to 127
-\   chars) in PATHBUF, and the first 23 chars in NAMEBUF (for direct
-\   dirent lookups).  Sets PN-LEN to the clamped NAMEBUF length.
+\ _PATH! ( c-addr u -- )
+\   Store a path: all of it (up to 127 chars) in PATHBUF, and its first
+\   23 chars in NAMEBUF (for direct dirent lookups).  Sets PN-LEN to the
+\   clamped NAMEBUF length.  The path may already lie in PATHBUF.
 VARIABLE PN-LEN
 
-: PARSE-NAME  ( "name" -- )
+: _PATH!  ( c-addr u -- )
+    127 MIN >R                          \ R: pathlen (up to 127)
+    PATHBUF R@ MOVE                     \ copy full path into PATHBUF
+    PATHBUF R@ + 128 R@ - 0 FILL        \ clear an older path's tail
     NAMEBUF 24 0 FILL
-    PATHBUF 128 0 FILL
-    BL WORD DUP C@                     ( waddr rawlen )
-    DUP 127 MIN >R                     \ R: pathlen (up to 127)
-    DROP 1+                             ( src )  \ drop rawlen, skip count byte
-    DUP PATHBUF R@ CMOVE               \ copy full path into PATHBUF
     R> 23 MIN PN-LEN !                  \ clamp for NAMEBUF
-    NAMEBUF PN-LEN @                    ( src dst len )
-    CMOVE ;
+    PATHBUF NAMEBUF PN-LEN @ CMOVE ;
+
+\ PARSE-NAME ( "name" -- )
+\   Parse next whitespace-delimited word and store it as _PATH! does.
+: PARSE-NAME  ( "name" -- )
+    BL WORD COUNT _PATH! ;
 
 \ -- Stack safety utilities --
 
@@ -5729,7 +5731,8 @@ VARIABLE LD-CUR
 VARIABLE LD-LEN
 VARIABLE LD-LINE
 \ Nesting support: save/restore walker state for nested LOAD/REQUIRE.
-\ Includes CWD so relative-path loads restore the working directory.  Each
+\ Includes CWD, so a directory the loaded text changes to does not outlive
+\ the load; _LD-FROM-END gives back the one a path resolution left.  Each
 \ frame owns evaluator-depth and HERE/LATEST checkpoints plus a private module
 \ transaction pointer.  Only the module-ID hooks are no-ops until §20 binds
 \ them; dictionary rollback is intrinsic to every guarded loader frame.
@@ -5794,10 +5797,10 @@ VARIABLE _LD-RUN-ADDR
     _LD-RUN-ADDR @ _LD-RUN-CNT @ SECTOR * + ;
 : _LD-SLOT-BYTES  ( slot -- bytes )
     DIRENT DUP DE.COUNT SWAP DE.EXT1-CNT + SECTOR * ;
-\ _LD-READ-SLOT ( slot -- )  Concatenate both validated extents in LD-BUF.
-: _LD-READ-SLOT  ( slot -- )
-    DIRENT
-    DUP DE.SEC OVER DE.COUNT LD-BUF @ _LD-READ-RUN
+\ _LD-READ-SLOT ( addr slot -- )  Concatenate both validated extents at ADDR.
+: _LD-READ-SLOT  ( addr slot -- )
+    DIRENT SWAP >R
+    DUP DE.SEC OVER DE.COUNT R> _LD-READ-RUN
     OVER DE.EXT1-CNT DUP IF
         2 PICK DE.EXT1-SEC SWAP ROT _LD-READ-RUN 2DROP
     ELSE
@@ -5807,9 +5810,10 @@ VARIABLE _LD-RUN-ADDR
 \  Paths like "../markup/html.f" or "lib/util.f" are split on '/'.
 \  Each intermediate component adjusts CWD (".." goes to parent,
 \  anything else CDs into a subdirectory).  The final component
-\  (the filename) is left in NAMEBUF for FIND-BY-NAME.  CWD is
-\  saved by _LD-SAVE and restored by _LD-RESTORE so that nested
-\  loads always return to the caller's working directory.
+\  (the filename) is left in NAMEBUF for FIND-BY-NAME.  The loader
+\  keeps the directory a load started from and gives it back when the
+\  load ends (_LD-FROM-SAVE, _LD-FROM-END), so that nested loads always
+\  return to the caller's working directory.
 CREATE _RP-PATH 128 ALLOT    \ copy of full path from PATHBUF (up to 128 B)
 CREATE _RP-COMP 24 ALLOT     \ current component being processed (≤ 23 chars)
 VARIABLE _RP-I                \ scan position within _RP-PATH
@@ -5880,6 +5884,127 @@ VARIABLE _RP-I                \ scan position within _RP-PATH
             DROP TRUE                    \ done
         THEN
     UNTIL ;
+
+\ ── Module sources ──────────────────────────────────────────────────
+\
+\  LOAD and REQUIRE find and read a file through the current module
+\  source.  KDOS's own MP64FS is the built-in source.  A filesystem layer
+\  that mounts another volume builds a source of its own and selects it
+\  with MODULE-SOURCE!, and modules then come from that volume.  The
+\  contract is docs/module-source-contract.md.
+\
+\  A source is five cells, which its owner keeps alive while it is
+\  selected or a load that started from it is under way:
+\    +0   resolve  ( c-addr u file source -- ior )
+\    +8   read     ( addr file source -- ior )
+\    +16  dir@     ( source -- token )
+\    +24  dir!     ( token source -- )
+\    +32  context, for the owner
+\  RESOLVE finds the file a path names from the source's current
+\  directory, makes that file's directory current, and fills FILE:
+\    +0   identity, two cells; both zero when the source has none
+\    +16  bytes of source text
+\    +24  bytes READ needs at ADDR, at least the text
+\    +32  the source's own handle
+\  READ follows its RESOLVE with no other call to the source between
+\  them, and at most once.  The loader takes DIR@ before it resolves and
+\  gives that token back to DIR! exactly once, when the load ends, so a
+\  nested load returns to its caller's directory.
+40 CONSTANT /MODULE-SOURCE
+: MS.RESOLVE  ( source -- addr ) ;
+: MS.READ     ( source -- addr )   8 + ;
+: MS.DIR@     ( source -- addr )  16 + ;
+: MS.DIR!     ( source -- addr )  24 + ;
+: MS.CONTEXT  ( source -- addr )  32 + ;
+40 CONSTANT /MODULE-FILE
+: MF.ID       ( file -- addr ) ;
+: MF.USED     ( file -- addr )  16 + ;
+: MF.RESERVE  ( file -- addr )  24 + ;
+: MF.HANDLE   ( file -- addr )  32 + ;
+-4110 CONSTANT MS-E-NOT-FOUND
+-4111 CONSTANT MS-E-NO-FILESYSTEM
+
+\ KDOS's MP64FS as a source.  The current directory is CWD, and a file's
+\ handle is its directory slot.  Its identity is that slot with the
+\ file's first extent, length, time and checksum.  _RESOLVE-PATH walks
+\ the path, so RESOLVE leaves it in PATHBUF and NAMEBUF.
+VARIABLE _FMS-FILE
+: _FS-MS-RESOLVE  ( c-addr u file source -- ior )
+    DROP _FMS-FILE ! _PATH!
+    FS-ENSURE
+    FS-OK @ 0= IF MS-E-NO-FILESYSTEM EXIT THEN
+    _RESOLVE-PATH
+    FIND-BY-NAME DUP -1 = IF DROP MS-E-NOT-FOUND EXIT THEN
+    DUP _FMS-FILE @ MF.HANDLE !
+    DUP _LD-SLOT-BYTES _FMS-FILE @ MF.RESERVE !
+    DUP DIRENT                          ( slot de )
+    DUP DE.USED _FMS-FILE @ MF.USED !
+    DUP DE.CRC 32 LSHIFT OVER DE.USED OR _FMS-FILE @ MF.ID !
+    DUP DE.MTIME 32 LSHIFT SWAP DE.SEC 16 LSHIFT OR OR
+    _FMS-FILE @ MF.ID 8 + !
+    0 ;
+: _FS-MS-READ  ( addr file source -- ior )
+    DROP MF.HANDLE @ _LD-READ-SLOT 0 ;
+: _FS-MS-DIR@  ( source -- token )  DROP CWD @ ;
+: _FS-MS-DIR!  ( token source -- )  DROP CWD ! ;
+CREATE FS-MODULE-SOURCE
+    ' _FS-MS-RESOLVE ,  ' _FS-MS-READ ,
+    ' _FS-MS-DIR@ ,     ' _FS-MS-DIR! ,
+    0 ,
+VARIABLE MODULE-SOURCE
+FS-MODULE-SOURCE MODULE-SOURCE !
+
+\ MODULE-SOURCE! ( source -- )  Select the source that later loads use.
+\   A load under way when the selection changes leaves it in place when it
+\   ends; a load that fails selects the source it started from again.
+: MODULE-SOURCE!  ( source -- )
+    ?CORE0 MODULE-SOURCE ! ;
+
+\ The file the current source resolved last.  The loader reads it before
+\ it evaluates anything, so nested loads may fill the record again.
+CREATE _LD-FILE /MODULE-FILE ALLOT
+: _LD-PATH  ( -- c-addr u )
+    PATHBUF 0
+    BEGIN
+        DUP 127 < IF 2DUP + C@ 0<> ELSE FALSE THEN
+    WHILE 1+ REPEAT ;
+: _LD-RESOLVE  ( -- ior )
+    _LD-FILE /MODULE-FILE 0 FILL
+    _LD-PATH _LD-FILE MODULE-SOURCE @ DUP MS.RESOLVE @ EXECUTE ;
+: _LD-READ  ( -- )
+    LD-BUF @ _LD-FILE MODULE-SOURCE @ DUP MS.READ @ EXECUTE THROW ;
+\ _LD-FOUND? ( ior module? -- flag )  True when RESOLVE found the file.
+\   A missing filesystem and a path that names no file are reported
+\   here, for LOAD or for REQUIRE; any other failure is thrown.
+: _LD-FOUND?  ( ior module? -- flag )
+    OVER 0= IF 2DROP TRUE EXIT THEN
+    OVER MS-E-NO-FILESYSTEM = IF
+        2DROP ."  No filesystem" CR FALSE EXIT
+    THEN
+    OVER MS-E-NOT-FOUND <> IF DROP THROW THEN
+    NIP IF ."  Module not found: " ELSE ."  Not found: " THEN
+    PATHBUF .ZSTR CR FALSE ;
+
+\ Each LOAD and REQUIRE keeps the source and directory it started from,
+\ and gives the directory back to that source when it ends.  A source the
+\ load selected stays selected when the load succeeds; a failed load
+\ selects the source it started from again.
+CREATE _LD-FROM-STK _LD-MAXLVL 16 * ALLOT
+VARIABLE _LD-FROM-SP
+0 _LD-FROM-SP !
+: _LD-FROM-SAVE  ( -- )
+    _LD-FROM-SP @ _LD-MAXLVL 16 * >= ABORT" REQUIRE nested too deep"
+    MODULE-SOURCE @ DUP _LD-FROM-SP @ _LD-FROM-STK + !
+    DUP MS.DIR@ @ EXECUTE _LD-FROM-SP @ _LD-FROM-STK + 8 + !
+    16 _LD-FROM-SP +! ;
+\ _LD-FROM-END ( exception -- )  End one load and rethrow what it threw.
+: _LD-FROM-END  ( exception -- )
+    _LD-FROM-SP @ 0= ABORT" REQUIRE nesting underflow"
+    -16 _LD-FROM-SP +!
+    _LD-FROM-SP @ _LD-FROM-STK +        ( exception entry )
+    OVER IF DUP @ MODULE-SOURCE ! THEN
+    DUP 8 + @ SWAP @ DUP MS.DIR! @ EXECUTE
+    THROW ;
 
 \ ── Checked source compiler ─────────────────────────────────────────
 \
@@ -6026,33 +6151,28 @@ VARIABLE _SEC-LINE
     ['] _LD-WALK _LD-GUARDED ;
 
 : _LD-READ-WALK  ( -- )
-    LD-CUR @ _LD-READ-SLOT
+    _LD-READ
     _LD-WALK ;
 
-: LOAD  ( "filename" -- )
-    FS-ENSURE
-    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
-    PARSE-NAME
-    \ Save walker state (including CWD) before resolving path.
+: _LOAD-BODY  ( -- )
+    _LD-RESOLVE FALSE _LD-FOUND? 0= IF EXIT THEN
+    _LD-FILE MF.USED @ 0= IF ."  Empty file" CR EXIT THEN
     _LD-SAVE
-    _RESOLVE-PATH
-    FIND-BY-NAME DUP -1 = IF
-        DROP ."  Not found: " NAMEBUF .ZSTR CR
-        _LD-RESTORE EXIT
-    THEN
-    DUP DIRENT DE.USED DUP 0= IF
-        2DROP ."  Empty file" CR
-        _LD-RESTORE EXIT
-    THEN
-    LD-SZ !                              ( slot )
+    _LD-FILE MF.USED @ LD-SZ !
     \ Source text is temporary.  ALLOCATE routes it to XMEM when present;
-    \ the full sector-rounded span bounds DMA and is reclaimed after walk.
-    DUP _LD-SLOT-BYTES ALLOCATE IF
-        2DROP ."  File buffer allocation failed" CR
+    \ the span the source asks for bounds its read and is reclaimed after
+    \ the walk.
+    _LD-FILE MF.RESERVE @ ALLOCATE IF
+        DROP ."  File buffer allocation failed" CR
         _LD-RESTORE EXIT
     THEN
-    LD-BUF ! LD-CUR !
+    LD-BUF !
     ['] _LD-READ-WALK _LD-GUARDED ;
+
+: LOAD  ( "filename" -- )
+    PARSE-NAME
+    _LD-FROM-SAVE
+    ['] _LOAD-BODY CATCH _LD-FROM-END ;
 \ ── Application Loading ──────────────────────────────────────────────
 \  APP-EVAL evaluates a string.  ENTER-USER / SYS-EXIT are retained
 \  as no-ops for API compatibility (hardware user mode was removed
@@ -6088,7 +6208,7 @@ VARIABLE _SEC-LINE
     _APP-MPU-ON ENTER-USER _APP-LOAD-WALK ;
 
 : _APP-LOAD-RUN  ( -- )
-    LD-CUR @ _LD-READ-SLOT
+    LD-BUF @ LD-CUR @ _LD-READ-SLOT
     ['] _APP-LOAD-USER CATCH
     SYS-EXIT
     _APP-MPU-OFF
@@ -9516,28 +9636,38 @@ VARIABLE _HTE-HT
 CREATE _MOD-INLINE  _MOD-INLINE-BUCKETS CELLS ALLOT
 _MOD-INLINE _MOD-INLINE-BUCKETS CELLS 0 FILL
 
-\ Registry descriptor: bucket pointer, bucket count, entry count,
-\ heap-owned-bucket flag, lock number.
+\ Registry descriptor: bucket pointer, bucket count, module count,
+\ heap-owned-bucket flag, lock number, loaded-file count.
 CREATE _MOD-REG
     _MOD-INLINE ,
     _MOD-INLINE-BUCKETS ,
     0 ,
     0 ,
     HT-LOCK ,
+    0 ,
 
 : _MOD-BUCKETS       ( -- addr )  _MOD-REG      @ ;
 : _MOD-BUCKET-COUNT  ( -- n )     _MOD-REG  8 + @ ;
 : _MOD-COUNT         ( -- n )     _MOD-REG 16 + @ ;
 : _MOD-BUCKETS-HEAP? ( -- flag )  _MOD-REG 24 + @ ;
 : _MOD-LOCK          ( -- n )     _MOD-REG 32 + @ ;
+: _MOD-FILES         ( -- n )     _MOD-REG 40 + @ ;
+\ Growth follows every entry, the modules and the loaded files.
+: _MOD-ENTRIES       ( -- n )     _MOD-COUNT _MOD-FILES + ;
 
 \ Stable entry: bucket-next, provisional-next, hash, exact length, ID bytes.
+\ An entry whose hash carries _MOD-FILE-BIT, one bit above every name's
+\ hash, records a loaded file ("Loaded files" below).  No name finds it.
 32 CONSTANT /MOD-NODE
 : _MN-NEXT  ( node -- addr ) ;
 : _MN-PROV  ( node -- addr )  8 + ;
 : _MN-HASH  ( node -- addr ) 16 + ;
 : _MN-LEN   ( node -- addr ) 24 + ;
 : _MN-ID    ( node -- addr ) 32 + ;
+1 32 LSHIFT CONSTANT _MOD-FILE-BIT
+\ _MOD-TALLY ( hash -- addr )  The count an entry with this hash is in.
+: _MOD-TALLY  ( hash -- addr )
+    _MOD-FILE-BIT AND IF _MOD-REG 40 + ELSE _MOD-REG 16 + THEN ;
 
 \ Private allocation seam.  Production bindings deliberately use the Bank-0
 \ heap; DEFER keeps deterministic entry/rehash failure qualification possible.
@@ -9590,12 +9720,8 @@ VARIABLE _MF-H
 \ _MOD-INSERT ( id-addr id-len -- node inserted? ior )
 \ Publish only a complete node.  Duplicate lookup occurs before allocation and
 \ is repeated under the publication lock, so duplicates remain allocation-free.
-: _MOD-INSERT  ( id-addr id-len -- node inserted? ior )
-    ?CORE0
-    DUP 0= OVER _MOD-ID-MAX > OR IF
-        2DROP 0 FALSE _MOD-E-BAD-ID EXIT
-    THEN
-    2DUP _MOD-HASH                         ( id-addr id-len hash )
+\ _MOD-INSERT-HASHED does the work for a caller that brings the hash cell.
+: _MOD-INSERT-HASHED  ( id-addr id-len hash -- node inserted? ior )
     _MOD-LOCK LOCK
     2 PICK 2 PICK 2 PICK _MOD-FIND-LOCKED ( id-addr id-len hash node )
     _MOD-LOCK UNLOCK
@@ -9623,9 +9749,16 @@ VARIABLE _MF-H
     OVER _MOD-BUCKET                        ( ... candidate bucket-addr )
     DUP @ 2 PICK _MN-NEXT !
     OVER SWAP !
-    1 _MOD-REG 16 + +!
+    1 2 PICK _MOD-TALLY +!
     _MOD-LOCK UNLOCK
     >R 2DROP DROP R> TRUE 0 ;
+
+: _MOD-INSERT  ( id-addr id-len -- node inserted? ior )
+    ?CORE0
+    DUP 0= OVER _MOD-ID-MAX > OR IF
+        2DROP 0 FALSE _MOD-E-BAD-ID EXIT
+    THEN
+    2DUP _MOD-HASH _MOD-INSERT-HASHED ;
 
 \ Best-effort retained growth.  Load factor may affect lookup time but never
 \ entry capacity.  Nodes stay at stable addresses while only bucket links move.
@@ -9637,7 +9770,7 @@ VARIABLE _MG-NEXT
 : _MOD-GROW-TARGET  ( -- buckets | 0 )
     _MOD-LOCK LOCK
     _MOD-BUCKET-COUNT DUP
-    BEGIN _MOD-COUNT OVER 2* > WHILE 2* REPEAT
+    BEGIN _MOD-ENTRIES OVER 2* > WHILE 2* REPEAT
     2DUP = IF 2DROP 0 ELSE NIP THEN
     _MOD-LOCK UNLOCK ;
 
@@ -9648,7 +9781,7 @@ VARIABLE _MG-NEXT
 
     _MOD-LOCK LOCK
     _MOD-BUCKET-COUNT 2 PICK >=
-    _MOD-COUNT _MOD-BUCKET-COUNT 2* <= OR IF
+    _MOD-ENTRIES _MOD-BUCKET-COUNT 2* <= OR IF
         _MOD-LOCK UNLOCK
         NIP _MOD-FREE EXIT
     THEN
@@ -9697,6 +9830,12 @@ VARIABLE _MOD-GROW-READY
         DROP
     THEN ;
 
+\ _MOD-JOIN ( node inserted? ior -- inserted? )  Throw an insert's failure;
+\ otherwise a new entry joins the loader's provisional list.
+: _MOD-JOIN  ( node inserted? ior -- inserted? )
+    DUP IF >R 2DROP R> THROW THEN
+    DROP DUP >R _MOD-ADOPT R> ;
+
 VARIABLE _MU-TARGET
 VARIABLE _MU-LINK
 
@@ -9706,7 +9845,7 @@ VARIABLE _MU-LINK
     BEGIN _MU-LINK @ @ DUP WHILE
         DUP _MU-TARGET @ = IF
             _MN-NEXT @ _MU-LINK @ !
-            -1 _MOD-REG 16 + +!
+            -1 _MU-TARGET @ _MN-HASH @ _MOD-TALLY +!
             EXIT
         THEN
         _MN-NEXT _MU-LINK !
@@ -9848,9 +9987,7 @@ VARIABLE _PS-LINE-U
 \ Neither word leaves insertion status on the public data stack.
 : PROVIDED-SPAN  ( id-addr id-len -- )
     ?CORE0
-    _MOD-INSERT
-    DUP IF >R 2DROP R> THROW THEN
-    DROP _MOD-ADOPT ;
+    _MOD-INSERT _MOD-JOIN DROP ;
 
 : PROVIDED  ( "name" -- )
     _MOD-PARSE-ID PROVIDED-SPAN ;
@@ -9862,79 +9999,83 @@ VARIABLE _PS-LINE-U
     DUP 0= OVER _MOD-ID-MAX > OR IF 2DROP _MOD-E-BAD-ID THROW THEN
     _MOD-FIND 0<> ;
 
-\ _MOD-LOAD-BODY ( -- )  Load file whose name is already in NAMEBUF.
-\   This is the core of LOAD without the PARSE-NAME call.
-\   CWD must already point to the target directory (set by
-\   _RESOLVE-PATH when the REQUIRE argument contains '/').
-\   After reading the file, pre-scans for PROVIDED.  If the module
-\   is already loaded, skips execution entirely (zero side effects).
+\ ── Loaded files ─────────────────────────────────────────────────────
+\ REQUIRE reads a file to find its PROVIDED line, so a module that many
+\ others name would be read once for each of them.  The registry therefore
+\ also holds the identity of every file whose module is loaded: the source
+\ that resolved it and the two cells that source gave.  Such a node sets
+\ one bit above every name's hash, so no name finds it, and it joins the
+\ loader's provisional list as a name does, so a failed load takes it out.
+CREATE _MOD-FILE-KEY 24 ALLOT
+
+\ _MOD-FILE-KEY? ( -- flag )  Build the resolved file's key; false when
+\ its source gave no identity.
+: _MOD-FILE-KEY?  ( -- flag )
+    _LD-FILE MF.ID @ _LD-FILE MF.ID 8 + @ OR 0= IF FALSE EXIT THEN
+    MODULE-SOURCE @ _MOD-FILE-KEY !
+    _LD-FILE MF.ID _MOD-FILE-KEY 8 + 16 CMOVE
+    TRUE ;
+: _MOD-FILE-HASH  ( -- hash )
+    _MOD-FILE-KEY 24 _MOD-HASH _MOD-FILE-BIT OR ;
+
+\ _MOD-FILE-LOADED? ( -- flag )  True when the resolved file's module is
+\ loaded, or is loading further up.
+: _MOD-FILE-LOADED?  ( -- flag )
+    _MOD-FILE-KEY? 0= IF FALSE EXIT THEN
+    _MOD-FILE-KEY 24 _MOD-FILE-HASH
+    _MOD-LOCK LOCK
+    _MOD-FIND-LOCKED
+    _MOD-LOCK UNLOCK
+    0<> ;
+
+\ _MOD-FILE-NOTE ( -- )  Record the resolved file beside its module name.
+: _MOD-FILE-NOTE  ( -- )
+    _MOD-FILE-KEY? 0= IF EXIT THEN
+    _MOD-FILE-KEY 24 _MOD-FILE-HASH _MOD-INSERT-HASHED _MOD-JOIN DROP ;
+
+\ _MOD-LOAD-BODY ( -- )  Load the file whose path PARSE-NAME left.
+\   The current module source resolves the path and makes the file's
+\   directory current.  A file whose module is loaded is not read again.
+\   After reading a file, the loader pre-scans it for PROVIDED.  If that
+\   module is already loaded, it skips execution entirely (zero side
+\   effects) and remembers the file.
 : _MOD-READ-WALK  ( -- )
-    LD-CUR @ _LD-READ-SLOT
+    _LD-READ
     \ Pre-register the exact source-buffer slice before executing anything.
     _MOD-PRESCAN IF
-        _MOD-INSERT                     ( node inserted? ior )
-        DUP IF
-            >R 2DROP R> THROW
-        THEN
-        DROP                            ( node inserted? )
-        DUP 0= IF
-            2DROP EXIT
-        THEN
-        _MOD-ADOPT
+        _MOD-INSERT _MOD-JOIN           ( inserted? )
+        _MOD-FILE-NOTE
+        0= IF EXIT THEN
     ELSE
         2DROP
     THEN
     _LD-WALK ;
 : _MOD-LOAD-BODY  ( -- )
-    FS-ENSURE
-    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
-    FIND-BY-NAME DUP -1 = IF
-        DROP ."  Module not found: " NAMEBUF .ZSTR CR EXIT
-    THEN
-    DUP DIRENT DE.USED DUP 0= IF
-        2DROP ."  Empty module" CR EXIT
-    THEN
+    _LD-RESOLVE TRUE _LD-FOUND? 0= IF EXIT THEN
+    _LD-FILE MF.USED @ 0= IF ."  Empty module" CR EXIT THEN
+    _MOD-FILE-LOADED? IF EXIT THEN
     _LD-SAVE
-    LD-SZ !                              ( slot )
+    _LD-FILE MF.USED @ LD-SZ !
     \ Module source is a reclaimable loader allocation, not permanent XMEM.
-    DUP _LD-SLOT-BYTES ALLOCATE IF
-        2DROP ."  Module buffer allocation failed" CR
+    _LD-FILE MF.RESERVE @ ALLOCATE IF
+        DROP ."  Module buffer allocation failed" CR
         _LD-RESTORE EXIT
     THEN
-    LD-BUF ! LD-CUR !
+    LD-BUF !
     ['] _MOD-READ-WALK _LD-GUARDED ;
 
 \ REQUIRE ( "name" -- )  Load a module file.
-\   The file's own PROVIDED line is the sole guard against duplicate
-\   loading.  REQUIRE just resolves the path and loads the file.
+\   The file's own PROVIDED line guards against loading a module twice,
+\   and a file whose module is loaded is not read again.
 \   Accepts relative paths: REQUIRE ../lib/util.f
-\   Path components adjust CWD; the final name is looked up in
-\   the resolved directory.  CWD is restored after loading.
-_LD-MAXLVL 8 * XBUF _REQ-CWD-STK
-VARIABLE _REQ-SP  0 _REQ-SP !
-
-: _REQ-SAVE-CWD  ( -- )
-    _REQ-SP @ _LD-MAXLVL 8 * >= ABORT" REQUIRE nested too deep"
-    CWD @ _REQ-SP @ _REQ-CWD-STK + !
-    8 _REQ-SP +! ;
-
-: _REQ-RESTORE-CWD  ( -- )
-    _REQ-SP @ 0= ABORT" REQUIRE nesting underflow"
-    -8 _REQ-SP +!
-    _REQ-SP @ _REQ-CWD-STK + @ CWD ! ;
-
-: _REQUIRE-BODY  ( -- )
-    _RESOLVE-PATH
-    _MOD-LOAD-BODY ;
-
+\   The current module source resolves the path from its current
+\   directory, which is the requiring file's during a load, and the
+\   directory is restored after loading.
 : REQUIRE  ( "name" -- )
     ?CORE0
     PARSE-NAME
-    FS-ENSURE                  \ load FS before path resolution
-    _REQ-SAVE-CWD
-    ['] _REQUIRE-BODY CATCH
-    _REQ-RESTORE-CWD           \ restore before returning or rethrowing
-    THROW ;
+    _LD-FROM-SAVE
+    ['] _MOD-LOAD-BODY CATCH _LD-FROM-END ;
 
 VARIABLE _ML-NODE
 
@@ -9943,8 +10084,10 @@ VARIABLE _ML-NODE
     _MOD-BUCKET-COUNT 0 DO
         _MOD-BUCKETS I CELLS + @ _ML-NODE !
         BEGIN _ML-NODE @ WHILE
-            ."   "
-            _ML-NODE @ DUP _MN-ID SWAP _MN-LEN @ TYPE CR
+            _ML-NODE @ _MN-HASH @ _MOD-FILE-BIT AND 0= IF
+                ."   "
+                _ML-NODE @ DUP _MN-ID SWAP _MN-LEN @ TYPE CR
+            THEN
             _ML-NODE @ _MN-NEXT @ _ML-NODE !
         REPEAT
     LOOP
@@ -9992,8 +10135,7 @@ CREATE _AUTOEXEC-NAME
 
 : _AUTOEXEC-RUN  ( -- )
     FS-OK @ 0= IF EXIT THEN
-    _AUTOEXEC-NAME NAMEBUF 10 CMOVE
-    NAMEBUF 10 + 14 0 FILL
+    _AUTOEXEC-NAME 10 _PATH!
     FIND-BY-NAME -1 = IF EXIT THEN
     ."  Running autoexec.f..." CR
     _MOD-LOAD-BODY ;

@@ -2163,28 +2163,41 @@ the new occupant (an ABA hazard), while a double close can race logical reuse.
 Pool headers, fdesc payloads, `OP-SLOT`, parser state, directory cache, and the
 deferred vectors are global and unlocked.
 
-Exact current lines 5675 through 6008 contain 334 LF records and 11,980 bytes,
+Exact current lines 5724 through 6175 contain 452 LF records and 17,210 bytes,
 with SHA-256
-`6a30453c933ac8666c1b798a98a4fb3e6a331afeb4c2d3048299a83a0ea79a7c`
-and Git blob `f2bea50138ca04e235358debd734a4fc234e002a`. Their exact 55-definition
+`9848280b32b5db3387dd94df4e0c7036597d913e3f457d97ee88a29722b3bc9a`
+and Git blob `679fb2d92ac20649daa6992ccc9490122e6d5d52`. Their exact 86-definition
 ledger installs five loader globals, constants for a 16 × 88-byte nesting stack,
 frame/evaluator/transaction accessors, three deferred transaction actions,
-two-extent read helpers, path scratch and traversal, six evaluator-status
-constants, the KDOS checked-evaluator shadow, five whole-source walker cells,
-`SOURCE-EVALUATE-CHECKED`, `_LD-STATUS-THROW`, the checked loader walker,
-dictionary/error guards, and final raw filesystem `LOAD`. Its optional module
-transaction
+two-extent read helpers, path scratch and traversal, the five-cell
+module-source and module-file records with nine accessors and two error
+constants, the built-in MP64FS source and its four operations, the
+`MODULE-SOURCE` selection, the resolve, read and report helpers, a 16 × 16-byte
+stack of the source and directory each load started from, six
+evaluator-status constants, the KDOS checked-evaluator shadow, five
+whole-source walker cells, `SOURCE-EVALUATE-CHECKED`, `_LD-STATUS-THROW`, the
+checked loader walker, dictionary/error guards, `_LOAD-BODY`, and final `LOAD`.
+Its optional module transaction
 actions are all bound to `_LD-TXN-NOOP`; the later module registry owns their
-real commit/rollback meanings. Fixture evaluation allocates dictionary storage
-and explicitly clears `_LD-SP`, but performs no filesystem, storage, clock,
-lock, or UART operation.
+real commit/rollback meanings. Fixture evaluation allocates dictionary storage,
+explicitly clears `_LD-SP` and `_LD-FROM-SP`, and selects the built-in source,
+but performs no filesystem, storage, clock, lock, or UART operation.
 
 `LOAD` is a parsing word and is admitted only through an active ordinary source
-cursor. It calls `FS-ENSURE` before `PARSE-NAME`: an unavailable filesystem
-prints ` No filesystem` plus CRLF, returns before consuming the filename, and
-lets the enclosing interpreter process that token. After parsing, a lookup
-miss, zero `DE.USED`, or allocation failure emits its literal diagnostic and
-restores the saved loader frame without payload I/O or transaction actions.
+cursor. It calls `PARSE-NAME` first, saves the current module source with that
+source's directory token, and has the source resolve the path; the contract is
+`module-source-contract.md`. The built-in source calls `FS-ENSURE`: an
+unavailable filesystem prints ` No filesystem` plus CRLF with the filename
+already consumed. A lookup miss prints ` Not found: `, the path as written, and
+CRLF. That miss, zero `DE.USED`, or allocation failure emits its literal
+diagnostic, leaves the loader globals unchanged, and gives the saved directory
+back without payload I/O or transaction actions; no frame exists before the
+path has resolved to a nonempty file. A resolve failure other than those two
+is thrown. Five focused tests serve `LOAD` from a recording source of their
+own and pin the order of calls across nested relative loads, the return of
+every directory token exactly once, both reports, thrown resolve and read
+failures, a load that selects another source, and the built-in source's
+record for a path it is given.
 The current eleven-cell nesting frame saves `LD-BUF`, `LD-SZ`, `LD-CUR`,
 `LD-LEN`, `LD-LINE`, `EVAL-LINE`, CWD, the evaluator-depth checkpoint, a
 transaction head, and the frame's `HERE`/`LATEST` dictionary checkpoint; a seventeenth frame
@@ -2195,10 +2208,12 @@ storage at most 127 bytes; each intermediate and final component at most 23
 bytes; and an in-range positive combined extent allocation. Source is
 LF-delimited, contains no retained CR, has physical lines at most 255 bytes,
 and ends with complete compiler/control state. A final line need not carry LF.
-The loader allocates the combined primary/secondary sector span, reads each
+The loader allocates the span its source asks for, the combined
+primary/secondary sector span for the built-in source, which reads each
 complete run contiguously, and evaluates only `DE.USED`, so transferred
 allocation padding is not source. Relative nested loads inherit the containing
-directory during execution and restore each caller's CWD and walker globals.
+directory during execution; each load's end gives the directory token it
+saved back to its source and restores the caller's walker globals.
 Qualification crosses the 512-byte extent seam inside a definition, then
 loads a sibling module normally.
 
@@ -2218,8 +2233,9 @@ Path resolution has two admitted source defects. Intermediate and final copies
 have no component-length bound; oversized paths are excluded, and hosted
 semantic dictionary metadata cannot reproduce native linked-header corruption
 from such an overwrite. More visibly, `_RESOLVE-PATH` prints failure for a
-missing or nondirectory intermediate but returns no status. `LOAD` continues
-with that rejected component in `NAMEBUF`; it may print a second miss or load
+missing or nondirectory intermediate but returns no status. The built-in
+source continues
+with that rejected component in `NAMEBUF`; `LOAD` may print a second miss or load
 the component itself instead of the requested final file. Focused acceptance
 pins the latter result rather than adding simulator-only control flow.
 
@@ -2252,10 +2268,10 @@ This is a KDOS lifecycle repair shared by emulator and simulator, not a direct
 host-filesystem substitute. File-type/flag policy and the runtime-global,
 unlocked loader scratch remain separate open matters.
 
-Exact current lines 6009 through 6123 contain 115 LF records and 4,231 bytes,
+Exact current lines 6176 through 6290 contain 115 LF records and 4,240 bytes,
 with SHA-256
-`b42f5c10635f43ff41e4dd719987f21ab5bcbb229d3985ad0cc854d2bba7ffc1`
-and Git blob `bf344d51bdea5287d4af87c920d563a33adc1a85`. The 13-definition ledger
+`514fe3ffe462c1571d3e45f75ec274186278a2f0201fb09c1476c142a5244141`
+and Git blob `e7463dc7365cc67799febd7c676773bb8dd0555c`. The 13-definition ledger
 installs `_APP-MPU-ON`, `_APP-MPU-OFF`, `APP-EVAL`, `_APP-LOAD-WALK`,
 `_APP-LOAD-USER`, `_APP-LOAD-RUN`, and `APP-LOAD`, followed by the six
 canonical ANSI byte helpers. Loading the fixture only compiles dictionary
@@ -3354,42 +3370,47 @@ deferred.
 
 ### KDOS §20 module-system contract
 
-Exact current lines 9448 through 9917 contain 470 LF records and 14,414
+Exact current lines 9615 through 10107 contain 493 LF records and 16,157
 bytes, with SHA-256
-`73adf1e903e12f891908750aeeced70d4888dfb6087af6372a99eca1495ecd74`
-and Git blob `231b452a63ad3d70fc635f3e4b40a7033627fc68`. The checked fixture adds the
-line-9863 §14 Startup separator: 471 LF records, 14,486 bytes, SHA-256
-`6213a62e8bbc1ada04565d775a436cebc2ace9b5c9b32f27302b13568d9d92b6`,
-and Git blob `be9ab02eced24379053654034ff4199bef57dbf3`. Line 9919 begins Startup and is
+`e3b84f6fbb348c2275c2e4339bdb92f398e621c437dcc975949611d0e367d265`
+and Git blob `7b616252e40b75bdd9fa82fbc5fc6c0f2c47ae64`. The checked fixture adds the
+line-10108 §14 Startup separator: 494 LF records, 16,229 bytes, SHA-256
+`cf818fbb9facbe2a06a825a6ba3cd6738b73d97793f423829b4386bc89b03a9d`,
+and Git blob `881609bc61944004c8f8442eb22a527f132ebbd8`. Line 10109 begins Startup and is
 not admitted by that sentinel.
 
-The slice publishes 69 words: 40 colons, 17 zero-initialized variables, six
-ordinary constants, three `CREATE` objects, two `DEFER` objects, and one
-`XBUF`-produced constant. Its 776 name bytes, 329 dictionary-body bytes, and
-1,173 fixed hosted header/semantic-slot bytes produce exactly 2,278 bytes of
-dictionary growth in the canonical XMEM-present composition. Load initializes
-128 zero inline-bucket bytes and the five-cell registry
-`( inline, 16, 0, 0, 5 )`, writes `PROVIDED` plus NUL, binds the private
+The slice publishes 75 words: 46 colons, 16 zero-initialized variables, seven
+ordinary constants, four `CREATE` objects, and two `DEFER` objects. Its 859
+name bytes, 353 dictionary-body bytes, and 1,275 fixed hosted
+header/semantic-slot bytes produce exactly 2,487 bytes of dictionary growth.
+Load initializes 128 zero inline-bucket bytes and the six-cell registry
+`( inline, 16, 0, 0, 5, 0 )`, whose last cell counts loaded-file entries apart
+from module names, writes `PROVIDED` plus NUL, binds the private
 allocator/free seam to `DMA-ALLOCATE`/`DMA-FREE`, and rebinds the three loader
-transaction hooks. `XBUF` reserves the 128-byte `_REQ-CWD-STK`, advances both
-XMEM frontier/floor cells, preserves the old bytes, and, for the canonical
-empty free list, leaves `FL-NEED = 128`, `FL-PREV = FL-CURR = 0`. No registry
-node or grown bucket is allocated. The no-XMEM fallback would instead add the
-128 bytes to dictionary growth for a 2,406-byte total and is not this profile.
+transaction hooks. The slice reserves no extended memory and leaves the XMEM
+frontier, floor, and free-list cells as they were: `REQUIRE` uses the stack of
+sources and directories that the loader slice defines for `LOAD`. No registry
+node or grown bucket is allocated.
 
-Eight focused tests pin those effects and the ordinary one-core behavior. They
-cover exact case-sensitive FNV-1a identity, duplicate neutrality, useful ID
+Thirteen focused tests pin those effects and the ordinary one-core behavior.
+They cover exact case-sensitive FNV-1a identity, duplicate neutrality, useful ID
 bounds, node OOM, stable-node rehash from 16 to 32 buckets, retryable bucket
 OOM, full-frame commit/rollback, prescan boundaries, pre-registration OOM
 cleanup and retry before any source prefix executes, mounted in-memory MP64FS
-  self-cycle and duplicate skipping, exact list output, and nested child
-  success joining the parent's registry and dictionary rollback closure.
-  Successful nested evaluation merges its provisional IDs into the parent
-  frame, so a later parent failure rolls back the child IDs and definitions
-  together.
-  The source definitions, MP64FS lookup/transfer, loader frames, allocator, and
-  evaluator run unchanged; there is no hosted module registry or direct file
-  shortcut.
+self-cycle read once and duplicate skipping, exact list output, and nested
+child success joining the parent's registry and dictionary rollback closure.
+Successful nested evaluation merges its provisional IDs into the parent
+frame, so a later parent failure rolls back the child IDs and definitions
+together. Five tests concern the loaded-file entries. Four drive `REQUIRE`
+through a module source served by the test, which records each call: a loaded
+file is resolved and not read, a second file of a loaded module is read once,
+a file without identity is read every time and evaluated once, a failed load
+removes its file entries, identities stay with the source that gave them, and
+growth counts names and files together. The fifth, on MP64FS, shows that a
+file entry which cannot be allocated rolls its module name back and that a
+loaded MP64FS file is not read again. The source definitions, MP64FS
+lookup/transfer, loader frames, allocator, and evaluator run unchanged; there
+is no hosted module registry or direct file shortcut.
 
 The admitted public contract is exact byte identity on core 0. Parsed
 `PROVIDED` and `MODULE?` use case-sensitive BL-delimited tokens;
@@ -3420,10 +3441,12 @@ Literal source discrepancies bound that contract:
   enters unchecked hashing, wrapped allocation, and copying. Caller mapping,
   immutability, allocator reentry, arithmetic, node fields, bucket geometry,
   count, and lock descriptors are not independently validated.
-- Duplicate `REQUIRE` still ensures the filesystem, resolves/looks up the
-  path, allocates and reads the transfer, saves a loader frame, and prescans
-  before it skips evaluation. It is persistent-state-neutral, not I/O-neutral;
-  module identity is also independent of file path and content.
+- Duplicate `REQUIRE` still has its module source resolve the path, which
+  for the built-in source ensures the filesystem and looks the name up. When
+  the source gives the file an identity that the registry holds, the load
+  ends there, with no allocation, read, frame, or prescan. A file without an
+  identity is allocated, read, and prescanned before evaluation is skipped.
+  Module identity is independent of file path and content.
 - Module loading retains the public `REQUIRE`/`PROVIDED` surface and module
   identity. At the pinned pre-decision revision it inherited raw `LOAD`, did
   not validate final `EVAL-STATUS` or call `EVALUATE-FINISH`, and could strand
@@ -3455,13 +3478,16 @@ and no reentry or pre-held shared lock. §20 ends at line 9917; the following
 
 ### Current KDOS §14 startup and EOF contract
 
-Exact current lines 9918 through 9958, including the section separator,
-contain 41 LF records and 1,432 bytes, with SHA-256
-`d14948c62ff524ed67fe0743f1f3976d3430c1754809bf339c45ac8bd3569f82`
-and Git blob `64644994439ac09da0bd19db31866c404d380582`. The executable section from
-line 9919 through EOF contains 40 LF records and 1,360 bytes, with SHA-256
-`480ab7b30f349044fdfd2c10257aee4525348819e15938396865ce332efa71fb`
-and Git blob `5f5d1922439468bbd5884505b3c5801e8d295269`. At the historical qualification
+Exact current lines 10108 through 10147, including the section separator,
+contain 40 LF records and 1,398 bytes, with SHA-256
+`d75984f7fd3d55cb8c573da5b9f494ff1c1e8bba32b3537fa2270669add3ca8a`
+and Git blob `1354db80222545647369729b93526831ff0a21ec`. The executable section from
+line 10109 through EOF contains 39 LF records and 1,326 bytes, with SHA-256
+`07df5026ba571e0d6e232d8c908963a0403756d3859390af3c7de3230f446b85`
+and Git blob `c920305479e61c2a5d51719779ec9c9fba0c2b8f`. The complete current file has
+10,147 LF records and 355,722 bytes, with SHA-256
+`90768df9fafdd3392f7e93f0542367ee0104f82ac286e2b6eeb1e42ce427bbd2`
+and Git blob `2cff300d84349d154cbf8837ad0cca9f1935f052`. At the historical qualification
 revision, the complete `kdos.f` had 9,894 LF records and 341,355 bytes, with
 SHA-256
 `99e71114ed141c14522d687a3bef3110ead94de7b0a055ae693c135a94772fb8`
@@ -3506,14 +3532,16 @@ words plus 1,452 KDOS publications; the authoritative 65,536-slot index held
 buffers, 23 kernels, three pipelines, nine screens, intact heap/HBW state,
 mounted media, zero modules, balanced stacks, and released locks, followed by
 a checked post-boot definition, allocation/free, CRC32, ring FIFO, and module
-listing. Current source-ledger accounting expects 1,460 KDOS publications and
-1,772 unique bindings, but no new full regular-load measurement is claimed;
-rerunning it remains deferred by the rich-terminal gate.
+listing. The current regular-load test,
+`tests/simulator/test_kdos_regular_load.py`, loads the present file over
+455 core words and expects 1,514 KDOS publications and 1,962 unique
+bindings; it submits 6,803 lines (220,624 payload bytes, 227,427 CLI UART bytes).
 
 The startup filesystem path is literal. `DISK?` false skips `FS-LOAD` and does
-not clear a stale true `FS-OK`. A successful load copies the exact lowercase,
-unterminated ten bytes `autoexec.f` into `NAMEBUF`, zeroes the remaining 14
-bytes, and searches the ambient `CWD`; `_MOD-LOAD-BODY` performs its own second
+not clear a stale true `FS-OK`. A successful load stores the exact lowercase
+ten bytes `autoexec.f` through `_PATH!`, which leaves them zero-padded in both
+`PATHBUF` and `NAMEBUF`, and searches the ambient `CWD`; `_MOD-LOAD-BODY` has
+the current module source resolve the same path, a second
 lookup. Neither lookup adds a file-type, flags, CRC, encryption, or root-CWD
 gate, and the `Running` line is printed before module-body validation. The tiny
 accepted autoexec proves this startup-to-module seam only and stays in the
