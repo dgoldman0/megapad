@@ -670,6 +670,20 @@ public:
         // the closed gate and serializes through the scheduler afterward.
         const uint64_t count =
             static_cast<uint64_t>(staged_.size());
+        if (count == 0) {
+            // A batch that staged nothing publishes nothing. history_ gains
+            // no record, and pending_ already stands in cycle-then-sequence
+            // order, which every writer of it keeps, so the sort below
+            // would return it unchanged. Only the boundary advances.
+            // Copying both lists here cost time in proportion to the whole
+            // journal at the end of every batch.
+            staging_open_ = false;
+            completed_staging_boundaries_ = release_boundary;
+            active_staging_boundary_ = 0;
+            return 0;
+        }
+        // Build both published lists before changing any state, so that an
+        // allocation failure leaves this boundary open.
         std::vector<ExternalEventRecord> published_history =
             history_;
         std::vector<ExternalEventRecord> published_pending =
