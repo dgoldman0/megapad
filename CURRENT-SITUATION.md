@@ -147,12 +147,17 @@
 > implemented. The design is
 > [`docs/chiplet-interconnect-plan.md`](docs/chiplet-interconnect-plan.md).
 
-> **RTL TRNG health monitor — 2026-11-11:** `rtl/periph/mp64_trng.v` awaits
-> a fix. Its repetition count test trips one byte late (GitHub issue #1), a
-> health failure clears itself, and reads return data while the source is
-> unhealthy. The TRNG section of
-> [`docs/architecture.md`](docs/architecture.md#trng-true-random-number-generator)
-> lists each difference and what the fix needs.
+> **RTL TRNG health monitor — 2026-11-11:** The repetition count test in
+> `rtl/periph/mp64_trng.v` fails a run at its 10th identical raw byte, where
+> GitHub issue #1 found the 11th, and the failure latches until reset. While
+> `USABLE` is clear, `STATUS` reads zero, `SEED` is ignored, and the device
+> leaves a `RAND8` or `RAND64` read unacknowledged, so the bus watchdog ends
+> it as the target fault that a core takes as `IVEC_BUS_FAULT`; these are
+> the rules of the TRNG section of
+> [`docs/architecture.md`](docs/architecture.md#trng-true-random-number-generator).
+> `rtl/sim/tb_trng.v` drives the raw bytes and simulates each rule through
+> the bus arbiter's response; the core's trap on that response was read in
+> `rtl/core/mp64_cpu.v`.
 
 **Date:** 2026-03-07  
 **Branch:** `main`  
