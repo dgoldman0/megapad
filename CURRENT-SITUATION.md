@@ -133,6 +133,13 @@
 > Akashic `local_testing/evidence/rich-desktop-simulator-checkpoint-20260908.md`.
 > Earlier September 4 frontier statements above are superseded by this record.
 
+> **Module loading, storage units and the evaluator — 2026-11-11:** KDOS's
+> loader reads modules through a module source, the machine has storage units
+> for the system and user volumes, and the exception words, the evaluator,
+> the shared disk port and the native simulator's memory each had a fault
+> repaired on the way. The record, with each commit and what it passed, is
+> [`docs/module-loading-and-storage-units-2026-11-11.md`](docs/module-loading-and-storage-units-2026-11-11.md).
+
 **Date:** 2026-03-07  
 **Branch:** `main`  
 **Status:** 1,797 tests passing, 35 skipped.
