@@ -1,8 +1,8 @@
 # The token form of modules — design, 2026-11-11
 
-Status: built and tested on the branch `token-modules` of MegaPad and of
-Akashic, and not merged. Nothing here is enabled unless a build asks for it
-with `--token-modules`. Three decisions about the form were taken on
+Status: built and tested, and in MegaPad's and Akashic's main since
+2026-11-11. Nothing here is enabled unless a build asks for it with
+`--token-modules`. Three decisions about the form were taken on
 2026-11-11 and are recorded under [Decisions](#decisions); the rule that
 says when a token file is used is among them. What is still owed is under
 [What remains](#what-remains).
@@ -715,10 +715,10 @@ It was not built.
 ## Measurements
 
 All figures are from one round on the code this document describes:
-MegaPad's `token-modules` as the commit that holds this text leaves it, and
-Akashic's `token-modules` with the builder of the same change. Each boot
-ran alone, on a machine that other work shared. The branches stand on
-MegaPad's local main 8bbfedc2 and Akashic's 9980e390. Device figures are
+MegaPad d6f95654 and Akashic e15c8240, the heads of the two `token-modules`
+branches, which stood on MegaPad 8bbfedc2 and Akashic 9980e390 and were
+merged into the mains afterwards. Each boot ran alone, on a machine that
+other work shared. Device figures are
 the emulator's, for `desktop-apt1` from reset to the boot line that says
 the guest is entering Desk, in millions of instructions read between boot
 lines at a resolution of two million.
@@ -891,9 +891,6 @@ what it does not cover, and what stays open for the design of the System
 Practice's build.
 
 ## What remains
-
-**Before the branches merge.** The merge itself. Both branches stand on the
-local mains named under [Measurements](#measurements) and are not merged.
 
 **Committed later steps.**
 
