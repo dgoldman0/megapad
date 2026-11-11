@@ -62,7 +62,7 @@ SOC_ELAB_SRC = $(wildcard $(SOC)/*.v $(BUS)/*.v $(MEM)/*.v $(CORE)/*.v \
 
 .PHONY: all clean phase1 phase2 phase3 phase4 phase5 \
         sram_sp sram_dp rom clkgate rst_sync platform_sim mul \
-        bus_arbiter memory extmem \
+        bus_arbiter memory extmem extmem_arb \
         alu bitfield icache cpu_smoke cluster crc_isa sha2_isa field_alu_isa \
         peripherals rtc disk_controller disk_bus_dma disk_lint \
         byte_dma_arbiter byte_dma_arbiter_lint disk_units_dma \
@@ -82,7 +82,7 @@ phase1: sram_sp sram_dp rom clkgate rst_sync platform_sim mul
 	@echo ""
 	@echo "--- Phase 1 complete ---"
 
-phase2: bus_arbiter memory extmem
+phase2: bus_arbiter memory extmem extmem_arb
 	@echo ""
 	@echo "--- Phase 2 complete ---"
 
@@ -173,6 +173,13 @@ extmem: tb_extmem.vvp
 	$(VVP) $<
 
 tb_extmem.vvp: tb_extmem.v $(MEM)/mp64_extmem.v
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
+# --- External memory client arbiter (core path and chiplet ports) ---
+extmem_arb: tb_extmem_arb.vvp
+	$(VVP) $<
+
+tb_extmem_arb.vvp: tb_extmem_arb.v $(MEM)/mp64_extmem_arb.v $(MEM)/mp64_extmem.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # ==========================================================================

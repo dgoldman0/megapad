@@ -32,6 +32,9 @@ module mp64_extmem (
     input  wire [1:0]   cpu_size,
     output reg  [63:0]  cpu_rdata,
     output reg          cpu_ack,
+    // Pulses with CPU_ACK when the access failed: the launch or the response
+    // timed out, or the PHY answered with an error.  CPU_RDATA is zero then.
+    output reg          cpu_error,
 
     // === Tile port (8 physical words, 512-bit) ===
     input  wire         tile_req,
@@ -155,6 +158,7 @@ module mp64_extmem (
             tile_wdata_r     <= 512'd0;
             cpu_rdata        <= 64'd0;
             cpu_ack          <= 1'b0;
+            cpu_error        <= 1'b0;
             tile_accept      <= 1'b0;
             tile_rdata       <= 512'd0;
             tile_ack         <= 1'b0;
@@ -168,6 +172,7 @@ module mp64_extmem (
             phy_burst_len    <= 4'd0;
         end else begin
             cpu_ack         <= 1'b0;
+            cpu_error       <= 1'b0;
             tile_accept     <= 1'b0;
             tile_ack        <= 1'b0;
             tile_error      <= 1'b0;
@@ -246,11 +251,12 @@ module mp64_extmem (
                         cpu_cancelled <= 1'b1;
                         state         <= EXT_IDLE;
                     end else if (word_timer == 8'd254) begin
-                        // CPU has no architectural error sideband yet.  Return
-                        // a terminal ACK with zero data rather than deadlock.
+                        // Return a terminal ACK with zero data and the error
+                        // sideband rather than deadlock.
                         phy_launch_pending <= 1'b0;
                         cpu_rdata  <= 64'd0;
                         cpu_ack    <= 1'b1;
+                        cpu_error  <= 1'b1;
                         state      <= EXT_IDLE;
                     end else begin
                         word_timer <= word_timer + 8'd1;
@@ -269,9 +275,9 @@ module mp64_extmem (
                             // A withdrawn request cannot consume the response.
                             state <= EXT_IDLE;
                         end else if (phy_error) begin
-                            // See the CPU error-sideband seam above.
                             cpu_rdata <= 64'd0;
                             cpu_ack   <= 1'b1;
+                            cpu_error <= 1'b1;
                             state     <= EXT_IDLE;
                         end else if (cpu_rmw && !cpu_rmw_write) begin
                             // The subword read completed.  Launch a distinct
@@ -294,6 +300,7 @@ module mp64_extmem (
                         if (!(cpu_cancelled || !cpu_req)) begin
                             cpu_rdata <= 64'd0;
                             cpu_ack   <= 1'b1;
+                            cpu_error <= 1'b1;
                         end
                         // Upstream retires at the architectural deadline, but
                         // the controller remains closed until the PHY proves
