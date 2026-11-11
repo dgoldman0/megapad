@@ -9,13 +9,24 @@
 //   - Conditioning: lightweight LFSR mixer + SHA-3 conditioner (absorb raw
 //     entropy, squeeze conditioned output)
 //   - Outputs: 8-bit and 64-bit random values
-//   - Health monitoring: repetition count test (NIST SP 800-90B)
+//   - Health monitoring: repetition count test (NIST SP 800-90B 4.4.1)
 //
 // Register map (byte offsets from base):
-//   0x00  RAND8   (R)  — 8-bit conditioned random byte
-//   0x08  RAND64  (R)  — 64-bit conditioned random value (LE, 8 bytes)
-//   0x10  STATUS  (R)  — bit[0] = entropy_valid (pool has data)
-//   0x18  SEED    (W)  — 64-bit additional seed material (XOR into pool)
+//   0x00       RAND8   (R)  — 8-bit conditioned random byte
+//   0x08-0x0F  RAND64  (R)  — 64-bit conditioned random value (LE, 8 bytes)
+//   0x10       STATUS  (R)  — bit[0] = USABLE; every other bit reads zero
+//   0x18-0x1F  SEED    (W)  — 64-bit additional seed material (XOR into
+//                             pool); ignored while USABLE is clear
+//   Every other offset reads zero, and writes outside SEED change nothing.
+//
+// USABLE rises when the pool has been seeded and falls when the health
+// test fails.  A health failure latches until reset.
+//
+// The whole window answers in every state.  While USABLE is clear the
+// device leaves a RAND8 or RAND64 read unacknowledged and drives no data,
+// so the bus arbiter's MMIO watchdog ends the access as a target fault and
+// the requesting core takes its bus-fault trap.  Every other access is
+// acknowledged, so STATUS reads as zero in that state.
 //
 // Entropy collection:
 //   Each clock cycle, the XOR of all ring-oscillator LSBs is shift-registered
@@ -88,6 +99,60 @@ module mp64_trng (
     end
 
     // ========================================================================
+    // Health monitoring — repetition count test (NIST SP 800-90B 4.4.1)
+    // ========================================================================
+    // The low byte of each raw block is one sample.  rep_count is the length
+    // of the current run and counts the run's first byte as 1, so the test
+    // fails on the byte that brings a run to RCT_CUTOFF identical bytes.
+    // Reset leaves rep_count at 0, a run of no bytes, so the first byte after
+    // reset counts as 1 whether or not it equals last_byte's reset value.
+    // health_failed latches the failure until reset and stops the count.
+    localparam [3:0] RCT_CUTOFF = 4'd10;
+
+    reg [7:0]  last_byte;
+    reg [3:0]  rep_count;
+    reg        health_failed;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            last_byte     <= 8'd0;
+            rep_count     <= 4'd0;
+            health_failed <= 1'b0;
+        end else if (raw_valid && !health_failed) begin
+            if (raw_accum[7:0] == last_byte) begin
+                rep_count <= rep_count + 4'd1;
+                if (rep_count >= RCT_CUTOFF - 4'd1)
+                    health_failed <= 1'b1;
+            end else begin
+                last_byte <= raw_accum[7:0];
+                rep_count <= 4'd1;
+            end
+        end
+    end
+
+    // ========================================================================
+    // Access decode
+    // ========================================================================
+    // The system bus holds REQ until it observes the registered ACK, or
+    // until its watchdog expires on an access left unacknowledged, so REQ
+    // spans two or more edges.  The device judges an access and applies its
+    // side effects on the first edge only.
+    reg req_seen;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            req_seen <= 1'b0;
+        else
+            req_seen <= req;
+    end
+
+    wire accept     = req && !req_seen;
+    wire sel_rand8  = (addr == 5'h00);
+    wire sel_rand64 = (addr[4:3] == 2'b01);
+    wire sel_status = (addr == 5'h10);
+    wire sel_seed   = (addr[4:3] == 2'b11);
+
+    // ========================================================================
     // Conditioned entropy pool (256 bits = 4 × 64-bit words)
     // ========================================================================
     // Simple XOR-LFSR mixing: when raw_valid, XOR raw_accum into pool
@@ -99,6 +164,9 @@ module mp64_trng (
     reg [1:0]  pool_idx;        // which pool word to mix into
     reg        pool_ready;      // pool has been seeded at least once
     reg [7:0]  seed_count;      // number of raw blocks mixed in
+
+    // USABLE: the pool is seeded and the health test has yet to fail.
+    wire usable = pool_ready && !health_failed;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -122,8 +190,10 @@ module mp64_trng (
                     pool_ready <= 1'b1;
             end
 
-            // External seed injection (SEED register write)
-            if (req && wen && addr[4:3] == 2'b11) begin  // offset 0x18
+            // External seed injection (SEED register write).  The device
+            // ignores the write while USABLE is clear, so seed material
+            // never stands in for a healthy source.
+            if (accept && wen && sel_seed && usable) begin
                 pool[pool_idx] <= pool[pool_idx] ^ wdata;
                 pool_idx <= pool_idx + 2'd1;
             end
@@ -139,52 +209,33 @@ module mp64_trng (
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n)
             out_counter <= 64'd0;
-        else if (req && !wen)
+        else if (accept && !wen)
             out_counter <= out_counter + 64'd1;
     end
 
     wire [63:0] out_mixed = pool[0] ^ pool[1] ^ pool[2] ^ pool[3] ^ out_counter;
 
     // ========================================================================
-    // Health monitoring — simple repetition count test
-    // ========================================================================
-    reg [7:0]  last_byte;
-    reg [3:0]  rep_count;
-    wire       health_ok = (rep_count < 4'd10);  // fail if 10+ identical bytes
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            last_byte <= 8'd0;
-            rep_count <= 4'd0;
-        end else if (raw_valid) begin
-            if (raw_accum[7:0] == last_byte) begin
-                if (rep_count < 4'd15)
-                    rep_count <= rep_count + 4'd1;
-            end else begin
-                last_byte <= raw_accum[7:0];
-                rep_count <= 4'd0;
-            end
-        end
-    end
-
-    // ========================================================================
     // MMIO read/write interface
     // ========================================================================
+    // A RAND8 or RAND64 read that arrives while USABLE is clear gets neither
+    // ACK nor data; the bus watchdog turns it into the requester's bus fault.
+    wire rand_fault = accept && !wen && (sel_rand8 || sel_rand64) && !usable;
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             rdata <= 64'd0;
             ack   <= 1'b0;
         end else begin
-            ack <= req;
-            if (req && !wen) begin
-                case (addr[4:3])
-                    2'b00: rdata <= {56'd0, out_mixed[7:0]};     // RAND8
-                    2'b01: rdata <= out_mixed;                     // RAND64
-                    2'b10: rdata <= {63'd0, pool_ready & health_ok}; // STATUS
-                    default: rdata <= 64'd0;
-                endcase
-            end else begin
-                rdata <= 64'd0;
+            ack   <= accept && !rand_fault;
+            rdata <= 64'd0;
+            if (accept && !wen && !rand_fault) begin
+                if (sel_rand8)
+                    rdata <= {56'd0, out_mixed[7:0]};
+                else if (sel_rand64)
+                    rdata <= out_mixed;
+                else if (sel_status)
+                    rdata <= {63'd0, usable};
             end
         end
     end

@@ -472,11 +472,11 @@ mailbox: tb_mailbox.vvp
 tb_mailbox.vvp: tb_mailbox.v $(PERIPH)/mp64_mailbox.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
-# --- TRNG ---
+# --- TRNG: health test, latched failure, and faulted reads through the bus ---
 trng: tb_trng.vvp
 	$(VVP) $<
 
-tb_trng.vvp: tb_trng.v $(PERIPH)/mp64_trng.v
+tb_trng.vvp: tb_trng.v $(PERIPH)/mp64_trng.v $(BUS)/mp64_bus.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- TACC lifecycle state ---
