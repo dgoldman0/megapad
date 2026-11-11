@@ -3,9 +3,10 @@
 Status: design accepted on 2026-11-11. MegaPad's side of the link is in RTL
 and simulated, and [chiplet-link.md](chiplet-link.md) specifies it. LM1's
 end, a link endpoint and a boot fetch, is in LM1's RTL (`rtl/link/` in the
-lm1 repository), where a bench joins it to MegaPad's RTL; its wiring into
-LM1's cluster, the emulator's and simulator's models and the software are
-still to come. This note records how chiplets attach to MegaPad in
+lm1 repository), where a bench joins it to MegaPad's RTL. The emulator and
+the simulator model MegaPad's side, and a chiplet's model attaches to it
+through a C interface. The wiring of LM1's end into its cluster, LM1's own
+model and the software are still to come. This note records how chiplets attach to MegaPad in
 Leviathan: the contract every chiplet meets, how the chips share memory, how
 they signal and exchange work, and how LM1, the first chiplet, runs sandbox
 jobs and managed data over the link. It schedules no work. The release
@@ -225,6 +226,36 @@ limit at the controller bound what a chiplet takes from Desk.
 - **BIOS:** bringing the link up, and the doorbell interrupt.
 - **KDOS:** the system module for chiplets, and an allocator for lendable
   memory.
+- **The emulator and the simulator:** a model of the ports and an interface
+  for a chiplet's model.
+
+The software has two layers in one BIOS, accepted on 2026-11-11. A
+Leviathan BIOS of its own would be a second BIOS to keep in step with the
+first.
+
+The general chiplet words are a MegaPad system module in the pattern of
+`networking.f`. They serve any chiplet and name no chiplet:
+
+| Word | Stack | Does |
+|------|-------|------|
+| `CHIP-PORTS` | `( -- n )` | The ports the machine has |
+| `CHIP-PRESENT?` | `( port -- flag )` | Whether a chiplet is attached |
+| `CHIP-ID@` | `( index port -- x )` | One word of its identity record |
+| `CHIP-LEND` | `( base limit rights slot port -- ior )` | Lend a range |
+| `CHIP-UNLEND` | `( slot port -- )` | Withdraw it |
+| `CHIP-BOOT` | `( addr len port -- ior )` | Name the image, release the chiplet, wait for ready |
+| `CHIP-STOP` | `( port -- ior )` | Ask it to stop and wait until it has |
+| `CHIP-RESET` | `( port -- )` | Hold it in reset |
+| `CHIP-RING` | `( port -- )` | Signal the chiplet |
+| `CHIP-WAIT` | `( port -- )` | Wait for its signal with the flag branch, then acknowledge |
+| `CHIP-FAULT@` | `( port -- addr info )` | Read and clear the refusal record |
+
+The names and stack orders are a first draft, to settle when the module is
+written. Above them a Leviathan vocabulary names what the machine offers and
+never which chip does it: finding a function by its class, putting work on a
+queue and taking a result, and over those the sandbox and managed-data
+words. Its word list follows the offer-list and queue formats, which are
+still to be specified.
 - **LM1's spec:** external I/O, boot, the memory map, roots, the write
   barrier, safepoints, and capability mode as a required part.
 
@@ -234,9 +265,10 @@ transaction for a core, always serves the tile engines first, and takes a
 32-bit address (`rtl/mem/mp64_extmem.v`).
 
 Of the RTL items, the port bridge, the client arbiter with its weights and
-limits, the mailbox's ports, its register path and the external-flag wiring
-are built.
-[chiplet-link.md](chiplet-link.md) §8 lists what the RTL leaves for later.
+limits, the mailbox's ports, its register path, the external-flag wiring and
+System Info's field are built. The models of the emulator and the simulator
+are built too. [chiplet-link.md](chiplet-link.md) §9 lists what is left for
+later.
 
 ## 10. Open
 

@@ -1126,8 +1126,12 @@ the chiplet's memory requests against the lent ranges, a client arbiter that
 admits the ports to external memory beside the core path, and the mailbox,
 where each port is a participant with an ID that follows the cores'. The
 register window, the link's channels and the sideband are specified in
-[chiplet-link.md](chiplet-link.md). The emulator and the simulator have no
-model of a chiplet port yet, so the window faults there.
+[chiplet-link.md](chiplet-link.md). The emulator and the simulator model
+MegaPad's side with one C++ implementation in `shared/accel/`, and a
+chiplet's model attaches to a port through the C interface in
+`shared/accel/chiplet_module.h`, built in or loaded at run time. The
+emulator's machine has one port by default, and the simulator's hosted
+profile has ports when its address space is created with them.
 
 ### Privilege Model
 

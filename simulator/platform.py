@@ -21,6 +21,14 @@ from shared.crypto_caps import (
 )
 from simulator.aes import AES_LIMIT, AES_OFFSET, HostedAESService
 from simulator.audio import HostedAudioService
+from simulator.chiplet import (
+    CHIPLET_LIMIT,
+    CHIPLET_OFFSET,
+    MAILBOX_LIMIT,
+    MAILBOX_OFFSET,
+    HostedChipletMailbox,
+    HostedChipletPorts,
+)
 from simulator.entropy import (
     DEFAULT_TRNG_SEED,
     TRNG_LIMIT,
@@ -45,7 +53,7 @@ from simulator.sha3 import (
 
 
 SYSINFO_OFFSET = 0x300
-SYSINFO_SIZE = 0x70
+SYSINFO_SIZE = 0x78
 SYSINFO_LIMIT = SYSINFO_OFFSET + SYSINFO_SIZE
 SYSINFO_BANK0_SIZE = SYSINFO_OFFSET + 0x08
 SYSINFO_NUM_CORES = SYSINFO_OFFSET + 0x10
@@ -55,6 +63,7 @@ SYSINFO_EXTERNAL_BASE = SYSINFO_OFFSET + 0x38
 SYSINFO_EXTERNAL_SIZE = SYSINFO_OFFSET + 0x40
 SYSINFO_NUM_FULL = SYSINFO_OFFSET + 0x48
 SYSINFO_CRYPTO_CAPS = SYSINFO_OFFSET + 0x60
+SYSINFO_CHIPLET_PORTS = SYSINFO_OFFSET + 0x70
 
 BOARD_ID_VERSION = 0x4D50_3634_0002_0001
 
@@ -110,13 +119,21 @@ class OneCoreSysInfo:
     Callers should normally use :func:`create_one_core_address_space`.
     """
 
-    __slots__ = ("_crypto_capabilities", "_image")
+    __slots__ = ("_chiplet_ports", "_crypto_capabilities", "_image")
 
     def __init__(
         self,
         *,
         crypto_capabilities: int = HOSTED_CRYPTO_CAPABILITIES,
+        chiplet_ports: int = 0,
     ) -> None:
+        # The chiplet ports as PORT_COUNT of the port window packs them, or
+        # zero for a profile without ports.
+        if isinstance(chiplet_ports, bool) or not isinstance(chiplet_ports, int):
+            raise TypeError("chiplet ports must be an integer")
+        if not 0 <= chiplet_ports < 1 << 24:
+            raise ValueError("chiplet ports must be a 24-bit PORT_COUNT word")
+        self._chiplet_ports = chiplet_ports
         if (
             isinstance(crypto_capabilities, bool)
             or not isinstance(crypto_capabilities, int)
@@ -167,6 +184,7 @@ class OneCoreSysInfo:
             vram_size,
             self._crypto_capabilities,
             1,  # NUM_BUS_PORTS: the sole full-core requester.
+            self._chiplet_ports,
         )
         image = bytearray(SYSINFO_SIZE)
         for index, value in enumerate(register_values):
@@ -267,7 +285,10 @@ class OneCoreSysInfo:
 class OneCorePlatformMMIO:
     """Route each admitted one-core MMIO window to its sole service state."""
 
-    __slots__ = ("aes", "audio", "entropy", "rtc", "sha3", "sysinfo")
+    __slots__ = (
+        "aes", "audio", "chiplet", "entropy", "mailbox", "rtc", "sha3",
+        "sysinfo",
+    )
 
     def __init__(
         self,
@@ -278,7 +299,10 @@ class OneCorePlatformMMIO:
         entropy: HostedTRNGService,
         rtc: HostedRTCService,
         audio: HostedAudioService | None = None,
+        chiplet: HostedChipletPorts | None = None,
     ) -> None:
+        if chiplet is not None and not isinstance(chiplet, HostedChipletPorts):
+            raise TypeError("platform chiplet ports must be HostedChipletPorts")
         if not isinstance(sysinfo, OneCoreSysInfo):
             raise TypeError("platform SysInfo must be a OneCoreSysInfo")
         if not isinstance(aes, HostedAESService):
@@ -297,6 +321,12 @@ class OneCorePlatformMMIO:
         self.entropy = entropy
         self.rtc = rtc
         self.audio = HostedAudioService() if audio is None else audio
+        # A profile without chiplet ports has neither their window nor the
+        # mailbox that serves them.
+        self.chiplet = chiplet
+        self.mailbox = (
+            None if chiplet is None else HostedChipletMailbox(chiplet)
+        )
 
     def preflight(self, offset: int, width: int, *, write: bool) -> None:
         self._service(offset, width, write=write).preflight(
@@ -324,6 +354,8 @@ class OneCorePlatformMMIO:
         | HostedTRNGService
         | HostedRTCService
         | HostedAudioService
+        | HostedChipletPorts
+        | HostedChipletMailbox
     ):
         if isinstance(offset, int):
             if SYSINFO_OFFSET <= offset < SYSINFO_LIMIT:
@@ -339,6 +371,11 @@ class OneCorePlatformMMIO:
                 return self.rtc
             if AUDIO_OFFSET <= offset < AUDIO_LIMIT:
                 return self.audio
+            if self.chiplet is not None:
+                if CHIPLET_OFFSET <= offset < CHIPLET_LIMIT:
+                    return self.chiplet
+                if MAILBOX_OFFSET <= offset < MAILBOX_LIMIT:
+                    return self.mailbox
         raise PlatformMMIOAccessError(
             "access is outside every admitted platform MMIO window",
             offset=offset,
@@ -365,10 +402,20 @@ def create_one_core_address_space(
     entropy_usable: bool = True,
     initial_epoch_ms: int | None = None,
     initial_uptime_ms: int = 0,
+    chiplet_ports: int = 0,
 ) -> SparseAddressSpace:
-    """Return guest memory with the one-core router; sparse unless explicit."""
+    """Return guest memory with the one-core router; sparse unless explicit.
 
-    sysinfo = OneCoreSysInfo(crypto_capabilities=crypto_capabilities)
+    ``chiplet_ports`` gives the profile that many chiplet ports, with their
+    register window and mailbox. The ports are the native model, so asking
+    for any requires the native extension.
+    """
+
+    chiplet = HostedChipletPorts(chiplet_ports) if chiplet_ports else None
+    sysinfo = OneCoreSysInfo(
+        crypto_capabilities=crypto_capabilities,
+        chiplet_ports=0 if chiplet is None else chiplet.port_count_word,
+    )
     platform = OneCorePlatformMMIO(
         sysinfo=sysinfo,
         aes=HostedAESService(),
@@ -384,6 +431,7 @@ def create_one_core_address_space(
             initial_epoch_ms,
             initial_uptime_ms=initial_uptime_ms,
         ),
+        chiplet=chiplet,
     )
     memory = SparseAddressSpace(
         bank0_size=bank0_size,
@@ -396,6 +444,8 @@ def create_one_core_address_space(
     )
     sysinfo.bind(memory)
     platform.audio.bind(memory)
+    if chiplet is not None:
+        chiplet.bind(memory)
     return memory
 
 
@@ -403,6 +453,7 @@ __all__ = [
     "BOARD_ID_VERSION",
     "HOSTED_CRYPTO_CAPABILITIES",
     "SYSINFO_BANK0_SIZE",
+    "SYSINFO_CHIPLET_PORTS",
     "SYSINFO_CRYPTO_CAPS",
     "SYSINFO_EXTERNAL_BASE",
     "SYSINFO_EXTERNAL_SIZE",

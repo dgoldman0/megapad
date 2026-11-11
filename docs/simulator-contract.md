@@ -727,6 +727,26 @@ way for every core ID, without consuming its message or core operand: no IPI
 exists in this profile, so it cannot wake a core. Code that only another core
 runs, such as a worker telling core 0 its job is done, may still name it.
 
+Chiplet ports are a separately admitted capability, present when the address
+space is created with `chiplet_ports`. The ports are the C++ model the
+emulator uses (`shared/accel/chiplet_port.h`, `docs/chiplet-link.md`), so
+asking for them requires the native extension. With ports, SysInfo's
+`CHIPLET_PORTS` qword at `+0x70` holds the port window's `PORT_COUNT`, the
+window at MMIO offset `0xE00` admits aligned 64-bit accesses, and a mailbox
+window at `0x500` serves core 0 and the ports: the core's data slot,
+`MBOX_SEND`, `MBOX_STATUS` for IDs 0 to 7 and `MBOX_ACK`. The first port has
+the ID 1, the ID after the one core's. Without ports the qword reads zero and
+both windows lie outside every admitted window. The register values, the
+admission of a chiplet's memory requests against lent ranges with its
+refusal record, the traffic through lent external memory and the pending
+state of doorbells are compatibility claims. Arbitration, `QOS` and latency
+are outside them. A chiplet steps before each read of a port register or of
+`MBOX_STATUS` and when a dispatch returns to its host, so a guest that polls
+makes progress and the outcome depends on its accesses alone. A port's
+signal reaches the guest through `MBOX_STATUS`; its delivery as an interrupt
+or through a flag branch belongs to the simulator's multicore work, and
+`IPI-SEND` keeps the behaviour described above.
+
 It also has no micro-core cluster. `CLUSTER-EN@` returns zero, and
 `CLUSTER-EN!` accepts only zero as an idempotent disable; a nonzero mask fails
 before it is consumed. This semantic BIOS substitution is coherent with the

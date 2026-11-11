@@ -92,14 +92,16 @@ def test_exact_window_supports_little_endian_naturally_aligned_reads() -> None:
     assert memory.read32(SYSINFO_ADDRESS) == 0x0002_0001
     assert memory.read32(SYSINFO_ADDRESS + 4) == 0x4D50_3634
     assert memory.read64(SYSINFO_ADDRESS) == BOARD_ID_VERSION
-    assert memory.read64(MMIO_BASE + SYSINFO_LIMIT - 8) == 1
+    # The last two registers: one bus requester, and no chiplet ports.
+    assert memory.read64(MMIO_BASE + SYSINFO_LIMIT - 16) == 1
+    assert memory.read64(MMIO_BASE + SYSINFO_LIMIT - 8) == 0
 
     assert len(
         bytes(
             memory.read8(MMIO_BASE + offset)
             for offset in range(SYSINFO_OFFSET, SYSINFO_LIMIT)
         )
-    ) == 0x70
+    ) == 0x78
 
 
 @pytest.mark.parametrize(

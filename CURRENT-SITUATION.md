@@ -149,7 +149,10 @@
 > the external-memory client arbiter, the mailbox's ports and the SoC wiring,
 > specified in [`docs/chiplet-link.md`](docs/chiplet-link.md). LM1's end of
 > the link is in LM1's RTL, and a bench there joins the two sides. The
-> emulator and the simulator have no model of the link yet.
+> emulator and the simulator model MegaPad's side with one C++
+> implementation (`shared/accel/chiplet_port.h`), to which a chiplet's
+> model attaches through a C interface, built in or loaded at run time; a
+> test chiplet exercises it. System Info reports the ports at `+0x70`.
 
 > **RTL TRNG health monitor — 2026-11-11:** The repetition count test in
 > `rtl/periph/mp64_trng.v` fails a run at its 10th identical raw byte, where

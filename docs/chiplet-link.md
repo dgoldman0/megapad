@@ -1,14 +1,14 @@
 # Chiplet link
 
-Status: MegaPad's side is implemented in RTL and simulated, and LM1's end
-(`rtl/link/` in the lm1 repository) passes a bench joined to it; the
-emulator and the simulator have no model of the link yet. This is the
-specification of the link
-between MegaPad and one chiplet, as far as hardware defines it: the port's
-identity, its register window, the channels that cross the link, and the
-sideband. The design it follows, with its reasons, is
-[chiplet-interconnect-plan.md](chiplet-interconnect-plan.md). Section 8
-lists the parts of the chiplet contract that remain to be specified.
+Status: MegaPad's side is implemented in RTL and simulated, LM1's end
+(`rtl/link/` in the lm1 repository) passes a bench joined to it, and the
+emulator and the simulator model MegaPad's side (section 8). This is the
+specification of the link between MegaPad and one chiplet, as far as
+hardware defines it: the port's identity, its register window, the channels
+that cross the link, and the sideband. The design it follows, with its
+reasons, is [chiplet-interconnect-plan.md](chiplet-interconnect-plan.md).
+Section 9 lists the parts of the chiplet contract that remain to be
+specified or built.
 
 The RTL is `rtl/soc/mp64_chiplet_port.v` (the port bridge),
 `rtl/mem/mp64_extmem_arb.v` (the external-memory client arbiter),
@@ -23,7 +23,9 @@ core's: 16 on the standard die of 4 full cores and 12 microcores. IDs are the
 8-bit values that number the cores, so the mailbox addresses a port the way
 it addresses a core. `PORT_COUNT` in the register window reports the number
 of ports, the first ID and the number of lent ranges each port holds, and
-software sizes its tables from it.
+software sizes its tables from it. System Info repeats the word at `+0x70`
+(`CHIPLET_PORTS`), where it reads zero on a die built without ports, so
+software asks there before it touches a window that may be absent.
 
 ## 2. Register window
 
@@ -223,17 +225,63 @@ to the chiplet, `cl_dbr_*` the doorbell from it, and `cl_sb_*` the sideband.
 A top that attaches no chiplet ties `cl_sb_present` low and the other inputs
 to zero.
 
-## 8. Still to specify
+## 8. The emulator and the simulator
+
+Both model MegaPad's side of the link with one C++ implementation,
+`shared/accel/chiplet_port.{h,cpp}`, built into both native extensions. The
+registers of section 2, the admission check of section 3 with its refusal
+record, bursts, doorbells and the sideband behave as specified here. The
+differences follow from two properties of the models: they have no
+cycle-level arbitration at external memory, and they give a chiplet no
+clock.
+
+- A request completes inside the call that makes it. `BUSY` reads 0, `QOS`
+  and `EXT_CORE_QOS` hold what was written and shape nothing, and
+  `CANCELLED` answers only a request made while the chiplet is held in
+  reset.
+- In the emulator a chiplet steps between scheduler rounds, and at each
+  scheduling frontier of the cycle-exact batch. A step does a fixed budget
+  of the chiplet's own units, set per port. While every core sleeps or is
+  halted, the chiplets step until they rest or one has rung a core, and the
+  cores are then woken by the usual rule. A chiplet reads and writes memory
+  and rings cores only from its step, when no core runs.
+- In the hosted simulator a chiplet steps before each read of a port
+  register or of `MBOX_STATUS`, and when a dispatch returns to its host. The
+  simulator's one core reaches the mailbox by MMIO alone and polls
+  `MBOX_STATUS` for a port's signal. Its ports are absent unless the address
+  space is created with `chiplet_ports`, and its first port has the ID 1.
+- The emulator's mailbox counts the small cores, so a port's signal reaches
+  a small core there. The RTL's mailbox serves the full cores (section 9).
+
+A chiplet's model implements `shared/accel/chiplet_module.h`, a C interface
+that carries what the link carries: one memory request with the link's size
+and burst length, doorbells in both directions, reset, release, stop, ready
+and stopped, the identity record, and save and restore of the model's
+state. A model is built into an extension or loaded at run time from a
+module library, by `MegapadSystem.attach_chiplet` in the emulator and
+`HostedChipletPorts.attach_module` in the simulator.
+`shared/accel/chiplet_test_module.cpp` is a small chiplet that the tests use
+and a worked example of the interface.
+
+## 9. Still to specify or build
 
 - **The offer list and the work queues.** A running chiplet states its
   functions and the queues and memory it asks for, and work crosses as
   descriptors in queues in lent memory. Both are formats in memory, defined
-  with KDOS's system module for chiplets.
+  with KDOS's system module for chiplets, whose general words are listed in
+  [chiplet-interconnect-plan.md](chiplet-interconnect-plan.md) §9.
+- **Small cores in the RTL's mailbox.** A port's signal reaches any core by
+  its ID in the emulator. The RTL's mailbox has the full cores as
+  participants, and the SoC ties the small cores' IPI and flag inputs low.
+  Wiring them was accepted on 2026-11-11: the mailbox gains the small cores,
+  each cluster a flag input per core, and a small core a way to acknowledge.
+- **Reads at the edge of a range.** A read returns the aligned 64-bit word,
+  so a byte read at the edge of a range whose bounds are unaligned also
+  returns up to seven bytes that lie beyond the range. Software lends
+  word-aligned ranges. A bridge that clears the bytes outside the range
+  would remove the condition.
 - **IDs above 63.** The 64-bit pending mask covers IDs 0 to 63: the 16
   cores and 48 ports. A die with more ports needs a wider mask.
-- **System Info.** The port count is read from `PORT_COUNT`. System Info
-  gains the field together with the emulator and the simulator, whose
-  register map it matches.
 - **A chiplet lending memory to MegaPad.** The contract allows it, and no
   channel carries it yet.
 - **The physical layer.** The channels are logical; framing them onto UCIe's

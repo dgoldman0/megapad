@@ -799,6 +799,8 @@ class MegaForthRuntime:
             self.sha3.bind_native_permutation(None)
         self.entropy = platform_mmio.entropy
         self.rtc = platform_mmio.rtc
+        # The profile's chiplet ports, or None when it has none.
+        self.chiplet_ports = platform_mmio.chiplet
         self.sha2 = HostedSHA2Service(core_count=num_full)
         self.spinlocks = HostedSpinlockBank(core_count=num_cores)
         self.field = HostedFieldALUService(core_count=num_cores)
@@ -2999,6 +3001,19 @@ class MegaForthRuntime:
             raise ExecutionBlocked(result.suspension, result.semantic_steps)
         return result
 
+    def _step_chiplets(self, result):
+        """Step the attached chiplets as a dispatch returns to its host.
+
+        The hosted profile has no scheduler rounds. Its chiplets step here
+        and before the guest reads a port register or the mailbox status
+        (``simulator/chiplet.py``).
+        """
+
+        ports = self.chiplet_ports
+        if ports is not None:
+            ports.step()
+        return result
+
     def run_until_blocked(
         self,
         name_or_xt: bytes | str | int,
@@ -3020,13 +3035,13 @@ class MegaForthRuntime:
         with self._session_owner_lock:
             self._require_session_owner_access("run a semantic dispatch")
             try:
-                return self._run_until_blocked(
+                return self._step_chiplets(self._run_until_blocked(
                     name_or_xt,
                     context=context,
                     step_budget=step_budget,
                     quantum_steps=quantum_steps,
                     machine_quantum_instructions=machine_quantum_instructions,
-                )
+                ))
             except BaseException:
                 # This entry point rejects nested dispatch before execution, so
                 # every exception escaping it is an outer host escape rather than
@@ -3141,7 +3156,9 @@ class MegaForthRuntime:
 
         with self._session_owner_lock:
             self._require_session_owner_access("resume a semantic dispatch")
-            return self._resume_locked(suspension, wake_receipt)
+            return self._step_chiplets(
+                self._resume_locked(suspension, wake_receipt)
+            )
 
     def _resume_locked(
         self,
@@ -3193,7 +3210,9 @@ class MegaForthRuntime:
             blocked = self._require_suspension(suspension)
             if not blocked.cursor.host_yield:
                 raise ExecutionError("IDL suspension requires a runtime-issued wake")
-            return self._continue_suspension_locked(blocked)
+            return self._step_chiplets(
+                self._continue_suspension_locked(blocked)
+            )
 
     def _stack_snapshot(self, stack):
         """Preserve full suspension evidence through the selected executor."""

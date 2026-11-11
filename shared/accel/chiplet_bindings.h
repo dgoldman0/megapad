@@ -79,6 +79,72 @@ private:
     std::optional<std::uint64_t> fail_at_;
 };
 
+// External memory reached through two Python callables, for a backend whose
+// memory has no single buffer: reader(addr, length) returns that many bytes
+// and writer(addr, payload) stores them. A callable that raises, or returns
+// another length, reports a memory error to the chiplet; the exception is
+// handed to Python's unraisable hook, so it is seen.
+class CallbackMemory final : public ExternalMemory {
+public:
+    CallbackMemory(pybind11::object reader, pybind11::object writer,
+                   std::uint64_t base, std::uint64_t size)
+        : reader_(std::move(reader)), writer_(std::move(writer)),
+          base_(base), size_(size) {
+        if ((base & 7) != 0 || (size & 7) != 0)
+            throw pybind11::value_error(
+                "external memory must start and end on a 64-bit word");
+        if (base + size < base)
+            throw pybind11::value_error(
+                "external memory must fit in the address space");
+    }
+
+    std::uint64_t base() const noexcept override { return base_; }
+    std::uint64_t limit() const noexcept override { return base_ + size_; }
+
+    bool read(std::uint64_t addr, std::uint8_t* out,
+              std::size_t bytes) noexcept override {
+        pybind11::gil_scoped_acquire gil;
+        try {
+            const pybind11::bytes data = reader_(addr, bytes);
+            char* text = nullptr;
+            Py_ssize_t length = 0;
+            if (PyBytes_AsStringAndSize(data.ptr(), &text, &length) != 0)
+                throw pybind11::error_already_set();
+            if (static_cast<std::size_t>(length) != bytes)
+                return false;
+            std::memcpy(out, text, bytes);
+            return true;
+        } catch (pybind11::error_already_set& error) {
+            error.discard_as_unraisable("a chiplet's read of external memory");
+            return false;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    bool write(std::uint64_t addr, const std::uint8_t* in,
+               std::size_t bytes) noexcept override {
+        pybind11::gil_scoped_acquire gil;
+        try {
+            writer_(addr, pybind11::bytes(
+                reinterpret_cast<const char*>(in), bytes));
+            return true;
+        } catch (pybind11::error_already_set& error) {
+            error.discard_as_unraisable(
+                "a chiplet's write of external memory");
+            return false;
+        } catch (...) {
+            return false;
+        }
+    }
+
+private:
+    pybind11::object reader_;
+    pybind11::object writer_;
+    std::uint64_t base_;
+    std::uint64_t size_;
+};
+
 // A chiplet whose side of the link Python drives.
 struct ManualChipletState {
     const mp64_chiplet_host* host = nullptr;
@@ -157,19 +223,32 @@ inline mp64_chiplet_module make_manual_module(
 // MegaPad's side of the link with no machine around it.
 class ChipletLink {
 public:
-    ChipletLink(pybind11::buffer memory, std::uint64_t memory_base,
+    // `buffer` is the same object as `memory` when the memory is a buffer,
+    // and null otherwise; it serves the tests' error injection.
+    ChipletLink(std::unique_ptr<ExternalMemory> memory, BufferMemory* buffer,
                 int core_count, int port_count, int range_count)
-        : memory_(std::move(memory), memory_base),
+        : memory_(std::move(memory)),
+          buffer_(buffer),
           table_(core_count, port_count, core_count),
           mailbox_(&table_),
-          window_(port_count, core_count, range_count, &memory_,
+          window_(port_count, core_count, range_count, memory_.get(),
                   &mailbox_) {}
 
-    BufferMemory memory_;
+    std::unique_ptr<ExternalMemory> memory_;
+    BufferMemory* buffer_;
     MailboxPending table_;
     TableMailbox mailbox_;
     ChipletWindow window_;
 };
+
+inline void check_link_shape(int core_count, int port_count,
+                             int range_count) {
+    if (core_count < 1 || port_count < 0 || core_count + port_count > 256)
+        throw pybind11::value_error(
+            "cores and ports must share the 8-bit ID space");
+    if (range_count < 1 || range_count > 255)
+        throw pybind11::value_error("range_count must be 1 to 255");
+}
 
 inline void register_bindings(pybind11::module_& module) {
     namespace py = pybind11;
@@ -301,19 +380,33 @@ inline void register_bindings(pybind11::module_& module) {
     py::class_<ChipletLink>(module, "ChipletLink", py::module_local())
         .def(py::init([](py::buffer memory, std::uint64_t memory_base,
                          int core_count, int port_count, int range_count) {
-                 if (core_count < 1 || port_count < 0 ||
-                     core_count + port_count > 256)
-                     throw py::value_error(
-                         "cores and ports must share the 8-bit ID space");
-                 if (range_count < 1 || range_count > 255)
-                     throw py::value_error("range_count must be 1 to 255");
+                 check_link_shape(core_count, port_count, range_count);
+                 auto buffer = std::make_unique<BufferMemory>(
+                     std::move(memory), memory_base);
+                 BufferMemory* raw = buffer.get();
                  return std::make_unique<ChipletLink>(
-                     std::move(memory), memory_base, core_count, port_count,
+                     std::move(buffer), raw, core_count, port_count,
                      range_count);
              }),
              py::arg("memory"), py::arg("memory_base"),
              py::arg("core_count") = 4, py::arg("port_count") = 1,
              py::arg("range_count") = 8)
+        // The same link over memory that two callables read and write.
+        .def_static(
+            "over_callbacks",
+            [](py::object reader, py::object writer,
+               std::uint64_t memory_base, std::uint64_t memory_size,
+               int core_count, int port_count, int range_count) {
+                check_link_shape(core_count, port_count, range_count);
+                return std::make_unique<ChipletLink>(
+                    std::make_unique<CallbackMemory>(
+                        std::move(reader), std::move(writer), memory_base,
+                        memory_size),
+                    nullptr, core_count, port_count, range_count);
+            },
+            py::arg("reader"), py::arg("writer"), py::arg("memory_base"),
+            py::arg("memory_size"), py::arg("core_count") = 4,
+            py::arg("port_count") = 1, py::arg("range_count") = 8)
         .def_property_readonly(
             "mailbox",
             [](ChipletLink& link) -> MailboxPending& { return link.table_; },
@@ -394,7 +487,10 @@ inline void register_bindings(pybind11::module_& module) {
              })
         .def("fail_memory_at",
              [](ChipletLink& link, py::object addr) {
-                 link.memory_.fail_at(
+                 if (link.buffer_ == nullptr)
+                     throw std::runtime_error(
+                         "error injection needs a link over a buffer");
+                 link.buffer_->fail_at(
                      addr.is_none()
                          ? std::optional<std::uint64_t>()
                          : std::optional<std::uint64_t>(
