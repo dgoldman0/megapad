@@ -11805,6 +11805,24 @@ class TestBIOSHardening(unittest.TestCase):
             total += max(batch, 1)
         return uart_text(buf)
 
+    def _steps(self, input_lines, max_steps=20_000_000) -> int:
+        """The instructions a fresh BIOS takes to run INPUT_LINES and BYE."""
+        sys, _buf = self._boot_bios()
+        data = ("\n".join(input_lines) + "\nBYE\n").encode()
+        pos = 0
+        total = 0
+        while total < max_steps and not sys.cpu.halted:
+            if sys.cpu.idle and not sys.uart.has_rx_data:
+                if pos >= len(data):
+                    break
+                chunk = _next_line_chunk(data, pos)
+                sys.uart.inject_input(chunk)
+                pos += len(chunk)
+                continue
+            total += max(sys.run_batch(min(100_000, max_steps - total)), 1)
+        self.assertTrue(sys.cpu.halted, "the lines did not run to BYE")
+        return total
+
     # -- FSLOAD multi-sector (> 512 bytes) --
 
     def test_fsload_multi_sector(self):
@@ -12152,6 +12170,106 @@ class TestBIOSHardening(unittest.TestCase):
         ])
         self.assertRegex(text, r"\[EUNWIND-INVALID\s+1\s+1\s+1\s+\]")
         self.assertRegex(text, r"\[EUNWIND-AFTER\s+0\s+\]")
+
+    # -- The evaluator's input frames --
+
+    def test_nested_evaluate_restores_the_callers_whole_line(self):
+        """A line that calls a nested EVALUATE resumes to its last byte,
+        whatever its length and however much longer the nested string is,
+        and so does each line of a nest two deep."""
+        sys, buf = self._boot_bios()
+        nested = " ".join(["7 LG +!"] * 12)
+        lines = [
+            "VARIABLE LG  0 LG !  VARIABLE LH  0 LH !  VARIABLE LK  0 LK !",
+            f': I7  S" {nested}" EVALUATE ;',
+            # A ten-byte line between the typed one and the long one.
+            ': I8  S" I7 2 LK +!" EVALUATE ;',
+        ]
+        lengths = (10, 15, 16, 17, 23, 24, 25, 31, 32, 33, 64, 127, 128, 255)
+        for length in lengths:
+            lines.append("I7" + " " * (length - 9) + "1 LH +!")
+        # The typed line shorter than the line it nests, then longer.
+        lines.append("I8")
+        lines.append("I8 4 LK +!")
+        lines.append(
+            'CR ." [WHOLE-LINE " LG @ . LH @ . LK @ . EVAL-DEPTH @ . ." ]"'
+        )
+        text = self._run_forth(sys, buf, lines, max_steps=5_000_000)
+        self.assertRegex(
+            text,
+            rf"\[WHOLE-LINE\s+{84 * (len(lengths) + 2)}\s+{len(lengths)}"
+            r"\s+8\s+0\s+\]",
+        )
+
+    def test_evaluate_takes_a_string_of_every_length_whole(self):
+        """The string is copied in to its last byte and no further: a word
+        at the end of a string of each length from 1 to 255 runs once."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE LH  0 LH !  : Q 1 LH +! ;",
+            "CREATE EB 256 ALLOT  EB 256 32 FILL",
+            # A Q as byte N, where it is the string's last; the Q after it
+            # lies outside the string.
+            ": EV-ALL  256 1 DO  81 EB I 1- + C!  81 EB I + C!",
+            "    EB I EVALUATE  32 EB I 1- + C!  LOOP ;",
+            "EV-ALL",
+            'CR ." [EVERY-LENGTH " LH @ . DEPTH . EVAL-DEPTH @ . ." ]"',
+        ], max_steps=20_000_000)
+        self.assertRegex(text, r"\[EVERY-LENGTH\s+255\s+0\s+0\s+\]")
+
+    def test_nested_evaluate_copies_the_callers_live_input_only(self):
+        """Saving and restoring the caller's input costs by its length: a
+        short line that evaluates a short string many times stays far under
+        what copying the whole 256-byte buffer out and back would take."""
+        definitions = [
+            ': EV-SHORT  S" DEPTH DROP" EVALUATE ;',
+            ": EV-MANY  2000 0 DO EV-SHORT LOOP ;",
+            ": EV-NONE  2000 0 DO LOOP ;",
+        ]
+        per_call = (
+            self._steps(definitions + ["EV-MANY"])
+            - self._steps(definitions + ["EV-NONE"])
+        ) / 2000
+        # About 800 now.  Copying the 256 bytes out and back took over
+        # 4,000 more, and either copy alone over 250.
+        self.assertLess(per_call, 950)
+
+        # A long line is copied in a cell at a time: 248 bytes that end in
+        # a word which does nothing.  Stepping over its 247 spaces is most
+        # of the 5,000 left; a byte at a time the copy took 1,700 more.
+        definitions = [
+            ": Q ;  CREATE EV-LINE 248 ALLOT  EV-LINE 248 32 FILL",
+            "81 EV-LINE 247 + C!",
+            ": EV-LONG  EV-LINE 248 EVALUATE ;",
+            ": EV-MANY  2000 0 DO EV-LONG LOOP ;",
+            ": EV-NONE  2000 0 DO LOOP ;",
+        ]
+        per_call = (
+            self._steps(definitions + ["EV-MANY"])
+            - self._steps(definitions + ["EV-NONE"])
+        ) / 2000
+        self.assertLess(per_call, 5900)
+
+    def test_compiled_s_quote_stops_at_the_end_of_its_line(self):
+        """S" inside a definition ends at the line's end when no quote
+        closes it, whatever an earlier, longer line left in the buffer."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            '( a longer line whose tail holds a quote: zzz" )',
+            ': SQ-EOL S" ab',
+            ';',
+            'CR ." [SQ-EOL " SQ-EOL SWAP DROP . ." ]"',
+            # Twelve bytes, then a space where the next line ends.
+            '( 0123456789 after" )',
+            ': SQ-LAST S"',
+            ';',
+            'CR ." [SQ-LAST " SQ-LAST SWAP DROP . ." ]"',
+            ': SQ-CLOSED S" abc" ;',
+            'CR ." [SQ-CLOSED " SQ-CLOSED SWAP DROP . ." ]"',
+        ])
+        self.assertRegex(text, r"\[SQ-EOL\s+2\s+\]")
+        self.assertRegex(text, r"\[SQ-LAST\s+0\s+\]")
+        self.assertRegex(text, r"\[SQ-CLOSED\s+3\s+\]")
 
     # -- Dictionary full guard --
 

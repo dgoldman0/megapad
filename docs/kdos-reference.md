@@ -1863,8 +1863,8 @@ KDOS's `EVALUATE` rethrows the exception.  Whoever catches it, at any
 distance, finds the evaluator at the depth it had when that `EVALUATE` was
 entered, and a later `LOAD`, `REQUIRE` or `APP-LOAD` evaluates its file.
 KDOS's `EVALUATE-CHECKED` stores the code in `EVAL-THROW` and returns
-status 5 normally.  BIOS evaluator frames retain a complete caller TIB,
-length, and `>IN`, so normal nesting and caught unwinds both restore the
+status 5 normally.  BIOS evaluator frames retain the caller's active input,
+its length, and `>IN`, so normal nesting and caught unwinds both restore the
 exact caller source.  Status 5 remains sticky while enclosing evaluators
 unwind, preventing either the failed source tail or an enclosing line tail
 from executing.

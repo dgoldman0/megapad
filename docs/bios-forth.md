@@ -306,7 +306,7 @@ stack) or **compiled inline** (the `S"` and `."` pattern).
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `S"` | `( -- addr len )` | In a definition, compile an inline NUL-terminated string literal whose stable address and length are pushed at runtime. At the REPL, return up to 255 bytes in one reused BIOS-private transient buffer. Caller-span-checked crypto, entropy, and DMA paths reject that protected span, although raw/static physical-span interfaces such as checked SHA-2 apply their own policy; compile or copy the literal before retaining it or passing it across an interface. |
+| `S"` | `( -- addr len )` | In a definition, compile an inline NUL-terminated string literal whose stable address and length are pushed at runtime; the literal ends at its closing quote, or at the end of the line when none closes it. At the REPL, return up to 255 bytes in one reused BIOS-private transient buffer. Caller-span-checked crypto, entropy, and DMA paths reject that protected span, although raw/static physical-span interfaces such as checked SHA-2 apply their own policy; compile or copy the literal before retaining it or passing it across an interface. |
 | `."` | *see below* | Print a string literal.  Works in **both** interpret and compile modes: in a definition it compiles inline and prints at runtime; at the REPL it prints immediately. |
 | `WORD` | `( delim -- addr )` | Parse the next token delimited by *delim* from the input buffer.  Returns a counted-string address. |
 | `COUNT` | `( c-addr -- addr len )` | Convert a counted string (length byte at c-addr) to an address+length pair. |
@@ -481,7 +481,7 @@ text.
 |------|-------------|-------------|
 | `SOURCE` | `( -- addr len )` | Address and length of the current input buffer. |
 | `>IN` | `( -- addr )` | Address of the variable holding the current parse position within `SOURCE`. |
-| `EVALUATE` | `( addr len -- )` | Interpret one string as Forth source.  Retains the legacy stack effect but records any error in `EVAL-STATUS`.  Input above 255 bytes is rejected, never truncated.  Nested calls preserve and restore the caller's complete TIB bytes, length, and `>IN`. |
+| `EVALUATE` | `( addr len -- )` | Interpret one string as Forth source.  Retains the legacy stack effect but records any error in `EVAL-STATUS`.  Input above 255 bytes is rejected, never truncated.  Nested calls preserve and restore the caller's input, its length, and `>IN`: the bytes up to the active length, which are all that any parsing word reads. |
 | `EVALUATE-CHECKED` | `( addr len -- status )` | BIOS primitive returning status 0–3.  After KDOS defines `CATCH`, KDOS deliberately shadows this name with the transaction-safe wrapper described below, which also returns status 5. |
 | `EVALUATE-FINISH` | `( -- status )` | End a multi-line checked operation, returning 4 if compiler or cross-line conditional state is unfinished, otherwise 0. |
 | `EVALUATOR-RESET` | `( -- )` | Clear compiler bookkeeping after the caller invokes `DICT-ROLLBACK` with its saved `HERE/LATEST` pair. Does not roll back the dictionary itself, erase diagnostics, or change the enclosing evaluator depth. |

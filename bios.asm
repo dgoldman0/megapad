@@ -7379,39 +7379,50 @@ w_squote_compile:
     ldi64 r1, squote_runtime
     ldi64 r11, compile_call
     call.l r11
-    ; Now scan input for closing " and compile each byte
+    ; Now scan input for closing " and compile each byte.  The scan ends
+    ; at the active length, as every other reader of the input does: the
+    ; bytes past it belong to earlier lines.
     ldi64 r11, var_to_in
     ldn r13, r11              ; >IN
     ldi64 r9, tib_buffer
-    add r9, r13               ; current input position
     ; Skip the leading space delimiter (ANS Forth: S" skips one space)
-    ld.b r1, r9
+    ldi64 r11, var_tib_len
+    ldn r7, r11
+    cmp r13, r7
+    breq sq_done              ; S" ends the line: an empty string
+    mov r11, r9
+    add r11, r13
+    ld.b r1, r11
     cmpi r1, 0x20
     brne sq_scan
-    inc r9
+    inc r13
 sq_scan:
-    ld.b r1, r9
-    cmpi r1, 0                ; end of input?
+    ldi64 r11, var_tib_len
+    ldn r7, r11
+    cmp r13, r7
+    breq sq_done              ; hit EOL without closing quote
+    mov r11, r9
+    add r11, r13
+    ld.b r1, r11
+    cmpi r1, 0                ; a NUL in the line ends the string as well
     breq sq_done
     cmpi r1, 0x22             ; '"' ?
     breq sq_done_skip
     ; compile this byte
     ldi64 r11, compile_byte
     call.l r11
-    inc r9
+    inc r13
     br sq_scan
 sq_done_skip:
-    inc r9                    ; skip past closing "
+    inc r13                   ; skip past closing "
 sq_done:
     ; compile null terminator
     ldi r1, 0
     ldi64 r11, compile_byte
     call.l r11
     ; update >IN
-    ldi64 r11, tib_buffer
-    sub r9, r11
     ldi64 r11, var_to_in
-    str r11, r9
+    str r11, r13
     ret.l
 
 ; squote_runtime: called at runtime.  Return address on RSP = string address.
@@ -11391,9 +11402,11 @@ w_to_in:
 ;   5 = source-level THROW caught by the KDOS checked wrapper
 ;
 ; Save one caller input frame.  var_eval_depth has already been incremented,
-; so depth-1 is the frame index.  The complete 256-byte TIB is copied because
-; nested EVALUATE reuses tib_buffer and may overwrite bytes beyond the active
-; caller length before returning.
+; so depth-1 is the frame index.  A nested EVALUATE reuses tib_buffer, so the
+; caller's input is copied out here and back when the nested one ends.  The
+; copy is the caller's live input: its active bytes and the one after them,
+; eight at a time.  Every reader of tib_buffer stops at var_tib_len, so the
+; bytes past the active length carry nothing a caller can come back to.
 eval_input_save:
     subi r15, 8
     str r15, r9               ; preserve source address
@@ -11423,16 +11436,19 @@ eval_input_save:
     ldi64 r7, eval_saved_tib
     add r7, r13               ; destination frame
     ldi64 r9, tib_buffer      ; current caller TIB
-    ldi r1, 0
-    ldi64 r10, 256
+    ; R12 holds the caller's active length, at most 255.  (len + 8) / 8
+    ; cells cover its bytes and the one after them and end inside the
+    ; 256-byte buffer and frame.
+    addi r12, 8
+    lsri r12, 3
 eval_input_save_loop:
-    cmp r1, r10
+    cmpi r12, 0
     breq eval_input_save_done
-    ld.b r0, r9
-    st.b r7, r0
-    inc r9
-    inc r7
-    inc r1
+    ldn r0, r9
+    str r7, r0
+    addi r9, 8
+    addi r7, 8
+    dec r12
     br eval_input_save_loop
 eval_input_save_done:
     ldn r12, r15
@@ -11455,16 +11471,22 @@ eval_input_restore_one:
     ldi64 r9, eval_saved_tib
     add r9, r13               ; saved caller TIB
     ldi64 r7, tib_buffer      ; live TIB
-    ldi r1, 0
-    ldi64 r10, 256
+    ; Copy back the cells eval_input_save took for this frame's length.
+    mov r0, r1
+    lsli r0, 3
+    ldi64 r11, eval_saved_tib_len
+    add r11, r0
+    ldn r10, r11
+    addi r10, 8
+    lsri r10, 3
 eval_input_restore_loop:
-    cmp r1, r10
+    cmpi r10, 0
     breq eval_input_restore_meta
-    ld.b r0, r9
-    st.b r7, r0
-    inc r9
-    inc r7
-    inc r1
+    ldn r0, r9
+    str r7, r0
+    addi r9, 8
+    addi r7, 8
+    dec r10
     br eval_input_restore_loop
 
 eval_input_restore_meta:
@@ -11562,24 +11584,35 @@ w_eval_check_depth:
     ldi r1, 255
     cmp r12, r1
     lbrgt w_eval_len_err
-    ; Preserve the caller's complete input context outside RSP.  A later
+    ; Preserve the caller's input context outside RSP.  A later
     ; source-level THROW may unwind the CPU stacks before w_eval_done runs.
     ldi64 r11, eval_input_save
     call.l r11
-    ; Copy source string into TIB (length was checked above).
+    ; Copy source string into TIB (length was checked above): whole cells
+    ; while eight bytes or more remain, then the rest a byte at a time, so
+    ; that nothing past the string is read and nothing past its length
+    ; written.
     ldi64 r7, tib_buffer
-    ldi r1, 0
+    mov r13, r9               ; source cursor
+    mov r1, r12               ; bytes left
 w_eval_copy:
-    cmp r1, r12
-    breq w_eval_copy_done
-    mov r0, r9
-    add r0, r1
-    ld.b r0, r0
-    mov r11, r7
-    add r11, r1
-    st.b r11, r0
-    inc r1
+    cmpi r1, 8
+    brcc w_eval_copy_tail     ; fewer than eight left
+    ldn r0, r13
+    str r7, r0
+    addi r13, 8
+    addi r7, 8
+    subi r1, 8
     br w_eval_copy
+w_eval_copy_tail:
+    cmpi r1, 0
+    breq w_eval_copy_done
+    ld.b r0, r13
+    st.b r7, r0
+    inc r13
+    inc r7
+    dec r1
+    br w_eval_copy_tail
 w_eval_copy_done:
     ; Set up new input
     ldi64 r11, var_tib_len

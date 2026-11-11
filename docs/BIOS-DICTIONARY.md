@@ -134,15 +134,18 @@ operation's status:
 1. Rejects source longer than 255 bytes before copying or executing any
    prefix.  Legacy `EVALUATE` prints the error and records status 2 rather
    than silently truncating.
-2. Saves the caller's complete 256-byte TIB, `>IN`, and `var_tib_len` in
-   the static frame indexed by evaluator depth.  This context survives a
+2. Saves the caller's live input, `>IN`, and `var_tib_len` in the static
+   frame indexed by evaluator depth: the TIB's bytes up to the caller's
+   active length and the one after them, copied a cell at a time.  Every
+   word that reads the TIB stops at the active length, so the bytes past it
+   carry nothing the caller comes back to.  This context survives a
    return-stack exception unwind.
 3. Copies the source string into TIB, sets `>IN` = 0, and sets
    `var_tib_len` = len.
 4. Runs the interpreter loop.  The first undefined token is copied to a
    stable diagnostic buffer, its zero-based column is recorded, and the
    rest of that input line is not executed.
-5. Restores the caller's TIB bytes, `>IN`, and `var_tib_len`, then removes
+5. Restores the caller's saved bytes, `>IN`, and `var_tib_len`, then removes
    the depth frame.  Nested evaluator failure is sticky and propagates to
    the outer checked call.
 
@@ -353,7 +356,7 @@ byte independently.
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 88 | `S"` | `( -- addr len )` | ✓ | Compile an inline stable string; at the REPL return one reused 255-byte BIOS-private transient buffer (caller-span-checked crypto/entropy/DMA paths reject it as protected, while raw/static span interfaces have their own policy) |
+| 88 | `S"` | `( -- addr len )` | ✓ | Compile an inline stable string, which ends at its closing quote or at the end of the line; at the REPL return one reused 255-byte BIOS-private transient buffer (caller-span-checked crypto/entropy/DMA paths reject it as protected, while raw/static span interfaces have their own policy) |
 | 89 | `."` | `( -- )` | ✓ | State-smart: interpret → print immediately; compile → compile inline string + print at runtime |
 | 90 | `WORD` | `( char "ccc" -- c-addr )` | | Parse input delimited by char, store counted string at HERE (transient) |
 | 91 | `COUNT` | `( c-addr -- addr len )` | | Convert counted string to (addr len) pair |
@@ -428,7 +431,7 @@ byte independently.
 |---|------|-------------|-----|-------------|
 | 141 | `SOURCE` | `( -- addr len )` | | Push TIB address and current TIB length |
 | 142 | `>IN` | `( -- addr )` | | Push address of `>IN` variable (parse offset into TIB) |
-| 143 | `EVALUATE` | `( addr len -- )` | | Interpret string as Forth source; nested calls restore complete caller input context and errors are recorded without returning a status cell |
+| 143 | `EVALUATE` | `( addr len -- )` | | Interpret string as Forth source; nested calls restore the caller's input, its length and `>IN`, and errors are recorded without returning a status cell |
 | — | `EVALUATE-CHECKED` | `( addr len -- status )` | | BIOS returns 0–3; the later KDOS shadow also catches source `THROW` and returns 5 |
 | — | `EVALUATE-FINISH` | `( -- status )` | | Return 4 if compiler/cross-line evaluator state is unfinished, otherwise 0 |
 | — | `EVALUATOR-RESET` | `( -- )` | | Clear compiler bookkeeping after caller-owned HERE/LATEST rollback; retain diagnostics and enclosing evaluator depth |
