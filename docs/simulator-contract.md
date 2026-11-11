@@ -3806,9 +3806,15 @@ interpreter's work on the module's source that `TOKEN-REPLAY` runs through
 the interpreter's own steps (`docs/token-modules-proposal-2026-11-11.md`).
 It has its own magic, `MFTOKEN1`, and is never emitted under the MF64
 identity.  The same file loads on every backend.  It holds no state of any
-backend, so no simulator or runtime version enters its validity.  It cannot
-become a production path before cold, warm, and source/warm equivalence all
-pass and useful wall time is demonstrated.
+backend, so no simulator or runtime version enters its validity.  What ties
+it to a system is the stamp in its header: KDOS's `LOAD-STAMP` as it stood
+where the file's recording began, which starts from `BOOT-ID` and takes in
+each file as its load begins.  This runtime gives `BOOT-ID` for the BIOS
+that `bios.asm` assembles to and for the file an image boot read as the
+boot file (`shared/boot_identity.py`), so a file recorded here is current on
+the emulator and on a device that booted the same KDOS, and nowhere else.
+It cannot become a production path before cold, warm, and source/warm
+equivalence all pass and useful wall time is demonstrated.
 
 ## 10. Differential authority
 

@@ -715,7 +715,7 @@ def recorded_volume(sources: dict[str, bytes], top: str) -> dict[str, bytes]:
     }
 
 __all__ = [
-    "A", "B", "CASES", "Case", "MALFORMED", "MISMATCH", "RECORDED_LINES",
+    "A", "B", "C", "D", "E", "CASES", "Case", "MALFORMED", "MISMATCH", "RECORDED_LINES",
     "RECORDED_SHOWS", "RECORDED_SOURCES", "STALE", "TOKENS_ON", "failures",
     "module", "record", "recorded_volume", "records", "stamps", "token_file",
     "tokens", "volume",
