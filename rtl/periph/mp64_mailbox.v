@@ -28,6 +28,11 @@
 // line, so the core can test for a chiplet's signal with a branch.  With
 // N_PORTS = 0 the mailbox serves the full cores alone, as before.
 //
+// A core's pending mask is indexed by ID: bit n is set while the participant
+// with ID n has signalled the core.  MBOX_STATUS shows IDs 0 to 7, and the
+// CSR path returns all 64 bits, where a port's bit is at its ID.  A
+// participant's signal to itself is ignored, as the emulator ignores it.
+//
 
 `include "mp64_pkg.vh"
 
@@ -196,9 +201,23 @@ module mp64_mailbox #(
     // CSR_MBOX (0x22) read  → returns pending mask for that core
     // CSR_MBOX (0x22) write → send IPI (wdata[ID_BITS-1:0] = target core)
     // CSR_IPIACK (0x23) write → ack IPI (wdata[ID_BITS-1:0] = source core)
+    // Each core's pending mask, indexed by ID.
+    wire [63:0] id_mask [0:N_CORES-1];
     generate
-        for (ci = 0; ci < N_CORES; ci = ci + 1) begin : csr_ipi_rdata_gen
-            assign csr_ipi_rdata[ci*64 +: 64] = {{(64-P){1'b0}}, mbox_pending[ci]};
+        for (ci = 0; ci < N_CORES; ci = ci + 1) begin : id_mask_gen
+            reg [63:0] m;
+            integer    mk;
+            always @(*) begin
+                m = 64'd0;
+                for (mk = 0; mk < N_CORES; mk = mk + 1)
+                    m[mk] = mbox_pending[ci][mk];
+                for (mk = 0; mk < N_PORTS; mk = mk + 1)
+                    if (PORT_ID_BASE_I + mk < 64)
+                        m[PORT_ID_BASE_I + mk] =
+                            mbox_pending[ci][N_CORES + mk];
+            end
+            assign id_mask[ci] = m;
+            assign csr_ipi_rdata[ci*64 +: 64] = m;
         end
     endgenerate
 
@@ -245,10 +264,9 @@ module mp64_mailbox #(
                     4'h7:         rdata = mbox_data[requester_id][63:56];
                     MBOX_STATUS: begin
                         // The architectural status register is eight bits
-                        // even when a reduced SoC has fewer full cores.
-                        rdata = 8'd0;
-                        for (ri = 0; ri < P && ri < 8; ri = ri + 1)
-                            rdata[ri] = mbox_pending[requester_id][ri];
+                        // even when a reduced SoC has fewer full cores: the
+                        // pending bits of IDs 0 to 7.
+                        rdata = id_mask[requester_id][7:0];
                     end
                     default:      rdata = 8'd0;
                 endcase
@@ -346,19 +364,23 @@ module mp64_mailbox #(
 
             // --- SEND: write target ID → set pending bit on target ---
             if (req && wen && is_mbox && requester_in_mailbox_range &&
-                mbox_reg == MBOX_SEND && mmio_id_ok)
+                mbox_reg == MBOX_SEND && mmio_id_ok &&
+                {{(32-PIDX_W){1'b0}}, mmio_pidx} !=
+                {{(32-ID_BITS){1'b0}}, requester_id})
                 mbox_pending[mmio_pidx][requester_id] <= 1'b1;
 
             // --- CSR-side IPI send ---
             for (wi = 0; wi < N_CORES; wi = wi + 1) begin
                 if (csr_ipi_wen[wi] &&
-                    csr_ipi_addr[wi*8 +: 8] == CSR_MBOX && csr_id_ok[wi])
+                    csr_ipi_addr[wi*8 +: 8] == CSR_MBOX && csr_id_ok[wi] &&
+                    {{(32-PIDX_W){1'b0}}, csr_pidx[wi]} != wi)
                     mbox_pending[csr_pidx[wi]][wi] <= 1'b1;
             end
 
             // --- A port rings a participant ---
             for (wi = 0; wi < N_PORTS; wi = wi + 1) begin
-                if (port_send_valid[wi] && send_id_ok[wi])
+                if (port_send_valid[wi] && send_id_ok[wi] &&
+                    {{(32-PIDX_W){1'b0}}, send_pidx[wi]} != N_CORES + wi)
                     mbox_pending[send_pidx[wi]][N_CORES + wi] <= 1'b1;
             end
         end

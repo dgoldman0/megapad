@@ -406,8 +406,10 @@ module tb_soc_chiplet;
         check("the flag reaches the core's flag input",
               u_soc.g_core[0].u_cpu.ef_flags == 4'b0001);
         mmio_access(MB_STATUS, 64'd0, 1'b0, BUS_BYTE);
-        check("the core's status shows the port's bit",
-              mmio_rd[7:0] == 8'b0000_0010);
+        check("the core's status shows the port's bit at its ID, 3",
+              mmio_rd[7:0] == 8'b0000_1000);
+        check("the core's CSR mask shows the same bit",
+              u_soc.g_core[0].u_cpu.ipi_pending == 64'h8);
         mmio_access(MB_ACK, {56'd0, PORT_ID}, 1'b1, BUS_BYTE);
         repeat (2) @(posedge clk);
         check("acknowledging the port clears the line and the flag",

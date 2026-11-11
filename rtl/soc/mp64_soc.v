@@ -300,6 +300,7 @@ module mp64_soc #(
     wire        irq_timer_w;
     wire [NUM_CORES-1:0] ipi_out;
     wire [NUM_CORES-1:0] mbox_ef;   // a chiplet's doorbell is pending
+    wire [NUM_CORES*64-1:0] mbox_csr_rdata;  // each core's pending mask
     // RTC uptime, which every full core compares with its WAKE_MS
     wire [63:0] rtc_uptime_w;
 
@@ -443,6 +444,7 @@ module mp64_soc #(
                 .irq_uart        (ci == 0 ? irq_uart_w : 1'b0),
                 .irq_nic         (ci == 0 ? irq_nic_w : 1'b0),
                 .irq_ipi         (ipi_out[ci]),
+                .ipi_pending     (mbox_csr_rdata[ci*64 +: 64]),
                 .rtc_uptime_ms   (rtc_uptime_w),
 
                 // Info
@@ -2100,6 +2102,20 @@ module mp64_soc #(
     wire [7:0]  mbox_rdata_raw;
     wire        mbox_ack;
 
+    // Each full core's CSR writes reach the mailbox, which acts on MBOX and
+    // IPIACK, so a core signals and acknowledges without a bus transaction.
+    wire [NUM_CORES-1:0]    mbox_csr_wen;
+    wire [NUM_CORES*8-1:0]  mbox_csr_addr;
+    wire [NUM_CORES*64-1:0] mbox_csr_wdata;
+    genvar mci;
+    generate
+        for (mci = 0; mci < NUM_CORES; mci = mci + 1) begin : g_mbox_csr
+            assign mbox_csr_wen[mci]            = core_csr_wen[mci];
+            assign mbox_csr_addr[mci*8 +: 8]    = core_csr_addr[mci];
+            assign mbox_csr_wdata[mci*64 +: 64] = core_csr_wdata[mci];
+        end
+    endgenerate
+
     mp64_mailbox #(
         .N_CORES        (NUM_CORES),
         .N_GLOBAL_CORES (NUM_GLOBAL_CORES),
@@ -2117,10 +2133,10 @@ module mp64_soc #(
         .requester_valid(bus_mmio_requester_valid),
         .requester_id   (bus_mmio_requester_id),
         .ipi_out      (ipi_out),
-        .csr_ipi_wen  ({NUM_CORES{1'b0}}),
-        .csr_ipi_addr ({NUM_CORES*8{1'b0}}),
-        .csr_ipi_wdata({NUM_CORES*64{1'b0}}),
-        .csr_ipi_rdata(),
+        .csr_ipi_wen  (mbox_csr_wen),
+        .csr_ipi_addr (mbox_csr_addr),
+        .csr_ipi_wdata(mbox_csr_wdata),
+        .csr_ipi_rdata(mbox_csr_rdata),
         .port_send_valid(cp_mb_send_valid),
         .port_send_dst  (cp_mb_send_dst),
         .port_take_valid(cp_mb_take_valid),

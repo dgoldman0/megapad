@@ -138,6 +138,42 @@ module tb_multicore_smoke;
     assign ipi_lines = ipi_manual;
 
     // ========================================================================
+    // Mailbox on the cores' CSR path, with one chiplet port (ID 16)
+    // ========================================================================
+    // The cores reach it through CSR MBOX and IPIACK alone.  Its IPI lines
+    // stay off the cores, so a pending signal never interrupts a test
+    // program; the tests read the lines directly.  It has a reset of its
+    // own, so its state survives from one test program to the next.
+    reg         mbox_rst_n;
+    wire [MP64_NUM_CORES_DEFAULT-1:0]    mb_csr_wen;
+    wire [MP64_NUM_CORES_DEFAULT*8-1:0]  mb_csr_addr;
+    wire [MP64_NUM_CORES_DEFAULT*64-1:0] mb_csr_wdata;
+    wire [MP64_NUM_CORES_DEFAULT*64-1:0] mb_csr_rdata;
+    wire [MP64_NUM_CORES_DEFAULT-1:0]    mb_ipi;
+    wire [MP64_NUM_CORES_DEFAULT-1:0]    mb_ef;
+    reg         mb_port_send, mb_port_take;
+    reg  [7:0]  mb_port_dst, mb_port_src;
+    wire        mb_port_db_valid;
+    wire [7:0]  mb_port_db_src;
+
+    mp64_mailbox #(
+        .N_CORES(MP64_NUM_CORES_DEFAULT), .N_GLOBAL_CORES(16),
+        .N_PORTS(1), .PORT_ID_BASE(8'd16)
+    ) u_mbox (
+        .clk(clk), .rst_n(mbox_rst_n),
+        .req(1'b0), .addr(12'd0), .wdata(8'd0), .wen(1'b0),
+        .rdata(), .ack(),
+        .requester_valid(1'b0), .requester_id(8'd0),
+        .ipi_out(mb_ipi),
+        .csr_ipi_wen(mb_csr_wen), .csr_ipi_addr(mb_csr_addr),
+        .csr_ipi_wdata(mb_csr_wdata), .csr_ipi_rdata(mb_csr_rdata),
+        .port_send_valid(mb_port_send), .port_send_dst(mb_port_dst),
+        .port_take_valid(mb_port_take), .port_take_src(mb_port_src),
+        .port_db_valid(mb_port_db_valid), .port_db_src(mb_port_db_src),
+        .ef_out(mb_ef)
+    );
+
+    // ========================================================================
     // 4 × CPU cores (generate block)
     // ========================================================================
     // Each core has its own CSR + MEX stubs (no tile engines)
@@ -150,6 +186,9 @@ module tb_multicore_smoke;
             wire [63:0] csr_wdata;
             reg  [63:0] csr_rdata;
             always @(*) csr_rdata = 64'd0;
+            assign mb_csr_wen[c]            = csr_wen;
+            assign mb_csr_addr[c*8 +: 8]    = csr_addr;
+            assign mb_csr_wdata[c*64 +: 64] = csr_wdata;
 
             // MEX stubs
             wire        mex_valid;
@@ -275,10 +314,11 @@ module tb_multicore_smoke;
                 .irq_uart   (1'b0),
                 .irq_nic    (1'b0),
                 .irq_ipi    (ipi_lines[c]),
+                .ipi_pending(mb_csr_rdata[c*64 +: 64]),
                 .icache_stat_hits  (ic_stat_hits),
                 .icache_stat_misses(ic_stat_misses),
                 .mem_size_bytes(64'd16384),
-                .ef_flags   (4'b0000)
+                .ef_flags   ({3'b000, mb_ef[c]})
             );
         end
     endgenerate
@@ -416,6 +456,10 @@ module tb_multicore_smoke;
 
         pass_cnt = 0;
         fail_cnt = 0;
+        mbox_rst_n = 1'b0;
+        mb_port_send = 1'b0; mb_port_take = 1'b0;
+        mb_port_dst = 8'd0;  mb_port_src = 8'd0;
+        #12 mbox_rst_n = 1'b1;
 
         // ================================================================
         // TEST 1 — All 4 cores boot and execute NOP + HALT
@@ -635,6 +679,114 @@ module tb_multicore_smoke;
         check_reg(2'd1, 4'd0, 64'h33);
         check_reg(2'd2, 4'd0, 64'h33);
         check_reg(2'd3, 4'd0, 64'h33);
+
+        // ================================================================
+        // TEST 10 — The mailbox by CSR: a core signals a core
+        // ================================================================
+        // Every core runs: LDI R1, 2; CSRW MBOX, R1; HALT.  Cores 0, 1 and 3
+        // signal core 2, and core 2's signal to itself is ignored.
+        $display("\n=== TEST 10: CSR MBOX send ===");
+        hold_reset;
+        load_byte(16'h0000, 8'h60); load_byte(16'h0001, 8'h10);
+        load_byte(16'h0002, 8'h02);                     // LDI R1, 2
+        load_byte(16'h0003, 8'hD9); load_byte(16'h0004, 8'h22); // CSRW MBOX
+        load_byte(16'h0005, 8'h02);                     // HALT
+        release_reset;
+        wait_all_halt(5000);
+        check_true(mb_ipi == 4'b0100, "CSR sends raise core 2's IPI line alone");
+        check_true(mb_csr_rdata[2*64 +: 64] == 64'hB,
+                   "core 2's mask holds cores 0, 1 and 3");
+        check_true(mb_ef == 4'b0000, "a core's signal raises no external flag");
+
+        // ================================================================
+        // TEST 11 — The mailbox by CSR: read the mask, then acknowledge
+        // ================================================================
+        // R3 is the program counter and R2 the X register after reset, so
+        // these programs keep their data in R1, R5, R6 and R7.
+        $display("\n=== TEST 11: CSR MBOX read and IPIACK ===");
+        hold_reset;
+        load_byte(16'h0000, 8'hD5); load_byte(16'h0001, 8'h22); // CSRR R5, MBOX
+        load_byte(16'h0002, 8'h02);
+        release_reset;
+        wait_all_halt(5000);
+        check_reg(2'd2, 4'd5, 64'hB);
+        check_reg(2'd0, 4'd5, 64'h0);
+
+        hold_reset;
+        load_byte(16'h0000, 8'h60); load_byte(16'h0001, 8'h10);
+        load_byte(16'h0002, 8'h00);                     // LDI R1, 0
+        load_byte(16'h0003, 8'hD9); load_byte(16'h0004, 8'h23); // CSRW IPIACK
+        load_byte(16'h0005, 8'h60); load_byte(16'h0006, 8'h10);
+        load_byte(16'h0007, 8'h01);                     // LDI R1, 1
+        load_byte(16'h0008, 8'hD9); load_byte(16'h0009, 8'h23);
+        load_byte(16'h000A, 8'h60); load_byte(16'h000B, 8'h10);
+        load_byte(16'h000C, 8'h03);                     // LDI R1, 3
+        load_byte(16'h000D, 8'hD9); load_byte(16'h000E, 8'h23);
+        load_byte(16'h000F, 8'hD5); load_byte(16'h0010, 8'h22); // CSRR R5, MBOX
+        load_byte(16'h0011, 8'h02);
+        release_reset;
+        wait_all_halt(5000);
+        check_reg(2'd2, 4'd5, 64'h0);
+        check_true(mb_ipi == 4'b0000, "acknowledging by CSR lowers the IPI line");
+
+        // ================================================================
+        // TEST 12 — A core signals the chiplet port by CSR
+        // ================================================================
+        // Every core runs: LDI R7, 16; CSRW MBOX, R7; HALT.
+        $display("\n=== TEST 12: CSR MBOX send to a chiplet port ===");
+        hold_reset;
+        load_byte(16'h0000, 8'h60); load_byte(16'h0001, 8'h70);
+        load_byte(16'h0002, 8'h10);                     // LDI R7, 16
+        load_byte(16'h0003, 8'hDF); load_byte(16'h0004, 8'h22); // CSRW MBOX
+        load_byte(16'h0005, 8'h02);
+        release_reset;
+        wait_all_halt(5000);
+        check_true(mb_port_db_valid && mb_port_db_src == 8'd0,
+                   "the port has a doorbell pending, lowest source first");
+        check_true(mb_ipi == 4'b0000, "no core's IPI line rises");
+        for (i = 0; i < 4; i = i + 1) begin
+            @(negedge clk);
+            mb_port_take = 1'b1; mb_port_src = i[7:0];
+            @(negedge clk);
+            mb_port_take = 1'b0;
+        end
+        check_true(!mb_port_db_valid, "four deliveries empty the port");
+
+        // ================================================================
+        // TEST 13 — A chiplet's doorbell: external flag, branch, mask, ack
+        // ================================================================
+        // The port signals core 1.  Every core runs:
+        //   00: BR.EF +4          taken where a chiplet has signalled
+        //   02: LDI R6, 1 ; HALT
+        //   06: LDI R6, 2 ; CSRR R5, MBOX ; LDI R7, 16 ; CSRW IPIACK, R7
+        //       HALT
+        $display("\n=== TEST 13: chiplet doorbell and BR.EF ===");
+        hold_reset;
+        @(negedge clk);
+        mb_port_send = 1'b1; mb_port_dst = 8'd1;
+        @(negedge clk);
+        mb_port_send = 1'b0;
+        check_true(mb_ef == 4'b0010 && mb_ipi == 4'b0010,
+                   "the port's signal raises core 1's flag and IPI line");
+        load_byte(16'h0000, 8'h3E); load_byte(16'h0001, 8'h04); // BR.EF +4
+        load_byte(16'h0002, 8'h60); load_byte(16'h0003, 8'h60);
+        load_byte(16'h0004, 8'h01);                     // LDI R6, 1
+        load_byte(16'h0005, 8'h02);                     // HALT
+        load_byte(16'h0006, 8'h60); load_byte(16'h0007, 8'h60);
+        load_byte(16'h0008, 8'h02);                     // LDI R6, 2
+        load_byte(16'h0009, 8'hD5); load_byte(16'h000A, 8'h22); // CSRR R5, MBOX
+        load_byte(16'h000B, 8'h60); load_byte(16'h000C, 8'h70);
+        load_byte(16'h000D, 8'h10);                     // LDI R7, 16
+        load_byte(16'h000E, 8'hDF); load_byte(16'h000F, 8'h23); // CSRW IPIACK
+        load_byte(16'h0010, 8'h02);                     // HALT
+        release_reset;
+        wait_all_halt(5000);
+        check_reg(2'd1, 4'd6, 64'h2);
+        check_reg(2'd0, 4'd6, 64'h1);
+        check_reg(2'd3, 4'd6, 64'h1);
+        check_reg(2'd1, 4'd5, 64'h1_0000);
+        check_true(mb_ef == 4'b0000 && mb_ipi == 4'b0000,
+                   "the core's acknowledgement by port ID clears both");
 
         // ================================================================
         // SUMMARY

@@ -112,15 +112,14 @@ read memory the chiplet lent.
 
 A doorbell is a mailbox send. Each chiplet port is a mailbox participant
 beside the full cores, and a doorbell from a chiplet sets a pending bit that
-raises the existing inter-core interrupt. The mailbox already has a register
-path, reached by CSR instructions, that bypasses the bus, and the SoC ties
-it off today (`rtl/periph/mp64_mailbox.v`, `rtl/soc/mp64_soc.v`). Connected,
-it lets a core ring a doorbell with a CSR write alone.
+raises the existing inter-core interrupt. The mailbox's register path,
+reached by CSR instructions, bypasses the bus, so a core rings a doorbell
+with a CSR write alone (`rtl/periph/mp64_mailbox.v`, `rtl/soc/mp64_soc.v`).
 
-The mailbox's pending status is eight bits wide today, enough for the four
-full cores and four ports. It widens to cover every participant before a
-fifth port is built, and that one widening also serves the microcores if
-their launch comes to use the mailbox
+A core's pending mask is indexed by ID and is 64 bits wide through that
+path, which covers the 16 cores and 48 ports. The 8-bit `MBOX_STATUS`
+register shows IDs 0 to 7. The microcores' bits are reserved in the mask for
+the day their launch comes to use the mailbox
 ([microcore-kernels-plan.md](microcore-kernels-plan.md)).
 
 A pending doorbell from a chiplet also drives the core's external-flag
@@ -220,7 +219,7 @@ limit at the controller bound what a chiplet takes from Desk.
 
 - **MegaPad RTL:** the external-memory controller (chiplet ports as clients,
   their weights and limits, the address width), the mailbox (ports as
-  participants, the register path, the width of its pending status), the
+  participants, the register path, a pending mask indexed by ID), the
   external-flag wiring, System Info, and the new port bridge.
 - **BIOS:** bringing the link up, and the doorbell interrupt.
 - **KDOS:** the system module for chiplets, and an allocator for lendable
@@ -234,7 +233,8 @@ transaction for a core, always serves the tile engines first, and takes a
 32-bit address (`rtl/mem/mp64_extmem.v`).
 
 Of the RTL items, the port bridge, the client arbiter with its weights and
-limits, the mailbox's ports and the external-flag wiring are built.
+limits, the mailbox's ports, its register path and the external-flag wiring
+are built.
 [chiplet-link.md](chiplet-link.md) §8 lists what the RTL leaves for later.
 
 ## 10. Open

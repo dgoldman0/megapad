@@ -9,7 +9,8 @@
 //     register shows the port's bit, and the core acknowledges by port ID;
 //   - a core's signal to another core leaves the external flag low;
 //   - a port rings another port;
-//   - IDs that name no participant are ignored;
+//   - a core's pending mask is indexed by ID, with a port's bit at its ID;
+//   - IDs that name no participant, and a participant's own ID, are ignored;
 //   - a signal raised in the cycle its predecessor is cleared stays pending;
 //   - the CSR path reaches ports as the MMIO path does.
 //
@@ -178,9 +179,11 @@ module tb_mailbox_ports;
         port_send(0, 8'd1);
         check("core 1's IPI line rises", ipi_out == 4'b0010);
         check("core 1's external flag rises", ef_out == 4'b0010);
+        check("core 1's pending mask has the port's bit at its ID, 16",
+              csr_rdata[1*64 +: 64] == 64'h1_0000);
         mbox_read(8'd1, MBOX_STATUS);
-        check("core 1's status shows participant 4, the first port",
-              rd == 8'b0001_0000);
+        check("the 8-bit status, which holds IDs 0 to 7, stays clear",
+              rd == 8'd0);
         mbox_write(8'd1, MBOX_ACK, PORT0);
         check("acknowledging the port's ID lowers the IPI line",
               ipi_out == 4'b0000);
@@ -192,8 +195,9 @@ module tb_mailbox_ports;
         check("the external flag stays low", ef_out == 4'b0000);
         port_send(1, 8'd3);
         mbox_read(8'd3, MBOX_STATUS);
-        check("core 3's status shows core 0 and the second port",
-              rd == 8'b0010_0001);
+        check("core 3's status shows core 0", rd == 8'b0000_0001);
+        check("its pending mask shows core 0 and the second port at ID 17",
+              csr_rdata[3*64 +: 64] == 64'h2_0001);
         check("its external flag follows the port's bit", ef_out == 4'b1000);
         mbox_write(8'd3, MBOX_ACK, PORT1);
         check("acknowledging the port keeps the core's signal pending",
@@ -221,6 +225,13 @@ module tb_mailbox_ports;
         check("nothing becomes pending",
               ipi_out == 4'b0000 && port_db_valid == 2'b00);
 
+        $display("\nA participant's signal to itself");
+        mbox_write(8'd2, MBOX_SEND, 8'd2);
+        port_send(0, PORT0);
+        csr_write(1, CSR_MBOX, 64'd1);
+        check("nothing becomes pending",
+              ipi_out == 4'b0000 && port_db_valid == 2'b00);
+
         $display("\nA signal raised as its predecessor is cleared");
         mbox_write(8'd0, MBOX_SEND, PORT0);
         @(posedge clk);
@@ -242,7 +253,7 @@ module tb_mailbox_ports;
         port_take(0, 8'd3);
         port_send(1, 8'd3);
         check("the pending mask read by CSR shows the second port",
-              csr_rdata[3*64 +: 64] == 64'h20);
+              csr_rdata[3*64 +: 64] == 64'h2_0000);
         csr_write(3, CSR_IPIACK, {56'd0, PORT1});
         check("a CSR acknowledge by port ID clears it",
               ipi_out == 4'b0000 && ef_out == 4'b0000);

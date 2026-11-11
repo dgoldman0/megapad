@@ -140,15 +140,21 @@ succeed.
 | From the chiplet | `dst` (8) | ID of the participant the port signals |
 
 A doorbell is a mailbox signal and carries no data. A core rings a port by
-writing the port's ID to `MBOX_SEND`, and the port's pending bit stays set
-until the chiplet takes the doorbell, lowest source first. A chiplet's
-doorbell sets its bit in the target's pending mask, which raises the
-target core's IPI line and its external-flag input 0; the core clears it by
-writing the port's ID to `MBOX_ACK`. A port can signal another port the same
-way. Signals from one source to one target coalesce, so a doorbell means
-"look at your queues" and never counts events. A destination that names no
-participant is ignored. `MBOX_STATUS` shows the first eight participants,
-the full cores and then the ports.
+writing the port's ID to CSR `MBOX` (0x22), which takes no bus transaction,
+or to the `MBOX_SEND` register. The port's pending bit stays set until the
+chiplet takes the doorbell, lowest source first. A chiplet's doorbell sets
+its bit in the target's pending mask, which raises the target core's IPI
+line and its external-flag input 0, so the core can test for it with
+`BR.EF`. The core clears it by writing the port's ID to CSR `IPIACK` (0x23)
+or to `MBOX_ACK`. A port can signal another port the same way. Signals from
+one source to one target coalesce, so a doorbell means "look at your queues"
+and never counts events. A destination that names no participant, or names
+the sender itself, is ignored.
+
+A core's pending mask is indexed by ID: bit n is set while the participant
+with ID n has signalled the core. Reading CSR `MBOX` returns all 64 bits,
+with a port's bit at its ID. The 8-bit `MBOX_STATUS` register shows IDs 0
+to 7, which on the standard die are full cores and microcores.
 
 A sender writes its data and then rings, and a write is complete when its
 response returns, so a doorbell follows the data it announces.
@@ -213,10 +219,8 @@ to zero.
   with KDOS's system module for chiplets.
 - **Bursts.** A request moves one word. Several words per request would cut
   the round trips of a queue descriptor.
-- **Doorbells by CSR.** The mailbox's CSR path reaches ports, and the SoC
-  leaves that path unconnected, so a core rings a port through `MBOX_SEND`.
-- **The mailbox status width.** `MBOX_STATUS` holds eight participants. It
-  widens before a fifth port, or before microcores join the mailbox.
+- **IDs above 63.** The 64-bit pending mask covers IDs 0 to 63: the 16
+  cores and 48 ports. A die with more ports needs a wider mask.
 - **System Info.** The port count is read from `PORT_COUNT`. System Info
   gains the field together with the emulator and the simulator, whose
   register map it matches.

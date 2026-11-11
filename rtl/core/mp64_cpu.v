@@ -116,6 +116,8 @@ module mp64_cpu #(
     input  wire        irq_uart,
     input  wire        irq_nic,
     input  wire        irq_ipi,
+    // Pending mask of the mailbox, indexed by ID: the value CSR MBOX reads.
+    input  wire [63:0] ipi_pending,
     // RTC uptime in ms, compared with WAKE_MS while IDL waits
     input  wire [63:0] rtc_uptime_ms,
 
@@ -1652,6 +1654,8 @@ module mp64_cpu #(
                             CSR_MPU_LIMIT:   R[nib[2:0]] <= mpu_limit;
                             CSR_FPCSR:       R[nib[2:0]] <= {55'd0, fpcsr};
                             CSR_COREID:      R[nib[2:0]] <= {{(64-CORE_ID_W){1'b0}}, core_id};
+                            CSR_MBOX:        R[nib[2:0]] <= ipi_pending;
+                            CSR_IPIACK:      R[nib[2:0]] <= 64'd0;
                             CSR_NCORES:      R[nib[2:0]] <= 64'd16;  // updated at SoC level
                             CSR_IVEC_ID:     R[nib[2:0]] <= {56'd0, ivec_id};
                             CSR_TRAP_ADDR:   R[nib[2:0]] <= trap_addr;

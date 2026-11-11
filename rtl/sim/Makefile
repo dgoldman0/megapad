@@ -648,7 +648,8 @@ tb_multicore_smoke.vvp: tb_multicore_smoke.v $(CORE)/mp64_cpu.v $(FPU_SRC) \
                         $(CORE)/mp64_icache.v \
                         $(PRIM)/mp64_sram_sp.v $(PRIM)/mp64_sram_dp.v \
                         $(PRIM)/mp64_mul.v $(MEM)/mp64_memory.v \
-                        $(BUS)/mp64_bus.v $(CPU_FUNCS_DEP)
+                        $(BUS)/mp64_bus.v $(PERIPH)/mp64_mailbox.v \
+                        $(CPU_FUNCS_DEP)
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
 		$(filter-out $(CPU_FUNCS_DEP),$^)
 
