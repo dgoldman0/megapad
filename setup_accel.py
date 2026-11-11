@@ -85,6 +85,8 @@ ext = Extension(
         "shared/accel/keccak_bindings.h",
         "shared/accel/scalar_fp.h",
         "shared/accel/scalar_fp_bindings.h",
+        "shared/accel/mailbox_pending.h",
+        "shared/accel/chiplet_bindings.h",
         "emulator/accel/cpu/mp64/block_ir.h",
         "emulator/accel/cpu/mp64/decode.h",
         "emulator/accel/cpu/mp64/decode_impl.h",
