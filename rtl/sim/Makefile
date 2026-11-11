@@ -473,10 +473,14 @@ tb_nic_bus_dma.vvp: tb_nic_bus_dma.v $(PERIPH)/mp64_nic.v \
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- Mailbox ---
-mailbox: tb_mailbox.vvp
-	$(VVP) $<
+mailbox: tb_mailbox.vvp tb_mailbox_ports.vvp
+	$(VVP) tb_mailbox.vvp
+	$(VVP) tb_mailbox_ports.vvp
 
 tb_mailbox.vvp: tb_mailbox.v $(PERIPH)/mp64_mailbox.v
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
+tb_mailbox_ports.vvp: tb_mailbox_ports.v $(PERIPH)/mp64_mailbox.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- Chiplet port bridge ---
