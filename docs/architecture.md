@@ -1110,6 +1110,14 @@ registers above R15. The agreed direction, JIT-compiled kernel words, and
 the RTL work on registers are in
 [microcore-kernels-plan.md](microcore-kernels-plan.md).
 
+### Chiplet Ports
+
+Leviathan attaches chiplets, LM1 first, to MegaPad through chiplet ports. A
+chiplet works on ranges of external memory that MegaPad lends it, signals
+through the mailbox, and exchanges work through queues in that memory. The
+design is accepted and unbuilt, and it is recorded in
+[chiplet-interconnect-plan.md](chiplet-interconnect-plan.md).
+
 ### Privilege Model
 
 Full cores implement the two-level model below through private `PRIV` and MPU

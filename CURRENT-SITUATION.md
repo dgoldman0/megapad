@@ -140,6 +140,13 @@
 > repaired on the way. The record, with each commit and what it passed, is
 > [`docs/module-loading-and-storage-units-2026-11-11.md`](docs/module-loading-and-storage-units-2026-11-11.md).
 
+> **Chiplet interconnect — 2026-11-11:** The design for attaching chiplets to
+> MegaPad is accepted, with LM1 as the first chiplet. A chiplet works on
+> ranges of external memory that MegaPad lends it, signals through the
+> mailbox, and exchanges work through queues in that memory. Nothing is
+> implemented. The design is
+> [`docs/chiplet-interconnect-plan.md`](docs/chiplet-interconnect-plan.md).
+
 **Date:** 2026-03-07  
 **Branch:** `main`  
 **Status:** 1,797 tests passing, 35 skipped.

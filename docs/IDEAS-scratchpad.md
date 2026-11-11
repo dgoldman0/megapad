@@ -1147,6 +1147,8 @@ all prior work: banked memory, clean primitives, parameterized bus).
   external memory is present and shifts the HBW window).
 - If we ever go multi-die / chiplet, the memory model naturally extends:
   each die has its own local HBW banks, external memory is shared.
+  **2026-11-11:** the chiplet design that follows from this is
+  [chiplet-interconnect-plan.md](chiplet-interconnect-plan.md).
 - For the micro-core, consider whether KDOS should support
   **asymmetric multiprocessing** (AMP) where micro-cores run a stripped
   KDOS image, or just act as slaves that execute dispatched tasks only.
