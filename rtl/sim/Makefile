@@ -67,7 +67,7 @@ SOC_ELAB_SRC = $(wildcard $(SOC)/*.v $(BUS)/*.v $(MEM)/*.v $(CORE)/*.v \
         peripherals rtc disk_controller disk_bus_dma disk_lint \
         byte_dma_arbiter byte_dma_arbiter_lint disk_units_dma \
         crypto sha3_keccak wots aes ntt kem nic \
-        nic_lint nic_bus mailbox trng tile tile_ext fp_exact fma_unit fpu cpu_fp tacc tacc_cycles \
+        nic_lint nic_bus mailbox chiplet_port trng tile tile_ext fp_exact fma_unit fpu cpu_fp tacc tacc_cycles \
         tamac_integer_vectors_check tamac_fp_vectors_check tacc_vectors \
         opcodes qos cpu_micro multicore_smoke core_bus_mux tile_port_arbiter \
         tacc_transfer tacc_soc soc_smoke soc_wots soc_tile_icache soc_elaborate
@@ -339,7 +339,7 @@ tb_dict.vvp: tb_dict.v $(CORE)/mp64_cpu.v $(FPU_SRC) $(CORE)/mp64_dict.v \
 # ==========================================================================
 
 phase4: peripherals rtc disk_controller disk_bus_dma byte_dma_arbiter \
-        disk_units_dma crypto ntt kem nic mailbox \
+        disk_units_dma crypto ntt kem nic mailbox chiplet_port \
         trng tile tacc tacc_vectors
 	@echo ""
 	@echo "--- Phase 4 complete ---"
@@ -477,6 +477,13 @@ mailbox: tb_mailbox.vvp
 	$(VVP) $<
 
 tb_mailbox.vvp: tb_mailbox.v $(PERIPH)/mp64_mailbox.v
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
+# --- Chiplet port bridge ---
+chiplet_port: tb_chiplet_port.vvp
+	$(VVP) $<
+
+tb_chiplet_port.vvp: tb_chiplet_port.v $(SOC)/mp64_chiplet_port.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- TRNG: health test, latched failure, and faulted reads through the bus ---
