@@ -1,11 +1,14 @@
 # Chiplet interconnect
 
-Status: design accepted on 2026-11-11; nothing is implemented. This note
-records how chiplets attach to MegaPad in Leviathan: the contract every
-chiplet meets, how the chips share memory, how they signal and exchange
-work, and how LM1, the first chiplet, runs sandbox jobs and managed data
-over the link. It schedules no work. The release plan's side is decision 37
-and Parts 3d, 8 and 9 of `dev/PLAN.md` in fantasy-engine.
+Status: design accepted on 2026-11-11. MegaPad's side of the link is in RTL
+and simulated, and [chiplet-link.md](chiplet-link.md) specifies it. The
+chiplet's side, the emulator's and simulator's models and the software are
+still to come. This note records how chiplets attach to MegaPad in
+Leviathan: the contract every chiplet meets, how the chips share memory, how
+they signal and exchange work, and how LM1, the first chiplet, runs sandbox
+jobs and managed data over the link. It schedules no work. The release
+plan's side is decision 37 and Parts 3d, 8 and 9 of `dev/PLAN.md` in
+fantasy-engine.
 
 ## 1. A chiplet works on memory lent to it
 
@@ -33,10 +36,10 @@ builds one; a second chiplet then needs a MegaPad die built with two ports,
 under the same design.
 
 The interface sets no port limit of its own. Each port takes an ID from the
-8-bit set that already numbers MegaPad's cores and bus requesters
-(`MP64_CORE_ID_BITS` in `rtl/pkg/mp64_pkg.vh`), so its ceiling is the ID
-space the chip already has. System Info reports the number of ports built,
-and software sizes its tables from that count. What bounds a real chip is
+8-bit set that already numbers MegaPad's cores (`MP64_CORE_ID_BITS` in
+`rtl/pkg/mp64_pkg.vh`), so its ceiling is the ID space the chip already
+has. The port window reports the number of ports built, and software sizes
+its tables from that count. What bounds a real chip is
 physical: each port takes die edge and package space, and every chiplet
 shares MegaPad's external memory, which points to one to four ports on a
 modest chip.
@@ -228,14 +231,14 @@ shared memory passes through it. Today it moves one 64-bit word per
 transaction for a core, always serves the tile engines first, and takes a
 32-bit address (`rtl/mem/mp64_extmem.v`).
 
+Of the RTL items, the port bridge, the client arbiter with its weights and
+limits, the mailbox's ports and the external-flag wiring are built.
+[chiplet-link.md](chiplet-link.md) §8 lists what the RTL leaves for later.
+
 ## 10. Open
 
 - **LM1's memory and size** (the release plan's D8), which set the lane
   count and the load on the external-memory controller.
-- **Sub-word writes to shared memory.** The controller writes a byte or a
-  half-word by reading and rewriting its word, so two chips writing parts of
-  one word can lose an update. Either shared structures use whole words, or
-  the controller makes that sequence atomic.
 - **Lendable memory in Akashic.** Zero-copy depends on the data handed to a
   job being created in lendable memory, and the job service's allocation has
   yet to be read with that in mind.

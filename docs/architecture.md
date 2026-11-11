@@ -67,6 +67,7 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
     │   0x0C00     │  PCM Audio Output    │ │
     │   0x0D00     │  Storage Controller 2│ │
     │   0x0D80     │  Storage Controller 3│ │
+    │   0x0E00     │  Chiplet Ports       │ │
     │              └──────────────────────┘ │
     └───────────────────────────────────────┘
 ```
@@ -164,6 +165,7 @@ device occupies a small range:
 | **PCM Audio Output** | `+0x0C00` | 32 bytes | One-shot PCM16 DMA contract; emulator capture/playback implemented, physical DMA/I2S bridge pending |
 | **Storage 2** | `+0x0D00` | 37 bytes | The same controller: the system disk, its medium write-protected |
 | **Storage 3** | `+0x0D80` | 37 bytes | The same controller: the user disk |
+| **Chiplet Ports** | `+0x0E00` | 256 bytes | RTL only: port count, port select, and the selected port's lent ranges, control, refusal record and sideband ([chiplet-link.md](chiplet-link.md)) |
 
 The crypto register, ownership, and capability assignments are normative in
 [`crypto-interface-contract.md`](crypto-interface-contract.md). System Info
@@ -1115,8 +1117,16 @@ the RTL work on registers are in
 Leviathan attaches chiplets, LM1 first, to MegaPad through chiplet ports. A
 chiplet works on ranges of external memory that MegaPad lends it, signals
 through the mailbox, and exchanges work through queues in that memory. The
-design is accepted and unbuilt, and it is recorded in
+design is recorded in
 [chiplet-interconnect-plan.md](chiplet-interconnect-plan.md).
+
+MegaPad's side of a link is in the RTL: a port bridge that checks each of
+the chiplet's memory requests against the lent ranges, a client arbiter that
+admits the ports to external memory beside the core path, and the mailbox,
+where each port is a participant with an ID that follows the cores'. The
+register window, the link's channels and the sideband are specified in
+[chiplet-link.md](chiplet-link.md). The emulator and the simulator have no
+model of a chiplet port yet, so the window faults there.
 
 ### Privilege Model
 

@@ -143,9 +143,12 @@
 > **Chiplet interconnect — 2026-11-11:** The design for attaching chiplets to
 > MegaPad is accepted, with LM1 as the first chiplet. A chiplet works on
 > ranges of external memory that MegaPad lends it, signals through the
-> mailbox, and exchanges work through queues in that memory. Nothing is
-> implemented. The design is
+> mailbox, and exchanges work through queues in that memory. The design is
 > [`docs/chiplet-interconnect-plan.md`](docs/chiplet-interconnect-plan.md).
+> MegaPad's side of the link is in the RTL and simulated: the port bridge,
+> the external-memory client arbiter, the mailbox's ports and the SoC wiring,
+> specified in [`docs/chiplet-link.md`](docs/chiplet-link.md). The emulator
+> and the simulator have no model of it yet.
 
 > **RTL TRNG health monitor — 2026-11-11:** The repetition count test in
 > `rtl/periph/mp64_trng.v` fails a run at its 10th identical raw byte, where
