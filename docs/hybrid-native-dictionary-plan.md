@@ -145,13 +145,17 @@ headers, services, or MMIO. Two exports can be called sequentially by semantic
 source and share caller-owned data through their explicit buffer rules. This
 is useful composition without requiring general native Forth linkage.
 
-Reuse the existing finite session ceilings: 64 issued routines, 1 MiB padded
-code per routine, 16 MiB total code, 4 MiB private control storage, 64 KiB stack
-per routine, and existing per-call/outer-dispatch instruction limits. Revoked
-entries do not reset issuance accounting to allow an unbounded load/unload
-loop. An aggregate package and all referenced images must be validated before
-publication, with bounded file and declaration counts. Loader paths and hashes
-remain ordinary host provenance, not guest execution authority.
+A package adds no fixed ceiling to the bounds routines have today. Each
+routine passes at most eight cells each way, its code is padded to whole
+instruction-cache lines and takes its space from the dictionary, and a
+buffer rule may state a maximum. The session's machine quantum bounds a host
+turn, and its optional per-dispatch instruction budget bounds a run. A
+rolled-back routine returns its dictionary space and its publication, while
+the owner keeps the declaration of every routine it ever registered; a
+package loader that unloads must release those too. An aggregate package and
+all referenced images must be validated before publication, with bounded
+file and declaration counts. Loader paths and hashes remain ordinary host
+provenance, not guest execution authority.
 
 All package exports publish as one session-owner transaction. Preflight names,
 geometry, budgets, code/control reservations, and host table capacity; stage
@@ -278,8 +282,9 @@ compile state, bracket mode, temporary interpreted IF definitions, errors,
 and their existing rollback behavior remain reference-dispatcher work.
 
 Immediate metadata and installed directives are not the complete BIOS
-metacompiler vocabulary. The current core installer does not publish guest
-`IMMEDIATE`, `POSTPONE`, `COMPILE,`, or `LITERAL` words. D4 must either admit and
+metacompiler vocabulary. The current core installer publishes `LITERAL` as a
+directive but no guest `IMMEDIATE` or `POSTPONE`, and neither it nor the BIOS
+publishes `COMPILE,`. D4 must either admit and
 qualify each required source word explicitly or report the narrower supported
 compiler profile. An emission backend does not fill these source-language
 gaps automatically. In particular, marking the most recent definition
@@ -327,7 +332,7 @@ when an implementation touches their contracts:
 | Dictionary layout, identity, rewind and allocation | `tests/simulator/test_dictionary.py`, `tests/simulator/test_dictionary_numeric_rollback.py`, `tests/simulator/test_dictionary_leases.py` |
 | Compiler, defining words, immediate/source state | `tests/simulator/test_runtime.py`, `tests/simulator/test_compiler_extensions.py`, `tests/simulator/test_bios_evaluator.py`, `tests/simulator/test_bios_source_primitives.py` |
 | Semantic execution, original budgets and retained slots | `tests/simulator/test_native_execution.py`, `tests/simulator/test_native_stack_pointers.py`, `tests/simulator/test_stacks.py`, `tests/simulator/test_stack_snapshots.py` |
-| Machine publication, admission and composition | `tests/test_native_hybrid_routine.py`, `tests/test_hybrid_runtime.py`, `tests/test_hybrid_registration_failure.py`, `tests/test_hybrid_manifest.py` |
+| Machine publication, admission and composition | `tests/test_hybrid_routines.py`, `tests/test_hybrid_manifest.py` |
 | Application ownership and source bootstrap | `tests/test_hybrid_session.py`, `tests/test_unified_launcher.py` |
 
 New D1/D2 tests must cover same-name shadowing, exact XT reuse, stale inspection
