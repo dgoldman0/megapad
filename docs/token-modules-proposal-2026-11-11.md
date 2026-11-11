@@ -706,11 +706,15 @@ fits none.
 | | Linked | System volume |
 |---|---:|---:|
 | dictionary bytes compared | 8,926,044 | 9,979,792 |
-| bytes that differ | 2,726 | 2,315 |
+| bytes that differ | 2,638 | 2,381 |
 | in a cell that holds an address the load allocated | 582, in 162 cells | 977, in 324 cells |
-| in the data of a listed word of the loader, the allocator or a filesystem | 2,142, in 31 words | 1,336, in 85 words |
+| in the data of a listed word of the loader, the allocator or a filesystem | 2,054, in 31 words | 1,402, in 85 words |
 | in the data of a word set from a clock (`DNS-ID`) | 2 | 2 |
 | unexplained | 0 | 0 |
+
+The count of state bytes moves a little from run to run: the boot volume's
+directory holds each file's time, and the two images of a pair are built
+seconds apart. The other two classes do not move.
 
 **Addresses.** The loader's buffer for a token file is smaller than for
 its source, so memory that a module allocates while it loads lies at
@@ -750,9 +754,17 @@ listed word that explains nothing, and a structure or an output that
 differs.
 
 The reports of the run of record are kept in Akashic's
-`local_testing/evidence/token-equivalence-20261111.md`. The test is four
+`local_testing/evidence/token-equivalence-20261111.md`, with the result
+lines of the journeys below. The test is four
 builds and four emulator boots, about four minutes and 1.7 GiB at its
 peak, and runs alone.
+
+### The journeys
+
+The physical Desktop journey, built with `--token-modules`, passed three
+ways at MegaPad 3f2a162b and Akashic af437d6a: the linked Desktop in the
+simulator, the Desktop on a system volume of token files alone in the
+simulator, and the linked Desktop in hybrid mode.
 
 ### Would taking the source's working space make the dictionaries identical?
 
@@ -762,7 +774,7 @@ would be empty: 582 bytes in the linked boot and 977 with the system
 volume. The other two classes would stay. The loader's cursors, the
 filesystems' caches and the checksums describe the files that were read,
 which are other files, and the clock is the clock. The dictionaries would
-still differ in 2,144 and 1,338 bytes, less the few cells among them that
+still differ in 2,056 and 1,404 bytes, less the few cells among them that
 only hold the allocator's own marks.
 
 What it would cost, from the recorded boots:
