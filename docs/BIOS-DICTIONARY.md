@@ -134,18 +134,26 @@ operation's status:
 1. Rejects source longer than 255 bytes before copying or executing any
    prefix.  Legacy `EVALUATE` prints the error and records status 2 rather
    than silently truncating.
-2. Saves the caller's live input, `>IN`, and `var_tib_len` in the static
+2. Returns at once for a line that holds no token, or whose first token
+   begins with a backslash: such a line does nothing, and source files are
+   full of them.  Nothing is saved or copied and the caller's input is
+   untouched.  The top-level status clear, the nested-failure gate, the
+   depth check and the length check have all run by then, so the line gets
+   the statuses any line gets.  While a false `[IF]` is skipping, every
+   line is scanned for the words that end the skip, and such a line takes
+   the steps below like any other.
+3. Saves the caller's live input, `>IN`, and `var_tib_len` in the static
    frame indexed by evaluator depth: the TIB's bytes up to the caller's
    active length and the one after them, copied a cell at a time.  Every
    word that reads the TIB stops at the active length, so the bytes past it
    carry nothing the caller comes back to.  This context survives a
    return-stack exception unwind.
-3. Copies the source string into TIB, sets `>IN` = 0, and sets
+4. Copies the source string into TIB, sets `>IN` = 0, and sets
    `var_tib_len` = len.
-4. Runs the interpreter loop.  The first undefined token is copied to a
+5. Runs the interpreter loop.  The first undefined token is copied to a
    stable diagnostic buffer, its zero-based column is recorded, and the
    rest of that input line is not executed.
-5. Restores the caller's saved bytes, `>IN`, and `var_tib_len`, then removes
+6. Restores the caller's saved bytes, `>IN`, and `var_tib_len`, then removes
    the depth frame.  Nested evaluator failure is sticky and propagates to
    the outer checked call.
 

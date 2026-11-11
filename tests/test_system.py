@@ -12271,6 +12271,99 @@ class TestBIOSHardening(unittest.TestCase):
         self.assertRegex(text, r"\[SQ-LAST\s+0\s+\]")
         self.assertRegex(text, r"\[SQ-CLOSED\s+3\s+\]")
 
+    # -- Blank and comment lines --
+
+    def test_comment_and_blank_lines_do_nothing(self):
+        """A line with no token, or whose first token starts with a
+        backslash, leaves the stacks, the depth and its caller's line as
+        they were, and a top-level one still starts with a fresh status."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE CM-H  0 CM-H !",
+            ': CM-NEST  S" \\ 99 CM-H !" EVALUATE  S"    " EVALUATE'
+            '  S" \\" EVALUATE ;',
+            "CM-NEST 5 CM-H +!",
+            'S" \\ a comment" EVALUATE-CHECKED '
+            'CR ." [CM-COMMENT " . DEPTH . EVAL-DEPTH @ . ." ]"',
+            'S"     " EVALUATE-CHECKED '
+            'CR ." [CM-BLANK " . DEPTH . EVAL-DEPTH @ . ." ]"',
+            'S"   \\ indented" EVALUATE-CHECKED CR ." [CM-INDENT " . ." ]"',
+            'S" \\comment-token 7 CM-H +!" EVALUATE-CHECKED '
+            'CR ." [CM-TOKEN " . CM-H @ . ." ]"',
+            'S" NO_SUCH_WORD" EVALUATE-CHECKED DROP',
+            'S" \\ after a failure" EVALUATE-CHECKED '
+            'CR ." [CM-FRESH " . EVAL-STATUS @ . ." ]"',
+        ])
+        self.assertRegex(text, r"\[CM-COMMENT\s+0\s+0\s+0\s+\]")
+        self.assertRegex(text, r"\[CM-BLANK\s+0\s+0\s+0\s+\]")
+        self.assertRegex(text, r"\[CM-INDENT\s+0\s+\]")
+        self.assertRegex(text, r"\[CM-TOKEN\s+0\s+5\s+\]")
+        self.assertRegex(text, r"\[CM-FRESH\s+0\s+0\s+\]")
+
+    def test_a_comment_line_costs_no_frame_and_no_copy(self):
+        """A comment or blank line returns before the caller's input is
+        saved and before the line is copied in."""
+        def per_call(mark: str) -> float:
+            definitions = [
+                # Sixty spaces, with the comment's backslash where MARK
+                # puts it.
+                "CREATE EV-LINE 60 ALLOT  EV-LINE 60 32 FILL  " + mark,
+                ": EV-COMMENT  EV-LINE 60 EVALUATE ;",
+                ": EV-MANY  2000 0 DO EV-COMMENT LOOP ;",
+                ": EV-NONE  2000 0 DO LOOP ;",
+            ]
+            return (
+                self._steps(definitions + ["EV-MANY"])
+                - self._steps(definitions + ["EV-NONE"])
+            ) / 2000
+
+        # The long way saved a frame, copied the 60 bytes in and parsed a
+        # token: over a thousand instructions.  Here the cost is the
+        # spaces stepped over to reach the backslash, or the line's end.
+        self.assertLess(per_call("92 EV-LINE C!"), 150)
+        self.assertLess(per_call("92 EV-LINE 8 + C!"), 250)
+        self.assertLess(per_call(""), 700)
+
+    def test_a_comment_line_under_a_pending_conditional_skip_is_scanned(self):
+        """While [IF] skips, a line that starts with a backslash is scanned
+        for the words that end the skip, as every line is."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE SK-H  0 SK-H !  VARIABLE SK-G  0 SK-G !",
+            ': SK  S" 0 [IF] 1 SK-H !" EVALUATE',
+            '      S" \\ [THEN] 2 SK-H !" EVALUATE',
+            '      S" 4 SK-G +!" EVALUATE',
+            '      S" [THEN] 8 SK-G +!" EVALUATE ;',
+            "SK",
+            'CR ." [SKIP " SK-H @ . SK-G @ . ." ]"',
+        ])
+        self.assertRegex(text, r"\[SKIP\s+2\s+12\s+\]")
+
+    def test_a_comment_line_at_the_depth_limit_reports_the_limit(self):
+        """A comment line one level too deep is refused like any other."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": DL  ( n -- )  DUP 0= IF",
+            '        DROP S" \\ at the limit" EVALUATE-CHECKED',
+            '        CR ." [DL " . EVAL-DEPTH @ . ." ]" EXIT',
+            '    THEN 1- S" DL" EVALUATE ;',
+            "15 DL",
+            "16 DL",
+        ], max_steps=5_000_000)
+        self.assertRegex(text, r"\[DL\s+0\s+15\s+\]")
+        self.assertRegex(text, r"\[DL\s+3\s+16\s+\]")
+        self.assertIn("depth limit", text)
+
+    def test_an_overlong_comment_line_is_still_refused(self):
+        """A comment of more than 255 bytes ends with the length status."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "HERE 256 32 FILL  92 HERE C!",
+            'HERE 256 EVALUATE-CHECKED '
+            'CR ." [LONG-COMMENT " . EVAL-DEPTH @ . ." ]"',
+        ])
+        self.assertRegex(text, r"\[LONG-COMMENT\s+2\s+0\s+\]")
+
     # -- Dictionary full guard --
 
     def test_dictionary_full_guard(self):

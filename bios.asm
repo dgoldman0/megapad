@@ -11584,6 +11584,38 @@ w_eval_check_depth:
     ldi r1, 255
     cmp r12, r1
     lbrgt w_eval_len_err
+    ; A line with no token, or whose first token starts with a backslash,
+    ; does nothing, and files are full of them.  It ends here: after every
+    ; check above, so its statuses are the ones any line gets, and before
+    ; the caller's input is saved and the line copied.  While a false [IF]
+    ; is skipping, every line is scanned for the words that end the skip,
+    ; so such a line then takes the ordinary way.
+    ldi64 r11, var_cond_skip_type
+    ldn r1, r11
+    cmpi r1, 0
+    brne w_eval_enter
+    mov r11, r9               ; scan pointer
+    mov r1, r12               ; bytes left
+w_eval_blank_scan:
+    cmpi r1, 0
+    breq w_eval_blank         ; spaces only, or nothing at all
+    ld.b r0, r11
+    cmpi r0, 0x20
+    brne w_eval_blank_token
+    inc r11
+    dec r1
+    br w_eval_blank_scan
+w_eval_blank_token:
+    cmpi r0, 0x5C             ; '\'
+    brne w_eval_enter
+w_eval_blank:
+    ; Give back the depth taken above; nothing else was touched.
+    ldi64 r11, var_eval_depth
+    ldn r1, r11
+    dec r1
+    str r11, r1
+    ret.l
+w_eval_enter:
     ; Preserve the caller's input context outside RSP.  A later
     ; source-level THROW may unwind the CPU stacks before w_eval_done runs.
     ldi64 r11, eval_input_save

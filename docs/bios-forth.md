@@ -481,7 +481,7 @@ text.
 |------|-------------|-------------|
 | `SOURCE` | `( -- addr len )` | Address and length of the current input buffer. |
 | `>IN` | `( -- addr )` | Address of the variable holding the current parse position within `SOURCE`. |
-| `EVALUATE` | `( addr len -- )` | Interpret one string as Forth source.  Retains the legacy stack effect but records any error in `EVAL-STATUS`.  Input above 255 bytes is rejected, never truncated.  Nested calls preserve and restore the caller's input, its length, and `>IN`: the bytes up to the active length, which are all that any parsing word reads. |
+| `EVALUATE` | `( addr len -- )` | Interpret one string as Forth source.  Retains the legacy stack effect but records any error in `EVAL-STATUS`.  Input above 255 bytes is rejected, never truncated.  A line with no token, or whose first token begins with a backslash, returns at once, unless a false `[IF]` is skipping.  Nested calls preserve and restore the caller's input, its length, and `>IN`: the bytes up to the active length, which are all that any parsing word reads. |
 | `EVALUATE-CHECKED` | `( addr len -- status )` | BIOS primitive returning status 0–3.  After KDOS defines `CATCH`, KDOS deliberately shadows this name with the transaction-safe wrapper described below, which also returns status 5. |
 | `EVALUATE-FINISH` | `( -- status )` | End a multi-line checked operation, returning 4 if compiler or cross-line conditional state is unfinished, otherwise 0. |
 | `EVALUATOR-RESET` | `( -- )` | Clear compiler bookkeeping after the caller invokes `DICT-ROLLBACK` with its saved `HERE/LATEST` pair. Does not roll back the dictionary itself, erase diagnostics, or change the enclosing evaluator depth. |
