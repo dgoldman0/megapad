@@ -259,6 +259,27 @@ privilege enforcement itself works; only the trap *delivery path* differs.
 
 DNS/network tests requiring live internet are skipped in CI.
 
+### The kernel dictionary can grow into the Bank-0 heap (found 2026-11-11)
+
+`HEAP-SETUP` in `kdos.f` bases the Bank-0 heap `LATE-DICT-RESERVE`, 32 KiB,
+above `HERE`. Source compiled into the kernel dictionary after that, before
+`ENTER-USERLAND`, is checked only against the data stack: the BIOS's
+`dict_preflight` knows no heap while no dictionary bounds are installed, and
+KDOS's `?DICT-ROOM` tests the heap's base only where code calls it. More than
+32 KiB of such source is therefore written over the heap's first blocks, and
+nothing faults.
+
+An Akashic boot is not affected. Its `autoexec.f` begins with
+`ENTER-USERLAND`, so every module compiles into extended memory, inside the
+bounds `DICT-BOUNDS!` installs. Three of Akashic's image test scripts did
+load a library into the kernel dictionary of a 2 MiB machine and ran it
+27 KiB through the heap's base; they passed until a change moved the bytes
+that landed there, and they now enter userland first.
+
+No fix is designed. The BIOS already faults on a bounded dictionary, so one
+direction is for KDOS to bound the kernel dictionary at the heap's base once
+the heap exists.
+
 ## 3. Architecture at a glance
 
 The standard disk boot compiles `kdos.f` into Bank 0.  KDOS then runs
