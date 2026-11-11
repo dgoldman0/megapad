@@ -1,8 +1,10 @@
 # Chiplet interconnect
 
 Status: design accepted on 2026-11-11. MegaPad's side of the link is in RTL
-and simulated, and [chiplet-link.md](chiplet-link.md) specifies it. The
-chiplet's side, the emulator's and simulator's models and the software are
+and simulated, and [chiplet-link.md](chiplet-link.md) specifies it. LM1's
+end, a link endpoint and a boot fetch, is in LM1's RTL (`rtl/link/` in the
+lm1 repository), where a bench joins it to MegaPad's RTL; its wiring into
+LM1's cluster, the emulator's and simulator's models and the software are
 still to come. This note records how chiplets attach to MegaPad in
 Leviathan: the contract every chiplet meets, how the chips share memory, how
 they signal and exchange work, and how LM1, the first chiplet, runs sandbox

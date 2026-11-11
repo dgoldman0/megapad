@@ -147,8 +147,9 @@
 > [`docs/chiplet-interconnect-plan.md`](docs/chiplet-interconnect-plan.md).
 > MegaPad's side of the link is in the RTL and simulated: the port bridge,
 > the external-memory client arbiter, the mailbox's ports and the SoC wiring,
-> specified in [`docs/chiplet-link.md`](docs/chiplet-link.md). The emulator
-> and the simulator have no model of it yet.
+> specified in [`docs/chiplet-link.md`](docs/chiplet-link.md). LM1's end of
+> the link is in LM1's RTL, and a bench there joins the two sides. The
+> emulator and the simulator have no model of the link yet.
 
 > **RTL TRNG health monitor — 2026-11-11:** The repetition count test in
 > `rtl/periph/mp64_trng.v` fails a run at its 10th identical raw byte, where

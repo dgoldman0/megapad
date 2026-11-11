@@ -1,7 +1,9 @@
 # Chiplet link
 
-Status: MegaPad's side is implemented in RTL and simulated; the emulator and
-the simulator have no model of it yet. This is the specification of the link
+Status: MegaPad's side is implemented in RTL and simulated, and LM1's end
+(`rtl/link/` in the lm1 repository) passes a bench joined to it; the
+emulator and the simulator have no model of the link yet. This is the
+specification of the link
 between MegaPad and one chiplet, as far as hardware defines it: the port's
 identity, its register window, the channels that cross the link, and the
 sideband. The design it follows, with its reasons, is
