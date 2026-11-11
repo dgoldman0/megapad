@@ -421,3 +421,23 @@ def test_the_ef_flags_field_still_takes_the_flag_branch():
     system = _machine(full_cores=2)
     system.cores[1].ef_flags = 1
     assert _run_on(system, 1, _EF_PROBE).regs[4] == 1
+
+
+def test_a_small_core_reads_and_acknowledges_a_ports_signal_by_csr():
+    system = _machine(full_cores=1, clusters=1)
+    native = system._native_system
+    port_id = system.first_chiplet_port_id
+    small = 2                               # a small core's ID
+    assert native.chiplet_port_send(0, small)
+
+    core = _run_on(system, small, f"""
+        csrr r4, {CSR_MBOX}
+        ldi64 r1, {port_id}
+        csrw {CSR_IPIACK}, r1
+        csrr r5, {CSR_MBOX}
+        halt
+    """)
+    assert core.core_id == small
+    assert core.regs[4:6] == [1 << port_id, 0]
+    assert not native.ef_line(small)
+    assert not core.irq_ipi

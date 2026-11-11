@@ -55,8 +55,8 @@ module mp64_cluster #(
     input  wire [N-1:0] irq_timer,
     input  wire [N-1:0] irq_ipi,
 
-    // === External flags (shared to all micro-cores) ===
-    input  wire [3:0]  ef_flags,
+    // === External flags (EF1-EF4), four per micro-core ===
+    input  wire [N*4-1:0] ef_flags,
 
     // === Tile memory port (512-bit, to SoC memory subsystem) ===
     output wire        tile_req,
@@ -315,7 +315,7 @@ module mp64_cluster #(
 
                 .irq_timer  (irq_timer[gi]),
                 .irq_ipi    (irq_ipi[gi]),
-                .ef_flags   (ef_flags),
+                .ef_flags   (ef_flags[gi*4 +: 4]),
 
                 .mul_req    (mc_mul_req[gi]),
                 .mul_op     (mc_mul_op [gi*4  +: 4]),

@@ -300,8 +300,11 @@ module mp64_soc #(
     wire        irq_uart_w;
     wire        irq_nic_w;
     wire        irq_timer_w;
-    wire [NUM_CORES-1:0] ipi_out;
-    wire [NUM_CORES-1:0] mbox_ef;   // a chiplet's doorbell is pending
+    // One line per core, the full cores first and then the small cores of
+    // each cluster, in the order of their IDs.
+    wire [NUM_CORES + NUM_CLUSTERS*CORES_PER_CLUSTER - 1:0] ipi_out;
+    // A chiplet's doorbell is pending for the core.
+    wire [NUM_CORES + NUM_CLUSTERS*CORES_PER_CLUSTER - 1:0] mbox_ef;
     wire [NUM_CORES*64-1:0] mbox_csr_rdata;  // each core's pending mask
     // RTC uptime, which every full core compares with its WAKE_MS
     wire [63:0] rtc_uptime_w;
@@ -570,8 +573,16 @@ module mp64_soc #(
     wire         cluster_tacc_xfer_stall_cycle[0:NUM_CLUSTERS-1];
 
     genvar ki;
+    genvar kc;
     generate
         for (ki = 0; ki < NUM_CLUSTERS; ki = ki + 1) begin : g_cluster
+            // The mailbox's flag line of each small core is its flag 0.
+            wire [CORES_PER_CLUSTER*4-1:0] cluster_ef;
+            for (kc = 0; kc < CORES_PER_CLUSTER; kc = kc + 1) begin : g_ef
+                assign cluster_ef[kc*4 +: 4] =
+                    {3'b000,
+                     mbox_ef[NUM_CORES + ki*CORES_PER_CLUSTER + kc]};
+            end
             mp64_cluster #(
                 .N             (CORES_PER_CLUSTER),
                 .CLUSTER_ID_BASE(NUM_CORES[7:0] +
@@ -602,8 +613,9 @@ module mp64_soc #(
                 .bus_error   (cluster_bus_error[ki]),
 
                 .irq_timer   ({CORES_PER_CLUSTER{irq_timer_w}}),
-                .irq_ipi     ({CORES_PER_CLUSTER{1'b0}}),
-                .ef_flags    (4'b0000),
+                .irq_ipi     (ipi_out[NUM_CORES + ki*CORES_PER_CLUSTER
+                                      +: CORES_PER_CLUSTER]),
+                .ef_flags    (cluster_ef),
 
                 // Tile memory ports
                 .tile_req    (cluster_tile_req[ki]),

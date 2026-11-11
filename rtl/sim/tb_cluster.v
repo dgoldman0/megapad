@@ -171,7 +171,7 @@ module tb_cluster;
 
         .irq_timer  ({N{1'b0}}),
         .irq_ipi    ({N{1'b0}}),
-        .ef_flags   (4'b0000),
+        .ef_flags   ({(N*4){1'b0}}),
 
         // Tile memory ports
         .tile_req   (tile_req),

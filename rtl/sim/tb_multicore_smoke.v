@@ -149,8 +149,14 @@ module tb_multicore_smoke;
     wire [MP64_NUM_CORES_DEFAULT*8-1:0]  mb_csr_addr;
     wire [MP64_NUM_CORES_DEFAULT*64-1:0] mb_csr_wdata;
     wire [MP64_NUM_CORES_DEFAULT*64-1:0] mb_csr_rdata;
-    wire [MP64_NUM_CORES_DEFAULT-1:0]    mb_ipi;
-    wire [MP64_NUM_CORES_DEFAULT-1:0]    mb_ef;
+    // The mailbox has a line for each of the sixteen cores; this bench
+    // builds the four full cores.
+    wire [15:0]                          mb_ipi_all;
+    wire [15:0]                          mb_ef_all;
+    wire [MP64_NUM_CORES_DEFAULT-1:0]    mb_ipi =
+        mb_ipi_all[MP64_NUM_CORES_DEFAULT-1:0];
+    wire [MP64_NUM_CORES_DEFAULT-1:0]    mb_ef =
+        mb_ef_all[MP64_NUM_CORES_DEFAULT-1:0];
     reg         mb_port_send, mb_port_take;
     reg  [7:0]  mb_port_dst, mb_port_src;
     wire        mb_port_db_valid;
@@ -164,13 +170,13 @@ module tb_multicore_smoke;
         .req(1'b0), .addr(12'd0), .wdata(8'd0), .wen(1'b0),
         .rdata(), .ack(),
         .requester_valid(1'b0), .requester_id(8'd0),
-        .ipi_out(mb_ipi),
+        .ipi_out(mb_ipi_all),
         .csr_ipi_wen(mb_csr_wen), .csr_ipi_addr(mb_csr_addr),
         .csr_ipi_wdata(mb_csr_wdata), .csr_ipi_rdata(mb_csr_rdata),
         .port_send_valid(mb_port_send), .port_send_dst(mb_port_dst),
         .port_take_valid(mb_port_take), .port_take_src(mb_port_src),
         .port_db_valid(mb_port_db_valid), .port_db_src(mb_port_db_src),
-        .ef_out(mb_ef)
+        .ef_out(mb_ef_all)
     );
 
     // ========================================================================

@@ -61,9 +61,11 @@ A kernel word:
 
 Launch, completion and the calling convention still need a design (section
 6). They can use the cluster barrier, the mailbox or a scratchpad flag. The
-SoC currently ties every microcore's IPI input to zero (`irq_ipi` in
-`rtl/soc/mp64_soc.v`), while the emulator's mailbox reaches every core, so
-the launch design must either work without microcore IPIs or wire them.
+mailbox reaches every core in the RTL as it does in the emulator: since
+2026-11-11 each microcore has its IPI line and its external-flag line from
+the mailbox, and sends, reads its status and acknowledges through the
+mailbox's registers. A microcore has no CSR path to the mailbox, so each of
+those is a bus access through its cluster's port.
 
 ## 3. Two gaps to close
 
@@ -145,8 +147,8 @@ contract.
 ## 6. Open questions
 
 - The kernel vocabulary, and how the compiler checks a word against it.
-- Launch and completion: barrier, mailbox or scratchpad flag, given that the
-  RTL ties microcore IPIs off.
+- Launch and completion: barrier, mailbox or scratchpad flag. The mailbox
+  now reaches microcores in the RTL.
 - Whether microcores can fetch from the scratchpad on every backend (idea 1).
 - Which fetch ideas to build, and in what order, once a first kernel is
   measured.

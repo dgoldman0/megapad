@@ -250,8 +250,8 @@ clock.
   simulator's one core reaches the mailbox by MMIO alone and polls
   `MBOX_STATUS` for a port's signal. Its ports are absent unless the address
   space is created with `chiplet_ports`, and its first port has the ID 1.
-- The emulator's mailbox counts the small cores, so a port's signal reaches
-  a small core there. The RTL's mailbox serves the full cores (section 9).
+- A small core in the emulator reaches the mailbox by CSR as a full core
+  does. In the RTL it uses the mailbox's registers (section 9).
 
 A chiplet's model implements `shared/accel/chiplet_module.h`, a C interface
 that carries what the link carries: one memory request with the link's size
@@ -270,11 +270,14 @@ and a worked example of the interface.
   descriptors in queues in lent memory. Both are formats in memory, defined
   with KDOS's system module for chiplets, whose general words are listed in
   [chiplet-interconnect-plan.md](chiplet-interconnect-plan.md) §9.
-- **Small cores in the RTL's mailbox.** A port's signal reaches any core by
-  its ID in the emulator. The RTL's mailbox has the full cores as
-  participants, and the SoC ties the small cores' IPI and flag inputs low.
-  Wiring them was accepted on 2026-11-11: the mailbox gains the small cores,
-  each cluster a flag input per core, and a small core a way to acknowledge.
+- **A CSR path for small cores.** A port's signal reaches a small core as
+  it reaches a full core: the mailbox raises that core's IPI line and its
+  flag input. A small core rings, reads `MBOX_STATUS` and acknowledges
+  through the mailbox's registers, each a bus access through its cluster's
+  port, where a full core uses CSRs that take none. Its 8-bit status holds
+  IDs 0 to 7, so on the standard die it learns of a port's signal from the
+  flag and acknowledges the port it rang. A CSR path in the cluster would
+  remove the bus accesses and show it the whole mask.
 - **Reads at the edge of a range.** A read returns the aligned 64-bit word,
   so a byte read at the edge of a range whose bounds are unaligned also
   returns up to seven bytes that lie beyond the range. Software lends

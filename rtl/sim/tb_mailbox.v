@@ -35,7 +35,11 @@ module tb_mailbox;
     wire        ack;
     reg         requester_valid;
     reg  [MP64_CORE_ID_BITS-1:0] requester_id;
-    wire [MP64_NUM_CORES_DEFAULT-1:0]     ipi_out;
+    // The mailbox has a line for each of the sixteen cores; these cases
+    // concern the four full cores.
+    wire [15:0]                           ipi_all;
+    wire [MP64_NUM_CORES_DEFAULT-1:0]     ipi_out =
+        ipi_all[MP64_NUM_CORES_DEFAULT-1:0];
 
     mp64_mailbox #(
         .N_CORES(MP64_NUM_CORES_DEFAULT),
@@ -51,7 +55,7 @@ module tb_mailbox;
         .ack          (ack),
         .requester_valid(requester_valid),
         .requester_id (requester_id),
-        .ipi_out      (ipi_out),
+        .ipi_out      (ipi_all),
         .csr_ipi_wen  ({MP64_NUM_CORES_DEFAULT{1'b0}}),
         .csr_ipi_addr ({MP64_NUM_CORES_DEFAULT*8{1'b0}}),
         .csr_ipi_wdata({MP64_NUM_CORES_DEFAULT*64{1'b0}}),

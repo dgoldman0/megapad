@@ -438,6 +438,26 @@ module tb_soc_chiplet;
         check("acknowledging the port clears the line and the flag",
               u_soc.ipi_out == 1'b0 && u_soc.mbox_ef == 1'b0);
 
+        // The SoC has one full core and two small cores, IDs 1 and 2.
+        @(posedge clk);
+        cl_dbr_valid <= 1'b1; cl_dbr_dst <= 8'd2;
+        @(posedge clk);
+        cl_dbr_valid <= 1'b0;
+        repeat (2) @(posedge clk);
+        check("the chiplet's signal to a small core raises that core's lines",
+              u_soc.ipi_out == 3'b100 && u_soc.mbox_ef == 3'b100);
+        check("they reach the small core in its cluster",
+              u_soc.g_cluster[0].u_cluster.irq_ipi == 2'b10 &&
+              u_soc.g_cluster[0].u_cluster.ef_flags == 8'h10);
+        force u_soc.bus_mmio_requester_valid = 1'b1;
+        force u_soc.bus_mmio_requester_id    = 8'd2;
+        mmio_access(MB_ACK, {56'd0, PORT_ID}, 1'b1, BUS_BYTE);
+        release u_soc.bus_mmio_requester_valid;
+        release u_soc.bus_mmio_requester_id;
+        repeat (2) @(posedge clk);
+        check("the small core's acknowledgement clears them",
+              u_soc.ipi_out == 3'b000 && u_soc.mbox_ef == 3'b000);
+
         $display("\nReturn to reset");
         reg_wr(P_CTRL, 64'h0B);
         check("the chiplet's reset line falls", cl_sb_rst_n == 1'b0);

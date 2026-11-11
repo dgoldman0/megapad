@@ -35,7 +35,8 @@ module tb_mailbox_ports;
     wire [7:0]  rdata;
     wire        ack;
     reg  [IDB-1:0] requester_id;
-    wire [NC-1:0]  ipi_out, ef_out;
+    // One line per core: the four full cores, then twelve small cores.
+    wire [15:0]    ipi_out, ef_out;
 
     reg  [NC-1:0]     csr_wen;
     reg  [NC*8-1:0]   csr_addr;
@@ -218,9 +219,8 @@ module tb_mailbox_ports;
         port_take(1, 8'd1);
 
         $display("\nIDs that name no participant");
-        mbox_write(8'd0, MBOX_SEND, 8'd5);       // a microcore's ID
         mbox_write(8'd0, MBOX_SEND, 8'd18);      // beyond the last port
-        port_send(0, 8'd9);
+        port_send(0, 8'd18);
         port_send(0, 8'd200);
         check("nothing becomes pending",
               ipi_out == 4'b0000 && port_db_valid == 2'b00);
@@ -260,6 +260,40 @@ module tb_mailbox_ports;
         csr_write(3, CSR_MBOX, 64'h1_0000_0010);
         check("a CSR send whose upper bits are set names no participant",
               port_db_valid == 2'b00);
+
+        $display("\nThe small cores");
+        port_send(0, 8'd9);
+        check("a port's signal raises a small core's IPI line and flag",
+              ipi_out == 16'h0200 && ef_out == 16'h0200);
+        mbox_read(8'd9, MBOX_STATUS);
+        check("its 8-bit status, which holds IDs 0 to 7, stays clear",
+              rd == 8'h00);
+        mbox_write(8'd9, MBOX_ACK, PORT0);
+        check("the small core acknowledges the port through the registers",
+              ipi_out == 16'h0000 && ef_out == 16'h0000);
+
+        mbox_write(8'd9, MBOX_SEND, PORT0);
+        check("a small core rings a port, which sees its ID",
+              port_db_valid[0] && port_db_src[0 +: IDB] == 8'd9);
+        port_take(0, 8'd9);
+
+        mbox_write(8'd0, MBOX_SEND, 8'd12);
+        check("a full core's signal raises a small core's IPI line alone",
+              ipi_out == 16'h1000 && ef_out == 16'h0000);
+        mbox_read(8'd12, MBOX_STATUS);
+        check("the small core's status shows the full core", rd == 8'h01);
+        mbox_write(8'd12, MBOX_ACK, 8'd0);
+        check("and its acknowledgement lowers the line", ipi_out == 16'h0000);
+
+        mbox_write(8'd5, MBOX_SEND, 8'd1);
+        check("a small core's signal reaches a full core",
+              ipi_out == 16'h0002 && csr_rdata[1*64 +: 64] == 64'h20);
+        csr_write(1, CSR_IPIACK, 64'd5);
+        check("which acknowledges it by CSR", ipi_out == 16'h0000);
+
+        mbox_write(8'd7, MBOX_SEND, 8'd7);
+        check("a small core's signal to itself is ignored",
+              ipi_out == 16'h0000);
 
         $display("\n========================================");
         $display("  Mailbox Port Tests: %0d PASSED, %0d FAILED",
