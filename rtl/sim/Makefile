@@ -70,7 +70,8 @@ SOC_ELAB_SRC = $(wildcard $(SOC)/*.v $(BUS)/*.v $(MEM)/*.v $(CORE)/*.v \
         nic_lint nic_bus mailbox chiplet_port trng tile tile_ext fp_exact fma_unit fpu cpu_fp tacc tacc_cycles \
         tamac_integer_vectors_check tamac_fp_vectors_check tacc_vectors \
         opcodes qos cpu_micro multicore_smoke core_bus_mux tile_port_arbiter \
-        tacc_transfer tacc_soc soc_smoke soc_wots soc_tile_icache soc_elaborate
+        tacc_transfer tacc_soc soc_smoke soc_wots soc_tile_icache soc_chiplet \
+        soc_elaborate
 
 all: phase1 phase2 phase3 phase4 phase5
 	@echo ""
@@ -623,7 +624,8 @@ tb_tile_write_ack.vvp: tb_tile_write_ack.v $(GPU)/mp64_tacc.v \
 # ==========================================================================
 
 phase5: qos multicore_smoke core_bus_mux tile_port_arbiter tacc_soc \
-        tacc_transfer soc_smoke soc_wots soc_tile_icache soc_elaborate
+        tacc_transfer soc_smoke soc_wots soc_tile_icache soc_chiplet \
+        soc_elaborate
 	@echo ""
 	@echo "--- Phase 5 complete ---"
 
@@ -690,6 +692,15 @@ tb_soc_smoke.vvp: tb_soc_smoke.v $(SOC_ELAB_SRC) ../pkg/mp64_pkg.vh \
                   $(CPU_FUNCS_DEP)
 	$(IVERILOG) $(IVFLAGS) $(INC) -s tb_soc_smoke -o $@ \
 		tb_soc_smoke.v $(SOC_ELAB_SRC)
+
+# --- A chiplet port inside the SoC: lent memory, doorbells, sideband ---
+soc_chiplet: tb_soc_chiplet.vvp
+	$(VVP) $<
+
+tb_soc_chiplet.vvp: tb_soc_chiplet.v $(SOC_ELAB_SRC) ../pkg/mp64_pkg.vh \
+                    $(CPU_FUNCS_DEP)
+	$(IVERILOG) $(IVFLAGS) $(INC) -s tb_soc_chiplet -o $@ \
+		tb_soc_chiplet.v $(SOC_ELAB_SRC)
 
 # --- Integrated WOTS requester, Bank0, and shared Keccak transaction ---
 soc_wots: tb_soc_wots.vvp

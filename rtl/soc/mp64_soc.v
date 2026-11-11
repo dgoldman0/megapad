@@ -38,7 +38,12 @@ module mp64_soc #(
     // 512-byte sectors.
     parameter [31:0] SETTINGS_TOTAL_SECTORS = 32'd2048,
     parameter [31:0] SYSTEM_TOTAL_SECTORS = 32'd65536,
-    parameter [31:0] USER_TOTAL_SECTORS = 32'd65536
+    parameter [31:0] USER_TOTAL_SECTORS = 32'd65536,
+    // Chiplet ports built on this die, and the lent ranges each one holds.
+    // Port vectors keep one element when no port is built; it is unused then.
+    parameter NUM_CHIPLET_PORTS = 1,
+    parameter CHIPLET_RANGES    = 8,
+    parameter CP_W = (NUM_CHIPLET_PORTS > 0) ? NUM_CHIPLET_PORTS : 1
 )(
     input  wire        sys_clk,
     input  wire        sys_rst_n,
@@ -102,6 +107,39 @@ module mp64_soc #(
     input  wire [7:0]  nic_rx_data,
     output wire        nic_rx_ready,
     input  wire        nic_link_up,
+
+    // === Chiplet links, one per port (docs/chiplet-link.md) ===
+    // Memory request channel (chiplet -> MegaPad) and its response
+    input  wire [CP_W-1:0]    cl_rq_valid,
+    output wire [CP_W-1:0]    cl_rq_ready,
+    input  wire [CP_W*64-1:0] cl_rq_addr,
+    input  wire [CP_W*64-1:0] cl_rq_wdata,
+    input  wire [CP_W-1:0]    cl_rq_wen,
+    input  wire [CP_W*2-1:0]  cl_rq_size,
+    input  wire [CP_W-1:0]    cl_rq_cancel,
+    output wire [CP_W-1:0]    cl_rs_valid,
+    input  wire [CP_W-1:0]    cl_rs_ready,
+    output wire [CP_W*64-1:0] cl_rs_rdata,
+    output wire [CP_W*2-1:0]  cl_rs_code,
+    // Doorbell to the chiplet, and from it
+    output wire [CP_W-1:0]    cl_dbt_valid,
+    input  wire [CP_W-1:0]    cl_dbt_ready,
+    output wire [CP_W*8-1:0]  cl_dbt_src,
+    input  wire [CP_W-1:0]    cl_dbr_valid,
+    output wire [CP_W-1:0]    cl_dbr_ready,
+    input  wire [CP_W*8-1:0]  cl_dbr_dst,
+    // Sideband
+    input  wire [CP_W-1:0]    cl_sb_present,
+    output wire [CP_W-1:0]    cl_sb_rst_n,
+    output wire [CP_W-1:0]    cl_sb_stop_req,
+    input  wire [CP_W-1:0]    cl_sb_stopped,
+    input  wire [CP_W-1:0]    cl_sb_ready,
+    output wire [CP_W-1:0]    cl_sb_id_req,
+    output wire [CP_W*8-1:0]  cl_sb_id_index,
+    input  wire [CP_W-1:0]    cl_sb_id_ack,
+    input  wire [CP_W*64-1:0] cl_sb_id_data,
+    output wire [CP_W*64-1:0] cl_sb_boot_addr,
+    output wire [CP_W*64-1:0] cl_sb_boot_len,
 
     // === Debug ===
     output wire [7:0]  debug_leds
@@ -261,6 +299,7 @@ module mp64_soc #(
     wire        irq_nic_w;
     wire        irq_timer_w;
     wire [NUM_CORES-1:0] ipi_out;
+    wire [NUM_CORES-1:0] mbox_ef;   // a chiplet's doorbell is pending
     // RTC uptime, which every full core compares with its WAKE_MS
     wire [63:0] rtc_uptime_w;
 
@@ -301,6 +340,8 @@ module mp64_soc #(
     localparam integer NUM_GLOBAL_CORES =
         NUM_CORES + NUM_CLUSTERS * CORES_PER_CLUSTER;
     localparam [63:0] NUM_ALL_CORES   = NUM_GLOBAL_CORES;
+    // Chiplet ports take the IDs that follow the cores'.
+    localparam [MP64_CORE_ID_BITS-1:0] CHIPLET_ID_BASE = NUM_GLOBAL_CORES;
     localparam [63:0] HBW_SIZE_BYTES  = 3 * BANK0_SIZE;           // 3 HBW banks
     localparam [31:0] EXT_MEM_BASE    = MP64_EXT_MEM_BASE;
     // The external allocation window ends where the distinct VRAM window
@@ -406,7 +447,8 @@ module mp64_soc #(
 
                 // Info
                 .mem_size_bytes  (MEM_SIZE_BYTES),
-                .ef_flags        (4'b0000)
+                // External flag 0: a chiplet has signalled this core.
+                .ef_flags        ({3'b000, mbox_ef[ci]})
             );
 
             // MEX execution keeps the CPU data port quiescent until the
@@ -952,18 +994,89 @@ module mp64_soc #(
     wire        extmem_phy_cancel;
     wire [3:0]  extmem_phy_burst_len;
 
+    // ---- 64-bit port clients: the core path, then one per chiplet port ----
+    wire        xm_req;
+    wire [63:0] xm_addr;
+    wire [63:0] xm_wdata;
+    wire        xm_wen;
+    wire [1:0]  xm_size;
+    wire [63:0] xm_rdata;
+    wire        xm_ack;
+    wire        xm_error;
+
+    // The chiplet bridges' client ports (Chiplet Ports section below).
+    wire [CP_W-1:0]    cp_m_req;
+    wire [CP_W*64-1:0] cp_m_addr;
+    wire [CP_W*64-1:0] cp_m_wdata;
+    wire [CP_W-1:0]    cp_m_wen;
+    wire [CP_W*2-1:0]  cp_m_size;
+    wire [CP_W-1:0]    cp_m_ack;
+    wire [CP_W-1:0]    cp_m_error;
+    wire [CP_W*8-1:0]  cp_m_weight;
+    wire [CP_W*16-1:0] cp_m_bwlimit;
+    reg  [7:0]         ext_core_weight;   // the core path's weight
+
+    generate
+        if (NUM_CHIPLET_PORTS > 0) begin : g_extmem_arb
+            localparam integer XM_CLIENTS = 1 + NUM_CHIPLET_PORTS;
+            localparam integer XM_BITS    = $clog2(XM_CLIENTS);
+            wire [XM_CLIENTS-1:0] xc_ack;
+            wire [XM_CLIENTS-1:0] xc_error;
+
+            mp64_extmem_arb #(
+                .N_CLIENTS   (XM_CLIENTS),
+                .CLIENT_BITS (XM_BITS)
+            ) u_extmem_arb (
+                .clk      (sys_clk),
+                .rst_n    (sys_rst_n),
+                .c_req    ({cp_m_req,   mem_ext_req}),
+                .c_addr   ({cp_m_addr,  mem_ext_addr}),
+                .c_wdata  ({cp_m_wdata, mem_ext_wdata}),
+                .c_wen    ({cp_m_wen,   mem_ext_wen}),
+                .c_size   ({cp_m_size,  mem_ext_size}),
+                .c_ack    (xc_ack),
+                .c_error  (xc_error),
+                .c_rdata  (mem_ext_rdata),
+                .c_weight ({cp_m_weight,  ext_core_weight}),
+                .c_bwlimit({cp_m_bwlimit, 16'd0}),
+                .ext_req  (xm_req),
+                .ext_addr (xm_addr),
+                .ext_wdata(xm_wdata),
+                .ext_wen  (xm_wen),
+                .ext_size (xm_size),
+                .ext_rdata(xm_rdata),
+                .ext_ack  (xm_ack),
+                .ext_error(xm_error)
+            );
+            assign mem_ext_ack = xc_ack[0];
+            assign cp_m_ack    = xc_ack[XM_CLIENTS-1:1];
+            assign cp_m_error  = xc_error[XM_CLIENTS-1:1];
+        end else begin : g_no_extmem_arb
+            assign xm_req        = mem_ext_req;
+            assign xm_addr       = mem_ext_addr;
+            assign xm_wdata      = mem_ext_wdata;
+            assign xm_wen        = mem_ext_wen;
+            assign xm_size       = mem_ext_size;
+            assign mem_ext_rdata = xm_rdata;
+            assign mem_ext_ack   = xm_ack;
+            assign cp_m_ack      = {CP_W{1'b0}};
+            assign cp_m_error    = {CP_W{1'b0}};
+        end
+    endgenerate
+
     mp64_extmem u_extmem (
         .clk       (sys_clk),
         .rst_n     (sys_rst_n),
 
-        // CPU port (forwarded from memory subsystem)
-        .cpu_req   (mem_ext_req),
-        .cpu_addr  (mem_ext_addr[31:0]),
-        .cpu_wdata (mem_ext_wdata),
-        .cpu_wen   (mem_ext_wen),
-        .cpu_size  (mem_ext_size),
-        .cpu_rdata (mem_ext_rdata),
-        .cpu_ack   (mem_ext_ack),
+        // 64-bit port: the core path and the chiplet ports, arbitrated above
+        .cpu_req   (xm_req),
+        .cpu_addr  (xm_addr[31:0]),
+        .cpu_wdata (xm_wdata),
+        .cpu_wen   (xm_wen),
+        .cpu_size  (xm_size),
+        .cpu_rdata (xm_rdata),
+        .cpu_ack   (xm_ack),
+        .cpu_error (xm_error),
 
         // Tile port
         .tile_req  (ext_tile_req),
@@ -1628,6 +1741,12 @@ module mp64_soc #(
         (bus_mmio_size == BUS_BYTE) &&
         (!bus_mmio_wen || (mmio_addr_eff[4:0] <= 5'h0a));
     wire mmio_sel_rtc    = bus_mmio_req && (mmio_addr_eff[11:5] == 7'b1011000); // 0xB00-0xB1F
+    // Chiplet ports: 0xE00-0xEFF, 64-bit registers reached by aligned 64-bit
+    // accesses.  Any other shape goes unanswered and ends as a bus fault.
+    wire mmio_sel_chiplet = bus_mmio_req && (NUM_CHIPLET_PORTS > 0) &&
+                            (mmio_addr_eff[11:8] == 4'hE) &&
+                            (bus_mmio_size == BUS_DWORD) &&
+                            (mmio_addr_eff[2:0] == 3'b000);
 
     // SysInfo occupies the exact half-open range [0x300, 0x370).  Reject a
     // misaligned or crossing request as one bus access instead of allowing the
@@ -1818,13 +1937,174 @@ module mp64_soc #(
         .phy_link_up  (nic_link_up)
     );
 
+    // ========================================================================
+    // Chiplet Ports
+    // ========================================================================
+    // One bridge per port.  The window at CHIPLET_BASE holds three shared
+    // registers and, from +0x80, the register block of the selected port:
+    //   +0x00 PORT_COUNT   [7:0] ports built  [15:8] ID of port 0
+    //                      [23:16] lent ranges per port         (read-only)
+    //   +0x08 PORT_SEL     port whose block appears at +0x80
+    //   +0x10 EXT_CORE_QOS [7:0] the core path's weight at external memory
+    //   +0x80 ...          the selected port's block (mp64_chiplet_port.v)
+    // PORT_SEL is shared, so the software that owns the window serializes
+    // its use.
+    localparam integer CP_RANGE_BITS =
+        (CHIPLET_RANGES <= 1) ? 1 : $clog2(CHIPLET_RANGES);
+
+    reg  [7:0]         chiplet_port_sel;
+    wire [CP_W*64-1:0] cp_reg_rdata;
+    wire [CP_W-1:0]    cp_mb_db_valid;
+    wire [CP_W*MP64_CORE_ID_BITS-1:0] cp_mb_db_src;
+    wire [CP_W-1:0]    cp_mb_take_valid;
+    wire [CP_W*MP64_CORE_ID_BITS-1:0] cp_mb_take_src;
+    wire [CP_W-1:0]    cp_mb_send_valid;
+    wire [CP_W*MP64_CORE_ID_BITS-1:0] cp_mb_send_dst;
+
+    wire chiplet_sel_shared = mmio_sel_chiplet && !mmio_addr_eff[7];
+    wire chiplet_sel_block  = mmio_sel_chiplet &&  mmio_addr_eff[7];
+
+    always @(posedge sys_clk) begin
+        if (!sys_rst_n) begin
+            chiplet_port_sel <= 8'd0;
+            ext_core_weight  <= 8'd1;
+        end else if (chiplet_sel_shared && bus_mmio_wen) begin
+            case (mmio_addr_eff[6:3])
+                4'h1: chiplet_port_sel <= bus_mmio_wdata[7:0];
+                4'h2: ext_core_weight  <= bus_mmio_wdata[7:0];
+                default: ;
+            endcase
+        end
+    end
+
+    genvar cpi;
+    generate
+        for (cpi = 0; cpi < CP_W; cpi = cpi + 1) begin : g_chiplet_port
+            if (NUM_CHIPLET_PORTS > 0) begin : g_port
+                mp64_chiplet_port #(
+                    .RANGES     (CHIPLET_RANGES),
+                    .RANGE_BITS (CP_RANGE_BITS),
+                    .PORT_ID    (CHIPLET_ID_BASE + cpi),
+                    .EXT_BASE   ({32'd0, EXT_MEM_BASE}),
+                    .EXT_LIMIT  (EXT_MEM_LIMIT)
+                ) u_port (
+                    .clk          (sys_clk),
+                    .rst_n        (sys_rst_n),
+                    .reg_sel      (chiplet_sel_block &&
+                                   chiplet_port_sel == cpi),
+                    .reg_wen      (bus_mmio_wen),
+                    .reg_idx      (mmio_addr_eff[6:3]),
+                    .reg_wdata    (bus_mmio_wdata),
+                    .reg_rdata    (cp_reg_rdata[cpi*64 +: 64]),
+                    .lk_rq_valid  (cl_rq_valid[cpi]),
+                    .lk_rq_ready  (cl_rq_ready[cpi]),
+                    .lk_rq_addr   (cl_rq_addr[cpi*64 +: 64]),
+                    .lk_rq_wdata  (cl_rq_wdata[cpi*64 +: 64]),
+                    .lk_rq_wen    (cl_rq_wen[cpi]),
+                    .lk_rq_size   (cl_rq_size[cpi*2 +: 2]),
+                    .lk_rq_cancel (cl_rq_cancel[cpi]),
+                    .lk_rs_valid  (cl_rs_valid[cpi]),
+                    .lk_rs_ready  (cl_rs_ready[cpi]),
+                    .lk_rs_rdata  (cl_rs_rdata[cpi*64 +: 64]),
+                    .lk_rs_code   (cl_rs_code[cpi*2 +: 2]),
+                    .lk_dbt_valid (cl_dbt_valid[cpi]),
+                    .lk_dbt_ready (cl_dbt_ready[cpi]),
+                    .lk_dbt_src   (cl_dbt_src[cpi*8 +: 8]),
+                    .lk_dbr_valid (cl_dbr_valid[cpi]),
+                    .lk_dbr_ready (cl_dbr_ready[cpi]),
+                    .lk_dbr_dst   (cl_dbr_dst[cpi*8 +: 8]),
+                    .sb_present   (cl_sb_present[cpi]),
+                    .sb_rst_n     (cl_sb_rst_n[cpi]),
+                    .sb_stop_req  (cl_sb_stop_req[cpi]),
+                    .sb_stopped   (cl_sb_stopped[cpi]),
+                    .sb_ready     (cl_sb_ready[cpi]),
+                    .sb_id_req    (cl_sb_id_req[cpi]),
+                    .sb_id_index  (cl_sb_id_index[cpi*8 +: 8]),
+                    .sb_id_ack    (cl_sb_id_ack[cpi]),
+                    .sb_id_data   (cl_sb_id_data[cpi*64 +: 64]),
+                    .sb_boot_addr (cl_sb_boot_addr[cpi*64 +: 64]),
+                    .sb_boot_len  (cl_sb_boot_len[cpi*64 +: 64]),
+                    .m_req        (cp_m_req[cpi]),
+                    .m_addr       (cp_m_addr[cpi*64 +: 64]),
+                    .m_wdata      (cp_m_wdata[cpi*64 +: 64]),
+                    .m_wen        (cp_m_wen[cpi]),
+                    .m_size       (cp_m_size[cpi*2 +: 2]),
+                    .m_ack        (cp_m_ack[cpi]),
+                    .m_error      (cp_m_error[cpi]),
+                    .m_rdata      (xm_rdata),
+                    .m_weight     (cp_m_weight[cpi*8 +: 8]),
+                    .m_bwlimit    (cp_m_bwlimit[cpi*16 +: 16]),
+                    .mb_db_valid  (cp_mb_db_valid[cpi]),
+                    .mb_db_src    (cp_mb_db_src[
+                        cpi*MP64_CORE_ID_BITS +: MP64_CORE_ID_BITS]),
+                    .mb_take_valid(cp_mb_take_valid[cpi]),
+                    .mb_take_src  (cp_mb_take_src[
+                        cpi*MP64_CORE_ID_BITS +: MP64_CORE_ID_BITS]),
+                    .mb_send_valid(cp_mb_send_valid[cpi]),
+                    .mb_send_dst  (cp_mb_send_dst[
+                        cpi*MP64_CORE_ID_BITS +: MP64_CORE_ID_BITS])
+                );
+            end else begin : g_no_port
+                assign cp_reg_rdata[cpi*64 +: 64]    = 64'd0;
+                assign cl_rq_ready[cpi]              = 1'b0;
+                assign cl_rs_valid[cpi]              = 1'b0;
+                assign cl_rs_rdata[cpi*64 +: 64]     = 64'd0;
+                assign cl_rs_code[cpi*2 +: 2]        = 2'd0;
+                assign cl_dbt_valid[cpi]             = 1'b0;
+                assign cl_dbt_src[cpi*8 +: 8]        = 8'd0;
+                assign cl_dbr_ready[cpi]             = 1'b0;
+                assign cl_sb_rst_n[cpi]              = 1'b0;
+                assign cl_sb_stop_req[cpi]           = 1'b0;
+                assign cl_sb_id_req[cpi]             = 1'b0;
+                assign cl_sb_id_index[cpi*8 +: 8]    = 8'd0;
+                assign cl_sb_boot_addr[cpi*64 +: 64] = 64'd0;
+                assign cl_sb_boot_len[cpi*64 +: 64]  = 64'd0;
+                assign cp_m_req[cpi]                 = 1'b0;
+                assign cp_m_addr[cpi*64 +: 64]       = 64'd0;
+                assign cp_m_wdata[cpi*64 +: 64]      = 64'd0;
+                assign cp_m_wen[cpi]                 = 1'b0;
+                assign cp_m_size[cpi*2 +: 2]         = 2'd0;
+                assign cp_m_weight[cpi*8 +: 8]       = 8'd0;
+                assign cp_m_bwlimit[cpi*16 +: 16]    = 16'd0;
+                assign cp_mb_take_valid[cpi]         = 1'b0;
+                assign cp_mb_take_src[
+                    cpi*MP64_CORE_ID_BITS +: MP64_CORE_ID_BITS] =
+                        {MP64_CORE_ID_BITS{1'b0}};
+                assign cp_mb_send_valid[cpi]         = 1'b0;
+                assign cp_mb_send_dst[
+                    cpi*MP64_CORE_ID_BITS +: MP64_CORE_ID_BITS] =
+                        {MP64_CORE_ID_BITS{1'b0}};
+            end
+        end
+    endgenerate
+
+    reg [63:0] chiplet_rdata;
+    always @(*) begin
+        chiplet_rdata = 64'd0;
+        if (chiplet_sel_block) begin
+            if (chiplet_port_sel < NUM_CHIPLET_PORTS)
+                chiplet_rdata = cp_reg_rdata[chiplet_port_sel*64 +: 64];
+        end else begin
+            case (mmio_addr_eff[6:3])
+                4'h0: chiplet_rdata = {40'd0, CHIPLET_RANGES[7:0],
+                                       CHIPLET_ID_BASE,
+                                       NUM_CHIPLET_PORTS[7:0]};
+                4'h1: chiplet_rdata = {56'd0, chiplet_port_sel};
+                4'h2: chiplet_rdata = {56'd0, ext_core_weight};
+                default: chiplet_rdata = 64'd0;
+            endcase
+        end
+    end
+
     // Mailbox
     wire [7:0]  mbox_rdata_raw;
     wire        mbox_ack;
 
     mp64_mailbox #(
         .N_CORES        (NUM_CORES),
-        .N_GLOBAL_CORES (NUM_GLOBAL_CORES)
+        .N_GLOBAL_CORES (NUM_GLOBAL_CORES),
+        .N_PORTS        (NUM_CHIPLET_PORTS),
+        .PORT_ID_BASE   (CHIPLET_ID_BASE)
     ) u_mailbox (
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
@@ -1840,7 +2120,14 @@ module mp64_soc #(
         .csr_ipi_wen  ({NUM_CORES{1'b0}}),
         .csr_ipi_addr ({NUM_CORES*8{1'b0}}),
         .csr_ipi_wdata({NUM_CORES*64{1'b0}}),
-        .csr_ipi_rdata()
+        .csr_ipi_rdata(),
+        .port_send_valid(cp_mb_send_valid),
+        .port_send_dst  (cp_mb_send_dst),
+        .port_take_valid(cp_mb_take_valid),
+        .port_take_src  (cp_mb_take_src),
+        .port_db_valid  (cp_mb_db_valid),
+        .port_db_src    (cp_mb_db_src),
+        .ef_out         (mbox_ef)
     );
 
     // ---- Crypto accelerators (64-bit data interfaces) ----------------------
@@ -2088,6 +2375,7 @@ module mp64_soc #(
         if (mmio_sel_wots)    begin mmio_rdata_mux = wots_rdata;  mmio_ack_mux = wots_ack;  end
         if (mmio_sel_rtc)     begin mmio_rdata_mux = {56'd0, rtc_rdata_raw}; mmio_ack_mux = rtc_ack; end
         if (mmio_sel_port_bridge) begin mmio_rdata_mux = port_bridge_rdata; mmio_ack_mux = 1'b1; end
+        if (mmio_sel_chiplet) begin mmio_rdata_mux = chiplet_rdata; mmio_ack_mux = 1'b1; end
     end
 
     assign bus_mmio_rdata = mmio_rdata_mux;

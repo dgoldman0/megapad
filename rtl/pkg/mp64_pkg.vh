@@ -460,6 +460,7 @@ localparam [11:0] NTT_BASE        = 12'h8C0;
 localparam [11:0] KEM_BASE        = 12'h900;
 localparam [11:0] TRNG_BASE       = 12'h800;
 localparam [11:0] FB_BASE         = 12'hA00;
+localparam [11:0] CHIPLET_BASE    = 12'hE00;  // chiplet ports
 
 // --- UART registers ---
 localparam [3:0] UART_TX      = 4'h0;

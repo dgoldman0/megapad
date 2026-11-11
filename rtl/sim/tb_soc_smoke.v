@@ -115,6 +115,36 @@ module tb_soc_smoke;
         .nic_rx_ready  (nic_rx_ready),
         .nic_link_up   (1'b0),
 
+        // Chiplet link: no chiplet is attached here, so the port stays idle.
+        .cl_rq_valid   (1'b0),
+        .cl_rq_ready   (),
+        .cl_rq_addr    (64'd0),
+        .cl_rq_wdata   (64'd0),
+        .cl_rq_wen     (1'b0),
+        .cl_rq_size    (2'd0),
+        .cl_rq_cancel  (1'b0),
+        .cl_rs_valid   (),
+        .cl_rs_ready   (1'b0),
+        .cl_rs_rdata   (),
+        .cl_rs_code    (),
+        .cl_dbt_valid  (),
+        .cl_dbt_ready  (1'b0),
+        .cl_dbt_src    (),
+        .cl_dbr_valid  (1'b0),
+        .cl_dbr_ready  (),
+        .cl_dbr_dst    (8'd0),
+        .cl_sb_present (1'b0),
+        .cl_sb_rst_n   (),
+        .cl_sb_stop_req(),
+        .cl_sb_stopped (1'b0),
+        .cl_sb_ready   (1'b0),
+        .cl_sb_id_req  (),
+        .cl_sb_id_index(),
+        .cl_sb_id_ack  (1'b0),
+        .cl_sb_id_data (64'd0),
+        .cl_sb_boot_addr(),
+        .cl_sb_boot_len(),
+
         .debug_leds    (debug_leds)
     );
 

@@ -57,6 +57,8 @@
 // Coding standard: Verilog-2001, sync reset, non-blocking assigns.
 //
 
+`include "mp64_pkg.vh"
+
 module mp64_chiplet_port #(
     parameter        RANGES     = 8,      // lent ranges this port holds
     parameter        RANGE_BITS = 3,      // ceil(log2(RANGES)), at least 1
@@ -132,8 +134,6 @@ module mp64_chiplet_port #(
     output wire        mb_send_valid,  // ring a participant as this port
     output wire [7:0]  mb_send_dst
 );
-
-    `include "mp64_pkg.vh"
 
     // Response codes on the link.
     localparam [1:0] LK_OK        = 2'd0;
