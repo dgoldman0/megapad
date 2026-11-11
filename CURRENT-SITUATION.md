@@ -147,6 +147,13 @@
 > implemented. The design is
 > [`docs/chiplet-interconnect-plan.md`](docs/chiplet-interconnect-plan.md).
 
+> **RTL TRNG health monitor — 2026-11-11:** `rtl/periph/mp64_trng.v` awaits
+> a fix. Its repetition count test trips one byte late (GitHub issue #1), a
+> health failure clears itself, and reads return data while the source is
+> unhealthy. The TRNG section of
+> [`docs/architecture.md`](docs/architecture.md#trng-true-random-number-generator)
+> lists each difference and what the fix needs.
+
 **Date:** 2026-03-07  
 **Branch:** `main`  
 **Status:** 1,797 tests passing, 35 skipped.

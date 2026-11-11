@@ -1061,6 +1061,30 @@ word with UNAVAILABLE so its ordinary complete-span wipe policy still runs.
 No mutable recovery flag is shared between cores, and every unrelated bus
 fault remains on the diagnostic path.
 
+**RTL status.** `rtl/periph/mp64_trng.v` differs from this contract in three
+ways, to be fixed together. The first was reported in GitHub issue #1
+(2026-10-08) from simulation of the unmodified file; the other two are read
+from the source and have yet to be simulated.
+
+- **The repetition count test trips one byte late.** `rep_count` restarts at
+  0 on the first byte of a run and `health_ok` falls when it reaches 10, so
+  the test fails at 11 identical bytes. Its own comment calls for 10, as
+  does SP 800-90B §4.4.1, which counts the first sample of a run as 1 and
+  fails when the count reaches the cutoff. Reset loads `last_byte` with
+  zero, so a first run of zero bytes after reset fails at 10. Comparing
+  against 9, or starting the count at 1, together with a flag that marks
+  the first byte after reset as unseen, corrects both cases.
+- **A failure clears itself.** `STATUS` is `pool_ready & health_ok`, and
+  `health_ok` rises again when the run ends, where the contract latches a
+  failure until reinitialization.
+- **Reads succeed while unhealthy.** `RAND8` and `RAND64` return data
+  whatever `STATUS` reads, and the module has no error output, where the
+  contract faults the read.
+
+The one health case in `rtl/sim/tb_trng.v` checks that `STATUS` stays 1
+across 100 ordinary reads, so the fix needs cases that drive repeated raw
+bytes and check the byte at which the test trips.
+
 ### Per-Core Infrastructure
 
 | Feature | CSR Range | Description |
