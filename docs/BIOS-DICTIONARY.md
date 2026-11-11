@@ -1159,7 +1159,7 @@ secret-boundary qualifications are recorded in
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 561 | `BOOT-ID` | `( -- u )` | | The identity of what booted: a hash of this BIOS's code and dictionary, the bytes below its first variable, followed by the bytes of the first file `FSLOAD` loaded since reset, which is KDOS for a boot from disk. Asked before any file was loaded, it is the BIOS's own and stays that until the next reset. It is never zero. KDOS starts the stamp of a load from it (`LOAD-STAMP`), and a module's token file is used only where that stamp stands as it stood when the file was recorded. `shared/boot_identity.py` computes the same cell for the hosted simulator and for the tools that build images. |
+| 561 | `BOOT-ID` | `( -- u )` | | The identity of what booted: a hash of this BIOS's code and dictionary, the bytes below its first variable, followed by the bytes of the first file `FSLOAD` loaded since reset, which is KDOS for a boot from disk. Asked before any file was loaded, it is the BIOS's own and stays that until the next reset. It is never zero. A module's token file holds the `BOOT-ID` of the system it was built for, and KDOS uses the file only where this word gives the same cell. `shared/boot_identity.py` computes the same cell for the hosted simulator and for the tools that build images. |
 
 ### Checked WOTS Chain (1 word)
 

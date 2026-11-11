@@ -9,15 +9,7 @@ cells.
 
 from __future__ import annotations
 
-from shared.boot_identity import (
-    bios_code,
-    boot_identity,
-    fold_bytes,
-    stamp_start,
-    stamp_take,
-    take,
-    text_identity,
-)
+from shared.boot_identity import bios_code, boot_identity, fold_bytes, take
 from simulator.image_bootstrap import prepare_image_bootstrap
 from simulator.platform import create_one_core_address_space
 from simulator.runtime import MegaForthRuntime
@@ -76,13 +68,3 @@ def test_the_hash_takes_cells_then_bytes_and_every_byte_counts() -> None:
         changed[index] ^= 0x80
         seen.add(fold_bytes(0, bytes(changed)))
     assert len(seen) == len(data) + 1
-
-
-def test_a_stamp_is_never_zero_and_follows_order() -> None:
-    assert stamp_start(0) != 0
-    one, two = text_identity(b"one\n"), text_identity(b"two!\n")
-    assert one != two
-    start = stamp_start(boot_identity())
-    assert stamp_take(stamp_take(start, one), two) != stamp_take(
-        stamp_take(start, two), one
-    )

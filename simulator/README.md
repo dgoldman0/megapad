@@ -2416,8 +2416,8 @@ and Git blob `c920305479e61c2a5d51719779ec9c9fba0c2b8f`. The complete current
 10,184-line, 357,426-byte `kdos.f` has SHA-256
 `b3d5211893432fb9b93acee1d330c84260b4a51c56ae0cecb265f54add3c5ff4`
 and Git blob `7aa48d675c1a1a6d6dd84731c3332a33b128155e`.
-The canonical source-mode CLI filter submits 6,981 non-comment records with
-226,667 payload bytes, or 233,648 UART bytes after one LF delimiter per
+The canonical source-mode CLI filter submits 6,955 non-comment records with
+225,862 payload bytes, or 232,817 UART bytes after one LF delimiter per
 record. These are structural source/transport identities, not a fresh
 wall-clock or complete-load qualification.
 
@@ -2471,7 +2471,7 @@ still free, mounted MP64FS, zero modules, balanced stacks, and no held lock. A
 post-boot checked definition returned 42, followed by allocation/free, CRC32,
 ring FIFO, and module-listing checks. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
-461 core words and expects 1,568 KDOS publications and 2,021 unique
+461 core words and expects 1,562 KDOS publications and 2,015 unique
 bindings.
 
 The contiguous unchanged KDOS core now reaches EOF. The integration branch is

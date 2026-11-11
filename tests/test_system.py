@@ -45745,10 +45745,14 @@ class TestKDOSTokenModules(_KDOSTestBase):
         """BOOT-ID is hashed again at each boot from the BIOS's code as it
         then stands in memory, and from KDOS as the BIOS loads it again.  A
         session writes nothing below the BIOS's first variable, so the
-        second boot gives the same identity and uses the same token file."""
+        second boot gives the same identity and uses the same token file.
+        KDOS is part of that identity: a file built for the BIOS alone is
+        refused by a machine that booted KDOS from disk, both times."""
         from asm import assemble
-        from shared.boot_identity import boot_identity, stamp_start
-        from tests.token_module_cases import TOKENS_ON, load, tokens, value
+        from shared.boot_identity import boot_identity
+        from tests.token_module_cases import (
+            OTHER_SYSTEM, TOKENS_ON, load, show, tokens, value,
+        )
 
         with open(os.path.join(PROJECT_ROOT, "kdos.f"), "rb") as f:
             kdos = f.read()
@@ -45757,7 +45761,10 @@ class TestKDOSTokenModules(_KDOSTestBase):
         fs.format()
         fs.inject_file("kdos.f", kdos, ftype=FTYPE_FORTH)
         fs.inject_file(
-            "a.ft", tokens("a", 11, stamp=stamp_start(identity)), ftype=FTYPE_FORTH
+            "a.ft", tokens("a", 11, boot_id=identity), ftype=FTYPE_FORTH
+        )
+        fs.inject_file(
+            "c.ft", tokens("c", 30, boot_id=boot_identity()), ftype=FTYPE_FORTH
         )
         with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
             path = f.name
@@ -45768,7 +45775,7 @@ class TestKDOSTokenModules(_KDOSTestBase):
         below = labels["var_state"]
         lines = [
             'CR ." [ID " BOOT-ID 32 RSHIFT . BOOT-ID 4294967295 AND . ." ]"',
-            TOKENS_ON, load("a.f"), value("A"),
+            TOKENS_ON, load("a.f"), value("A"), load("c.f"), *show("C"),
         ]
         shown = rf"\[ID {identity >> 32} {identity & 0xFFFFFFFF} \]"
 
@@ -45812,7 +45819,11 @@ class TestKDOSTokenModules(_KDOSTestBase):
             self.assertRegex(text, r"\[THROW 0 \]")
             self.assertRegex(text, r"\[A 11 \]")
             self.assertEqual(text.count("[load-a]"), 1)
-            self.assertNotIn("cannot be loaded", text)
+            self.assertNotIn("a.ft cannot be loaded", text)
+            self.assertIn(OTHER_SYSTEM, text)
+            self.assertIn("Token file c.ft cannot be loaded", text)
+            self.assertRegex(text, r"\[THROW 7 \]")
+            self.assertRegex(text, r"\[DEF-C 0 \]")
 
     def test_files_the_simulator_recorded_load_on_the_bios(self):
         from tests.token_module_cases import (
@@ -45823,14 +45834,11 @@ class TestKDOSTokenModules(_KDOSTestBase):
             Case,
             failures,
             recorded_volume,
-            stamps,
         )
 
         shows = Case(files={}, lines=[], must=list(RECORDED_SHOWS))
-        from_source = self._run_volume(RECORDED_SOURCES, RECORDED_LINES[:-1])
+        from_source = self._run_volume(RECORDED_SOURCES, RECORDED_LINES)
         self.assertEqual(failures(shows, from_source), [])
-        after = stamps(RECORDED_SOURCES["top.f"], RECORDED_SOURCES["lib.f"])[2]
-        shows.must.append(rf"\[STAMP {after >> 32} {after & 0xFFFFFFFF} \]")
         from_tokens = self._run_volume(
             recorded_volume(RECORDED_SOURCES, "top.f"),
             [TOKENS_ON, *RECORDED_LINES],

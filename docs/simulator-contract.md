@@ -3582,8 +3582,8 @@ mounted media, zero modules, balanced stacks, and released locks, followed by
 a checked post-boot definition, allocation/free, CRC32, ring FIFO, and module
 listing. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
-461 core words and expects 1,568 KDOS publications and 2,021 unique
-bindings; it submits 6,981 lines (226,667 payload bytes, 233,648 CLI UART bytes).
+461 core words and expects 1,562 KDOS publications and 2,015 unique
+bindings; it submits 6,955 lines (225,862 payload bytes, 232,817 CLI UART bytes).
 
 The startup filesystem path is literal. `DISK?` false skips `FS-LOAD` and does
 not clear a stale true `FS-OK`. A successful load stores the exact lowercase
@@ -3807,12 +3807,12 @@ the interpreter's own steps (`docs/token-modules-proposal-2026-11-11.md`).
 It has its own magic, `MFTOKEN1`, and is never emitted under the MF64
 identity.  The same file loads on every backend.  It holds no state of any
 backend, so no simulator or runtime version enters its validity.  What ties
-it to a system is the stamp in its header: KDOS's `LOAD-STAMP` as it stood
-where the file's recording began, which starts from `BOOT-ID` and takes in
-each file as its load begins.  This runtime gives `BOOT-ID` for the BIOS
-that `bios.asm` assembles to and for the file an image boot read as the
-boot file (`shared/boot_identity.py`), so a file recorded here is current on
-the emulator and on a device that booted the same KDOS, and nowhere else.
+it to a system is one cell of its header: the `BOOT-ID` of the system it
+was built for, which KDOS compares with the cell the BIOS gives.  This
+runtime gives `BOOT-ID` for the BIOS that `bios.asm` assembles to and for
+the file an image boot read as the boot file (`shared/boot_identity.py`), so
+a file built here is used on the emulator and on a device that booted the
+same KDOS, and nowhere else.
 It cannot become a production path before cold, warm, and source/warm
 equivalence all pass and useful wall time is demonstrated.
 

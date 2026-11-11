@@ -32,12 +32,12 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-interactive-screens-8166-8436.f"
+    / "kdos-interactive-screens-8112-8382.f"
 )
 
-FIRST_LINE = 8166
-FIXTURE_LAST_LINE = 8436
-LAST_LINE = 8435
+FIRST_LINE = 8112
+FIXTURE_LAST_LINE = 8382
+LAST_LINE = 8381
 FIXTURE_BYTES = 8_940
 FIXTURE_SHA256 = (
     "740ed36cafdb1b83489acfdd0f6c1e32cc24a17d4434aaa973aca136f910b59a"

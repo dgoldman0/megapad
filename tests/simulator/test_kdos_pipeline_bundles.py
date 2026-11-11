@@ -36,12 +36,12 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-pipeline-bundles-9541-9719.f"
+    / "kdos-pipeline-bundles-9487-9665.f"
 )
 
-FIRST_LINE = 9541
-FIXTURE_LAST_LINE = 9719
-LAST_LINE = 9718
+FIRST_LINE = 9487
+FIXTURE_LAST_LINE = 9665
+LAST_LINE = 9664
 FIXTURE_BYTES = 5_873
 FIXTURE_SHA256 = (
     "8791e5eecef059d052ecd8b69976317857c41c29ae475e18cc53d79761d8b922"

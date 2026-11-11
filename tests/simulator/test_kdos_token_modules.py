@@ -10,11 +10,12 @@ to the tools that build images.
 from __future__ import annotations
 
 import struct
+import zlib
 from pathlib import Path
 
 import pytest
 
-from shared.boot_identity import boot_identity, text_identity
+from shared.boot_identity import boot_identity
 from shared.token_form import (
     FLAG_SOURCE_BESIDE,
     HEADER_BYTES,
@@ -23,7 +24,7 @@ from shared.token_form import (
     pack_module_name_file,
     pack_token_file,
     unpack_token_file,
-    with_stamp,
+    with_boot_id,
 )
 from simulator.runtime import MegaForthRuntime
 from simulator.storage import HostedStorageService
@@ -39,7 +40,6 @@ from tests.token_module_cases import (
     record,
     recorded_volume,
     records,
-    stamps,
     tokens,
     volume,
 )
@@ -71,60 +71,40 @@ def test_a_case_runs_as_it_does_on_the_bios(name: str) -> None:
 
 def test_recorded_files_load_as_their_source_does() -> None:
     shows = Case(files={}, lines=[], must=RECORDED_SHOWS)
-    from_source = _run(RECORDED_SOURCES, RECORDED_LINES[:-1])
+    from_source = _run(RECORDED_SOURCES, RECORDED_LINES)
     assert failures(shows, from_source) == []
 
     files = recorded_volume(RECORDED_SOURCES, "top.f")
     assert sorted(files) == ["lib.ft", "top.ft"]
+    assert {unpack_token_file(data).boot_id for data in files.values()} == {
+        boot_identity()
+    }
     from_tokens = _run(files, [TOKENS_ON, *RECORDED_LINES])
-    after = stamps(RECORDED_SOURCES["top.f"], RECORDED_SOURCES["lib.f"])[2]
-    shows.must.append(rf"\[STAMP {after >> 32} {after & 0xFFFFFFFF} \]")
     assert failures(shows, from_tokens) == []
-    # The two loads print the same text, apart from the stamp's line.
-    assert " ".join(from_tokens.split()).startswith(" ".join(from_source.split()))
+    # The two loads print the same text.
+    assert " ".join(from_tokens.split()) == " ".join(from_source.split())
 
 
-def test_the_recorder_notes_the_order_of_the_loads_and_what_was_loading() -> None:
+def test_the_recorder_gives_each_loaded_file_its_form_and_module_name() -> None:
     recorder, _ = record(RECORDED_SOURCES, "top.f")
 
     top, lib = recorder.units
     assert (top.source, lib.source) == (
         RECORDED_SOURCES["top.f"], RECORDED_SOURCES["lib.f"],
     )
-    assert (top.index, top.enclosing) == (0, ())
-    assert (lib.index, lib.enclosing) == (1, (0,))
     assert top.module_name() == b"rec-top" and lib.module_name() == b"rec-lib"
-    assert top.text_identity == text_identity(RECORDED_SOURCES["top.f"])
-    # A stamp per file, as the files' texts in that order give it; a file
-    # whose text the builder writes again is taken by the text it will have.
-    boot = boot_identity()
-    assert recorder.stamps(boot) == stamps(top.source, lib.source)[:2]
-    assert recorder.stamps(boot, {0: b"other\n"}) == stamps(b"other\n", lib.source)[:2]
-    assert recorder.stamps(boot ^ 1)[0] != recorder.stamps(boot)[0]
-
-
-def test_a_text_no_loader_announced_is_no_file_of_the_load() -> None:
-    held = b": HELD-WORD 3 ;\n"
-    cells = " ".join(f"{byte} C," for byte in held)
-    sources = {
-        "holder.f": (
-            f"CREATE HELD {cells}\n"
-            f"HELD {len(held)} SOURCE-EVALUATE-CHECKED DROP\n"
-            f"HELD {len(held)} 2DUP LOAD-STAMP-SOURCE SOURCE-EVALUATE-CHECKED DROP\n"
-        ).encode(),
-    }
-    recorder, _ = record(sources, "holder.f")
-
-    holder, quiet, told = recorder.units
-    assert (holder.kind, quiet.kind, told.kind) == ("loader", "source", "source")
-    assert quiet.source == told.source == held
-    assert (holder.announced, quiet.announced, told.announced) == (True, False, True)
-    assert told.enclosing == (0,)
-    # The stamp where each began: the text that was not announced leaves it
-    # as it was, and the one that was is taken in.
-    assert recorder.stamps(boot_identity()) == [
-        stamps()[0], stamps(holder.source)[1], stamps(holder.source)[1],
-    ]
+    # A form states the system it is built for and whether its source
+    # ships beside it; the recording gives neither.
+    form = unpack_token_file(lib.token_file())
+    assert (form.boot_id, form.source_beside, form.module_name) == (
+        0, False, b"rec-lib",
+    )
+    assert (form.source_bytes, form.source_crc32) == (
+        len(lib.source), zlib.crc32(lib.source),
+    )
+    built = unpack_token_file(lib.token_file(boot_id=7, source_beside=True))
+    assert (built.boot_id, built.source_beside) == (7, True)
+    assert built.records == form.records
 
 
 def test_a_file_that_takes_entries_out_of_the_dictionary_has_no_token_form() -> None:
@@ -153,33 +133,36 @@ def test_the_file_round_trips_and_kdos_reads_what_was_written() -> None:
     recorded, slots = records((":", " F-WORD"), 5, ";")
     data = pack_token_file(
         recorded, slots, source=A, lines=3, module_name=b"mod-file",
-        stamp=0x0123456789ABCDEF, source_beside=True,
+        boot_id=0x0123456789ABCDEF, source_beside=True,
     )
     parts = unpack_token_file(data)
 
     assert (parts.records, parts.slots, parts.lines) == (recorded, slots, 3)
-    assert (parts.module_name, parts.stamp, parts.source_beside) == (
+    assert (parts.module_name, parts.boot_id, parts.source_beside) == (
         b"mod-file", 0x0123456789ABCDEF, True,
     )
-    assert parts.text_identity == text_identity(A)
+    assert (parts.source_bytes, parts.source_crc32) == (len(A), zlib.crc32(A))
     assert parts.header_bytes == HEADER_BYTES + 8 and len(data) % 1 == 0
-    assert unpack_token_file(with_stamp(data, 7, source_beside=False)).stamp == 7
-    assert not unpack_token_file(with_stamp(data, 7, source_beside=False)).source_beside
+    rebuilt = unpack_token_file(with_boot_id(data, 7, source_beside=False))
+    assert (rebuilt.boot_id, rebuilt.source_beside) == (7, False)
+    assert rebuilt.records == recorded
 
     lines = ["CREATE FILE"]
     for start in range(0, len(data), 24):
         lines.append(" ".join(f"{byte} C," for byte in data[start : start + 24]))
     lines += [
         'CR ." [FIELDS " FILE TKF.HEADER . FILE TKF.SLOTS . FILE TKF.RECORDS .',
-        "FILE TKF.SOURCE . FILE TKF.FLAGS . FILE TKF.STAMP 32 RSHIFT .",
-        "FILE TKF.STAMP 4294967295 AND . FILE TKF.TEXT-ID 32 RSHIFT .",
+        "FILE TKF.SOURCE . FILE TKF.FLAGS . FILE TKF.BOOT-ID 32 RSHIFT .",
+        "FILE TKF.BOOT-ID 4294967295 AND . FILE TKF.TEXT-ID 32 RSHIFT .",
         'FILE TKF.TEXT-ID 4294967295 AND . ." ]"',
         f'CR ." [NAME " FILE TKF.ID TYPE ." ]"',
         f'CR ." [IS " FILE {len(data)} TOKEN-FILE? . FILE {len(data)} _TKF-VALID? .',
         f'FILE {len(data) - 1} _TKF-VALID? . FILE 63 TOKEN-FILE? . ." ]"',
     ]
     text = " ".join(_run({}, lines).split())
-    identity = text_identity(A)
+    # A source text's CRC-32 and length in one cell, as the loader compares
+    # them with the source that ships beside a token file.
+    identity = (zlib.crc32(A) << 32) ^ len(A)
     assert (
         f"[FIELDS {HEADER_BYTES + 8} {slots} {len(recorded)} {len(A)} "
         f"{FLAG_SOURCE_BESIDE} {0x01234567} {0x89ABCDEF} "
@@ -193,7 +176,7 @@ def test_a_file_that_only_names_its_module_holds_no_records() -> None:
     parts = unpack_token_file(pack_module_name_file(b"mod-early"))
 
     assert (parts.records, parts.slots, parts.module_name) == (b"", 0, b"mod-early")
-    assert (parts.stamp, parts.source_beside, parts.source_bytes) == (0, False, 0)
+    assert (parts.boot_id, parts.source_beside, parts.source_bytes) == (0, False, 0)
     with pytest.raises(TokenFormError, match="needs the name"):
         pack_module_name_file(b"")
 
@@ -220,7 +203,7 @@ def test_a_file_that_only_names_its_module_holds_no_records() -> None:
     ],
 )
 def test_reading_a_file_refuses(what: str, change, message: str) -> None:
-    data = tokens("a", 11, stamp=stamps()[0])
+    data = tokens("a", 11)
     unpack_token_file(data)
 
     with pytest.raises(TokenFormError, match=message):
@@ -230,7 +213,7 @@ def test_reading_a_file_refuses(what: str, change, message: str) -> None:
 def test_writing_a_file_refuses_what_the_layout_cannot_hold() -> None:
     with pytest.raises(TokenFormError, match="slot count"):
         pack_token_file(b"\xff", 0xF001, source=b"", lines=0)
-    with pytest.raises(TokenFormError, match="stamp out of range"):
-        pack_token_file(b"\xff", 1, source=b"", lines=0, stamp=1 << 64)
+    with pytest.raises(TokenFormError, match="BOOT-ID out of range"):
+        pack_token_file(b"\xff", 1, source=b"", lines=0, boot_id=1 << 64)
     with pytest.raises(TokenFormError, match="module name too long"):
         pack_token_file(b"\xff", 1, source=b"", lines=0, module_name=b"x" * 65536)

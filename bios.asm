@@ -9924,9 +9924,9 @@ mp64fs_validate_at_bad:
 ; ---------------------------------------------------------------------
 ; BOOT-ID is one cell that differs when this BIOS's code differs or when the
 ; first file FSLOAD loaded since reset differs: for a boot from disk, that
-; file is KDOS.  KDOS starts the stamp of a load from it, and a module's
-; token file is used only where that stamp stands as it stood when the file
-; was recorded (docs/token-modules-proposal-2026-11-11.md).
+; file is KDOS.  A module's token file holds the BOOT-ID of the system it
+; was built for, and KDOS uses the file only where this word gives the same
+; cell (docs/token-modules-proposal-2026-11-11.md).
 ;
 ; The cell is a hash of the bytes below the BIOS's first variable, which
 ; are its code and its dictionary and never change while it runs, followed
@@ -25367,7 +25367,7 @@ d_token_replay:
     call.l r11
     ret.l
 
-; The identity that a token file's stamp starts from appends after it.
+; The identity of what booted appends after it.
 ; === BOOT-ID ===
 latest_entry:
 d_boot_id:

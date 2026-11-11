@@ -333,63 +333,6 @@ VARIABLE _LD-FROM-SP
     DUP 8 + @ SWAP @ DUP MS.DIR! @ EXECUTE
     THROW ;
 
-\ ── The stamp of a load ─────────────────────────────────────────────
-\
-\ A token file (below) is what the interpreter did with a source file on
-\ top of everything that was loaded before it.  LOAD-STAMP says what that
-\ is.  It starts from BIOS BOOT-ID, the identity of the BIOS and of the
-\ file the BIOS loaded first, which is KDOS, and takes in each file as its
-\ load begins, in order: a source text by its CRC-32 and its length, a
-\ token file by the same two numbers of the source it was recorded from,
-\ which its header holds.
-\
-\ The stamp is zero until a token file first asks for it.  It starts then,
-\ with the source files that are loading at that moment, outermost first.
-\ A boot that meets no token file therefore computes no checksum.
-VARIABLE LOAD-STAMP
-0 LOAD-STAMP !
-
-\ _STAMP-TAKE ( id -- )  Take one identity in.  The stamp is never zero
-\ afterwards.  BIOS BOOT-ID folds bytes with this step, and
-\ shared/boot_identity.py repeats it for the tools that build images.
-: _STAMP-TAKE  ( id -- )
-    LOAD-STAMP @ XOR 0x9E3779B97F4A7C15 *
-    DUP 32 RSHIFT XOR
-    DUP 0= IF 1+ THEN
-    LOAD-STAMP ! ;
-
-\ _TEXT-ID ( addr len -- id )  A source text's identity in the stamp.
-: _TEXT-ID  ( addr len -- id )
-    DUP >R CRC32-IEEE-BUF 32 LSHIFT R> XOR ;
-
-\ LOAD-STAMP-SOURCE ( addr len -- )  The load of a source file begins,
-\ and this is its text.  KDOS's loader says so for the files it reads; a
-\ loader outside KDOS says so for the files it evaluates itself.  Nothing
-\ is computed before the stamp has started.
-: LOAD-STAMP-SOURCE  ( addr len -- )
-    LOAD-STAMP @ IF _TEXT-ID _STAMP-TAKE ELSE 2DROP THEN ;
-
-\ _STAMP-TEXT ( buf rest cur -- )  Take in the source file one loader
-\ frame walks: it begins at BUF, and REST bytes of it remain from CUR.
-: _STAMP-TEXT  ( buf rest cur -- )
-    2 PICK - + _TEXT-ID _STAMP-TAKE ;
-
-\ _STAMP-START ( addr -- )  Start the stamp for the token file at ADDR.
-\ Every saved frame above the first holds the file that was loading when
-\ the next load began.  The loader's own cells hold the innermost file:
-\ the token file itself when the loader read it, and otherwise a source
-\ file whose line handed ADDR to the replay.
-: _STAMP-START  ( addr -- )
-    BOOT-ID _STAMP-TAKE
-    _LD-SP @ _LD-FRAME 2* < 0= IF
-        _LD-SP @ _LD-STK +  _LD-STK _LD-FRAME +  DO
-            I @  I 8 + @  I 16 + @ _STAMP-TEXT
-        _LD-FRAME +LOOP
-    THEN
-    _LD-SP @ 0<> SWAP LD-BUF @ <> AND IF
-        LD-BUF @ LD-SZ @ LD-CUR @ _STAMP-TEXT
-    THEN ;
-
 \ ── Checked source compiler ─────────────────────────────────────────
 \
 \ SOURCE-EVALUATE-CHECKED is the transaction-friendly compiler surface
@@ -544,14 +487,15 @@ VARIABLE _SEC-LINE
 \   +16  bytes of records, 8                    +24  bytes of the source, 8
 \   +32  CRC-32 of the source, 4                +36  CRC-32 of the records, 4
 \   +40  lines in the source, 4                 +44  bytes of module name, 2
-\   +46  flags, 2                               +48  the stamp, 8
+\   +46  flags, 2                               +48  a system's BOOT-ID, 8
 \   +64  the module name its source PROVIDES
 \
-\ The stamp is LOAD-STAMP as it stood where the file's recording began.
-\ Flag 1 says that the file's source ships beside it, under the file's
-\ name without its last letter.  A file with no records only names its
-\ module: it stands on a volume for a module that is loaded before the
-\ volume is mounted, so that a REQUIRE of its path finds it loaded.
+\ The cell at +48 is BIOS BOOT-ID of the system the file was built for:
+\ the identity of that system's BIOS and of its KDOS.  Flag 1 says that
+\ the file's source ships beside it, under the file's name without its
+\ last letter.  A file with no records only names its module: it stands
+\ on a volume for a module that is loaded before the volume is mounted,
+\ so that a REQUIRE of its path finds it loaded.
 6 CONSTANT EVAL-S-TOKENS
 7 CONSTANT EVAL-S-MISMATCH
 
@@ -561,11 +505,16 @@ VARIABLE _SEC-LINE
 : TKF.RECORDS  ( addr -- u )  16 + @ ;
 : TKF.SOURCE   ( addr -- u )  24 + @ ;
 : TKF.FLAGS    ( addr -- u )  46 + W@ ;
-: TKF.STAMP    ( addr -- u )  48 + @ ;
-\ TKF.TEXT-ID ( addr -- id )  The identity of the source the file was
-\ recorded from, as _TEXT-ID gives it for the text.
-: TKF.TEXT-ID  ( addr -- id )  DUP 32 + L@ 32 LSHIFT SWAP TKF.SOURCE XOR ;
+: TKF.BOOT-ID  ( addr -- u )  48 + @ ;
 1 CONSTANT TKF-F-SOURCE-BESIDE
+
+\ One source text is told from another by its CRC-32 and its length, held
+\ in one cell.  _TEXT-ID gives the cell for a text in memory, and
+\ TKF.TEXT-ID gives it for the source a token file was recorded from, out
+\ of the file's header.
+: _TEXT-ID  ( addr len -- id )
+    DUP >R CRC32-IEEE-BUF 32 LSHIFT R> XOR ;
+: TKF.TEXT-ID  ( addr -- id )  DUP 32 + L@ 32 LSHIFT SWAP TKF.SOURCE XOR ;
 : TKF.ID       ( addr -- id-addr id-len )  DUP /TOKEN-HEADER + SWAP 44 + W@ ;
 
 CREATE _TKF-MAGIC  77 C, 70 C, 84 C, 79 C, 75 C, 69 C, 78 C, 49 C,
@@ -596,12 +545,14 @@ VARIABLE _TKF-U
     >R DUP DUP TKF.HEADER + OVER TKF.RECORDS ROT TKF.SLOTS R> SWAP ;
 
 \ TOKENS-CURRENT? ( addr -- flag )  The staleness rule, stated here and
-\ nowhere else: the token file at ADDR is used only where the stamp of
-\ the load stands as it stood when the file's recording began.  That
-\ makes a file stale when anything loaded before it has changed.
+\ nowhere else: the token file at ADDR was built for this system.  Its
+\ header holds the BOOT-ID of the system it was built for, and the BIOS
+\ gives this system's.  Where the file's source ships beside it the
+\ loader asks one thing more, that the source is the one the file was
+\ recorded from (_LD-TOKENS?).  Nothing else enters: not the files loaded
+\ before this one, nor their order.
 : TOKENS-CURRENT?  ( addr -- flag )
-    LOAD-STAMP @ 0= IF DUP _STAMP-START THEN
-    TKF.STAMP LOAD-STAMP @ = ;
+    TKF.BOOT-ID BOOT-ID = ;
 
 \ TOKEN-EVALUATE-CHECKED ( i*x addr len -- j*x status )
 \   Run a token file held in memory, as SOURCE-EVALUATE-CHECKED runs a
@@ -609,10 +560,10 @@ VARIABLE _TKF-U
 \   same check that nothing is left unfinished.  The table lives in an
 \   allocation of its own for as long as the replay runs, and nothing of
 \   this word's stays on the data stack meanwhile.  A buffer that is not a
-\   whole token file, or holds no records, is status 6.  A file that is
-\   not current is status 7 and runs nothing: nothing stands in its
-\   place here, and the caller names the file.  A file that runs is taken
-\   into the stamp first.  A table that cannot be allocated throws.
+\   whole token file, or holds no records, is status 6.  A file that was
+\   built for another system is status 7 and runs nothing: nothing stands
+\   in its place here, and the caller names the file.  A table that
+\   cannot be allocated throws.
 : TOKEN-EVALUATE-CHECKED  ( i*x addr len -- j*x status )
     2DUP _TKF-VALID? 0= IF
         2DROP EVAL-S-TOKENS DUP EVAL-STATUS ! EXIT
@@ -627,7 +578,6 @@ VARIABLE _TKF-U
         ."  this volume was built for another system" CR
         EVAL-S-MISMATCH DUP EVAL-STATUS ! EXIT
     THEN
-    DUP TKF.TEXT-ID _STAMP-TAKE
     DUP TKF.SLOTS 1 MAX CELLS ALLOCATE THROW
     DUP >R _TKF-ARGS
     ['] TOKEN-REPLAY _EVALUATION-GUARDED
@@ -681,9 +631,10 @@ VARIABLE _LD-SRC-U
 \ _LD-TOKENS? ( -- flag )  True when the file read is a token file to
 \ replay, whatever it is called.  A file found as a token form must be
 \ one; anything else ends the load.  A token file whose source ships
-\ beside it is used when it is current and that source is the one it was
-\ recorded from.  Otherwise the source takes its place in the loader's
-\ buffer, the file is named, and the answer is false.
+\ beside it is used when it was built for this system and that source is
+\ the one it was recorded from, by length and CRC-32.  Otherwise the
+\ source takes its place in the loader's buffer, the file is named, and
+\ the answer is false.
 : _LD-TOKENS?  ( -- flag )
     LD-BUF @ LD-SZ @ TOKEN-FILE? DUP 0= _LD-TOKENS-CHOSEN @ AND
     0 _LD-TOKENS-CHOSEN !
@@ -731,11 +682,6 @@ VARIABLE _LD-SRC-U
         0 0 FALSE
     THEN ;
 
-\ _LD-WALK-SOURCE ( -- )  Walk the source text the loader read, as a
-\ file of the load.
-: _LD-WALK-SOURCE  ( -- )
-    LD-BUF @ LD-SZ @ LOAD-STAMP-SOURCE
-    _LD-WALK ;
 
 : _LD-RELEASE  ( -- )
     LD-BUF @ FREE
@@ -773,7 +719,7 @@ VARIABLE _LD-SRC-U
 
 : _LD-READ-WALK  ( -- )
     _LD-READ
-    _LD-TOKENS? IF _LD-WALK-TOKENS ELSE _LD-WALK-SOURCE THEN ;
+    _LD-TOKENS? IF _LD-WALK-TOKENS ELSE _LD-WALK THEN ;
 
 : _LOAD-BODY  ( -- )
     _LD-RESOLVE FALSE _LD-FOUND? 0= IF EXIT THEN

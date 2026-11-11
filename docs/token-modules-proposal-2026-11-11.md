@@ -2,10 +2,10 @@
 
 Status: built and tested on the branch `token-modules` of MegaPad and of
 Akashic, and not merged. Nothing here is enabled unless a build asks for it
-with `--token-modules`. Three decisions about the form are taken and
-recorded under [Decisions](#decisions); the staleness rule is taken for
-now, and what is uncertain about it is stated where the rule is.
-What is still owed is under [What remains](#what-remains).
+with `--token-modules`. Three decisions about the form were taken on
+2026-11-11 and are recorded under [Decisions](#decisions); the rule that
+says when a token file is used is among them. What is still owed is under
+[What remains](#what-remains).
 
 A module's token form is a record of what the interpreter did with its
 source: the words it found, the numbers it converted, and the text each
@@ -28,7 +28,7 @@ entering Desk.
 | | token forms | 430 M | 584 M | 5.8 s |
 | System volume | source | 1,442 M | 1,866 M | 18.7 s |
 | | token files alone, as it ships | 676 M | 899 M | 9.0 s |
-| | token files with their source beside them | 1,230 M | 1,609 M | 16.1 s |
+| | token files with their source beside them | 1,228 M | 1,607 M | 16.1 s |
 
 A token boot builds the dictionary its source boot builds. Every entry is
 at the same address with the same name and flags, `HERE` and `LATEST` are
@@ -137,16 +137,17 @@ The record is therefore made by the interpreter that loads the source, and
 the builder gains no reader of Forth of its own. A file is the buffer one
 walk of KDOS's loader or of its checked source evaluator covers. The
 recorder learns where a walk begins from a hook on `_LD-WALK` and
-`SOURCE-EVALUATE-CHECKED`, that the loader announced the text as a file of
-the load from a hook on `LOAD-STAMP-SOURCE`, and that the walk ended
-cleanly from `EVALUATE-FINISH`. While it records, every line goes through
+`SOURCE-EVALUATE-CHECKED`, and that it ended cleanly from
+`EVALUATE-FINISH`. While it records, every line goes through
 the simulator's reference evaluator and the native line walker stands aside.
 
-The one boot gives every file's token form and the order in which the loads
-began. The builder then writes the image with each file in that form,
-stamped for the image ([The stamp](#the-stamp-and-when-a-token-file-is-stale)).
-A linked Desktop built with `--token-modules` takes about 32 seconds and one
-with the system volume about 54, where the source builds take two or three.
+The one boot gives every file's token form, keyed by the SHA-256 of its
+text. The builder then writes the image with each file in that form, built
+for the system the image boots
+([When a token file is used](#when-a-token-file-is-used)). A linked Desktop
+built with `--token-modules` takes about 35 seconds and one with
+the system volume about 64, where the source builds take two
+seconds.
 
 **A machine must also build them.** The System Practice, the developer one
 with the working name Workshop (Part 7 of the release plan), has to build
@@ -163,12 +164,12 @@ loader are kept fit for it:
 - A record names a word by a slot that is filled by a search or from
   `LATEST`, never by an address, so a file a machine writes is the file the
   host writes for the same load.
-- The stamp a file needs is `LOAD-STAMP` as it stands when the load of its
-  source begins, which KDOS keeps for any load once it has started, and the
-  header fields are the source's length and CRC-32, which the loader has in
-  hand when it announces a source file.
+- A file states the system it was built for by `BOOT-ID`, which the
+  machine's own BIOS gives, and its header's other fields are the source's
+  length and CRC-32, which the loader has in hand when it reads a source
+  file.
 - Where the source ships beside the token file, an edited module loads from
-  its source at once, and the modules after it do too, so the machine keeps
+  its source at once and no other module is affected, so the machine keeps
   working between an edit and the rebuild.
 
 A tokenizer on the host was weighed and not pursued. It would be a second
@@ -230,12 +231,10 @@ to the buffer's first eight bytes.
 | The JIT and its inlining | the replay compiles through `jit_compile_word` and `jit_compile_literal` in whatever state the JIT is in at load time, which is the state a source load would find |
 | Nested loads | `REQUIRE` in a token file is the word `REQUIRE` with its path as text; the nested file loads from its token form or from source |
 | The cold-source container | its CRC covers the token bytes it holds; the boot script's wrapper names a chunk that fails |
-| The stamp of the load | a token file that runs is taken into `LOAD-STAMP` by the length and CRC-32 of its source; the loader announces a source file with `LOAD-STAMP-SOURCE`, and so does the cold-source loader for a chunk of source |
+| The system a file was built for | a token file runs only where the `BOOT-ID` in its header is the one the BIOS gives; otherwise `TOKEN-EVALUATE-CHECKED` returns status 7 and runs nothing |
 
 `_LD-WALK`, `SOURCE-EVALUATE-CHECKED` and the other words that the
-simulator's source overlays bind by digest are unchanged. The loader's own
-source walk goes through a new word, `_LD-WALK-SOURCE`, which announces the
-file and then calls `_LD-WALK`.
+simulator's source overlays bind by digest are unchanged.
 
 ## The file
 
@@ -251,7 +250,7 @@ file and then calls `_LD-WALK`.
 | 40 | 4 | lines in the source |
 | 44 | 2 | bytes of the module name |
 | 46 | 2 | flags: 1, the source ships beside the file |
-| 48 | 8 | the stamp of the load where the file's recording began |
+| 48 | 8 | `BOOT-ID` of the system the file was built for |
 | 56 | 8 | reserved, zero |
 | 64 | | the module name the source provides, zero-padded to eight bytes |
 
@@ -282,9 +281,9 @@ entry leaves the dictionary: the BIOS counts the calls of `LATEST!` and
 `DICT-ROLLBACK` that succeed, and a replay ends with status 7 when the
 count moves under it.
 
-## The stamp, and when a token file is stale
+## When a token file is used
 
-A token file holds three things that were true when it was recorded and
+A token file holds four things that were true when it was recorded and
 that nothing in the records checks again at load time.
 
 1. It is the record of one particular source text.
@@ -293,56 +292,55 @@ that nothing in the records checks again at load time.
    found first.
 3. Each parsing word took the text it took. A parsing word changed to take
    more or less would be given the old text.
+4. Each name was bound where it was. The replay searches a name at the
+   place where the recording first met that binding, and binds a word the
+   file defines to the entry that is newest when its definition completes.
 
-Names are not among them, since every name is searched at load time.
+What a name is bound to is not among them, since every search happens at
+load time.
 Conditional compilation is not either: the replay checks every conditional
 against the record and ends with status 7 when one goes the other way.
-Fact 1 depends on the file's own source. Facts 2 and 3 depend on everything
-loaded before the file, the BIOS and KDOS included, though only through
-those two narrow routes.
+Fact 1 depends on the file's own source. Facts 2 to 4 depend on what was
+loaded before the file, the BIOS and KDOS included.
 
 ### The rule
 
-This rule is taken for now. What is uncertain about it is stated below.
+Decided 2026-11-11. A token file is used when
 
-1. A token file is used only on top of what it was recorded on. KDOS keeps
-   a running stamp, `LOAD-STAMP`, that starts from the identity of the BIOS
-   and of KDOS and takes in each file as its load begins, in order. A token
-   file's header holds the stamp that stood where its recording began, and
-   the file is used only when the stamp stands the same at load time.
-2. Where no source stands beside the token file, a mismatch ends the load.
-   KDOS prints ` Token form recorded on another system: this volume was
-   built for another system`, the loader prints ` Token file`, the file's
-   name and ` cannot be loaded`, and the load throws status 7. Nothing is
-   loaded in the file's place. That is every volume except the System
-   Practice's system volume, and later a user volume.
-3. Where the source stands beside it, the token file is also checked
-   against that source, by length and CRC-32, and on either mismatch the
-   module loads from its source. The loader names each file that gave way:
-   ` Token file`, the name and ` is out of date: loading its source`. The
-   source is taken into the stamp by its own text, so an edited module takes
-   with it every module loaded after it, until their token files are built
-   again.
+- (a) it was built for this system: the cell in its header equals
+  `BOOT-ID`, the identity of the BIOS's code and of KDOS as loaded; and
+- (b) where its source ships beside it, which flag 1 says, that source
+  matches the header by length and CRC-32.
 
-The rule is stated once, in `TOKENS-CURRENT? ( addr -- flag )`: the header's
-stamp equals `LOAD-STAMP`. Narrowing it to the file's own source means
-changing that word to answer true, after which a token file with its source
-beside it is checked against the source alone and one without is always
-used. The replay, the format and the builder would not change; the header's
-stamp and the BIOS word would simply go unread.
+Nothing else enters: not the files loaded before it, nor their order, nor
+the boot script. `TOKENS-CURRENT? ( addr -- flag )` states (a) and is its
+only statement. The loader states (b), where it reads the source
+(`_LD-TOKENS?`).
 
-### What the stamp is made of
+Where no source stands beside the file, a file that fails (a) ends the
+load. KDOS prints ` Token form recorded on another system: this volume was
+built for another system`, the loader prints ` Token file`, the file's name
+and ` cannot be loaded`, and the load throws status 7. Nothing is loaded in
+the file's place. That is every volume except the System Practice's system
+volume, and later a user volume.
 
-**The identity of the BIOS and of KDOS** is one cell that a new BIOS word,
-`BOOT-ID ( -- u )`, gives. The BIOS hashes its own code and dictionary, the
-65,490 bytes below its first variable, which never change while it runs.
-It then takes in the first file `FSLOAD` loads after reset, as it reads it.
-For a boot from disk that file is KDOS, as the volume holds it. So the
-running system needs nobody to tell it what it is: the BIOS that answers
-is the code that was hashed, and KDOS is the bytes the BIOS evaluated. The
-BIOS's messages lie past its variables and are not part of the cell. Asked
-before any file was loaded, the word gives the BIOS's own cell, and the
-answer is fixed until the next reset.
+Where the source stands beside it, a file that fails (a) or (b) gives way
+to its source. The loader names it: ` Token file`, the name and ` is out of
+date: loading its source`. An edited module therefore loads from its
+source, and no other module is affected. An edit to the boot script affects
+nothing.
+
+### The identity of a system
+
+One cell, which a BIOS word, `BOOT-ID ( -- u )`, gives. The BIOS hashes its
+own code and dictionary, the 65,490 bytes below its first variable, which
+never change while it runs. It then takes in the first file `FSLOAD` loads
+after reset, as it reads it. For a boot from disk that file is KDOS, as the
+volume holds it. So the running system needs nobody to tell it what it is:
+the BIOS that answers is the code that was hashed, and KDOS is the bytes
+the BIOS evaluated. The BIOS's messages lie past its variables and are not
+part of the cell. Asked before any file was loaded, the word gives the
+BIOS's own cell, and the answer is fixed until the next reset.
 
 The hash takes each eight bytes X, and then each byte left over, as
 `h = (h XOR x) * K`, `h = h XOR (h >> 32)`, in eleven instructions for a
@@ -361,148 +359,22 @@ The simulator has no BIOS image. Its `BOOT-ID` gives the cell of the BIOS
 that `bios.asm` assembles to, which it assembles once when the word is
 first asked for, and of the file an image boot reads as the boot file. The
 assembly adds 0.09 host seconds to a simulator boot that meets a token
-file, about 2.5% of the linked Desktop's 3.5 seconds; a boot from source
-never asks. That is host time only. `shared/boot_identity.py` holds the arithmetic for it and
-for the tools that build images. The simulator's own session root, which
-it evaluates before the boot script, is not a loaded file and is outside
-the stamp.
+file, about 2% of the linked Desktop's 3.9 seconds; a boot from source
+never asks. That is host time only. `shared/boot_identity.py` holds the
+arithmetic for the simulator and for the tools that build images.
 
-**The files.** `LOAD-STAMP` takes in a source text by its CRC-32 and
-length, and a token file by the same two numbers of the source it was
-recorded from, which its header holds, with the same step as the BIOS's
-hash. A file is taken in when its load begins, so a file loaded from inside
-another stands on the part of that other file which came before it.
+A builder writes the `BOOT-ID` of the system its image boots into every
+token file of the image: the cell for the BIOS that `bios.asm` assembles to
+and for KDOS as the image holds it.
 
-The stamp is zero until a token file first asks for it. It starts then,
-from `BOOT-ID` and the source files that are loading at that moment,
-outermost first: on a boot, the boot script. From there on the loader
-announces every source file it reads (`LOAD-STAMP-SOURCE`), and a loader
-outside KDOS announces the text it evaluates itself; Akashic's cold-source
-loader does so for a chunk of source. A boot that meets no token file never
-starts the stamp and computes no checksum.
+### What the rule does not cover
 
-### What the stamp leaves out
+The rule ties a token file to the BIOS, to KDOS, and, where the source
+ships, to the file's own source. It does not tie it to the other files
+that were loaded before it was recorded. A module whose token file is used
+may therefore have been recorded on an older version of a module it uses.
 
-The stamp starts at the first token file, with the source files that are
-loading at that moment, and a file is taken in when its load begins. Three
-things are therefore in no stamp.
-
-- **A source file whose load ended before the first token file was met.**
-  It was loaded, and the files after it stand on it, but its text was gone
-  before the stamp began.
-- **Anything defined outside a file:** a line typed at the prompt, and text
-  given to `EVALUATE` or `SOURCE-EVALUATE-CHECKED` that no loader announced
-  with `LOAD-STAMP-SOURCE`.
-- **The files a file loads itself.** A file's header is compared, and the
-  file taken in, when its load begins. A module it is the first to require
-  loads after that point, so that module is not in the requiring file's
-  stamp. If such a module changes, the requiring file's token file is
-  still current, and the part of it recorded after the `REQUIRE`, which is
-  most of a module, is replayed on top of the changed module. As the rule
-  stands, an edit therefore makes stale the modules that happen to load
-  later, whether or not they use the edited one, and leaves in use the
-  token file of the module that brought the edited one in.
-
-In the Desktop's two token boots the first two name nothing. The boot
-script is the only file that loads as source. It is still loading when the
-first token file, `networking.f`, begins, so it is in the stamp. Every
-other file the boot loads is a token file: 55 in the linked boot, and with
-the system volume 11 on the boot volume and 301 on the system volume.
-Nothing is typed, and no text is evaluated outside a file, except the
-simulator's session root, which the simulator evaluates before the boot
-script. A build refuses an image in which a source file would end before
-the first token file. The third applies wherever one module requires
-another and the volume is changed in part; a volume built in one piece is
-recorded in one boot.
-
-Two of the shared cases pin the first two: a source file that ended, and a
-word typed, before the first token file leave the stamp unstarted, and a
-token file stamped as if that source file were in it is refused.
-
-### What a token file could sidestep
-
-Nothing. No load path checks a module's source text against a recorded
-hash, signature or approval where a token file is loaded in its place.
-KDOS's registry of loaded modules holds names and file identities and
-compares no content. A cold-source container's CRC covers the bytes it
-holds, which are the token form when it holds one. Akashic's application
-builder digests the source it compiles, but it reads that source itself and
-never asks the loader for it, and its loader takes machine-code images by
-their digests. The sandbox's modules are its own artifacts, bound by their
-digests, and are not Forth source.
-
-The builder computes each file's stamp for the image it writes. The
-recording boot gives the files and the order their loads began in. The
-image gives `BOOT-ID`, from its own KDOS, and the text its own boot script
-has. That text differs from the recording's in two lines: the one that
-turns token loading on, and the last, which a simulator image hands to the
-simulator. So "the stamp that stood when its recording began" is the stamp
-that will stand at that point on the image the file is built into.
-
-### What it costs
-
-Emulator, `desktop-apt1`; [Measurements](#measurements) has the method.
-
-| | Instructions |
-|---|---:|
-| `BOOT-ID`: the BIOS's code, once at the first `FSLOAD` | 90,082 |
-| `BOOT-ID`: KDOS as the image holds it, 202,713 bytes | 278,749 |
-| starting the stamp: the CRC-32 of the boot script, 9,309 bytes linked and 6,237 with the system volume | 172,000 and 115,000 |
-| one token file: the comparison and the take | 324 |
-| all 312 token files of the system-volume boot | 101,000 |
-
-The comparison and the take are about 320 instructions for a file in KDOS's
-Forth, where a handful was estimated, and about 100,000 for every file of
-the system-volume boot. With `BOOT-ID` and the start, the whole stamp is
-about 0.6 million instructions of a token boot's 676 million, under a thousandth.
-The `BOOT-ID` hash is paid by every boot from disk, a source boot too. A
-source file taken into a started stamp costs its CRC-32, 18.5
-instructions a byte in KDOS's Forth loop over the CRC unit.
-
-The check of a token file against its own source is another matter, and it
-applies only where the source ships, on the System Practice's volume:
-
-| System volume, to Desk's entry | Instructions | System cycles |
-|---|---:|---:|
-| from source | 1,442 M | 1,866 M |
-| token files alone | 676 M | 899 M |
-| token files with their source beside them | 1,230 M | 1,609 M |
-
-The check reads every module's source to compare it, so the volume gives
-back most of what token files save: 554 million instructions more than
-the volume without source. About 177 million are the CRC-32 of the
-9.5 MB of source, about 135 million the 310 further path resolutions, and
-the rest, about 240 million, the reads of the source through the ext4
-driver. A check against the file
-system's own identity of the source, its size and time, which the module
-source already reports for every file it resolves, would cost one more
-path resolution for each module and no read; stage 1 measured 134 million
-instructions for 301 such resolutions. It would need the token file to hold
-that identity, which only whoever writes the source onto the volume knows.
-That is a change to weigh when the System Practice's build is designed; it
-is not made here.
-
-### What follows from the rule
-
-- **The boot script is the first file of every load.** An edit to
-  `autoexec.f` makes every token file on the machine stale. On a volume
-  without source the boot then ends at the first token file, until the
-  image is built again. The builder writes the script, and nothing on such
-  a volume should edit it.
-- **A changed BIOS or KDOS** does the same, which is the rule's purpose.
-- **A file loaded from inside an edited one counts as loaded after it.** An
-  edited module takes with it the modules it is the first to require, as
-  well as those loaded after it ends.
-- **A text loaded with `LOAD` at the prompt, or by a loader outside KDOS,**
-  enters the stamp once the stamp has started. A token file loaded after
-  it is then stale, since it was not recorded on top of that text.
-
-### What is uncertain
-
-The rule counts the modules loaded after an edited one as stale. Whether
-they need to be is not settled.
-
-What a change to something loaded earlier can still make a replay get
+What a change to something loaded earlier can then make a replay get
 wrong, with the file's own source unchanged, is the following and no more.
 The replay searches every name at load time and takes each word's flags as
 they are then, so it finds the definition the source would find and decides
@@ -528,27 +400,77 @@ to compile or to run it as the interpreter would.
   bound to the dictionary's newest entry after the record that completes
   its definition. A defining word changed to leave another entry newest
   binds another word.
-- *A conditional* that goes the other way is checked: the replay ends with
-  status 7.
 
-*For.* The recording is a reading of the text on top of the words that
-existed then. Every item above but the last is silent: the system that
-results differs from the one a source load builds, and nothing in the
-replay notices. The stamp is the only check that covers them, and it costs
-a comparison.
+Each of the five is silent: the system that results differs from the one a
+source load builds, and nothing in the replay notices. A conditional that
+goes the other way is not among them, since the replay checks it.
 
-*Against.* All of them are rare. Nearly every edit to an earlier module
-leaves the later records exactly right, and the rule throws them away all
-the same. The cost is source loads until a rebuild: an edit to a module
-that loads early turns the System Practice's boot back into a source boot,
-and an edit to the boot script stops a volume without source altogether.
-The rule also misses the place where the items above are most likely to
-bite, a module's own requirements, as
-[What the stamp leaves out](#what-the-stamp-leaves-out) says. A rule that
-looked only at the file's own source would keep every other token file in
-use and would say plainly that it covers none of the list.
+A volume built in one piece is recorded in one boot, so none of the five
+can arise while it is loaded the way it was recorded. They can arise
+wherever what was loaded before a file is no longer what the recording
+saw: after an edit to the boot script, in another load order, after words
+typed at the prompt, and, on the System Practice's volume, between an edit
+to one module and the rebuild of the token files of the modules that use
+it.
 
-The rule can be narrowed in the one word that states it.
+### What a token file could sidestep
+
+Nothing. No load path checks a module's source text against a recorded
+hash, signature or approval where a token file is loaded in its place.
+KDOS's registry of loaded modules holds names and file identities and
+compares no content. A cold-source container's CRC covers the bytes it
+holds, which are the token form when it holds one. Akashic's application
+builder digests the source it compiles, but it reads that source itself and
+never asks the loader for it, and its loader takes machine-code images by
+their digests. The sandbox's modules are its own artifacts, bound by their
+digests, and are not Forth source.
+
+### What it costs
+
+Emulator, `desktop-apt1`; [Measurements](#measurements) has the method.
+
+| | Instructions |
+|---|---:|
+| `BOOT-ID`: the BIOS's code, once at the first `FSLOAD` | 90,082 |
+| `BOOT-ID`: KDOS as the image holds it, 201,978 bytes | 277,748 |
+| one token file: the comparison | 69 |
+| all 312 token files of the system-volume boot | 21,500 |
+
+Rule (a) is about 0.4 million instructions of a token boot's
+676 million, nearly all of it the hash, which every boot from disk pays,
+a source boot too.
+
+Rule (b) is another matter, and it applies only where the source ships, on
+the System Practice's volume:
+
+| System volume, to Desk's entry | Instructions | System cycles |
+|---|---:|---:|
+| from source | 1,442 M | 1,866 M |
+| token files alone | 676 M | 899 M |
+| token files with their source beside them | 1,228 M | 1,607 M |
+
+The check reads every module's source to compare it, so the volume gives
+back most of what token files save: 552 million instructions more than
+the volume without source. About 177 million are the CRC-32 of the
+9.5 MB of source, about 135 million the 310 further path resolutions, and
+the rest, about 240 million, the reads of the source through the ext4
+driver.
+
+### Open, for the design of the System Practice's build
+
+- **A rule that counts as stale the modules that use an edited one.** That
+  would close what the rule does not cover. It needs each token file to
+  list the files it takes words from, so that the loader can tell which
+  token files an edit reaches.
+- **A cheaper check of a token file against its source.** A check against
+  the file system's own identity of the source, its size and time, which
+  the module source already reports for every file it resolves, would cost
+  one more path resolution for each module and no read; a further path
+  resolution was measured at 0.44 million instructions. It needs the token
+  file to hold that identity, which only whoever writes the source onto the
+  volume knows.
+- **The recorder on the machine**, which builds a token file again after
+  an edit ([Who writes the file](#who-writes-the-file)).
 
 ## Where the files live
 
@@ -564,8 +486,8 @@ it had, 86 of 128 for the linked Desktop and 66 with the system volume, and
 the volume has more free space than before: 58,249 free sectors
 against 51,022 for the linked Desktop, and 63,480 against 61,498 on the
 boot volume of the system-volume build. The Desktop's free-space reserve is
-not touched. The boot script, `autoexec.f`, is the one source file: the
-builder writes it, and it is 9 KB.
+not touched. The boot script, `autoexec.f`, stays source. It is the file a
+person edits to change what the machine loads, and it is 9 KB.
 
 **The system volume (ext4).** A module's token form stands at the module's
 path with a `t` added: `utils/string.ft` for `utils/string.f`. A build with
@@ -600,8 +522,9 @@ build's report lists it; the Desktop has none.
 **With the source kept (`--keep-module-source`).** The builder writes every
 module's source at its path as well and sets flag 1 in each token file. This
 is the System Practice's volume. KDOS then checks each token file against
-its source and loads the source of one that is out of date, as the next
-section says. A module without a token form simply loads from its source.
+its source and loads the source of a module that was edited
+([When a token file is used](#when-a-token-file-is-used)). A module without
+a token form simply loads from its source.
 
 The module-source contract changes in two respects. The loader may call
 RESOLVE twice to find a file, and a RESOLVE that returns `MS-E-NOT-FOUND`
@@ -623,15 +546,9 @@ A file has no token form when
 - its load does not finish.
 
 The recorder marks the first and the last. On the boot volume the builder
-leaves such a file as source, and KDOS takes its text into the stamp like
-any other file's. On a system volume without source it is absent, and with
-the source kept it loads from source. No file of the Desktop was marked
-unfit.
-
-A build also refuses two shapes of boot, because the stamp could not follow
-them: a source file that ends its load before the first token file begins,
-which KDOS's stamp would leave out, and one source text loaded twice, which
-would need two stamps in one file.
+leaves such a file as source. On a system volume without source it is
+absent, and with the source kept it loads from source. No file of the
+Desktop was marked unfit.
 
 ## The simulator
 
@@ -643,17 +560,17 @@ exist before the image boots, and a token file finds them by name, as
 source does.
 
 The source-acceleration overlays and their pins are untouched, because no
-word they bind changed: the loader announces a source file from a word of
-its own and then calls the walker the overlay binds. They serve source
-loads as before, and a token load does not pass through them.
+word they bind changed. They serve source loads as before, and a token load
+does not pass through them.
 
 Host time is not device time. In the simulator the linked Desktop
-reached Desk's entry in 2.6 and 2.3 seconds from source and in 3.7 and 3.4
-from token forms; with the system volume it took 10.6 and 9.8 seconds from
-source and 12.8 and 13.2 from token files alone. The guest does less work
-from token forms, 56.9 million semantic steps against 69.4 million with the
+reached Desk's entry in 2.8 and 2.6 seconds from source and in 4.1 and 3.7
+from token forms; with the system volume it took 11.2 and 10.9 seconds from
+source and 13.9 and 14.4 from token files alone. The guest does less work
+from token forms, 56.8 million semantic steps against 69.4 million with the
 system volume, but the replay is Python where the source path has a native
-line walker, and that costs more host time than the smaller load saves. A native replay is among
+line walker, and that costs more host time than the smaller load saves.
+A native replay is among
 [what remains](#what-remains).
 
 ### Section 9 of the simulator contract
@@ -674,10 +591,10 @@ reads:
 > the interpreter's work on the module's source, which `TOKEN-REPLAY` runs
 > through the interpreter's own steps. The same file loads on every
 > backend. It holds no state of any backend, so no simulator or runtime
-> version enters its validity; its header's stamp ties it to the BIOS, the
-> KDOS and the files it was recorded on. It cannot become a production
-> path before cold, warm, and source/warm equivalence all pass and useful
-> wall time is demonstrated.
+> version enters its validity; one cell of its header, the `BOOT-ID` of
+> the system it was built for, ties it to a BIOS and a KDOS. It cannot
+> become a production path before cold, warm, and source/warm equivalence
+> all pass and useful wall time is demonstrated.
 
 The gate sentence stays as it is.
 
@@ -694,10 +611,10 @@ a word that prints a mark and returns. The system-volume pair's token image
 is the one that ships, a volume of token files and no source.
 
 In both pairs the dictionary's structure is equal. Every entry is at the
-same address with the same name and flags, 50,506 entries in the linked
-boot and 54,598 with the system volume. `HERE`, `LATEST` and the end of the
-system dictionary are equal, and the terminal output of the two boots is
-identical.
+same address with the same name and flags, 50,500 entries in the
+linked boot and 54,592 with the system volume. `HERE`, `LATEST`
+and the end of the system dictionary are equal, and the terminal output of
+the two boots is identical.
 
 The bytes are not all equal. The test puts every byte that differs to the
 word that holds it and into one of three classes, and fails on a byte that
@@ -705,16 +622,19 @@ fits none.
 
 | | Linked | System volume |
 |---|---:|---:|
-| dictionary bytes compared | 8,926,044 | 9,979,792 |
-| bytes that differ | 2,638 | 2,381 |
+| dictionary bytes compared | 8,925,064 | 9,978,812 |
+| bytes that differ | 2,628 | 2,370 |
 | in a cell that holds an address the load allocated | 582, in 162 cells | 977, in 324 cells |
-| in the data of a listed word of the loader, the allocator or a filesystem | 2,054, in 31 words | 1,402, in 85 words |
+| in the data of a listed word of the loader, the allocator or a filesystem | 2,044, in 30 words | 1,391, in 84 words |
 | in the data of a word set from a clock (`DNS-ID`) | 2 | 2 |
 | unexplained | 0 | 0 |
 
 The count of state bytes moves a little from run to run: the boot volume's
 directory holds each file's time, and the two images of a pair are built
-seconds apart. The other two classes do not move.
+seconds apart. The other two classes do not move. These are the figures of
+the run made before this document was committed; the run of record, on the
+commits that hold it, is in Akashic's
+`local_testing/evidence/token-equivalence-20261111.md`.
 
 **Addresses.** The loader's buffer for a token file is smaller than for
 its source, so memory that a module allocates while it loads lies at
@@ -730,15 +650,15 @@ or between its limit and `XMEM-HERE`. A value anywhere else fails.
 cold-source loader, the VFS and the ext4 driver keep cursors, buffers,
 sizes and checksums of the files and the volume they read, and the two
 boots read other files from other volumes. The test holds a list of those
-words, 61 entries, each with the pairs it differs in and one line that
-says why its data follows the files that were read. An entry is a word, or
-the prefix of one routine's private cells. A difference is accepted only
-in the data field of a `VARIABLE` or `CREATE`d word on the list, and the
-data field is found from the word's own code, so a byte that differs in a
-colon definition, in a name or in a link fails whatever the word is called.
-The list is closed in both directions: an entry that explains no byte in a
-pair it is listed for fails the test, so an entry cannot outlive its
-reason.
+words, 60 entries, each with the pairs it differs in and one
+line that says why its data follows the files that were read. An entry is
+a word, or the prefix of one routine's private cells. A difference is
+accepted only in the data field of a `VARIABLE` or `CREATE`d word on the
+list, and the data field is found from the word's own code, so a byte that
+differs in a colon definition, in a name or in a link fails whatever the
+word is called. The list is closed in both directions: an entry that
+explains no byte in a pair it is listed for fails the test, so an entry
+cannot outlive its reason.
 
 **The clock.** `DNS-ID` takes its value from the timer when networking
 loads, and the two boots reach that line at different times.
@@ -753,29 +673,24 @@ listed for the other pair, a listed name on a colon definition's code, a
 listed word that explains nothing, and a structure or an output that
 differs.
 
-The reports of the run of record are kept in Akashic's
-`local_testing/evidence/token-equivalence-20261111.md`, with the result
-lines of the journeys below. The test is four
-builds and four emulator boots, about four minutes and 1.7 GiB at its
-peak, and runs alone.
+The test is four builds and four emulator boots, about four minutes and
+1.7 GiB at its peak, and runs alone.
 
 ### The journeys
 
-The physical Desktop journey, built with `--token-modules`, passed three
-ways at MegaPad 3f2a162b and Akashic af437d6a: the linked Desktop in the
+The physical Desktop journey is the gate for a change to the Desktop's
+path, and it runs from token forms three ways: the linked Desktop in the
 simulator, the Desktop on a system volume of token files alone in the
-simulator, and the linked Desktop in hybrid mode.
+simulator, and the linked Desktop in hybrid mode. Their result lines, and
+the commits they ran on, are in the same evidence note.
 
 ### Would taking the source's working space make the dictionaries identical?
 
 No. A token load that allocated what its source load allocates would put
 every later allocation at the source boot's address, and the first class
-would be empty: 582 bytes in the linked boot and 977 with the system
-volume. The other two classes would stay. The loader's cursors, the
-filesystems' caches and the checksums describe the files that were read,
-which are other files, and the clock is the clock. The dictionaries would
-still differ in 2,056 and 1,404 bytes, less the few cells among them that
-only hold the allocator's own marks.
+would be empty. The other two classes would stay. The loader's cursors,
+the filesystems' caches and the checksums describe the files that were
+read, which are other files, and the clock is the clock.
 
 What it would cost, from the recorded boots:
 
@@ -799,18 +714,19 @@ It was not built.
 
 ## Measurements
 
-All figures are from one round on MegaPad `token-modules` efca9db4 and the
-Akashic builder that became `token-modules` 1f2c7718, run one boot at a
-time on a machine that other work shared. The branches stand on MegaPad's
-local main 8bbfedc2 and Akashic's 9980e390. Device figures are the
-emulator's, for `desktop-apt1` from reset to the boot line that says the
-guest is entering Desk, in millions of instructions read between boot lines
-at a resolution of two million.
+All figures are from one round on the code this document describes:
+MegaPad's `token-modules` as the commit that holds this text leaves it, and
+Akashic's `token-modules` with the builder of the same change. Each boot
+ran alone, on a machine that other work shared. The branches stand on
+MegaPad's local main 8bbfedc2 and Akashic's 9980e390. Device figures are
+the emulator's, for `desktop-apt1` from reset to the boot line that says
+the guest is entering Desk, in millions of instructions read between boot
+lines at a resolution of two million.
 
 | Linked chunks | Source | Token forms |
 |---|---:|---:|
-| BIOS and KDOS | 28 | 26 |
-| networking, rich terminal, cold-source loader | 86 | 32 |
+| BIOS and KDOS | 26 | 26 |
+| networking, rich terminal, cold-source loader | 88 | 32 |
 | the Desktop's modules, 52 chunks | 912 | 370 |
 | the rest | 2 | 2 |
 | total | 1,028 | 430 |
@@ -821,20 +737,15 @@ at a resolution of two million.
 | BIOS and KDOS | 26 | 26 | 26 |
 | networking, rich terminal, cold-source loader | 88 | 32 | 32 |
 | the volume's driver, 8 chunks | 136 | 52 | 52 |
-| the mount | 14 | 12 | 12 |
-| the Desktop's modules, 310 files | 1,176 | 552 | 1,106 |
-| the rest | 2 | 2 | 2 |
-| total | 1,442 | 676 | 1,230 |
-| system cycles | 1,866 | 899 | 1,609 |
+| the mount | 12 | 12 | 12 |
+| the Desktop's modules, 310 files | 1,178 | 552 | 1,106 |
+| the rest | 2 | 2 | under 2 |
+| total | 1,442 | 676 | 1,228 |
+| system cycles | 1,866 | 899 | 1,607 |
 | sectors read from the system volume | 95,898 | 71,018 | 179,642 |
 
-At the SoC's 100 MHz the linked boot goes from 13.4 seconds to 5.8, and the
-boot from the system volume from 18.7 to 9.0.
-
-The volume of token files alone loads its modules in 552 million
-instructions where stage 1's volume, which kept the source, took 640
-million: the nine modules loaded before the mount are now one small file
-each to read, where the loader read and scanned their whole source.
+At the SoC's 100 MHz the linked boot goes from 13.4 s to 5.8 s,
+and the boot from the system volume from 18.7 s to 9.0 s.
 
 ### Where the instructions go
 
@@ -844,90 +755,73 @@ held it. In millions of instructions, for the three token boots:
 
 | | Linked | System volume | With source beside |
 |---|---:|---:|---:|
-| the token replay's loop and the interpreter's two steps | 65 | 75 | 74 |
-| splitting the text of parsing words | 10 | 11 | 11 |
-| dictionary searches | 28 | 29 | 29 |
-| compiling: the scan of the inline table | 82 | 94 | 94 |
+| the token replay's loop and the interpreter's two steps | 64 | 75 | 75 |
+| splitting the text of parsing words | 10 | 10 | 10 |
+| dictionary searches | 27 | 29 | 29 |
+| compiling: the scan of the inline table | 83 | 94 | 94 |
 | compiling: the rest | 123 | 138 | 138 |
-| checksums: the CRC words and the BIOS's CRC primitives | 38 | 40 | 198 |
-| ext4, the VFS and the disk | 1 | 59 | 153 |
-| calls between Forth words (NEXT and EXIT) | 19 | 99 | 252 |
-| other BIOS primitives that Forth words run | 29 | 78 | 202 |
-| other Forth words | 8 | 28 | 52 |
+| checksums: the CRC words and the BIOS's CRC primitives | 38 | 40 | 197 |
+| ext4, the VFS and the disk | 1 | 59 | 152 |
+| calls between Forth words (NEXT and EXIT) | 19 | 100 | 253 |
+| other BIOS primitives that Forth words run | 29 | 78 | 203 |
+| other Forth words | 8 | 27 | 52 |
 | sampled | 402 | 649 | 1,202 |
 
-The replay, the searches and the compiling take the same in all three. The
+The first five rows are the replay and the compiling it drives, and they
+take the same whether or not the source ships beside the token files. The
 last five rows are what the modules and the filesystems run. With the
-source beside the token files they grow by 551 million instructions, which
-is the check of each token file against its source: finding the source,
-reading it, and computing its CRC-32. The rows cannot split that exactly,
-because KDOS's checksum loop and the ext4 driver are both Forth words
-calling BIOS primitives. Timed apart, below, the CRC-32 is 18.5
-instructions a byte, 177 million for the 9.5 MB of source. Stage 1 measured
-a further path resolution at 0.44 million instructions, 135 million for
-310. The remaining 240 million or so are the reads of the source through
-the driver, 108,624 sectors. The CRC unit takes eight bytes in one
-instruction; KDOS's loop around it costs the rest.
+source beside the token files they grow by 553 million
+instructions, which is the check of each token file against its source:
+finding the source, reading it, and computing its CRC-32. The rows cannot
+split that exactly, because KDOS's checksum loop and the ext4 driver are
+both Forth words calling BIOS primitives. Timed apart, below, the CRC-32 is
+18.5 instructions a byte, 177 million for the 9.5 MB
+of source. A further path resolution was measured at 0.44 million
+instructions, 135 million for 310. The rest, about 240 million,
+are the reads of the source through the driver, 108,624 sectors.
+The CRC unit takes eight bytes in one instruction; KDOS's loop around it
+costs the rest.
 
 For a source boot, `docs/performance/loader-line-cost-2026-11-11.md` has
 the same table of MegaPad's main.
 
-### The stamp
+### The rule's own cost
 
-The words of the staleness rule were timed apart from a boot. A boot
-volume's script ran a million passes of the per-file check and take
-against a million of an empty loop, a thousand starts of the stamp, and a
-hundred CRC-32s of 100,000 bytes, between boot lines stamped at a
-resolution of 50,000 instructions.
+The BIOS's hash was counted instruction by instruction on a boot volume
+that holds KDOS as the Desktop's images hold it. The comparison was timed
+apart from a boot: a boot volume's script ran a million passes of it
+against a million of an empty loop, and a hundred CRC-32s of 100,000 bytes,
+between boot lines marked at a resolution of 50,000 instructions.
 
 | | Instructions |
 |---|---:|
 | the BIOS's hash of its own code, 65,490 bytes | 90,082 |
-| its hash of KDOS as the Desktop's images hold it, 202,713 bytes | 278,749 |
-| the check and the take for one token file | 324 |
-| the CRC-32 of a source text, and so the start of the stamp for each byte of the boot script | 18.5 a byte |
+| its hash of KDOS as the Desktop's images hold it, 201,978 bytes | 277,748 |
+| the comparison for one token file | 69 |
+| the CRC-32 of a source text | 18.5 a byte |
 
-The BIOS's hash is eleven instructions for a cell. The per-file figure is
-a pass of 358 instructions less the empty loop's 34. In the three profiles
-the stamp's own words were hit 3, 21 and 47 times in 398,848, 643,584 and
-1,191,680 samples, which agrees with it.
+The comparison's figure is a pass of 90 instructions less the empty
+loop's 21. For the 312 token files of the system-volume boot it comes to
+about 21,500 instructions, so the cost of rule (a) is the hash: 0.4
+million instructions, paid once in a boot.
 
-A boot was also measured with and without the stamp. The same builder
-wrote the Desktop's two token images twice, once on this branch and once on
-a copy whose KDOS never asks for the stamp and whose BIOS does not hash at
-its first `FSLOAD`, and the emulator booted each to Desk's entry at a
-resolution of 100,000 instructions.
-
-| To Desk's entry | With the stamp | Without | The stamp |
-|---|---:|---:|---:|
-| Linked chunks: instructions | 428,900,000 | 428,400,000 | 500,000 |
-| system cycles | 582,719,371 | 582,053,472 | 665,899 |
-| System volume, token files alone: instructions | 675,200,000 | 674,600,000 | 600,000 |
-| system cycles | 898,342,400 | 897,551,063 | 791,337 |
-
-That is seven or eight milliseconds at 100 MHz, about a thousandth of the
-boot, and it agrees with the parts timed above. In the simulator the
-difference is smaller than what one run differs from the next. Three runs
-each took 3.8, 3.8 and 3.9 host seconds with the stamp and 3.6, 4.1 and 4.1
-without for the linked Desktop, and 13.6, 14.5 and 15.8 against 15.0, 14.3
-and 15.1 with the system volume, on a machine other work shared; the guest
-ran 4,524 and 22,858 more semantic steps with the stamp.
+The BIOS's hash is eleven instructions for a cell.
 
 ### Sizes
 
 | | Files | Source | Token forms | |
 |---|---:|---:|---:|---:|
-| Linked boot: 52 chunks, `networking.f`, `rich-terminal.f`, the cold-source loader | 55 | 7,107,018 | 3,408,153 | 48% |
+| Linked boot: 52 chunks, `networking.f`, `rich-terminal.f`, the cold-source loader | 55 | 7,106,769 | 3,408,131 | 48% |
 | of which the 52 chunks, in their containers | 52 | 6,320,982 | 3,114,573 | 49% |
 | System volume: modules, as plain files with their comments | 301 of 310 | 9,544,132 | 3,168,937 | 33% |
 
 The system volume also holds nine files that only name a module, 744 bytes
-together. With `--keep-module-source` it holds 611 files and 12,713,069
-bytes. The boot volume has 58,249 free sectors where the source build has
-51,022, and 63,480 against 61,498 for the boot volume of the
-system-volume build.
+together. With `--keep-module-source` it holds the 310 source files and the
+301 token forms, 611 files and 12,713,069 bytes. The boot volume has 58,250
+free sectors where the source build has 51,024, and 63,481 against 61,500
+for the boot volume of the system-volume build.
 
-In stage 1's count the 52 chunks held 1,054,713 records: 685,542 words by
+In an earlier count the 52 chunks held 1,054,713 records: 685,542 words by
 slot (44% of the bytes), 51,006 texts (30%), 23,686 IMPORTs with their
 names (12%), 73,340 numbers (6%), 185,260 line marks (6%), 35,745 DEFINEDs
 and 134 SKIPPEDs. Their tables, allocated one file at a time while it
@@ -935,10 +829,11 @@ loads, came to 59,431 slots, 475 KB in all and about 9 KB for a chunk.
 
 ### The build
 
-A linked Desktop with `--token-modules` built in 32 seconds and one with
-the system volume in 54, with or without the source kept, against two
-seconds for the source builds. Nearly all of it is the recording boot,
-which evaluates every line on the simulator's reference path.
+A linked Desktop with `--token-modules` built in 35 seconds and
+one with the system volume in 64, or in 60 with the source kept,
+against two seconds for the source builds. Nearly all of it is the
+recording boot, which evaluates every line on the simulator's reference
+path.
 
 ### The simulator's host time
 
@@ -948,22 +843,22 @@ device.
 
 | | Source | Token forms | With source beside |
 |---|---:|---:|---:|
-| Linked chunks | 2.6, 2.3 | 3.7, 3.4 | |
-| System volume | 10.6, 9.8 | 12.8, 13.2 | 22.6, 23.4 |
+| Linked chunks | 2.8, 2.6 | 4.1, 3.7 | |
+| System volume | 11.2, 10.9 | 13.9, 14.4 | 26.4, 26.6 |
 
 The simulator's semantic steps for the system-volume boot are 69.4 million
-from source, 56.9 million from token files alone and 132.5 million with the
+from source, 56.8 million from token files alone and 132.5 million with the
 source beside them, and its reads of the system volume 11,988, 8,878 and
 22,456.
 
 ## Decisions
 
-Three decisions were taken on 2026-11-11. They are recorded here, each
-with what it rests on.
+Three decisions were taken on 2026-11-11. They are recorded here, each with
+what it rests on.
 
 ### 1. Where token files are built
 
-On the host, when an image is built, for now. The recorder runs in the
+On the host, when an image is built. The recorder runs in the
 simulator, which records a boot in under a minute and whose replay matches
 the BIOS's by test. The System Practice must also build token files on the
 machine before the release; that recorder is a committed later step, and
@@ -987,31 +882,27 @@ lists the boot volume, where the sample documents and `example.f` live.
 The tests that read module source back from a system volume do so on a
 volume built without `--token-modules`, where the source is the only form.
 
-### 3. What makes a token file stale
+### 3. When a token file is used
 
-The rule under [The stamp](#the-stamp-and-when-a-token-file-is-stale),
-taken for now, with what is uncertain about it stated there: whether the
-modules loaded after an edited one need to count as stale.
+When it was built for this system, and, where its source ships beside it,
+when that source is the one it was recorded from. Nothing else enters.
+[When a token file is used](#when-a-token-file-is-used) gives the rule,
+what it does not cover, and what stays open for the design of the System
+Practice's build.
 
 ## What remains
 
-**Before the branches merge.**
-
-- A reading of three findings in this document that bear on the
-  decisions: an edit to the boot script makes every token file stale; the
-  stamp does not cover the modules a module requires itself; and the check
-  of a token file against its source costs most of what the token files
-  save on the System Practice's volume.
-- The merge itself. Both branches stand on the local mains named under
-  [Measurements](#measurements) and are not merged.
+**Before the branches merge.** The merge itself. Both branches stand on the
+local mains named under [Measurements](#measurements) and are not merged.
 
 **Committed later steps.**
 
 - The recorder on the machine, for the System Practice (decision 1).
 - The System Practice's build, which is what uses `--keep-module-source`.
-  When it is designed, the own-source check should be weighed again: by
-  content it reads every source, and a check by the file system's identity
-  of the source would not.
+  Its design takes up the three things that the rule's section
+  [leaves open](#open-for-the-design-of-the-system-practices-build):
+  a rule that reaches the modules that use an edited one, a cheaper check
+  of a token file against its source, and the recorder itself.
 
 **Open, and not needed for the form to land.**
 
@@ -1019,9 +910,10 @@ modules loaded after an edited one need to count as stale.
   source path has a native line walker, so a token boot takes more host
   time in the simulator than a source boot, though it is the smaller load.
 - A BIOS word that feeds a buffer to the CRC unit. KDOS's loop over the
-  unit costs 18.5 instructions a byte, where the unit takes eight bytes in
-  one instruction. The cold-source containers'
-  checksums, the ext4 driver's and the own-source check all pay it.
+  unit costs 18.5 instructions a byte, where the unit takes
+  eight bytes in one instruction. The cold-source containers' checksums,
+  the ext4 driver's and the check of a token file against its source all
+  pay it.
 - Token forms for applets a machine builds itself. Akashic's application
   builder writes MF64 images, which the simulator and hybrid mode cannot
   run; the token form could serve there, with the recorder on the machine.

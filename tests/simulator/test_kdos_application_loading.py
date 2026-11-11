@@ -43,16 +43,16 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-application-loading-6541-6656.f"
+    / "kdos-application-loading-6487-6602.f"
 )
 
-FIRST_LINE = 6541
-LAST_LINE = 6656
-SLICE_BYTES = 4_324
+FIRST_LINE = 6487
+LAST_LINE = 6602
+SLICE_BYTES = 4_317
 SLICE_SHA256 = (
-    "22211fa4bbe953710a0ed106991143d2b9247060526654b6a52f3ce257e59acc"
+    "d7dcf0aba6bafca16a71ee0ee8cb123e6ed39ab468092be19087129ce8872de4"
 )
-SLICE_GIT_BLOB = "d62020d5645f4bf37165577864e1e0416acde078"
+SLICE_GIT_BLOB = "47a80d7b4cbd0721487e90093123fe9853640386"
 
 SOURCE_LEDGER = (
     (":", b"_APP-MPU-ON"),

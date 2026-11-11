@@ -3264,7 +3264,8 @@ def install_core(runtime: MegaForthRuntime) -> None:
         lambda context: runtime.bios_token_replay(context),
     )
 
-    # The identity that the stamp of a load starts from follows.
+    # The identity of what booted follows.  KDOS compares it with the cell
+    # a token file's header holds.
     runtime.define_primitive(
         b"BOOT-ID",
         lambda context: context.data.push(runtime.boot_identity()),

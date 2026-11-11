@@ -46,16 +46,16 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-mp64fs-load-5745-6540.f"
+    / "kdos-mp64fs-load-5745-6486.f"
 )
 
 FIRST_LINE = 5745
-LAST_LINE = 6540
-SLICE_BYTES = 32_413
+LAST_LINE = 6486
+SLICE_BYTES = 30_015
 SLICE_SHA256 = (
-    "7a75e2de8d8617fbe65b6c82ed492cba8dc448bfcbf1e31dfb57659bca1f6438"
+    "bd01a2e2ab9083e97f986be1b42a3d197091121151b22b28620e28627bdeae19"
 )
-SLICE_GIT_BLOB = "06d9fae11d6d37f1f0a599e4f3289dddc12d4fda"
+SLICE_GIT_BLOB = "9f4195a6c9b62030b599a34e51e329b4294dd8f2"
 
 # Exact defining-word/name order in kdos.f.  Keeping the defining word in
 # the ledger makes source-layout changes visible even if a replacement happens
@@ -133,12 +133,6 @@ SOURCE_LEDGER = (
     ("VARIABLE", b"_LD-FROM-SP"),
     (":", b"_LD-FROM-SAVE"),
     (":", b"_LD-FROM-END"),
-    ("VARIABLE", b"LOAD-STAMP"),
-    (":", b"_STAMP-TAKE"),
-    (":", b"_TEXT-ID"),
-    (":", b"LOAD-STAMP-SOURCE"),
-    (":", b"_STAMP-TEXT"),
-    (":", b"_STAMP-START"),
     ("CONSTANT", b"EVAL-S-OK"),
     ("CONSTANT", b"EVAL-S-UNDEFINED"),
     ("CONSTANT", b"EVAL-S-LINE-TOO-LONG"),
@@ -169,9 +163,10 @@ SOURCE_LEDGER = (
     (":", b"TKF.RECORDS"),
     (":", b"TKF.SOURCE"),
     (":", b"TKF.FLAGS"),
-    (":", b"TKF.STAMP"),
-    (":", b"TKF.TEXT-ID"),
+    (":", b"TKF.BOOT-ID"),
     ("CONSTANT", b"TKF-F-SOURCE-BESIDE"),
+    (":", b"_TEXT-ID"),
+    (":", b"TKF.TEXT-ID"),
     (":", b"TKF.ID"),
     ("CREATE", b"_TKF-MAGIC"),
     (":", b"TOKEN-FILE?"),
@@ -191,7 +186,6 @@ SOURCE_LEDGER = (
     (":", b"_LD-TOKENS?"),
     (":", b"_LD-WALK-TOKENS"),
     (":", b"_LD-TOKENS-MODULE"),
-    (":", b"_LD-WALK-SOURCE"),
     (":", b"_LD-RELEASE"),
     (":", b"_LD-FAIL"),
     (":", b"_LD-GUARDED"),
@@ -244,7 +238,6 @@ VARIABLES = (
     "_LD-TNAME-U",
     "_LD-NAME-U",
     "_LD-TOKENS-CHOSEN",
-    "LOAD-STAMP",
     "_TKF-A",
     "_TKF-U",
     "_LD-SRC-BUF",
@@ -503,7 +496,7 @@ def _select_source(runtime: MegaForthRuntime, source: _HostSource) -> None:
 def test_load_slice_is_exact_and_publishes_complete_source_ledger() -> None:
     runtime = _load_mp64fs_load()
 
-    assert len(SOURCE_LEDGER) == 138
+    assert len(SOURCE_LEDGER) == 132
     assert all(runtime.find(name) is not None for name in DEFINITIONS)
     assert tuple(_constant(runtime, name) for name, _value in CONSTANTS) == (
         tuple(value for _name, value in CONSTANTS)

@@ -4,29 +4,31 @@
 BIOS in the emulator, and ``tests/simulator/test_kdos_token_modules.py``
 runs it in the hosted simulator.  A case is a set of files for the boot
 volume, the lines typed at KDOS's prompt, what the output must show, and
-what it must not.  Each case that ends "refused" plants one fault and holds
-the loader to refusing the file, naming it, and loading nothing in its
-place.
+what it must not.
+
+KDOS uses a token file when it was built for this system, which its header
+says by the system's ``BOOT-ID``, and, where its source ships beside it,
+when that source is the one it was recorded from.  Each case that ends
+"refused" plants one fault against that rule or against the file's layout
+and holds the loader to refusing the file, naming it, and loading nothing
+in its place.  The cases under "what the rule does not look at" pin the
+other side: a file loaded earlier that has changed, another load order, an
+edited script and a word typed first leave a token file in use.
 
 The token files are written by hand here, so that a file can state a
 header its records do not match.  A file recorded from a text that defines
-``A-WORD`` as 11 can hold records that define it as 22, and the value the
+``A-WORD`` as 11 can hold records that define it as 110, and the value the
 word then gives says which of the two forms KDOS loaded.
 
 Both harnesses load KDOS without ``FSLOAD``, so ``BOOT-ID`` is the BIOS's
-own identity on both, and one set of stamps serves them.
+own identity on both, and one set of files serves them.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from shared.boot_identity import (
-    boot_identity,
-    stamp_start,
-    stamp_take,
-    text_identity,
-)
+from shared.boot_identity import bios_code, boot_identity
 from shared.token_form import (
     TokenWriter,
     pack_module_name_file,
@@ -34,14 +36,17 @@ from shared.token_form import (
 )
 
 SKIPPED = object()
-STALE = "Token form recorded on another system: this volume was built for another system"
+OTHER_SYSTEM = (
+    "Token form recorded on another system: "
+    "this volume was built for another system"
+)
 MALFORMED = "token stream is malformed"
 MISMATCH = "token stream does not match this system"
 
 
 def records(*items) -> tuple[bytes, int]:
     """Records for ITEMS: an int is a number, a string a word, a pair a
-    word and the text it takes, "\\n" the next source line, and SKIPPED the
+    word and the text it takes, "\n" the next source line, and SKIPPED the
     end of a conditional skip."""
 
     writer = TokenWriter()
@@ -67,12 +72,13 @@ def token_file(
     source: bytes,
     items,
     *,
-    stamp: int,
+    boot_id: int | None = None,
     module: bytes = b"",
     beside: bool = False,
 ) -> bytes:
     """A token file that says it was recorded from SOURCE and holds the
-    records of ITEMS."""
+    records of ITEMS, built for the system whose BOOT-ID is BOOT_ID: by
+    default the one both harnesses boot."""
 
     recorded, slots = records(*items)
     return pack_token_file(
@@ -81,22 +87,9 @@ def token_file(
         source=source,
         lines=source.count(b"\n"),
         module_name=module,
-        stamp=stamp,
+        boot_id=boot_identity() if boot_id is None else boot_id,
         source_beside=beside,
     )
-
-
-def stamps(*texts: bytes, boot: int | None = None) -> list[int]:
-    """The stamp of a load where each of TEXTS begins to load, in order,
-    and last the stamp after all of them."""
-
-    stamp = stamp_start(boot_identity() if boot is None else boot)
-    result = []
-    for text in texts:
-        result.append(stamp)
-        stamp = stamp_take(stamp, text_identity(text))
-    result.append(stamp)
-    return result
 
 
 # ---- the modules -----------------------------------------------------------
@@ -135,7 +128,7 @@ def tokens(
     name: str,
     value: int,
     *,
-    stamp: int,
+    boot_id: int | None = None,
     says: int | None = None,
     requires: str | None = None,
     beside: bool = False,
@@ -148,7 +141,7 @@ def tokens(
     return token_file(
         source,
         items(name, value, requires=requires),
-        stamp=stamp,
+        boot_id=boot_id,
         module=f"mod-{name}".encode(),
         beside=beside,
     )
@@ -168,7 +161,7 @@ def load(name: str, word: str = "REQUIRE") -> str:
 
 
 def show(*words: str) -> list[str]:
-    """Lines that report whether each of WORDS is defined, and its value."""
+    """Lines that report whether each of WORDS is defined."""
 
     lines = []
     for word in words:
@@ -180,14 +173,7 @@ def value(word: str) -> str:
     return f'CR ." [{word} " {word}-WORD . ." ]"'
 
 
-STAMP_LINE = (
-    'CR ." [STAMP " LOAD-STAMP @ 32 RSHIFT . LOAD-STAMP @ 4294967295 AND . ." ]"'
-)
 TOKENS_ON = "-1 MODULE-TOKENS !"
-
-
-def stamp_shown(stamp: int) -> str:
-    return rf"\[STAMP {stamp >> 32} {stamp & 0xFFFFFFFF} \]"
 
 
 @dataclass
@@ -205,39 +191,46 @@ def _refused(file: str, throw: int, *more: str) -> list[str]:
 
 def _cases() -> dict[str, Case]:
     cases: dict[str, Case] = {}
-    start = stamps()[0]
-    s_ba = stamps(B, A)
-    s_a = stamps(A)
+    here = boot_identity()
+    # Systems this one is not: a BIOS whose code differs in one byte, the
+    # same BIOS after it loaded a KDOS from disk, and one bit of the cell.
+    other_bios = bytearray(bios_code())
+    other_bios[1000] ^= 0x01
+    elsewhere = {
+        "a BIOS that differs in one byte": boot_identity(bios=bytes(other_bios)),
+        "a KDOS the BIOS loaded from disk": boot_identity(b"another KDOS\n"),
+        "an identity that differs in one bit": here ^ (1 << 40),
+        "no identity": 0,
+    }
+    assert here not in elsewhere.values()
 
     # ---- the loader's paths ------------------------------------------------
     cases["a volume of token files alone loads nested modules"] = Case(
         files={
-            "a.ft": tokens("a", 11, stamp=s_ba[1]),
-            "b.ft": tokens("b", 0, requires="a", stamp=s_ba[0]),
+            "a.ft": tokens("a", 11),
+            "b.ft": tokens("b", 0, requires="a"),
         },
         lines=[
             TOKENS_ON, load("b.f"), value("B"), value("A"),
             'CR ." [MODS " MODULE? mod-a . MODULE? mod-b . ." ]"',
-            load("a.f"), load("b.f"), STAMP_LINE,
+            load("a.f"), load("b.f"),
         ],
-        must=[
-            r"\[THROW 0 \]", r"\[B 12 \]", r"\[A 11 \]", r"\[MODS -1 -1 \]",
-            stamp_shown(s_ba[2]),
-        ],
+        must=[r"\[THROW 0 \]", r"\[B 12 \]", r"\[A 11 \]", r"\[MODS -1 -1 \]"],
         must_not=["not found", "cannot be loaded", "out of date"],
         count={"[load-a]": 1, "[load-b]": 1, "[THROW 0 ]": 3},
     )
     cases["a token file under its source's name loads by LOAD"] = Case(
-        files={"a.f": tokens("a", 11, stamp=s_a[0])},
-        lines=[load("a.f", "LOAD"), value("A"), STAMP_LINE],
-        must=[r"\[THROW 0 \]", r"\[A 11 \]", stamp_shown(s_a[1])],
+        files={"a.f": tokens("a", 11)},
+        lines=[load("a.f", "LOAD"), value("A")],
+        must=[r"\[THROW 0 \]", r"\[A 11 \]"],
         must_not=["cannot be loaded"],
         count={"[load-a]": 1},
     )
-    cases["a boot that meets no token file keeps no stamp"] = Case(
+    cases["source files load as before where no token form stands"] = Case(
         files={"a.f": A, "b.f": B},
-        lines=[TOKENS_ON, load("b.f"), value("B"), STAMP_LINE],
-        must=[r"\[B 12 \]", r"\[STAMP 0 0 \]"],
+        lines=[TOKENS_ON, load("b.f"), value("B")],
+        must=[r"\[THROW 0 \]", r"\[B 12 \]"],
+        must_not=["not found", "Token"],
         count={"[load-a]": 1, "[load-b]": 1},
     )
     cases["a module that has no file is reported as before"] = Case(
@@ -249,15 +242,15 @@ def _cases() -> dict[str, Case]:
     # A file that only names its module, for a module loaded earlier.
     named = {
         "a.ft": pack_module_name_file(b"mod-a"),
-        "b.ft": tokens("b", 0, requires="a", stamp=start),
+        "b.ft": tokens("b", 0, requires="a"),
     }
     cases["a file that only names a loaded module is passed over"] = Case(
         files=named,
         lines=[
             "PROVIDED mod-a", ": A-WORD 33 ;", TOKENS_ON, load("b.f"),
-            value("B"), load("a.f"), STAMP_LINE,
+            value("B"), load("a.f"),
         ],
-        must=[r"\[B 34 \]", stamp_shown(stamps(B)[1])],
+        must=[r"\[B 34 \]"],
         must_not=["not found", "only names", "cannot be loaded", "[load-a]"],
         count={"[THROW 0 ]": 2},
     )
@@ -277,7 +270,7 @@ def _cases() -> dict[str, Case]:
     )
 
     # ---- a file that cannot be replayed: statuses 6 and 7 ------------------
-    good = tokens("a", 11, stamp=start)
+    good = tokens("a", 11)
     broken = {
         "cut short": good[:-3],
         "longer than its sizes say": good + b"\xff",
@@ -321,7 +314,7 @@ def _cases() -> dict[str, Case]:
     }
     for what, (recorded, status, message) in replayed.items():
         data = pack_token_file(
-            recorded, 16, source=A, lines=3, module_name=b"mod-a", stamp=start
+            recorded, 16, source=A, lines=3, module_name=b"mod-a", boot_id=here
         )
         named_too = status in (6, 7)
         cases[f"refused: records with {what}"] = Case(
@@ -343,7 +336,7 @@ def _cases() -> dict[str, Case]:
     cases["a refused file is named once, by the load that read it"] = Case(
         files={
             "a.ft": good[:-3],
-            "b.ft": tokens("b", 0, requires="a", stamp=start),
+            "b.ft": tokens("b", 0, requires="a"),
         },
         lines=[TOKENS_ON, load("b.f"), *show("B")],
         must=_refused(r"a\.ft", 6, r"\[DEF-B 0 \]"),
@@ -351,180 +344,110 @@ def _cases() -> dict[str, Case]:
         count={"cannot be loaded": 1},
     )
 
-    # ---- clauses 1 and 2: the stamp, where no source stands beside ---------
-    def stale(what: str, files: dict[str, bytes], lines: list[str], *named: str):
-        cases[f"refused: {what}"] = Case(
-            files=files,
-            lines=[TOKENS_ON, *lines],
-            must=[STALE, r"\[THROW 7 \]",
-                  *(rf"Token file {name} cannot be loaded" for name in named)],
-            must_not=["out of date"],
+    # ---- the rule: built for this system -----------------------------------
+    # No source stands beside these files, so one built for another system
+    # ends the load.
+    for what, identity in elsewhere.items():
+        cases[f"refused: a file built for {what}"] = Case(
+            files={"a.ft": tokens("a", 11, boot_id=identity)},
+            lines=[TOKENS_ON, load("a.f"), *show("A")],
+            must=[OTHER_SYSTEM, *_refused(r"a\.ft", 7, r"\[DEF-A 0 \]")],
+            must_not=["[load-a]", "out of date"],
         )
-
-    stale(
-        "a stamp that differs in one bit",
-        {"a.ft": tokens("a", 11, stamp=start ^ (1 << 40))},
-        [load("a.f"), *show("A")], r"a\.ft",
-    )
-    cases["refused: a stamp that differs in one bit"].must.append(r"\[DEF-A 0 \]")
-    cases["refused: a stamp that differs in one bit"].must_not.append("[load-a]")
-    stale(
-        "a file that holds no stamp",
-        {"a.ft": tokens("a", 11, stamp=0)},
-        [load("a.f")], r"a\.ft",
-    )
-    stale(
-        "a file recorded on another BIOS or KDOS",
-        {"a.ft": tokens("a", 11, stamp=stamps(boot=boot_identity(b"other"))[0])},
-        [load("a.f")], r"a\.ft",
-    )
-    b_old = B + b"\\ a line the file has since lost\n"
-    stale(
-        "a file recorded under an earlier text of the file before it",
-        {
-            "a.ft": tokens("a", 11, stamp=stamps(b_old, A)[1]),
-            "b.ft": tokens("b", 0, requires="a", stamp=start),
+    cases["refused: a file for another system ends the load that required it"] = Case(
+        files={
+            "a.ft": tokens("a", 11, boot_id=elsewhere["no identity"]),
+            "b.ft": tokens("b", 0, requires="a"),
         },
-        [load("b.f"), *show("B", "A")], r"a\.ft",
-    )
-    case = cases["refused: a file recorded under an earlier text of the file before it"]
-    case.must += [r"\[DEF-B 0 \]", r"\[DEF-A 0 \]"]
-    case.must_not += ["b.ft cannot"]
-    s_cd = stamps(C, D)
-    ordered = {
-        "c.ft": tokens("c", 30, stamp=s_cd[0]),
-        "d.ft": tokens("d", 40, stamp=s_cd[1]),
-    }
-    stale(
-        "files loaded in another order than they were recorded in",
-        ordered, [load("d.f"), *show("D")], r"d\.ft",
-    )
-    cases["files load in the order they were recorded in"] = Case(
-        files=ordered,
-        lines=[TOKENS_ON, load("c.f"), load("d.f"), value("C"), value("D"),
-               STAMP_LINE],
-        must=[r"\[C 30 \]", r"\[D 40 \]", stamp_shown(s_cd[2])],
-        must_not=["cannot be loaded"],
+        lines=[TOKENS_ON, load("b.f"), *show("B", "A")],
+        must=[OTHER_SYSTEM,
+              *_refused(r"a\.ft", 7, r"\[DEF-B 0 \]", r"\[DEF-A 0 \]")],
+        must_not=["b.ft cannot"],
     )
 
-    # The source files that are loading when the first token file is met
-    # are part of the stamp, outermost first, and so is every source file
-    # loaded after it.
-    boot_f = b"-1 MODULE-TOKENS !\nREQUIRE a.f\n"
-    outer_f = b"LOAD boot.f\n"
-    s_oba = stamps(outer_f, boot_f, A)
-    cases["the files that are loading when the stamp starts are part of it"] = Case(
-        files={"outer.f": outer_f, "boot.f": boot_f,
-               "a.ft": tokens("a", 11, stamp=s_oba[2])},
-        lines=[load("outer.f", "LOAD"), value("A"), STAMP_LINE],
-        must=[r"\[THROW 0 \]", r"\[A 11 \]", stamp_shown(s_oba[3])],
-        must_not=["cannot be loaded"],
+    # ---- what the rule does not look at ------------------------------------
+    # Each token file here gives ten times what its source would, so the
+    # value says that the token file was used.
+    lying_a = tokens("a", 110, says=11)
+    cases["a token file is used though the file loaded before it has changed"] = Case(
+        # b.f is source, and not the text it had when a.ft was built.
+        files={"a.ft": lying_a, "b.f": B + b": B-LATER 1 ;\n"},
+        lines=[TOKENS_ON, load("b.f"), value("B"), value("A")],
+        must=[r"\[THROW 0 \]", r"\[B 111 \]", r"\[A 110 \]"],
+        must_not=["cannot be loaded", "out of date"],
     )
-    stale(
-        "a file recorded without the script that loads it",
-        {"outer.f": outer_f, "boot.f": boot_f,
-         "a.ft": tokens("a", 11, stamp=stamps(boot_f, A)[1])},
-        [load("outer.f", "LOAD"), *show("A")], r"a\.ft",
-    )
-    stale(
-        "a file recorded under another text of the script that loads it",
-        {"outer.f": outer_f, "boot.f": boot_f,
-         "a.ft": tokens("a", 11, stamp=stamps(outer_f, boot_f + b"\n", A)[2])},
-        [load("outer.f", "LOAD"), *show("A")], r"a\.ft",
-    )
-    plain = b": S-WORD 7 ;\n"
-    s_asc = stamps(A, plain, C)
-    cases["a source file loaded after the stamp started is part of it"] = Case(
-        files={"a.ft": tokens("a", 11, stamp=s_asc[0]), "s.f": plain,
-               "c.ft": tokens("c", 30, stamp=s_asc[2])},
-        lines=[TOKENS_ON, load("a.f"), load("s.f", "LOAD"), load("c.f"),
-               value("C"), STAMP_LINE],
-        must=[r"\[C 30 \]", stamp_shown(s_asc[3])],
-        must_not=["cannot be loaded"],
-    )
-    stale(
-        "a file recorded under another text of a source file before it",
-        {"a.ft": tokens("a", 11, stamp=s_asc[0]), "s.f": b": S-WORD 8 ;\n",
-         "c.ft": tokens("c", 30, stamp=s_asc[2])},
-        [load("a.f"), load("s.f", "LOAD"), load("c.f"), *show("C")], r"c\.ft",
-    )
-
-    # What the stamp leaves out: a source file whose load ended before the
-    # first token file was met, and anything defined outside a file.  The
-    # stamp starts at that token file with the files loading then, so
-    # neither is in it.
-    cases["a source file that ended before the first token file is in no stamp"] = Case(
-        files={"s.f": plain, "a.ft": tokens("a", 11, stamp=start)},
-        lines=[TOKENS_ON, load("s.f", "LOAD"), ": TYPED-WORD 5 ;", STAMP_LINE,
-               load("a.f"), value("A"), 'CR ." [S " S-WORD TYPED-WORD + . ." ]"',
-               STAMP_LINE],
-        must=[r"\[STAMP 0 0 \]", r"\[A 11 \]", r"\[S 12 \]", stamp_shown(s_a[1])],
+    ordered = {"c.ft": tokens("c", 300, says=30), "d.ft": tokens("d", 400, says=40)}
+    for what, first, second in (
+        ("in one order", "c", "d"),
+        ("in the other order", "d", "c"),
+    ):
+        cases[f"token files are used {what}"] = Case(
+            files=ordered,
+            lines=[TOKENS_ON, load(f"{first}.f"), load(f"{second}.f"),
+                   value("C"), value("D")],
+            must=[r"\[C 300 \]", r"\[D 400 \]"],
+            must_not=["cannot be loaded"],
+            count={"[THROW 0 ]": 2},
+        )
+    for what, script in (
+        ("a script", b"-1 MODULE-TOKENS !\nREQUIRE a.f\n"),
+        ("the same script after an edit",
+         b": SCRIPT-WORD 9 ;\n-1 MODULE-TOKENS !\n\\ a line added later\nREQUIRE a.f\n"),
+    ):
+        cases[f"a token file is used when {what} loads it"] = Case(
+            files={"outer.f": b"LOAD boot.f\n", "boot.f": script, "a.ft": lying_a},
+            lines=[load("outer.f", "LOAD"), value("A")],
+            must=[r"\[THROW 0 \]", r"\[A 110 \]"],
+            must_not=["cannot be loaded"],
+        )
+    cases["a token file is used after a word typed and a source file loaded"] = Case(
+        files={"s.f": b": S-WORD 7 ;\n", "a.ft": lying_a},
+        lines=[TOKENS_ON, ": TYPED-WORD 5 ;", load("s.f", "LOAD"), load("a.f"),
+               value("A"), 'CR ." [S " S-WORD TYPED-WORD + . ." ]"'],
+        must=[r"\[A 110 \]", r"\[S 12 \]"],
         must_not=["cannot be loaded"],
         count={"[THROW 0 ]": 2},
     )
-    stale(
-        "a file stamped as if an earlier, finished source file were in the stamp",
-        {"s.f": plain, "a.ft": tokens("a", 11, stamp=stamps(plain, A)[1])},
-        [load("s.f", "LOAD"), load("a.f"), *show("A")], r"a\.ft",
-    )
 
     # A token file that other code holds in memory and hands to the replay,
-    # as a loader of containers does: the source file whose line does so is
-    # the innermost file of the load.  Its text holds the token file without
-    # a stamp, and the stamp comes from a cell set at the prompt, so that the
-    # text does not depend on its own checksum.
-    held = tokens("a", 11, stamp=0)
-    runner = ["CREATE HELD"]
-    for index in range(0, len(held), 24):
-        runner.append(" ".join(f"{byte} C," for byte in held[index : index + 24]))
-    runner += [
-        "T-STAMP @ HELD 48 + !",
-        f'HELD {len(held)} TOKEN-EVALUATE-CHECKED CR ." [STATUS " . ." ]"',
-    ]
-    runner_f = ("\n".join(runner) + "\n").encode()
-    s_ra = stamps(runner_f, A)
-    for what, stamp, status in (
-        ("is used under the stamp its holder's text gives", s_ra[1], 0),
-        ("is refused without its holder's text in the stamp", start, 7),
+    # as a loader of containers does.
+    for what, identity, shows in (
+        ("is used when it was built for this system", here,
+         [r"\[STATUS 0 \]", r"\[THROW 0 \]", r"\[DEF-A -1 \]"]),
+        # The status ends the line that asked, and the load with it.
+        ("is refused when it was built for another", elsewhere["no identity"],
+         [OTHER_SYSTEM, r"\[THROW 7 \]", r"\[DEF-A 0 \]"]),
     ):
-        cases[f"a token file held in memory {what}"] = Case(
-            files={"runner.f": runner_f},
-            lines=["VARIABLE T-STAMP",
-                   f"{stamp >> 32} 32 LSHIFT {stamp & 0xFFFFFFFF} OR T-STAMP !",
-                   load("runner.f", "LOAD"), *show("A"), STAMP_LINE],
-            must=(
-                [r"\[STATUS 0 \]", r"\[THROW 0 \]", r"\[DEF-A -1 \]",
-                 stamp_shown(s_ra[2])]
-                if status == 0
-                # The status ends the line that asked, and the load with it.
-                else [STALE, r"\[THROW 7 \]", r"\[DEF-A 0 \]"]
-            ),
+        held = tokens("a", 11, boot_id=identity)
+        runner = ["CREATE HELD"]
+        for index in range(0, len(held), 24):
+            runner.append(
+                " ".join(f"{byte} C," for byte in held[index : index + 24])
+            )
+        runner.append(
+            f'HELD {len(held)} TOKEN-EVALUATE-CHECKED CR ." [STATUS " . ." ]"'
         )
-    cases["a source file a loader outside KDOS evaluates joins the stamp"] = Case(
-        files={"a.ft": tokens("a", 11, stamp=start),
-               "c.ft": tokens("c", 30, stamp=stamps(A, b"12345")[2])},
-        lines=[TOKENS_ON, 'CREATE TXT 49 C, 50 C, 51 C, 52 C, 53 C,',
-               "TXT 5 LOAD-STAMP-SOURCE", STAMP_LINE,
-               load("a.f"), "TXT 5 LOAD-STAMP-SOURCE", load("c.f"), value("C")],
-        must=[r"\[STAMP 0 0 \]", r"\[C 30 \]"],
-        must_not=["cannot be loaded"],
-    )
+        cases[f"a token file held in memory {what}"] = Case(
+            files={"runner.f": ("\n".join(runner) + "\n").encode()},
+            lines=[load("runner.f", "LOAD"), *show("A")],
+            must=shows,
+        )
 
-    # ---- clause 3: the source ships beside the token file ------------------
-    # Each token file's records give ten times what its source gives.
-    def beside(name: str, source_value: int, *, stamp: int, text: bytes | None = None):
+    # ---- the rule: the source that ships beside the file -------------------
+    def beside(name: str, source_value: int, *, text: bytes | None = None,
+               boot_id: int | None = None):
         return {
             f"{name}.f": module(name, source_value) if text is None else text,
             f"{name}.ft": tokens(
-                name, source_value * 10, says=source_value, stamp=stamp,
-                beside=True,
+                name, source_value * 10, says=source_value, beside=True,
+                boot_id=boot_id,
             ),
         }
 
     cases["a current token file is used though its source stands beside it"] = Case(
-        files=beside("a", 11, stamp=start),
-        lines=[TOKENS_ON, load("a.f"), value("A"), STAMP_LINE],
-        must=[r"\[THROW 0 \]", r"\[A 110 \]", stamp_shown(s_a[1])],
+        files=beside("a", 11),
+        lines=[TOKENS_ON, load("a.f"), value("A")],
+        must=[r"\[THROW 0 \]", r"\[A 110 \]"],
         must_not=["out of date", "cannot be loaded"],
     )
     for what, text, shows in (
@@ -532,27 +455,21 @@ def _cases() -> dict[str, Case]:
         ("a source that differs in one byte", module("a", 12), 12),
     ):
         cases[f"{what} is loaded in its token file's place"] = Case(
-            files=beside("a", 11, stamp=start, text=text),
-            lines=[TOKENS_ON, load("a.f"), value("A"), STAMP_LINE],
+            files=beside("a", 11, text=text),
+            lines=[TOKENS_ON, load("a.f"), value("A")],
             must=[r"Token file a\.ft is out of date: loading its source",
-                  r"\[THROW 0 \]", rf"\[A {shows} \]",
-                  stamp_shown(stamps(text)[1])],
-            must_not=["cannot be loaded", STALE],
+                  r"\[THROW 0 \]", rf"\[A {shows} \]"],
+            must_not=["cannot be loaded", OTHER_SYSTEM],
             count={"[load-a]": 1},
         )
-    cases["a stale stamp loads the source that stands beside the file"] = Case(
-        files=beside("a", 11, stamp=start ^ 1),
+    cases["a file built for another system gives way to the source beside it"] = Case(
+        files=beside("a", 11, boot_id=elsewhere["a KDOS the BIOS loaded from disk"]),
         lines=[TOKENS_ON, load("a.f"), value("A")],
         must=[r"Token file a\.ft is out of date: loading its source",
               r"\[THROW 0 \]", r"\[A 11 \]"],
-        must_not=["cannot be loaded", STALE],
+        must_not=["cannot be loaded", OTHER_SYSTEM],
     )
-    s_cde = stamps(C, D, E)
-    three = {
-        **beside("c", 30, stamp=s_cde[0]),
-        **beside("d", 40, stamp=s_cde[1]),
-        **beside("e", 50, stamp=s_cde[2]),
-    }
+    three = {**beside("c", 30), **beside("d", 40), **beside("e", 50)}
     three_lines = [TOKENS_ON, load("c.f"), load("d.f"), load("e.f"),
                    value("C"), value("D"), value("E")]
     cases["current files with their sources beside them all load as tokens"] = Case(
@@ -561,48 +478,47 @@ def _cases() -> dict[str, Case]:
         must_not=["out of date"],
     )
     d_new = module("d", 41)
-    cases["an edited module takes with it every module loaded after it"] = Case(
+    cases["an edited module loads from its source and no other is affected"] = Case(
         files={**three, "d.f": d_new},
         lines=three_lines,
-        must=[r"\[C 300 \]", r"\[D 41 \]", r"\[E 50 \]",
-              r"Token file d\.ft is out of date", r"Token file e\.ft is out of date"],
-        must_not=["c.ft is out of date", "cannot be loaded"],
-        count={"is out of date: loading its source": 2},
+        must=[r"\[C 300 \]", r"\[D 41 \]", r"\[E 500 \]",
+              r"Token file d\.ft is out of date: loading its source"],
+        must_not=["c.ft is out of date", "e.ft is out of date", "cannot be loaded"],
+        count={"is out of date: loading its source": 1},
     )
-    s_cde_new = stamps(C, d_new, E)
-    cases["token files built again for the edited module are used again"] = Case(
+    cases["a token file built again for the edited module is used again"] = Case(
         files={
             **three,
             "d.f": d_new,
-            "d.ft": tokens("d", 410, says=41, stamp=s_cde_new[1], beside=True),
-            "e.ft": tokens("e", 500, says=50, stamp=s_cde_new[2], beside=True),
+            "d.ft": tokens("d", 410, says=41, beside=True),
         },
         lines=three_lines,
         must=[r"\[C 300 \]", r"\[D 410 \]", r"\[E 500 \]"],
         must_not=["out of date"],
     )
-    flagged = {"a.ft": tokens("a", 110, says=11, stamp=start, beside=True)}
     cases["a file that says its source is beside it loads without one"] = Case(
-        files=flagged,
+        files={"a.ft": tokens("a", 110, says=11, beside=True)},
         lines=[TOKENS_ON, load("a.f"), value("A")],
         must=[r"\[THROW 0 \]", r"\[A 110 \]"],
         must_not=["out of date"],
     )
-    stale(
-        "a stale file whose source is said to be beside it and is not",
-        {"a.ft": tokens("a", 110, says=11, stamp=start ^ 1, beside=True)},
-        [load("a.f"), *show("A")], r"a\.ft",
+    cases["refused: a file for another system whose source is said to be beside it and is not"] = Case(
+        files={"a.ft": tokens(
+            "a", 110, says=11, beside=True,
+            boot_id=elsewhere["an identity that differs in one bit"],
+        )},
+        lines=[TOKENS_ON, load("a.f"), *show("A")],
+        must=[OTHER_SYSTEM, *_refused(r"a\.ft", 7, r"\[DEF-A 0 \]")],
+        must_not=["out of date"],
     )
     # In a folder, with a module REQUIREd by a path from the file's own.
-    s_ba = stamps(B, A)
-    folder = {
-        "mods/b.f": B,
-        "mods/b.ft": tokens("b", 0, requires="a", stamp=s_ba[0], beside=True),
-        "mods/a.f": module("a", 12),
-        "mods/a.ft": tokens("a", 110, says=11, stamp=s_ba[1], beside=True),
-    }
     cases["a source beside its token file is found in the file's own folder"] = Case(
-        files=folder,
+        files={
+            "mods/b.f": B,
+            "mods/b.ft": tokens("b", 0, requires="a", beside=True),
+            "mods/a.f": module("a", 12),
+            "mods/a.ft": tokens("a", 110, says=11, beside=True),
+        },
         lines=[TOKENS_ON, load("mods/b.f"), value("B"), value("A")],
         must=[r"Token file a\.ft is out of date: loading its source",
               r"\[THROW 0 \]", r"\[B 13 \]", r"\[A 12 \]"],
@@ -687,7 +603,6 @@ RECORDED_LINES = [
     'CR ." [VALUES " T-V @ . T-A . T-B . 5 T-C . 2 T-AT . T-SUM . T-D . L-41 . ." ]"',
     'CR ." [STR " T-STR TYPE ." ]"',
     'CR ." [MODS " MODULE? rec-top . MODULE? rec-lib . ." ]"',
-    STAMP_LINE,
 ]
 RECORDED_SHOWS = [
     r"\[lib\]", r"\[top 49 \]", r"\[THROW 0 \]",
@@ -723,19 +638,19 @@ def record(sources: dict[str, bytes], top: str):
 def recorded_volume(sources: dict[str, bytes], top: str) -> dict[str, bytes]:
     """The volume of token files alone that a recording of TOP's load
     gives: each of SOURCES that was loaded, in its token form, under its
-    name with a t added."""
+    name with a t added, built for the system both harnesses boot."""
 
     recorder, _ = record(sources, top)
     names = {text: name for name, text in sources.items()}
-    stamped = recorder.stamps(boot_identity())
     return {
-        names[unit.source] + "t": unit.token_file(stamp=stamped[unit.index])
+        names[unit.source] + "t": unit.token_file(boot_id=boot_identity())
         for unit in recorder.units
     }
 
+
 __all__ = [
-    "A", "B", "C", "D", "E", "CASES", "Case", "MALFORMED", "MISMATCH", "RECORDED_LINES",
-    "RECORDED_SHOWS", "RECORDED_SOURCES", "STALE", "TOKENS_ON", "failures",
-    "module", "record", "recorded_volume", "records", "stamps", "token_file",
-    "tokens", "volume",
+    "A", "B", "C", "D", "E", "CASES", "Case", "MALFORMED", "MISMATCH",
+    "OTHER_SYSTEM", "RECORDED_LINES", "RECORDED_SHOWS", "RECORDED_SOURCES",
+    "TOKENS_ON", "failures", "load", "module", "record", "recorded_volume",
+    "records", "show", "token_file", "tokens", "value", "volume",
 ]

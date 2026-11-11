@@ -34,16 +34,17 @@ File
     +16  u64  bytes of records           +24  u64  bytes of the source
     +32  u32  CRC-32 of the source       +36  u32  CRC-32 of the records
     +40  u32  lines in the source        +44  u16  bytes of the module name
-    +46  u16  flags                      +48  u64  the stamp
+    +46  u16  flags                      +48  u64  a system's BOOT-ID
     +56  u64  reserved, zero             +64  the module name, zero-padded
 
 then the records.  The table is allocated when the file is replayed.
 
-The stamp is KDOS's ``LOAD-STAMP`` as it stood where the file's recording
-began (``shared/boot_identity.py``); KDOS uses the file only where the
-stamp stands the same.  Flag 1 says that the file's source ships beside it,
-under the file's name without its last letter: KDOS then also checks the
-file against that source and loads the source when either check fails.  A
+The cell at +48 is BIOS ``BOOT-ID`` of the system the file was built for,
+the identity of that system's BIOS and KDOS (``shared/boot_identity.py``);
+KDOS uses the file only on a system whose BIOS gives the same cell.  Flag 1
+says that the file's source ships beside it, under the file's name without
+its last letter: KDOS then also checks the file against that source and
+loads the source when either check fails.  A
 file with no records only names its module.  It stands on a volume for a
 module that is loaded before the volume is mounted.
 """
@@ -193,22 +194,22 @@ def pack_token_file(
     source: bytes,
     lines: int,
     module_name: bytes = b"",
-    stamp: int = 0,
+    boot_id: int = 0,
     source_beside: bool = False,
 ) -> bytes:
     """Lay RECORDS out as a token file with a table of SLOTS cells.
 
-    STAMP is the load's stamp where the recording of SOURCE began; a file
-    left at zero is never current.  SOURCE_BESIDE says that the source ships
-    beside the file.
+    BOOT_ID is the BOOT-ID of the system the file is built for; no system
+    gives zero, so a file left at zero is used nowhere.  SOURCE_BESIDE says
+    that the source ships beside the file.
     """
 
     if not 0 <= slots <= MAX_SLOTS:
         raise TokenFormError("slot count out of range")
     if len(module_name) > MODULE_NAME_MAX_BYTES:
         raise TokenFormError("module name too long")
-    if not 0 <= stamp < 1 << 64:
-        raise TokenFormError("stamp out of range")
+    if not 0 <= boot_id < 1 << 64:
+        raise TokenFormError("BOOT-ID out of range")
     name_bytes = (len(module_name) + 7) & ~7
     header_bytes = HEADER_BYTES + name_bytes
     header = _HEADER.pack(
@@ -222,7 +223,7 @@ def pack_token_file(
         lines,
         len(module_name),
         FLAG_SOURCE_BESIDE if source_beside else 0,
-        stamp,
+        boot_id,
         0,
     )
     return b"".join((
@@ -252,14 +253,8 @@ class TokenFile:
     records_crc32: int
     lines: int
     module_name: bytes
-    stamp: int = 0
+    boot_id: int = 0
     source_beside: bool = False
-
-    @property
-    def text_identity(self) -> int:
-        """The identity of the source in the stamp of a load."""
-
-        return ((self.source_crc32 << 32) ^ self.source_bytes) & ((1 << 64) - 1)
 
 
 def is_token_file(data: bytes) -> bool:
@@ -273,7 +268,7 @@ def unpack_token_file(data: bytes) -> TokenFile:
         raise TokenFormError("not a token file")
     (
         _magic, header_bytes, slots, record_bytes, source_bytes, source_crc,
-        records_crc, lines, name_bytes, flags, stamp, reserved,
+        records_crc, lines, name_bytes, flags, boot_id, reserved,
     ) = _HEADER.unpack_from(data)
     if header_bytes < HEADER_BYTES or header_bytes & 7:
         raise TokenFormError("bad header size")
@@ -295,18 +290,20 @@ def unpack_token_file(data: bytes) -> TokenFile:
         records_crc32=records_crc,
         lines=lines,
         module_name=bytes(data[HEADER_BYTES : HEADER_BYTES + name_bytes]),
-        stamp=stamp,
+        boot_id=boot_id,
         source_beside=bool(flags & FLAG_SOURCE_BESIDE),
     )
 
 
-def with_stamp(data: bytes, stamp: int, *, source_beside: bool | None = None) -> bytes:
-    """DATA, a token file, with STAMP in its header and, when given, its
-    source-beside flag set or cleared."""
+def with_boot_id(
+    data: bytes, boot_id: int, *, source_beside: bool | None = None
+) -> bytes:
+    """DATA, a token file, built for the system whose BOOT-ID is BOOT_ID
+    and, when given, with its source-beside flag set or cleared."""
 
     unpack_token_file(data)
     out = bytearray(data)
-    struct.pack_into("<Q", out, 48, stamp & ((1 << 64) - 1))
+    struct.pack_into("<Q", out, 48, boot_id & ((1 << 64) - 1))
     if source_beside is not None:
         flags = struct.unpack_from("<H", out, 46)[0] & ~FLAG_SOURCE_BESIDE
         struct.pack_into(
@@ -373,5 +370,5 @@ __all__ = [
     "pack_module_name_file",
     "pack_token_file",
     "unpack_token_file",
-    "with_stamp",
+    "with_boot_id",
 ]

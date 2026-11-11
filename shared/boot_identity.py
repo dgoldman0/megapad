@@ -1,23 +1,21 @@
-"""The identity of what booted, and the stamp of a load that starts from it.
+"""The identity of what booted.
 
 BIOS ``BOOT-ID`` gives one cell that differs when the BIOS's code differs or
 when the first file it loaded since reset, KDOS for a boot from disk, differs.
-KDOS starts the stamp of a load from that cell and takes in each file as its
-load begins; a module's token file holds the stamp that stood where its
-recording began and is used only where the stamp stands the same
+A module's token file holds the cell of the system it was built for, and
+KDOS uses the file only where the BIOS gives the same one
 (``docs/token-modules-proposal-2026-11-11.md``).
 
-``bios.asm`` (``boot_identity_fold``) and ``kdos.f`` (``_STAMP-TAKE``) define
-the arithmetic.  This module computes the same cells for the hosted
-simulator, which has no BIOS image of its own and stands for the one
-``bios.asm`` assembles to, and for the tools that build images.
+``bios.asm`` (``boot_identity_fold``) defines the arithmetic.  This module
+computes the same cell for the hosted simulator, which has no BIOS image of
+its own and stands for the one ``bios.asm`` assembles to, and for the tools
+that build images.
 """
 
 from __future__ import annotations
 
 import functools
 import struct
-import zlib
 from pathlib import Path
 
 _MASK = (1 << 64) - 1
@@ -25,23 +23,23 @@ _K = 0x9E3779B97F4A7C15
 _BIOS_SOURCE = Path(__file__).resolve().parents[1] / "bios.asm"
 
 
-def take(stamp: int, value: int) -> int:
-    """One step: STAMP with VALUE taken in."""
+def take(cell: int, value: int) -> int:
+    """One step of the hash: CELL with VALUE taken in."""
 
-    stamp = ((stamp ^ (value & _MASK)) * _K) & _MASK
-    return stamp ^ (stamp >> 32)
+    cell = ((cell ^ (value & _MASK)) * _K) & _MASK
+    return cell ^ (cell >> 32)
 
 
-def fold_bytes(stamp: int, data: bytes) -> int:
-    """STAMP with DATA taken in: each eight bytes as one little-endian
+def fold_bytes(cell: int, data: bytes) -> int:
+    """CELL with DATA taken in: each eight bytes as one little-endian
     cell, then each byte left over."""
 
     whole = len(data) & ~7
-    for (cell,) in struct.iter_unpack("<Q", bytes(data[:whole])):
-        stamp = take(stamp, cell)
+    for (word,) in struct.iter_unpack("<Q", bytes(data[:whole])):
+        cell = take(cell, word)
     for byte in data[whole:]:
-        stamp = take(stamp, byte)
-    return stamp
+        cell = take(cell, byte)
+    return cell
 
 
 @functools.lru_cache(maxsize=4)
@@ -67,36 +65,10 @@ def boot_identity(boot_file: bytes | None = None, *, bios: bytes | None = None) 
     default the code ``bios.asm`` assembles to) after it loaded BOOT_FILE
     first, or before it loaded any file."""
 
-    stamp = fold_bytes(0, bios_code() if bios is None else bios)
+    cell = fold_bytes(0, bios_code() if bios is None else bios)
     if boot_file is not None:
-        stamp = fold_bytes(stamp, boot_file)
-    return stamp or 1
+        cell = fold_bytes(cell, boot_file)
+    return cell or 1
 
 
-def text_identity(text: bytes) -> int:
-    """A source text's identity in the stamp: its CRC-32 and its length."""
-
-    return (((zlib.crc32(text) & 0xFFFFFFFF) << 32) ^ len(text)) & _MASK
-
-
-def stamp_take(stamp: int, identity: int) -> int:
-    """KDOS ``_STAMP-TAKE``: STAMP with one identity taken in, never zero."""
-
-    return take(stamp, identity) or 1
-
-
-def stamp_start(boot: int) -> int:
-    """The stamp of a load before any file: started from BOOT-ID."""
-
-    return stamp_take(0, boot)
-
-
-__all__ = [
-    "bios_code",
-    "boot_identity",
-    "fold_bytes",
-    "stamp_start",
-    "stamp_take",
-    "take",
-    "text_identity",
-]
+__all__ = ["bios_code", "boot_identity", "fold_bytes", "take"]
