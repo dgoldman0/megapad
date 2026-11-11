@@ -2,9 +2,9 @@
 
 Status: built and tested on the branch `token-modules` of MegaPad and of
 Akashic, and not merged. Nothing here is enabled unless a build asks for it
-with `--token-modules`. The three decisions that were the author's are
-taken and recorded under [Decisions](#decisions); the staleness rule is
-taken for now, and what is uncertain about it is stated where the rule is.
+with `--token-modules`. Three decisions about the form are taken and
+recorded under [Decisions](#decisions); the staleness rule is taken for
+now, and what is uncertain about it is stated where the rule is.
 What is still owed is under [What remains](#what-remains).
 
 A module's token form is a record of what the interpreter did with its
@@ -958,7 +958,7 @@ source beside them, and its reads of the system volume 11,988, 8,878 and
 
 ## Decisions
 
-Three decisions were the author's. They are recorded here as taken, each
+Three decisions were taken on 2026-11-11. They are recorded here, each
 with what it rests on.
 
 ### 1. Where token files are built
@@ -997,11 +997,11 @@ modules loaded after an edited one need to count as stale.
 
 **Before the branches merge.**
 
-- The author's reading of this document, and of three findings in it that
-  bear on the decisions: an edit to the boot script makes every token file
-  stale; the stamp does not cover the modules a module requires itself;
-  and the check of a token file against its source costs most of what the
-  token files save on the System Practice's volume.
+- A reading of three findings in this document that bear on the
+  decisions: an edit to the boot script makes every token file stale; the
+  stamp does not cover the modules a module requires itself; and the check
+  of a token file against its source costs most of what the token files
+  save on the System Practice's volume.
 - The merge itself. Both branches stand on the local mains named under
   [Measurements](#measurements) and are not merged.
 
