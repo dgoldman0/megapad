@@ -89,6 +89,7 @@ public:
         ID_DATA = 0xA,
         BOOT_ADDR = 0xB,
         BOOT_LEN = 0xC,
+        BOOT_ARG = 0xD,
     };
 
     // CTRL bits.
@@ -191,6 +192,7 @@ private:
     std::uint16_t qos_limit_ = 0;
     std::uint64_t boot_addr_ = 0;
     std::uint64_t boot_len_ = 0;
+    std::uint64_t boot_arg_ = 0;
 
     // Refusal record
     bool fault_ = false;

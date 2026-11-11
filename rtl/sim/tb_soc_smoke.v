@@ -146,6 +146,7 @@ module tb_soc_smoke;
         .cl_sb_id_data (64'd0),
         .cl_sb_boot_addr(),
         .cl_sb_boot_len(),
+        .cl_sb_boot_arg(),
 
         .debug_leds    (debug_leds)
     );

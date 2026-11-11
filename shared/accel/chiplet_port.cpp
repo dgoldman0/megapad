@@ -133,7 +133,7 @@ bool ChipletPort::attach(const mp64_chiplet_module& module) noexcept {
     module_.bind(module_.self, &host_);
     // A chiplet attached to a released port starts as one released there.
     if (!reset_hold_) {
-        module_.release(module_.self, boot_addr_, boot_len_);
+        module_.release(module_.self, boot_addr_, boot_len_, boot_arg_);
         if (stop_req_)
             module_.stop(module_.self, 1);
         more_work_ = true;
@@ -206,6 +206,8 @@ std::uint64_t ChipletPort::read_register(unsigned index) const noexcept {
             return boot_addr_;
         case BOOT_LEN:
             return boot_len_;
+        case BOOT_ARG:
+            return boot_arg_;
         default:
             return 0;
     }
@@ -227,7 +229,8 @@ void ChipletPort::write_register(unsigned index,
             if (was_up && !now_up) {
                 enter_reset();
             } else if (!was_up && now_up) {
-                module_.release(module_.self, boot_addr_, boot_len_);
+                module_.release(module_.self, boot_addr_, boot_len_,
+                                boot_arg_);
                 if (stop_req_)
                     module_.stop(module_.self, 1);
                 // A released chiplet has its start to do, so the port
@@ -284,6 +287,9 @@ void ChipletPort::write_register(unsigned index,
             break;
         case BOOT_LEN:
             boot_len_ = value;
+            break;
+        case BOOT_ARG:
+            boot_arg_ = value;
             break;
         default:
             break;
@@ -477,6 +483,7 @@ std::vector<std::uint8_t> ChipletPort::save() const {
     out.u64(read_register(QOS));
     out.u64(boot_addr_);
     out.u64(boot_len_);
+    out.u64(boot_arg_);
     out.u8(fault_ ? 1 : 0);
     out.u64(fault_addr_);
     out.u64(read_register(FAULT_INFO));
@@ -515,12 +522,12 @@ bool ChipletPort::restore(const std::vector<std::uint8_t>& state) noexcept {
             !in.u8(range.rights))
             return false;
     }
-    std::uint64_t qos = 0, boot_addr = 0, boot_len = 0, fault_addr = 0,
-                  fault_info = 0, id_data = 0, blob_size = 0;
+    std::uint64_t qos = 0, boot_addr = 0, boot_len = 0, boot_arg = 0,
+                  fault_addr = 0, fault_info = 0, id_data = 0, blob_size = 0;
     std::uint8_t fault = 0, id_done = 0, id_index = 0, ready = 0,
                  stopped = 0, more = 0, declined = 0, attached = 0;
     if (!in.u64(qos) || !in.u64(boot_addr) || !in.u64(boot_len) ||
-        !in.u8(fault) || !in.u64(fault_addr) || !in.u64(fault_info) ||
+        !in.u64(boot_arg) || !in.u8(fault) || !in.u64(fault_addr) || !in.u64(fault_info) ||
         !in.u8(id_done) || !in.u8(id_index) || !in.u64(id_data) ||
         !in.u8(ready) || !in.u8(stopped) || !in.u8(more) ||
         !in.u8(declined) || !in.u8(attached))
@@ -565,6 +572,7 @@ bool ChipletPort::restore(const std::vector<std::uint8_t>& state) noexcept {
     qos_limit_ = static_cast<std::uint16_t>(qos >> 16);
     boot_addr_ = boot_addr;
     boot_len_ = boot_len;
+    boot_arg_ = boot_arg;
     fault_ = fault != 0;
     fault_addr_ = fault_addr;
     fault_size_ = static_cast<std::uint8_t>(fault_info & 3);

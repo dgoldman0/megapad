@@ -100,7 +100,7 @@ module tb_soc_chiplet;
     wire [7:0]  cl_sb_id_index;
     reg         cl_sb_id_ack;
     reg  [63:0] cl_sb_id_data;
-    wire [63:0] cl_sb_boot_addr, cl_sb_boot_len;
+    wire [63:0] cl_sb_boot_addr, cl_sb_boot_len, cl_sb_boot_arg;
 
     // The chiplet's identity record: word n reads "LM1" and n.
     always @(posedge clk) begin
@@ -158,6 +158,7 @@ module tb_soc_chiplet;
         .cl_sb_id_index(cl_sb_id_index), .cl_sb_id_ack(cl_sb_id_ack),
         .cl_sb_id_data(cl_sb_id_data), .cl_sb_boot_addr(cl_sb_boot_addr),
         .cl_sb_boot_len(cl_sb_boot_len),
+        .cl_sb_boot_arg(cl_sb_boot_arg),
         .debug_leds()
     );
 
@@ -202,7 +203,8 @@ module tb_soc_chiplet;
     localparam [11:0] P_RSEL = 12'hEA0, P_RBASE = 12'hEA8;
     localparam [11:0] P_RLIM = 12'hEB0, P_RRTS = 12'hEB8;
     localparam [11:0] P_ID_INDEX = 12'hEC8, P_ID_DATA = 12'hED0;
-    localparam [11:0] P_BOOT_ADDR = 12'hED8, P_BOOT_LEN = 12'hEE0;
+    localparam [11:0] P_BOOT_ADDR = 12'hED8, P_BOOT_LEN = 12'hEE0,
+                      P_BOOT_ARG = 12'hEE8;
     localparam [11:0] MB_SEND = 12'h508, MB_STATUS = 12'h509, MB_ACK = 12'h50A;
 
     // ------------------------------------------------------------------
@@ -336,9 +338,11 @@ module tb_soc_chiplet;
               mmio_rd == {40'h4C_4D31_0000, 16'd0, 8'd2});
         reg_wr(P_BOOT_ADDR, 64'h0010_8000);
         reg_wr(P_BOOT_LEN, 64'h0000_0400);
+        reg_wr(P_BOOT_ARG, 64'h0010_9000);
         check("the boot words reach the chiplet",
               cl_sb_boot_addr == 64'h0010_8000 &&
-              cl_sb_boot_len == 64'h400);
+              cl_sb_boot_len == 64'h400 &&
+              cl_sb_boot_arg == 64'h0010_9000);
 
         $display("\nLent memory");
         // Lend [0x0010_1000, 0x0010_2000) for reading and writing.

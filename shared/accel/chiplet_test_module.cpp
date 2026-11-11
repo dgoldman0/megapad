@@ -98,7 +98,10 @@ void reset(void* self) {
     clear_work(chip);
 }
 
-void release(void* self, std::uint64_t boot_addr, std::uint64_t boot_len) {
+// The test chiplet takes its addresses from its image and has no use for
+// the boot argument, which names the control block of the queue layer.
+void release(void* self, std::uint64_t boot_addr, std::uint64_t boot_len,
+             std::uint64_t) {
     auto& chip = *static_cast<TestChiplet*>(self);
     chip.phase = Phase::Boot;
     chip.stop_req = 0;

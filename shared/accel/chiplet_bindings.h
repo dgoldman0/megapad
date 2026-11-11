@@ -16,6 +16,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -155,7 +156,9 @@ struct ManualChipletState {
     int stop_req = 0;
     int resets = 0;
     int steps = 0;
-    std::vector<std::pair<std::uint64_t, std::uint64_t>> releases;
+    // Each release: the boot address, the boot length, the boot argument.
+    std::vector<std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>>
+        releases;
     std::vector<int> doorbells;
     std::vector<std::uint8_t> blob;     // what save yields and restore takes
 };
@@ -179,10 +182,11 @@ inline mp64_chiplet_module make_manual_module(
         state.released = false;
         state.resets += 1;
     };
-    module.release = [](void* self, std::uint64_t addr, std::uint64_t len) {
+    module.release = [](void* self, std::uint64_t addr, std::uint64_t len,
+                        std::uint64_t arg) {
         auto& state = **static_cast<Shared*>(self);
         state.released = true;
-        state.releases.emplace_back(addr, len);
+        state.releases.emplace_back(addr, len, arg);
     };
     module.stop = [](void* self, int stop_req) {
         (*static_cast<Shared*>(self))->stop_req = stop_req;

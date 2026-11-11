@@ -75,8 +75,11 @@ typedef struct mp64_chiplet_module {
     /* MegaPad holds the chiplet in reset: drop all work in hand. */
     void (*reset)(void *self);
 
-    /* MegaPad releases the chiplet, naming its boot image. */
-    void (*release)(void *self, uint64_t boot_addr, uint64_t boot_len);
+    /* MegaPad releases the chiplet, naming its boot image and giving the
+       boot argument: the address of the control block it lends, where the
+       chiplet finds its queues (docs/chiplet-link.md, section 8). */
+    void (*release)(void *self, uint64_t boot_addr, uint64_t boot_len,
+                    uint64_t boot_arg);
 
     /* The sideband's stop request changed. */
     void (*stop)(void *self, int stop_req);

@@ -142,6 +142,7 @@ module mp64_soc #(
     input  wire [CP_W*64-1:0] cl_sb_id_data,
     output wire [CP_W*64-1:0] cl_sb_boot_addr,
     output wire [CP_W*64-1:0] cl_sb_boot_len,
+    output wire [CP_W*64-1:0] cl_sb_boot_arg,
 
     // === Debug ===
     output wire [7:0]  debug_leds
@@ -2042,6 +2043,7 @@ module mp64_soc #(
                     .sb_id_data   (cl_sb_id_data[cpi*64 +: 64]),
                     .sb_boot_addr (cl_sb_boot_addr[cpi*64 +: 64]),
                     .sb_boot_len  (cl_sb_boot_len[cpi*64 +: 64]),
+                    .sb_boot_arg  (cl_sb_boot_arg[cpi*64 +: 64]),
                     .m_req        (cp_m_req[cpi]),
                     .m_addr       (cp_m_addr[cpi*64 +: 64]),
                     .m_wdata      (cp_m_wdata[cpi*64 +: 64]),
@@ -2078,6 +2080,7 @@ module mp64_soc #(
                 assign cl_sb_id_index[cpi*8 +: 8]    = 8'd0;
                 assign cl_sb_boot_addr[cpi*64 +: 64] = 64'd0;
                 assign cl_sb_boot_len[cpi*64 +: 64]  = 64'd0;
+                assign cl_sb_boot_arg[cpi*64 +: 64]  = 64'd0;
                 assign cp_m_req[cpi]                 = 1'b0;
                 assign cp_m_addr[cpi*64 +: 64]       = 64'd0;
                 assign cp_m_wdata[cpi*64 +: 64]      = 64'd0;

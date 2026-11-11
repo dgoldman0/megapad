@@ -257,8 +257,8 @@ The names and stack orders are a first draft, to settle when the module is
 written. Above them a Leviathan vocabulary names what the machine offers and
 never which chip does it: finding a function by its class, putting work on a
 queue and taking a result, and over those the sandbox and managed-data
-words. Its word list follows the offer-list and queue formats, which are
-still to be specified.
+words. Its word list follows the queue and offer formats of
+[chiplet-link.md](chiplet-link.md) §8.
 - **LM1's spec:** external I/O, boot, the memory map, roots, the write
   barrier, safepoints, and capability mode as a required part.
 
@@ -270,8 +270,8 @@ transaction for a core, always serves the tile engines first, and takes a
 Of the RTL items, the port bridge, the client arbiter with its weights and
 limits, the mailbox's ports, its register path, the external-flag wiring and
 System Info's field are built. The models of the emulator and the simulator
-are built too. [chiplet-link.md](chiplet-link.md) §9 lists what is left for
-later.
+are built too, and the queues and offers are specified.
+[chiplet-link.md](chiplet-link.md) §10 lists what is left for later.
 
 ## 10. Open
 

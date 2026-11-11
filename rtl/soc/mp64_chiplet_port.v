@@ -62,6 +62,8 @@
 //   0x50 ID_DATA     the word read
 //   0x58 BOOT_ADDR   address of the image the chiplet starts from
 //   0x60 BOOT_LEN    its length in bytes
+//   0x68 BOOT_ARG    a word given to the chiplet with them: the address of
+//                    its control block
 //
 // Coding standard: Verilog-2001, sync reset, non-blocking assigns.
 //
@@ -124,6 +126,7 @@ module mp64_chiplet_port #(
     input  wire [63:0] sb_id_data,
     output wire [63:0] sb_boot_addr,
     output wire [63:0] sb_boot_len,
+    output wire [63:0] sb_boot_arg,
 
     // === External-memory client port (to mp64_extmem_arb) ===
     output wire        m_req,
@@ -172,6 +175,7 @@ module mp64_chiplet_port #(
     localparam [3:0] R_ID_DATA    = 4'hA;
     localparam [3:0] R_BOOT_ADDR  = 4'hB;
     localparam [3:0] R_BOOT_LEN   = 4'hC;
+    localparam [3:0] R_BOOT_ARG   = 4'hD;
 
     // ========================================================================
     // Registers
@@ -194,6 +198,7 @@ module mp64_chiplet_port #(
     reg [15:0] qos_bwlimit;
     reg [63:0] boot_addr;
     reg [63:0] boot_len;
+    reg [63:0] boot_arg;
 
     reg        fault;
     reg [63:0] fault_addr;
@@ -215,6 +220,7 @@ module mp64_chiplet_port #(
     assign sb_stop_req  = ctl_stop_req;
     assign sb_boot_addr = boot_addr;
     assign sb_boot_len  = boot_len;
+    assign sb_boot_arg  = boot_arg;
     assign m_weight     = qos_weight;
     assign m_bwlimit    = qos_bwlimit;
 
@@ -327,6 +333,7 @@ module mp64_chiplet_port #(
             qos_bwlimit  <= 16'd0;
             boot_addr    <= 64'd0;
             boot_len     <= 64'd0;
+            boot_arg     <= 64'd0;
             fault        <= 1'b0;
             fault_addr   <= 64'd0;
             fault_size   <= 2'd0;
@@ -393,6 +400,7 @@ module mp64_chiplet_port #(
                     end
                     R_BOOT_ADDR: boot_addr <= reg_wdata;
                     R_BOOT_LEN:  boot_len  <= reg_wdata;
+                    R_BOOT_ARG:  boot_arg  <= reg_wdata;
                     default: ;
                 endcase
             end
@@ -565,6 +573,7 @@ module mp64_chiplet_port #(
             R_ID_DATA:    reg_rdata = id_data;
             R_BOOT_ADDR:  reg_rdata = boot_addr;
             R_BOOT_LEN:   reg_rdata = boot_len;
+            R_BOOT_ARG:   reg_rdata = boot_arg;
             default:      reg_rdata = 64'd0;
         endcase
     end

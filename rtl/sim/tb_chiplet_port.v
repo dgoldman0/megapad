@@ -29,6 +29,7 @@ module tb_chiplet_port;
     localparam [3:0] R_ID_DATA    = 4'hA;
     localparam [3:0] R_BOOT_ADDR  = 4'hB;
     localparam [3:0] R_BOOT_LEN   = 4'hC;
+    localparam [3:0] R_BOOT_ARG   = 4'hD;
 
     localparam [1:0] LK_OK        = 2'd0;
     localparam [1:0] LK_REFUSED   = 2'd1;
@@ -91,7 +92,7 @@ module tb_chiplet_port;
     reg  [63:0] sb_id_data;
     wire        sb_rst_n, sb_stop_req, sb_id_req;
     wire [7:0]  sb_id_index;
-    wire [63:0] sb_boot_addr, sb_boot_len;
+    wire [63:0] sb_boot_addr, sb_boot_len, sb_boot_arg;
 
     wire        m_req, m_wen;
     wire [63:0] m_addr, m_wdata;
@@ -133,6 +134,7 @@ module tb_chiplet_port;
         .sb_id_index(sb_id_index), .sb_id_ack(sb_id_ack),
         .sb_id_data(sb_id_data), .sb_boot_addr(sb_boot_addr),
         .sb_boot_len(sb_boot_len),
+        .sb_boot_arg(sb_boot_arg),
         .m_req(m_req), .m_addr(m_addr), .m_wdata(m_wdata), .m_wen(m_wen),
         .m_size(m_size), .m_ack(m_ack), .m_error(m_error),
         .m_rdata(m_rdata), .m_weight(m_weight), .m_bwlimit(m_bwlimit),
@@ -615,8 +617,12 @@ module tb_chiplet_port;
               m_weight == 8'd5 && m_bwlimit == 16'd300);
         reg_write(R_BOOT_ADDR, 64'h0060_0000);
         reg_write(R_BOOT_LEN, 64'h0000_8000);
+        reg_write(R_BOOT_ARG, 64'h0061_0040);
         check("the boot words reach the sideband",
-              sb_boot_addr == 64'h0060_0000 && sb_boot_len == 64'h8000);
+              sb_boot_addr == 64'h0060_0000 && sb_boot_len == 64'h8000 &&
+              sb_boot_arg == 64'h0061_0040);
+        reg_read(R_BOOT_ARG);
+        check("BOOT_ARG reads back", rd == 64'h0061_0040);
         reg_write(R_ID_INDEX, 64'd3);
         repeat (2) @(posedge clk);
         check("an identity read is requested for word 3",

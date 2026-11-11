@@ -2,13 +2,14 @@
 
 Status: MegaPad's side is implemented in RTL and simulated, LM1's end
 (`rtl/link/` in the lm1 repository) passes a bench joined to it, and the
-emulator and the simulator model MegaPad's side (section 8). This is the
-specification of the link between MegaPad and one chiplet, as far as
-hardware defines it: the port's identity, its register window, the channels
-that cross the link, and the sideband. The design it follows, with its
-reasons, is [chiplet-interconnect-plan.md](chiplet-interconnect-plan.md).
-Section 9 lists the parts of the chiplet contract that remain to be
-specified or built.
+emulator and the simulator model MegaPad's side (section 9). This is the
+specification of the link between MegaPad and one chiplet: the port's
+identity, its register window, the channels that cross the link, the
+sideband, and the queues in lent memory through which the two chips exchange
+work (section 8). The design it follows, with its reasons, is
+[chiplet-interconnect-plan.md](chiplet-interconnect-plan.md). Section 10
+lists the parts of the chiplet contract that remain to be specified or
+built.
 
 The RTL is `rtl/soc/mp64_chiplet_port.v` (the port bridge),
 `rtl/mem/mp64_extmem_arb.v` (the external-memory client arbiter),
@@ -63,6 +64,7 @@ zero and ignores writes.
 | `+0xD0` | `ID_DATA` | R | The identity word read |
 | `+0xD8` | `BOOT_ADDR` | R/W | Address of the image the chiplet starts from |
 | `+0xE0` | `BOOT_LEN` | R/W | Its length in bytes |
+| `+0xE8` | `BOOT_ARG` | R/W | The address of the port's control block (section 8) |
 
 `CTRL` resets to `RESET_HOLD` alone: the chiplet is held in reset and the
 port admits nothing. `ENABLE` opens the port to memory requests.
@@ -202,11 +204,14 @@ The sideband works while the chiplet is held in reset.
 | `ready` | to MegaPad | The chiplet's runtime is up |
 | `id_req`, `id_index`, `id_ack`, `id_data` | both | Read of one identity word |
 | `boot_addr`, `boot_len` | to chiplet | The image MegaPad names |
+| `boot_arg` | to chiplet | The address of the control block MegaPad lends |
 
 MegaPad starts a chiplet in this order: read the identity record, load the
-image into a range lent read-only, write `BOOT_ADDR` and `BOOT_LEN`, install
-the ranges, and clear `RESET_HOLD` with `ENABLE` set. The chiplet then reads
-its image through the memory channel and raises `ready`.
+image into a range lent read-only, write the control block of section 8,
+write `BOOT_ADDR`, `BOOT_LEN` and `BOOT_ARG`, install the ranges, and clear
+`RESET_HOLD` with `ENABLE` set. The chiplet then reads its image through the
+memory channel, raises `ready`, and finds its queues through the control
+block.
 
 Identity word 0 holds the contract version in its low 32 bits, 1 for this
 document, above the ASCII tag `CHIP` in its high 32 bits. Word 1 names the
@@ -225,7 +230,144 @@ to the chiplet, `cl_dbr_*` the doorbell from it, and `cl_sb_*` the sideband.
 A top that attaches no chiplet ties `cl_sb_present` low and the other inputs
 to zero.
 
-## 8. The emulator and the simulator
+## 8. Queues and offers
+
+Once a chiplet runs, the two chips exchange work as entries in queues, in
+memory that MegaPad lends. These are formats in memory: of the hardware they
+use the lent ranges, the doorbells and `BOOT_ARG`. Every field is a 64-bit
+little-endian word unless a bit range is given, and every structure is 64
+bytes long, one tile, or a multiple of that.
+
+### Who writes what
+
+MegaPad lends a chiplet two kinds of memory for its queues. What MegaPad
+writes, it lends for reading. What the chiplet writes, it lends for reading
+and writing. The bridge then holds each chip to its own words: a chiplet
+cannot alter an entry MegaPad queued, a count MegaPad keeps or a record
+MegaPad wrote. MegaPad checks whatever it reads from the chiplet's words.
+
+### A queue
+
+A queue carries entries one way, from its writer to its reader. It has two
+parts, so that each lies in memory that its owner alone writes:
+
+- the ring block, which the writer owns: `TAIL` in its first word, the rest
+  of its first 64 bytes reserved, and then the ring of `CAPACITY` entries of
+  64 bytes each;
+- the head word, which the reader owns: `HEAD`.
+
+`CAPACITY` is a power of two. It is asked for and granted when the queue is
+made (below) and is stated in the record that names the queue. `TAIL` counts
+the entries the writer has put and `HEAD` the entries the reader has taken,
+both from zero and both without wrapping, and entry number n lies in slot
+n mod `CAPACITY`. The queue is empty when the counts are equal and full when
+they differ by `CAPACITY`.
+
+The writer fills a slot, then advances `TAIL`, then rings the reader. The
+reader takes entries until `HEAD` equals `TAIL`. A doorbell means "look at
+your queues", so one ring can stand for several entries, and a reader that
+finds nothing new does nothing.
+
+A reader checks the count it reads. A `TAIL` that has moved backwards, or
+that runs more than `CAPACITY` ahead of `HEAD`, marks the queue broken, and
+MegaPad answers a broken queue by resetting the port.
+
+### A queue pair
+
+Queues come in pairs, one in each direction. MegaPad names a pair in a
+record of six words:
+
+| Offset | Field | Contents |
+|--------|-------|----------|
+| `+0x00` | `TO_RING` | Address of the ring block of the queue MegaPad writes |
+| `+0x08` | `TO_HEAD` | Address of that queue's head word, which the chiplet writes |
+| `+0x10` | `FROM_RING` | Address of the ring block of the queue the chiplet writes |
+| `+0x18` | `FROM_HEAD` | Address of that queue's head word, which MegaPad writes |
+| `+0x20` | `CAPACITIES` | [31:0] entries in the queue to the chiplet, [63:32] entries in the queue from it |
+| `+0x28` | `NOTIFY` | [7:0] ID of the core the chiplet rings for this pair |
+
+### The control block
+
+Before it releases a chiplet, MegaPad writes the port's control block, lends
+it for reading, and puts its address in `BOOT_ARG`:
+
+| Offset | Field | Contents |
+|--------|-------|----------|
+| `+0x00` | `MAGIC` | ASCII `CHIPCTRL`, first character in the low byte |
+| `+0x08` | `VERSION` | [31:0] version of these formats, 1 for this document |
+| `+0x10` | queue pair | The record of the port's control queues |
+
+### An entry
+
+| Word | Field | Contents |
+|------|-------|----------|
+| 0 | `HEADER` | [15:0] operation, [16] `REPLY`, [63:32] status |
+| 1 | `TAG` | Chosen by the sender of a request; a reply carries its request's tag |
+| 2 | `IN_ADDR` | Address of the data the receiver reads |
+| 3 | `IN_LEN` | Its length in bytes |
+| 4 | `OUT_ADDR` | Address of the area the receiver may write |
+| 5 | `OUT_LEN` | Its length in bytes; in a reply, the bytes written |
+| 6 | `ARG0` | A word for the operation |
+| 7 | `ARG1` | A word for the operation |
+
+An entry is a request, or with `REPLY` set the answer to the request that
+has its tag. A queue carries both: on the queue it writes, a chip puts its
+own requests and its replies to the other chip's requests. A chiplet
+therefore asks MegaPad for a service the way MegaPad hands it a job.
+
+The sender of a request owns the memory the request names. The receiver
+reads the input area and writes inside the output area, and both return to
+the sender with the reply. Each area lies in memory lent with the right its
+use needs.
+
+A reply's status is 0 for `OK`, 1 for `UNSUPPORTED` when the receiver knows
+no such operation, 2 for `CANCELLED`, 3 for `FAILED` and 4 for `REFUSED`.
+Statuses from `0x100` and operations from `0x100` belong to the class of the
+function that the pair serves. The operations below belong to every pair or
+to the control queues.
+
+| Operation | Number | Meaning |
+|-----------|--------|---------|
+| `CANCEL` | 1 | Abandon the request that has this entry's tag. It has no reply of its own: the request's one reply confirms it, with `CANCELLED`, or with the ordinary result when the work had finished |
+| `OFFER` | 2 | On the control queue from the chiplet: a function the chiplet provides, and what it asks for |
+
+### Offers and grants
+
+A running chiplet states each function it provides in an `OFFER`. `ARG0`
+holds the function's class in bits 31:0 and its version in bits 63:32,
+`ARG1` holds in bits 31:0 the entries it asks for in each work queue, and
+`OUT_LEN` holds the bytes of working memory it asks for.
+
+MegaPad replies on the control queue to the chiplet. A reply with `REFUSED`
+grants nothing. A reply with `OK` names in `IN_ADDR` a grant record, which
+MegaPad has written and lent:
+
+| Offset | Field | Contents |
+|--------|-------|----------|
+| `+0x00` | queue pair | The record of the function's work queues |
+| `+0x30` | `MEM_ADDR` | Address of the working memory, lent for reading and writing |
+| `+0x38` | `MEM_LEN` | Its length in bytes |
+
+MegaPad may grant fewer entries or bytes than were asked, and the record
+states what it granted. A chiplet that later needs more sends another
+`OFFER` for the class, and each grant stands beside the earlier ones. KDOS
+registers a granted function under its class, and software asks for a class
+and is given whichever chiplet provides it. Class 0 is reserved, and class
+numbers are assigned in this section as functions are specified.
+
+### Bounded waiting
+
+- A chip keeps at most as many of its requests unanswered on a pair as the
+  queue that brings their replies has entries, so the other chip never holds
+  more replies than that.
+- A chip takes entries from the queue it reads whenever it is signalled,
+  whether or not the queue it writes has room. A reply it cannot place yet
+  it keeps, and places when room appears.
+- MegaPad gives each of its requests a deadline. It cancels a request that
+  misses its deadline, and resets the port when the cancel goes unanswered
+  too.
+
+## 9. The emulator and the simulator
 
 Both model MegaPad's side of the link with one C++ implementation,
 `shared/accel/chiplet_port.{h,cpp}`, built into both native extensions. The
@@ -251,7 +393,7 @@ clock.
   `MBOX_STATUS` for a port's signal. Its ports are absent unless the address
   space is created with `chiplet_ports`, and its first port has the ID 1.
 - A small core in the emulator reaches the mailbox by CSR as a full core
-  does. In the RTL it uses the mailbox's registers (section 9).
+  does. In the RTL it uses the mailbox's registers (section 10).
 
 A chiplet's model implements `shared/accel/chiplet_module.h`, a C interface
 that carries what the link carries: one memory request with the link's size
@@ -263,13 +405,18 @@ module library, by `MegapadSystem.attach_chiplet` in the emulator and
 `shared/accel/chiplet_test_module.cpp` is a small chiplet that the tests use
 and a worked example of the interface.
 
-## 9. Still to specify or build
+## 10. Still to specify or build
 
-- **The offer list and the work queues.** A running chiplet states its
-  functions and the queues and memory it asks for, and work crosses as
-  descriptors in queues in lent memory. Both are formats in memory, defined
-  with KDOS's system module for chiplets, whose general words are listed in
-  [chiplet-interconnect-plan.md](chiplet-interconnect-plan.md) §9.
+- **The software of section 8.** Its two ends are KDOS's system module for
+  chiplets, whose general words are listed in
+  [chiplet-interconnect-plan.md](chiplet-interconnect-plan.md) §9, and a
+  chiplet's runtime. Neither exists yet. A test chiplet that speaks the
+  queues comes with the module; the present one takes its addresses from
+  its boot image.
+- **Classes.** Each function's class number, operations and statuses are
+  assigned with the function, LM1's with LM1's layer.
+- **Taking a grant back.** How MegaPad withdraws a function's queues and
+  memory from a running chiplet.
 - **A CSR path for small cores.** A port's signal reaches a small core as
   it reaches a full core: the mailbox raises that core's IPI line and its
   flag input. A small core rings, reads `MBOX_STATUS` and acknowledges

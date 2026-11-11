@@ -35,6 +35,7 @@ ID_INDEX = 0xC8
 ID_DATA = 0xD0
 BOOT_ADDR = 0xD8
 BOOT_LEN = 0xE0
+BOOT_ARG = 0xE8
 
 ENABLE = 1 << 0
 RESET_HOLD = 1 << 1
@@ -173,11 +174,14 @@ def test_the_window_takes_aligned_accesses_inside_itself(bench, offset):
 def test_release_hands_the_chiplet_its_boot_words(bench):
     bench.link.write64(BOOT_ADDR, EXT_BASE + 0x100)
     bench.link.write64(BOOT_LEN, 40)
+    bench.link.write64(BOOT_ARG, EXT_BASE + 0x800)
     bench.link.write64(CTRL, 0)
     assert bench.chiplet.released
-    assert bench.chiplet.releases == [(EXT_BASE + 0x100, 40)]
+    assert bench.chiplet.releases == [(EXT_BASE + 0x100, 40, EXT_BASE + 0x800)]
     assert bench.link.read64(BOOT_ADDR) == EXT_BASE + 0x100
     assert bench.link.read64(BOOT_LEN) == 40
+    assert bench.link.read64(BOOT_ARG) == EXT_BASE + 0x800
+    assert bench.link.read64(0xF0) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -589,6 +593,7 @@ def test_a_memory_error_ends_a_burst_at_its_failing_word(bench):
 def test_the_links_state_survives_a_save_and_restore(native, bench):
     bench.link.write64(BOOT_ADDR, EXT_BASE + 0x100)
     bench.link.write64(BOOT_LEN, 40)
+    bench.link.write64(BOOT_ARG, EXT_BASE + 0x440)
     bench.lend(0, EXT_BASE + 0x100, EXT_BASE + 0x200, READ)
     bench.lend(3, EXT_BASE + 0x400, EXT_BASE + 0x500, READ | WRITE)
     bench.link.write64(RANGE_BASE, 0x77)
