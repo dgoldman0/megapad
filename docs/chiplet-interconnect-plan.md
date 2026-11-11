@@ -32,6 +32,15 @@ built is a build parameter, as the number of storage units is, and Leviathan
 builds one; a second chiplet then needs a MegaPad die built with two ports,
 under the same design.
 
+The interface sets no port limit of its own. Each port takes an ID from the
+8-bit set that already numbers MegaPad's cores and bus requesters
+(`MP64_CORE_ID_BITS` in `rtl/pkg/mp64_pkg.vh`), so its ceiling is the ID
+space the chip already has. System Info reports the number of ports built,
+and software sizes its tables from that count. What bounds a real chip is
+physical: each port takes die edge and package space, and every chiplet
+shares MegaPad's external memory, which points to one to four ports on a
+modest chip.
+
 Every chiplet:
 
 - holds an identity record that MegaPad reads over a sideband, a slow channel
@@ -102,6 +111,12 @@ raises the existing inter-core interrupt. The mailbox already has a register
 path, reached by CSR instructions, that bypasses the bus, and the SoC ties
 it off today (`rtl/periph/mp64_mailbox.v`, `rtl/soc/mp64_soc.v`). Connected,
 it lets a core ring a doorbell with a CSR write alone.
+
+The mailbox's pending status is eight bits wide today, enough for the four
+full cores and four ports. It widens to cover every participant before a
+fifth port is built, and that one widening also serves the microcores if
+their launch comes to use the mailbox
+([microcore-kernels-plan.md](microcore-kernels-plan.md)).
 
 A pending doorbell from a chiplet also drives the core's external-flag
 input, so a core waiting for an answer tests it with the external-flag
@@ -200,8 +215,8 @@ limit at the controller bound what a chiplet takes from Desk.
 
 - **MegaPad RTL:** the external-memory controller (chiplet ports as clients,
   their weights and limits, the address width), the mailbox (ports as
-  participants, the register path), the external-flag wiring, System Info,
-  and the new port bridge.
+  participants, the register path, the width of its pending status), the
+  external-flag wiring, System Info, and the new port bridge.
 - **BIOS:** bringing the link up, and the doorbell interrupt.
 - **KDOS:** the system module for chiplets, and an allocator for lendable
   memory.
@@ -215,9 +230,6 @@ transaction for a core, always serves the tile engines first, and takes a
 
 ## 10. Open
 
-- **The interface's limit on ports.** Four would fit the mailbox's eight-bit
-  pending status beside the four full cores. The limit is set at production
-  size when the link is specified.
 - **LM1's memory and size** (the release plan's D8), which set the lane
   count and the load on the external-memory controller.
 - **Sub-word writes to shared memory.** The controller writes a byte or a
