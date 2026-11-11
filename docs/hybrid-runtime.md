@@ -192,4 +192,7 @@ boot, multicore execution and native snapshots.
 Machine access to MMIO and devices, multicore hybrid execution, native
 snapshots, and running compiled Forth or BIOS code as machine code are
 outside this mode. The last is the staged design in
-[`hybrid-native-dictionary-plan.md`](hybrid-native-dictionary-plan.md).
+[`hybrid-native-dictionary-plan.md`](hybrid-native-dictionary-plan.md). What
+stands between this mode and a dictionary the BIOS compiled, such as an MF64
+image, is reviewed in
+[`hybrid-compiled-code-review-2026-11-11.md`](hybrid-compiled-code-review-2026-11-11.md).

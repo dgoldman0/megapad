@@ -91,6 +91,12 @@ built: the native-authority ABI, and the mapping between the native image's
 state and the semantic engine's. Whether a single image should instead run
 inside a semantic session, beside semantic words, is undecided.
 
+The review behind this section is
+[`hybrid-compiled-code-review-2026-11-11.md`](hybrid-compiled-code-review-2026-11-11.md).
+It gives the gap item by item and the routes that could close it, recommends
+running a single image inside a semantic session if images must run in hybrid
+mode, and lists what is decided and what is open.
+
 ## Execution mapping and introspection
 
 Keep three identities distinct:
