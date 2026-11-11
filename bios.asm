@@ -518,6 +518,9 @@ interp_loop:
     breq interp_try_number
     ldi64 r11, interp_found_word
     call.l r11
+    cmpi r0, 0
+    lbreq interp_loop         ; compiled
+    call.l r9
     lbr interp_loop
 
 interp_try_number:
@@ -631,8 +634,11 @@ interp_no_rsp_overflow:
 
 ; interp_found_word: R9 = dictionary entry, R1 = its flags byte.
 ;   While interpreting, and for an IMMEDIATE word at any time, the word
-;   runs.  Otherwise it is compiled: inlined by the JIT or called.
-;   Returns R0 = 1 when the word ran and 0 when it was compiled.
+;   is to run.  Otherwise it is compiled: inlined by the JIT or called.
+;   Returns R0 = 0 when the word was compiled.  Returns R0 = 1 with R9 =
+;   the word's code when it is to run.  The caller makes that call, so the
+;   word finds the return stack one call below its front end, as it always
+;   has; RP@ shows the depth.
 interp_found_word:
     ldi64 r11, var_state
     ldn r11, r11
@@ -654,8 +660,7 @@ interp_found_run_flush:
 interp_found_run:
     ldi64 r11, entry_to_code
     call.l r11
-    ; R9 = code pointer
-    call.l r9
+    ; R9 = code pointer, for the caller to run
     ldi r0, 1
     ret.l
 
@@ -11745,6 +11750,7 @@ w_eval_loop_normal:
     call.l r11
     cmpi r0, 0
     lbreq w_eval_loop         ; compiled: nothing ran
+    call.l r9
     ; A word may invoke EVALUATE recursively.  Stop this source line as
     ; soon as that nested evaluation records an error.
     ldi64 r11, var_eval_status
@@ -12114,6 +12120,7 @@ w_tok_word:
     call.l r11
     cmpi r0, 0
     lbreq w_tok_loop          ; compiled: nothing ran
+    call.l r9
     ; The word ran.  Whatever input it was given is spent.
     ldi64 r11, var_tib_len
     ldn r1, r11

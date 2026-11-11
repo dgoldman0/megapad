@@ -165,11 +165,13 @@ Two other ways to produce the file were weighed.
 in the simulator, as every BIOS word has. The interpreter's two decisions
 are now stated once on each machine and shared by every front end.
 
-- In `bios.asm`, `interp_found_word` runs a word while interpreting or when
-  it is immediate and otherwise compiles it through `jit_compile_word`, and
-  `interp_found_number` compiles a literal or pushes. QUIT's loop and
-  EVALUATE's loop each held a copy of both; they and `TOKEN-REPLAY` now call
-  the one.
+- In `bios.asm`, `interp_found_word` decides whether a word runs, which it
+  does while interpreting or when it is immediate, or is compiled through
+  `jit_compile_word`, and `interp_found_number` compiles a literal or
+  pushes. QUIT's loop and EVALUATE's loop each held a copy of both; they
+  and `TOKEN-REPLAY` now call the one. A word that is to run is called by
+  its front end, with the code address the decision hands back, so that it
+  finds the return stack as deep as it always was.
 - In `simulator/runtime.py`, `_evaluate_found_word` and
   `_evaluate_found_number` are called by the source evaluator and by the
   replay.
@@ -447,7 +449,10 @@ with the landing.
 
 All figures are from one round on MegaPad `token-modules` 480ade1c and
 Akashic `token-modules` 66ff1fb4, run one boot at a time on a machine that
-other work shared. Device figures are the emulator's, for `desktop-apt1`
+other work shared. A later commit moved the call that runs a found word
+out of the shared step and into each front end; the linked boot from token
+forms, measured again after it, took 428 million instructions and
+582 million cycles. Device figures are the emulator's, for `desktop-apt1`
 from reset to the boot line that says the guest is entering Desk, in
 millions of instructions read between boot lines at a resolution of two
 million.
