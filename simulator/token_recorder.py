@@ -34,6 +34,13 @@ class RecordedUnit:
     depth: int
     address: int
     source: bytes
+    # Its place among the files the recording loaded, in the order their
+    # loads began, and the places of the files that were loading then.
+    index: int = 0
+    enclosing: tuple[int, ...] = ()
+    # True when the loader that evaluated the text told KDOS so, with
+    # LOAD-STAMP-SOURCE: the text is then part of the stamp of the load.
+    announced: bool = False
     items: list = field(default_factory=list)
     finished: bool = False
     unfit: str | None = None
@@ -109,8 +116,18 @@ class RecordedUnit:
             line_start = False
         return b""
 
-    def token_file(self) -> bytes:
-        """This file's token form.  Raises TokenFormError when it has none."""
+    @property
+    def text_identity(self) -> int:
+        """The identity KDOS takes into the stamp of a load for this text."""
+
+        from shared.boot_identity import text_identity
+
+        return text_identity(self.source)
+
+    def token_file(self, *, stamp: int = 0, source_beside: bool = False) -> bytes:
+        """This file's token form, to be used where the load's stamp stands
+        at STAMP when the file's load begins.  Raises TokenFormError when
+        the file has none."""
 
         if not self.finished:
             raise TokenFormError("the file's load did not finish")
@@ -142,6 +159,8 @@ class RecordedUnit:
             source=self.source,
             lines=self.source.count(b"\n") + (not self.source.endswith(b"\n")),
             module_name=self.module_name(),
+            stamp=stamp,
+            source_beside=source_beside,
         )
 
 
@@ -151,6 +170,7 @@ class TokenRecorder:
     def __init__(self) -> None:
         self.units: list[RecordedUnit] = []
         self._open: list[RecordedUnit] = []
+        self._announced: tuple[int, int] | None = None
         self._runtime = None
 
     def attach(self, runtime) -> None:
@@ -178,6 +198,13 @@ class TokenRecorder:
         buffer_cell = cell(b"LD-BUF")
         size_cell = cell(b"LD-SZ")
 
+        def announcement(context) -> bool:
+            # KDOS takes this text into the stamp of the load once the
+            # stamp has started.  The walk that follows is its file.
+            if context.data.depth() >= 2:
+                self._announced = (context.data.peek(1), context.data.peek())
+            return False
+
         def loader_walk(_context) -> bool:
             self._begin(
                 "loader",
@@ -201,6 +228,7 @@ class TokenRecorder:
             raise AssertionError("a recording hook is not an accelerator")
 
         for name, hook in (
+            (b"LOAD-STAMP-SOURCE", announcement),
             (b"_LD-WALK", loader_walk),
             (b"SOURCE-EVALUATE-CHECKED", source_walk),
         ):
@@ -209,9 +237,37 @@ class TokenRecorder:
                 raise RuntimeError(f"KDOS has no {name.decode()}")
             runtime.install_colon_accelerator(word, applicable=hook, callback=never)
 
+    def stamps(self, boot: int, texts: dict[int, bytes] | None = None) -> list[int]:
+        """The stamp of the load where each recorded file's load began, on
+        a machine whose BOOT-ID is BOOT that loads the same files in the
+        same order.  TEXTS gives, by place, the text a file has there when
+        it differs from the one recorded: a boot script that the image
+        builder writes again.
+
+        KDOS starts the stamp at the first token file it meets, with the
+        source files that are loading then, and takes in every file whose
+        load begins later.  This is that stamp for a machine on which no
+        source file ends its load before the first token file begins.  A
+        text that no loader announced with LOAD-STAMP-SOURCE is no file of
+        the load, and the stamp passes it by.
+        """
+
+        from shared.boot_identity import stamp_start, stamp_take, text_identity
+
+        stamp = stamp_start(boot)
+        result = []
+        for unit in self.units:
+            result.append(stamp)
+            if unit.announced:
+                text = (texts or {}).get(unit.index, unit.source)
+                stamp = stamp_take(stamp, text_identity(text))
+        return result
+
     # -- events ---------------------------------------------------------------
 
     def _begin(self, kind: str, depth: int, address: int, length: int) -> None:
+        announced = self._announced == (address, length)
+        self._announced = None
         # A walk at this depth or above means every deeper walk has ended.
         while self._open and self._open[-1].depth >= depth:
             self._open.pop()
@@ -226,6 +282,9 @@ class TokenRecorder:
             depth,
             address,
             bytes(source),
+            index=len(self.units),
+            enclosing=tuple(open_unit.index for open_unit in self._open),
+            announced=announced,
             unlinks=self._runtime._dictionary_unlinks,
         )
         self.units.append(unit)

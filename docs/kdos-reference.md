@@ -1850,6 +1850,8 @@ their lines with the two.
 | `EVAL-S-DEPTH` | 3 | Evaluator nesting limit exceeded |
 | `EVAL-S-UNFINISHED` | 4 | End of buffer left compiler state unfinished |
 | `EVAL-S-THROW` | 5 | A nonzero source-level `THROW` was caught; inspect `EVAL-THROW @` |
+| `EVAL-S-TOKENS` | 6 | A token file is malformed: its sizes do not account for its bytes, it holds no records, or a record runs past the end, names a slot nothing filled or is no record at all |
+| `EVAL-S-MISMATCH` | 7 | A token file does not match this system: it is not current (below), a conditional went another way than when it was recorded, or a word took entries out of the dictionary under the replay |
 
 On failure, read `EVAL-STATUS @`, `EVAL-LINE @`, `EVAL-COLUMN @`, and
 `EVAL-TOKEN` for token diagnostics, and `EVAL-THROW @` for the exact exception
@@ -1893,6 +1895,95 @@ failure left them.  A caller of `EVALUATE-CHECKED` or
 `SOURCE-EVALUATE-CHECKED` receives the status as a value instead.  There the
 status stays set, as described above, until the outermost evaluation ends
 or the caller clears it.
+
+### Token files
+
+A token file is the record of what the interpreter did with a source file:
+the words it found, the numbers it converted, and the text each parsing word
+took.  BIOS `TOKEN-REPLAY` runs the record through the interpreter's own
+found-word and found-number steps, so loading a token file builds the
+dictionary its source builds.  `docs/token-modules-proposal-2026-11-11.md`
+gives the design, the records and the measurements; `shared/token_form.py`
+writes the file for the tools that build images.
+
+The file is a header, the module name its source `PROVIDES`, and the
+records:
+
+| Offset | Bytes | Field | Word |
+|--------|-------|-------|------|
+| 0 | 8 | `MFTOKEN1` | `TOKEN-FILE? ( addr len -- flag )` |
+| 8 | 4 | bytes before the records: 64 and the padded module name | `TKF.HEADER` |
+| 12 | 4 | cells in the table `TOKEN-REPLAY` keeps found words in | `TKF.SLOTS` |
+| 16 | 8 | bytes of records | `TKF.RECORDS` |
+| 24 | 8 | bytes of the source | `TKF.SOURCE` |
+| 32 | 4 | CRC-32 of the source | `TKF.TEXT-ID` gives it with the length |
+| 36 | 4 | CRC-32 of the records, for tools | |
+| 40 | 4 | lines in the source | |
+| 44 | 2 | bytes of the module name | `TKF.ID ( addr -- id-addr id-len )` |
+| 46 | 2 | flags; 1 is `TKF-F-SOURCE-BESIDE` | `TKF.FLAGS` |
+| 48 | 8 | the stamp | `TKF.STAMP` |
+| 56 | 8 | reserved, zero | |
+
+`TOKEN-EVALUATE-CHECKED ( i*x addr len -- j*x status )` runs a token file
+held in memory as `SOURCE-EVALUATE-CHECKED` runs a source buffer: the same
+statuses and data-stack effects, the same check that nothing is left
+unfinished, and statuses 6 and 7 besides.  It allocates the table for the
+replay and frees it.  A file that runs is taken into the stamp first.
+
+`MODULE-TOKENS` is a variable, zero as KDOS starts.  While it is nonzero
+`LOAD` and `REQUIRE` look for a path's token form first, at the path with a
+`t` added (`util.f`, `util.ft`), and for the path itself when no such file
+is there.  A file found either way is replayed when it begins with
+`MFTOKEN1` and walked as source otherwise, so a token file may also stand
+under its source's own name.  A file found by the added `t` must be a token
+file.
+
+**The stamp of a load.**  A token file is the interpreter's work on top of
+everything loaded before it, so it is used only there.  `LOAD-STAMP` holds
+what that is.  It starts from BIOS `BOOT-ID`, the identity of the BIOS and
+of the file it loaded first, which is KDOS, and takes in each file as its
+load begins, in order: a source text by its CRC-32 and length, a token file
+by the same two numbers of the source it was recorded from.  A file's
+header holds the stamp as it stood where the file's recording began.
+`TOKENS-CURRENT? ( addr -- flag )` is the staleness rule and its only
+statement: the file is current when the header's stamp is `LOAD-STAMP`'s
+value.  The stamp is zero until a token file first asks for it; it starts
+then with the source files that are loading at that moment, outermost first,
+so a boot that meets no token file computes no checksum.
+`LOAD-STAMP-SOURCE ( addr len -- )` tells KDOS that the load of a source
+file begins with this text.  KDOS's loader calls it for the files it reads;
+a loader outside KDOS, such as one that evaluates containers, calls it for
+the source text it evaluates itself.
+
+What happens to a file that is not current depends on whether its source
+ships beside it:
+
+- *No source beside it.*  The load ends.  `TOKEN-EVALUATE-CHECKED` prints
+  ` Token form recorded on another system: this volume was built for another
+  system` and returns status 7, and the loader prints ` Token file` and the
+  file's name and ` cannot be loaded` and throws 7.  Nothing is loaded in
+  the file's place.
+- *Flag 1, and the source is there*, under the file's name without its last
+  letter and in the file's own folder.  The loader reads the source and
+  checks the token file against it as well, by length and CRC-32.  When
+  either check fails it prints ` Token file`, the name and ` is out of date:
+  loading its source`, and loads the source.  That source is taken into the
+  stamp by its own text, so every token file loaded after it is out of date
+  too, until those files are built again.
+
+A token file that cannot be replayed ends the load in the same way wherever
+it stands, since part of it may have run: statuses 6 and 7 from the replay
+name the file with ` cannot be loaded` and throw the status.  A file found
+by the added `t` that is not a token file is named with ` is not a token
+file` and throws 7.  Only the load that read the file names it; the loads
+it was nested in rethrow.
+
+A token file with no records only names its module.  It stands on a volume
+for a module that the system loads before it mounts the volume, at that
+module's path with the `t` added.  `REQUIRE` of the path then finds the
+module loaded and reads no further, as it does for any loaded module's
+file.  Where the module is not loaded the file is named with ` only names
+its module, which is not loaded` and the load throws 7.
 
 Dictionary changes are not automatically transactional. A caller that
 snapshots `HERE` and `LATEST` must pass that pair to `DICT-ROLLBACK` on failure,
@@ -3519,7 +3610,7 @@ evaluator with canonical XMEM, HBW, VRAM, and valid MP64FS media. It published
 1,452 KDOS words and finished with an authoritative 1,764-binding dictionary
 index. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
-460 core words and expects 1,543 KDOS publications and 1,995 unique
+461 core words and expects 1,568 KDOS publications and 2,021 unique
 bindings. The historical
 run is semantic evidence, not native/exact-full-core timing evidence, and adds
 no `rich-terminal.f`, projection, compositor, viewer, or rich-input work.

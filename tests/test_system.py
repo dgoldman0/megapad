@@ -5930,10 +5930,12 @@ class TestBIOSTACC(unittest.TestCase):
 
     def test_tacc_dictionary_tail_chain(self):
         """WOTS, AES's block-mode words, SHA-384, the storage unit words, the
-        QUIT callback, the string scan, the dictionary's code kind and the
-        token replay append after the unchanged full-TACC dictionary tail."""
+        QUIT callback, the string scan, the dictionary's code kind, the token
+        replay and the boot's identity append after the unchanged full-TACC
+        dictionary tail."""
         labels = self._labels
         chain = (
+            ("d_boot_id", "d_token_replay"),
             ("d_token_replay", "d_dict_machine_code_q"),
             ("d_dict_machine_code_q", "d_scan"),
             ("d_scan", "d_quit_xt_store"),
@@ -5975,7 +5977,7 @@ class TestBIOSTACC(unittest.TestCase):
             ("d_caller_span_status", "d_entropy_ready"),
         )
         self.assertEqual(
-            labels["latest_entry"], labels["d_token_replay"])
+            labels["latest_entry"], labels["d_boot_id"])
         for current, previous in chain:
             link = int.from_bytes(
                 self._code[labels[current]:labels[current] + 8],
@@ -5992,7 +5994,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 562)
+        self.assertEqual(len(seen), 563)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -6332,6 +6334,112 @@ class TestBIOSDictMachineCode(unittest.TestCase):
         self.assertRegex(text, r"\[BYTES\s+244\s+160\s+\]")
         self.assertRegex(text, r"\[TARGET\s+-1\s+\]")
         self.assertRegex(text, r"\[DEPTH\s+0\s+\]")
+
+
+class TestBIOSBootId(unittest.TestCase):
+    """BOOT-ID is the identity of what booted: this BIOS's code and the
+    first file it loaded.  shared/boot_identity.py computes the same cell,
+    and the hosted word (tests/simulator/test_boot_id.py) gives it."""
+
+    ASK = [
+        'CR ." [ID " BOOT-ID 32 RSHIFT . BOOT-ID 4294967295 AND . ." ]"',
+        'CR ." [AGAIN " BOOT-ID 32 RSHIFT . BOOT-ID 4294967295 AND . ." ]"',
+        'CR ." [DEPTH " DEPTH . ." ]"',
+    ]
+
+    def setUp(self):
+        self._bios_harness = TestBIOS(methodName="test_print_zero")
+        self._bios_harness.setUp()
+
+    def _identity(self, bios_code=None, files=()):
+        """Boot BIOS_CODE with FILES on its disk and return what BOOT-ID
+        gives, asked twice."""
+
+        harness = self._bios_harness
+        path = None
+        if files:
+            fs = MP64FS(total_sectors=8192)
+            fs.format()
+            for name, data in files:
+                fs.inject_file(name, data, ftype=FTYPE_FORTH)
+            with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+                path = f.name
+                fs.save(path)
+        try:
+            sys_obj = make_system(ram_kib=1024, storage_image=path)
+            buf = capture_uart(sys_obj)
+            sys_obj.load_binary(
+                0, harness.bios_code if bios_code is None else bios_code
+            )
+            harness._register_accel_hooks(sys_obj)
+            sys_obj.boot()
+            text = harness._run_forth(sys_obj, buf, self.ASK)
+        finally:
+            if path is not None:
+                os.unlink(path)
+        self.assertRegex(text, r"\[DEPTH\s+0\s+\]")
+        asked = []
+        for mark in ("ID", "AGAIN"):
+            high, low = re.search(
+                r"\[%s\s+(\d+)\s+(\d+)\s+\]" % mark, text
+            ).groups()
+            asked.append((int(high) << 32) | int(low))
+        self.assertEqual(asked[0], asked[1])
+        return asked[0]
+
+    def _code_and_labels(self):
+        from asm import assemble
+
+        labels = {}
+        with open(BIOS_PATH) as f:
+            source = f.read()
+        return bytearray(assemble(source, labels_out=labels)), labels
+
+    def test_before_any_file_it_is_the_bioss_own_code(self):
+        from shared.boot_identity import bios_code, boot_identity
+
+        code, labels = self._code_and_labels()
+        self.assertEqual(bytes(code[:labels["var_state"]]), bios_code())
+        self.assertEqual(self._identity(), boot_identity())
+
+    def test_one_changed_byte_of_bios_code_changes_it(self):
+        from shared.boot_identity import boot_identity
+
+        code, labels = self._code_and_labels()
+        # A letter of the name of a word this boot never looks for.
+        code[labels["d_token_replay"] + 9] ^= 0x01
+        changed = self._identity(bios_code=bytes(code))
+        self.assertNotEqual(changed, boot_identity())
+        self.assertEqual(
+            changed, boot_identity(bios=bytes(code[:labels["var_state"]]))
+        )
+        # The messages and the variables lie past the code and are not
+        # part of it.
+        code, labels = self._code_and_labels()
+        self.assertGreater(labels["str_token_bad"], labels["var_state"])
+        code[labels["str_token_bad"] + 1] ^= 0x20
+        self.assertEqual(self._identity(bios_code=bytes(code)), boot_identity())
+
+    def test_the_first_file_loaded_is_part_of_it(self):
+        from shared.boot_identity import boot_identity
+
+        first = b": FIRST-FILE 77 ;\n\\ nine odd bytes\n"
+        self.assertTrue(len(first) % 8)
+        booted = self._identity(files=(("first.f", first),))
+        self.assertEqual(booted, boot_identity(first))
+        self.assertNotEqual(booted, boot_identity())
+        # One byte of the file, and only the file loaded first, counts.
+        other = first.replace(b"77", b"78")
+        self.assertEqual(
+            self._identity(files=(("first.f", other),)), boot_identity(other)
+        )
+        self.assertNotEqual(boot_identity(other), booted)
+        self.assertEqual(
+            self._identity(
+                files=(("first.f", first), ("second.f", b": SECOND 1 ;\n"))
+            ),
+            booted,
+        )
 
 
 class TestBIOSTokenReplay(unittest.TestCase):
@@ -16894,7 +17002,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 562)
+        self.assertEqual(len(seen), 563)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -18518,12 +18626,13 @@ class TestBIOSEntropyFill(unittest.TestCase):
     def test_dictionary_append_preserves_every_older_link(self):
         """WOTS, then AES's block-mode words, then SHA-384, then the storage
         unit words, then the QUIT callback, then the string scan, then the
-        dictionary's code kind, then the token replay append without changing
-        any older dictionary link."""
+        dictionary's code kind, then the token replay, then the boot's
+        identity append without changing any older dictionary link."""
         labels = self._bios_labels
         self.assertEqual(
-            labels["latest_entry"], labels["d_token_replay"])
+            labels["latest_entry"], labels["d_boot_id"])
         for current, previous in (
+            ("d_boot_id", "d_token_replay"),
             ("d_token_replay", "d_dict_machine_code_q"),
             ("d_dict_machine_code_q", "d_scan"),
             ("d_scan", "d_quit_xt_store"),
@@ -45602,6 +45711,58 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
             r"\[NX-COLD\s+-1\s+1\s+0\s+41\s+32\s+-1\s+-1\s+-1\s+"
             r"4242\s+-1\s+0\s+0\s+0\s+0\s+\]",
         )
+
+
+class TestKDOSTokenModules(_KDOSTestBase):
+    """KDOS loads modules from token files.
+
+    The cases are in tests/token_module_cases.py: what each volume holds,
+    what is typed, and what the output must show.  The hosted simulator
+    runs the same ones in tests/simulator/test_kdos_token_modules.py.
+    """
+
+    def _run_volume(self, files, lines):
+        from tests.token_module_cases import volume
+
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+        try:
+            volume(files).save(path)
+            return self._run_kdos(lines, storage_image=path)
+        finally:
+            os.unlink(path)
+
+    def test_the_cases_run_as_they_do_in_the_simulator(self):
+        from tests.token_module_cases import CASES, failures
+
+        for name, case in sorted(CASES.items()):
+            with self.subTest(case=name):
+                self.assertEqual(
+                    failures(case, self._run_volume(case.files, case.lines)), []
+                )
+
+    def test_files_the_simulator_recorded_load_on_the_bios(self):
+        from tests.token_module_cases import (
+            RECORDED_LINES,
+            RECORDED_SHOWS,
+            RECORDED_SOURCES,
+            TOKENS_ON,
+            Case,
+            failures,
+            recorded_volume,
+            stamps,
+        )
+
+        shows = Case(files={}, lines=[], must=list(RECORDED_SHOWS))
+        from_source = self._run_volume(RECORDED_SOURCES, RECORDED_LINES[:-1])
+        self.assertEqual(failures(shows, from_source), [])
+        after = stamps(RECORDED_SOURCES["top.f"], RECORDED_SOURCES["lib.f"])[2]
+        shows.must.append(rf"\[STAMP {after >> 32} {after & 0xFFFFFFFF} \]")
+        from_tokens = self._run_volume(
+            recorded_volume(RECORDED_SOURCES, "top.f"),
+            [TOKENS_ON, *RECORDED_LINES],
+        )
+        self.assertEqual(failures(shows, from_tokens), [])
 
 
 class TestModuleProvidedGuard(_KDOSTestBase):

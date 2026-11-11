@@ -46,6 +46,7 @@ def test_rich_terminal_and_geometry_words_extend_the_core_append_only() -> None:
         b"SCAN",
         b"DICT-MACHINE-CODE?",
         b"TOKEN-REPLAY",
+        b"BOOT-ID",
     )
     assert len(runtime.dictionary.words) == 380 + len(frontier)
     words = runtime.dictionary.words[:-len(frontier)]

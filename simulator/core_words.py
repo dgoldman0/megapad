@@ -3264,6 +3264,12 @@ def install_core(runtime: MegaForthRuntime) -> None:
         lambda context: runtime.bios_token_replay(context),
     )
 
+    # The identity that the stamp of a load starts from follows.
+    runtime.define_primitive(
+        b"BOOT-ID",
+        lambda context: context.data.push(runtime.boot_identity()),
+    )
+
 
 def _scalar_float_word(service, shape: str, op: int | None):
     """Bind one BIOS-shaped scalar FP word to the hosted service."""

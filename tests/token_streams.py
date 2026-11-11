@@ -178,6 +178,62 @@ def _an_import_with_no_name():
     return bytes([0xF1, 1, 0xF0, 0, 0xFF]), 2
 
 
+def _an_import_name_that_passes_the_end():
+    return bytes([0xF1, 1, 0xF0, 9, 0x44, 0x55]), 2
+
+
+def _an_import_with_its_count_cut_off():
+    return bytes([0xF1, 1, 0xF0]), 2
+
+
+def _a_text_with_its_count_cut_off():
+    return bytes([0xF1, 1, 0xF5]), 2
+
+
+def _half_a_slot_number():
+    return bytes([0xF1, 1, 0x00]), 2
+
+
+def _a_slot_past_the_table():
+    return bytes([0xF1, 1, 0x00, 0x02, 0xFF]), 2
+
+
+def _the_highest_slot_number():
+    return bytes([0xF1, 1, 0xEF, 0xFF, 0xFF]), 2
+
+
+def _a_line_count_cut_off():
+    return bytes([0xF1, 1, 0xF7, 5]), 2
+
+
+def _a_one_byte_number_cut_off():
+    return bytes([0xF1, 1, 0xF1]), 2
+
+
+def _a_two_byte_number_cut_off():
+    return bytes([0xF1, 1, 0xF2, 5]), 2
+
+
+def _a_four_byte_number_cut_off():
+    return bytes([0xF1, 1, 0xF3, 1, 2, 3]), 2
+
+
+def _no_records_at_all():
+    return b"", 2
+
+
+def _a_skip_that_nothing_began():
+    return bytes([0xF8, 0xF1, 1, 0xFF]), 2
+
+
+def _a_text_of_255_bytes():
+    w = TokenWriter()
+    w.word("backslash", b"\\", b" " + b"x" * 254)
+    w.number(8)
+    w.word("dot", b".")
+    return w.finish(), w.slots
+
+
 def _a_line_count_of_two_bytes():
     w = TokenWriter()
     w.line(1000)
@@ -247,5 +303,57 @@ STREAMS = {
     "a line count of two bytes": (
         _a_line_count_of_two_bytes,
         "6 status=0 depth=0 line=1001",
+    ),
+    "an import name that passes the end": (
+        _an_import_name_that_passes_the_end,
+        f"{MALFORMED} status=6 depth=1 line=0",
+    ),
+    "an import with its count cut off": (
+        _an_import_with_its_count_cut_off,
+        f"{MALFORMED} status=6 depth=1 line=0",
+    ),
+    "a text with its count cut off": (
+        _a_text_with_its_count_cut_off,
+        f"{MALFORMED} status=6 depth=1 line=0",
+    ),
+    "half a slot number": (
+        _half_a_slot_number,
+        f"{MALFORMED} status=6 depth=1 line=0",
+    ),
+    "a slot past the table": (
+        _a_slot_past_the_table,
+        f"{MALFORMED} status=6 depth=1 line=0",
+    ),
+    "the highest slot number": (
+        _the_highest_slot_number,
+        f"{MALFORMED} status=6 depth=1 line=0",
+    ),
+    "a line count cut off": (
+        _a_line_count_cut_off,
+        f"{MALFORMED} status=6 depth=1 line=0",
+    ),
+    "a one-byte number cut off": (
+        _a_one_byte_number_cut_off,
+        f"{MALFORMED} status=6 depth=1 line=0",
+    ),
+    "a two-byte number cut off": (
+        _a_two_byte_number_cut_off,
+        f"{MALFORMED} status=6 depth=1 line=0",
+    ),
+    "a four-byte number cut off": (
+        _a_four_byte_number_cut_off,
+        f"{MALFORMED} status=6 depth=1 line=0",
+    ),
+    "no records at all": (
+        _no_records_at_all,
+        f"{MALFORMED} status=6 depth=0 line=0",
+    ),
+    "a skip that nothing began": (
+        _a_skip_that_nothing_began,
+        f"{MISMATCH} status=7 depth=0 line=0",
+    ),
+    "a text of 255 bytes": (
+        _a_text_of_255_bytes,
+        "8 status=0 depth=0 line=0",
     ),
 }

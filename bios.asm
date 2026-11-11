@@ -199,6 +199,13 @@ boot:
     ldi64 r11, var_quit_xt
     str r11, r1
 
+    ; A boot's identity belongs to this boot: the file it loads first may
+    ; differ from the one the last boot loaded.
+    ldi64 r11, var_boot_id
+    str r11, r1
+    ldi64 r11, var_boot_file_seen
+    str r11, r1
+
     ; The caller-owned dictionary index may point into external RAM which
     ; survives a warm reset.  A fresh BIOS must never inherit either that
     ; binding or an authoritative-miss claim from the previous instance.
@@ -9912,6 +9919,94 @@ mp64fs_validate_at_bad:
     ldi r0, 0
     ret.l
 
+; ---------------------------------------------------------------------
+;  The identity of what booted
+; ---------------------------------------------------------------------
+; BOOT-ID is one cell that differs when this BIOS's code differs or when the
+; first file FSLOAD loaded since reset differs: for a boot from disk, that
+; file is KDOS.  KDOS starts the stamp of a load from it, and a module's
+; token file is used only where that stamp stands as it stood when the file
+; was recorded (docs/token-modules-proposal-2026-11-11.md).
+;
+; The cell is a hash of the bytes below the BIOS's first variable, which
+; are its code and its dictionary and never change while it runs, followed
+; by the file's bytes.  The messages lie beyond the variables and are not
+; part of it.  Each eight bytes X, and then each byte left over,
+; is taken in as  h = (h XOR x) * K,  h = h XOR (h >> 32).  A result of
+; zero becomes one, so that zero can mean that the hash is not yet known.
+; shared/boot_identity.py computes the same cell for the hosted simulator
+; and for the tools that build images.
+
+; boot_identity_fold: R1 = the hash so far, R9 = address, R12 = bytes.
+; Returns R1; uses R7, R9, R10, R12, R13.
+boot_identity_fold:
+    ldi64 r13, 0x9E3779B97F4A7C15
+    ldi r10, 32
+bid_fold_cells:
+    cmpi r12, 8
+    brcc bid_fold_bytes       ; fewer than eight left
+    ldn r7, r9
+    xor r1, r7
+    mul r1, r13
+    mov r7, r1
+    shr r7, r10
+    xor r1, r7
+    addi r9, 8
+    subi r12, 8
+    br bid_fold_cells
+bid_fold_bytes:
+    cmpi r12, 0
+    breq bid_fold_done
+    ld.b r7, r9
+    xor r1, r7
+    mul r1, r13
+    mov r7, r1
+    shr r7, r10
+    xor r1, r7
+    inc r9
+    dec r12
+    br bid_fold_bytes
+bid_fold_done:
+    ret.l
+
+; boot_identity_bios: R1 = the hash of this BIOS's code and dictionary.
+boot_identity_bios:
+    ldi r1, 0
+    ldi r9, 0
+    ldi64 r12, var_state
+    ldi64 r11, boot_identity_fold
+    call.l r11
+    ret.l
+
+; boot_identity_finish: store R1, never zero, as the boot's identity.
+boot_identity_finish:
+    cmpi r1, 0
+    brne bid_finish_store
+    ldi r1, 1
+bid_finish_store:
+    ldi64 r11, var_boot_id
+    str r11, r1
+    ret.l
+
+; BOOT-ID ( -- u )  The identity of what booted.  Asked before any file
+; was loaded, it is the BIOS's own, and stays that until the next reset.
+w_boot_id:
+    ldi64 r11, var_boot_id
+    ldn r1, r11
+    cmpi r1, 0
+    brne w_boot_id_push
+    ldi r7, 1
+    ldi64 r11, var_boot_file_seen
+    str r11, r7
+    ldi64 r11, boot_identity_bios
+    call.l r11
+    ldi64 r11, boot_identity_finish
+    call.l r11
+w_boot_id_push:
+    subi r14, 8
+    str r14, r1
+    ret.l
+
 ; FSLOAD ( "name" -- )  Load a file from MP64FS and EVALUATE its contents.
 ;
 ; Parses the next word as a filename, reads the MP64FS directory from
@@ -10126,6 +10221,26 @@ w_fsload_found:
     cmpi r0, 0
     lbrne w_fsload_data_io_error
 w_fsload_data_ready:
+
+    ; The first file loaded since reset gives the boot its identity,
+    ; together with this BIOS's own code.
+    ldi64 r11, var_boot_file_seen
+    ldn r7, r11
+    cmpi r7, 0
+    lbrne w_fsload_identity_done
+    ldi r7, 1
+    str r11, r7
+    ldi64 r11, boot_identity_bios
+    call.l r11
+    ldn r9, r15               ; the file's first byte
+    mov r11, r15
+    addi r11, 8
+    ldn r12, r11              ; its bytes
+    ldi64 r11, boot_identity_fold
+    call.l r11
+    ldi64 r11, boot_identity_finish
+    call.l r11
+w_fsload_identity_done:
 
     ; Initialize FSLOAD line counter
     ldi r1, 0
@@ -25244,12 +25359,22 @@ d_dict_machine_code_q:
 
 ; The token replay appends after it.
 ; === TOKEN-REPLAY ===
-latest_entry:
 d_token_replay:
     .dq d_dict_machine_code_q
     .db 12
     .ascii "TOKEN-REPLAY"
     ldi64 r11, w_token_replay
+    call.l r11
+    ret.l
+
+; The identity that a token file's stamp starts from appends after it.
+; === BOOT-ID ===
+latest_entry:
+d_boot_id:
+    .dq d_token_replay
+    .db 7
+    .ascii "BOOT-ID"
+    ldi64 r11, w_boot_id
     call.l r11
     ret.l
 
@@ -25383,6 +25508,13 @@ var_eval_depth:
 ; dictionary.  TOKEN-REPLAY holds entry addresses in its table and ends when
 ; this count moves under it.
 var_dict_unlinks:
+    .dq 0
+
+; The identity of what booted (BOOT-ID); zero until it is known.  The
+; second cell is nonzero once the identity is fixed for this boot.
+var_boot_id:
+    .dq 0
+var_boot_file_seen:
     .dq 0
 
 ; Each active EVALUATE frame owns a complete copy of its caller's input

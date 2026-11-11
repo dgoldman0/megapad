@@ -84,6 +84,11 @@ order, on the source that is selected when the load begins.
    names no file, with the path itself.
 3. READ, at most once, and only after a RESOLVE that returned zero.  The
    loader makes no other call to the source between a RESOLVE and its READ.
+   When the file read is a token file that says its source ships beside
+   it, the loader then calls RESOLVE once more, with a second cleared
+   record and the file's own name without its last letter, which names the
+   source in the folder the first RESOLVE made current.  If that finds the
+   file, READ follows for it, into a buffer of its own.
 4. The calls of every load nested in the file's text, each complete before
    the next line is evaluated.
 5. DIR!, once, with the token of step 1.  The loader makes this call however

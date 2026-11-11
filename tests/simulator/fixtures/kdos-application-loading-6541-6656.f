@@ -27,7 +27,7 @@
     _APP-MPU-OFF ;
 
 : _APP-LOAD-WALK  ( -- )
-    _LD-WALK ;
+    _LD-WALK-SOURCE ;
 
 : _APP-LOAD-USER  ( -- )
     _APP-MPU-ON ENTER-USER _APP-LOAD-WALK ;

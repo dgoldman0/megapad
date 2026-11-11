@@ -34,10 +34,18 @@ File
     +16  u64  bytes of records           +24  u64  bytes of the source
     +32  u32  CRC-32 of the source       +36  u32  CRC-32 of the records
     +40  u32  lines in the source        +44  u16  bytes of the module name
-    +46  u16  flags, zero                +48  u64  load-chain stamp, zero
+    +46  u16  flags                      +48  u64  the stamp
     +56  u64  reserved, zero             +64  the module name, zero-padded
 
 then the records.  The table is allocated when the file is replayed.
+
+The stamp is KDOS's ``LOAD-STAMP`` as it stood where the file's recording
+began (``shared/boot_identity.py``); KDOS uses the file only where the
+stamp stands the same.  Flag 1 says that the file's source ships beside it,
+under the file's name without its last letter: KDOS then also checks the
+file against that source and loads the source when either check fails.  A
+file with no records only names its module.  It stands on a volume for a
+module that is loaded before the volume is mounted.
 """
 
 from __future__ import annotations
@@ -69,6 +77,8 @@ MAX_SLOTS = 0xF000
 MAX_NAME_BYTES = 255
 MAX_TEXT_BYTES = 255
 MODULE_NAME_MAX_BYTES = 0xFFFF
+FLAG_SOURCE_BESIDE = 1
+_KNOWN_FLAGS = FLAG_SOURCE_BESIDE
 
 
 class TokenFormError(ValueError):
@@ -183,13 +193,22 @@ def pack_token_file(
     source: bytes,
     lines: int,
     module_name: bytes = b"",
+    stamp: int = 0,
+    source_beside: bool = False,
 ) -> bytes:
-    """Lay RECORDS out as a token file with a table of SLOTS cells."""
+    """Lay RECORDS out as a token file with a table of SLOTS cells.
+
+    STAMP is the load's stamp where the recording of SOURCE began; a file
+    left at zero is never current.  SOURCE_BESIDE says that the source ships
+    beside the file.
+    """
 
     if not 0 <= slots <= MAX_SLOTS:
         raise TokenFormError("slot count out of range")
     if len(module_name) > MODULE_NAME_MAX_BYTES:
         raise TokenFormError("module name too long")
+    if not 0 <= stamp < 1 << 64:
+        raise TokenFormError("stamp out of range")
     name_bytes = (len(module_name) + 7) & ~7
     header_bytes = HEADER_BYTES + name_bytes
     header = _HEADER.pack(
@@ -202,8 +221,8 @@ def pack_token_file(
         zlib.crc32(records) & 0xFFFFFFFF,
         lines,
         len(module_name),
-        0,
-        0,
+        FLAG_SOURCE_BESIDE if source_beside else 0,
+        stamp,
         0,
     )
     return b"".join((
@@ -211,6 +230,14 @@ def pack_token_file(
         module_name.ljust(name_bytes, b"\0"),
         records,
     ))
+
+
+def pack_module_name_file(module_name: bytes) -> bytes:
+    """A token file with no records, which only names its module."""
+
+    if not module_name:
+        raise TokenFormError("a file that only names a module needs the name")
+    return pack_token_file(b"", 0, source=b"", lines=0, module_name=module_name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +252,14 @@ class TokenFile:
     records_crc32: int
     lines: int
     module_name: bytes
+    stamp: int = 0
+    source_beside: bool = False
+
+    @property
+    def text_identity(self) -> int:
+        """The identity of the source in the stamp of a load."""
+
+        return ((self.source_crc32 << 32) ^ self.source_bytes) & ((1 << 64) - 1)
 
 
 def is_token_file(data: bytes) -> bool:
@@ -246,7 +281,7 @@ def unpack_token_file(data: bytes) -> TokenFile:
         raise TokenFormError("module name outside the header")
     if header_bytes + record_bytes != len(data):
         raise TokenFormError("sizes do not account for the file")
-    if flags or stamp or reserved:
+    if flags & ~_KNOWN_FLAGS or reserved:
         raise TokenFormError("reserved fields are not zero")
     records = bytes(data[header_bytes:])
     if zlib.crc32(records) & 0xFFFFFFFF != records_crc:
@@ -260,7 +295,24 @@ def unpack_token_file(data: bytes) -> TokenFile:
         records_crc32=records_crc,
         lines=lines,
         module_name=bytes(data[HEADER_BYTES : HEADER_BYTES + name_bytes]),
+        stamp=stamp,
+        source_beside=bool(flags & FLAG_SOURCE_BESIDE),
     )
+
+
+def with_stamp(data: bytes, stamp: int, *, source_beside: bool | None = None) -> bytes:
+    """DATA, a token file, with STAMP in its header and, when given, its
+    source-beside flag set or cleared."""
+
+    unpack_token_file(data)
+    out = bytearray(data)
+    struct.pack_into("<Q", out, 48, stamp & ((1 << 64) - 1))
+    if source_beside is not None:
+        flags = struct.unpack_from("<H", out, 46)[0] & ~FLAG_SOURCE_BESIDE
+        struct.pack_into(
+            "<H", out, 46, flags | (FLAG_SOURCE_BESIDE if source_beside else 0)
+        )
+    return bytes(out)
 
 
 def iter_records(records: bytes) -> Iterator[tuple]:
@@ -309,6 +361,7 @@ def iter_records(records: bytes) -> Iterator[tuple]:
 
 
 __all__ = [
+    "FLAG_SOURCE_BESIDE",
     "HEADER_BYTES",
     "MAGIC",
     "MAX_SLOTS",
@@ -317,6 +370,8 @@ __all__ = [
     "TokenWriter",
     "is_token_file",
     "iter_records",
+    "pack_module_name_file",
     "pack_token_file",
     "unpack_token_file",
+    "with_stamp",
 ]

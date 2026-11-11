@@ -46,16 +46,16 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-mp64fs-load-5745-6349.f"
+    / "kdos-mp64fs-load-5745-6540.f"
 )
 
 FIRST_LINE = 5745
-LAST_LINE = 6349
-SLICE_BYTES = 24_371
+LAST_LINE = 6540
+SLICE_BYTES = 32_413
 SLICE_SHA256 = (
-    "02c367424778d779aafa28f7f605366e1f3cd3f9443cda00a04c4bf29e1e007b"
+    "7a75e2de8d8617fbe65b6c82ed492cba8dc448bfcbf1e31dfb57659bca1f6438"
 )
-SLICE_GIT_BLOB = "19c1a2dfd7ab23d20c43103ea66c7c82b9c5d32f"
+SLICE_GIT_BLOB = "06d9fae11d6d37f1f0a599e4f3289dddc12d4fda"
 
 # Exact defining-word/name order in kdos.f.  Keeping the defining word in
 # the ledger makes source-layout changes visible even if a replacement happens
@@ -119,15 +119,26 @@ SOURCE_LEDGER = (
     ("VARIABLE", b"MODULE-TOKENS"),
     ("CREATE", b"_LD-TNAME"),
     ("VARIABLE", b"_LD-TNAME-U"),
+    ("VARIABLE", b"_LD-NAME-U"),
     ("VARIABLE", b"_LD-TOKENS-CHOSEN"),
     (":", b"_LD-NAME-RESOLVE"),
     (":", b"_LD-RESOLVE"),
     (":", b"_LD-READ"),
     (":", b"_LD-FOUND?"),
+    ("CREATE", b"_LD-NAMES"),
+    (":", b"_LD-NAME-SLOT"),
+    (":", b"_LD-NAME-KEEP"),
+    (":", b"_LD-NAME"),
     ("CREATE", b"_LD-FROM-STK"),
     ("VARIABLE", b"_LD-FROM-SP"),
     (":", b"_LD-FROM-SAVE"),
     (":", b"_LD-FROM-END"),
+    ("VARIABLE", b"LOAD-STAMP"),
+    (":", b"_STAMP-TAKE"),
+    (":", b"_TEXT-ID"),
+    (":", b"LOAD-STAMP-SOURCE"),
+    (":", b"_STAMP-TEXT"),
+    (":", b"_STAMP-START"),
     ("CONSTANT", b"EVAL-S-OK"),
     ("CONSTANT", b"EVAL-S-UNDEFINED"),
     ("CONSTANT", b"EVAL-S-LINE-TOO-LONG"),
@@ -157,6 +168,10 @@ SOURCE_LEDGER = (
     (":", b"TKF.SLOTS"),
     (":", b"TKF.RECORDS"),
     (":", b"TKF.SOURCE"),
+    (":", b"TKF.FLAGS"),
+    (":", b"TKF.STAMP"),
+    (":", b"TKF.TEXT-ID"),
+    ("CONSTANT", b"TKF-F-SOURCE-BESIDE"),
     (":", b"TKF.ID"),
     ("CREATE", b"_TKF-MAGIC"),
     (":", b"TOKEN-FILE?"),
@@ -164,9 +179,19 @@ SOURCE_LEDGER = (
     ("VARIABLE", b"_TKF-U"),
     (":", b"_TKF-VALID?"),
     (":", b"_TKF-ARGS"),
+    (":", b"TOKENS-CURRENT?"),
     (":", b"TOKEN-EVALUATE-CHECKED"),
+    (":", b"_LD-TOKENS-NAMED"),
+    ("CREATE", b"_LD-SRC-FILE"),
+    ("VARIABLE", b"_LD-SRC-BUF"),
+    ("VARIABLE", b"_LD-SRC-U"),
+    (":", b"_LD-SIBLING"),
+    (":", b"_LD-SRC-READ"),
+    (":", b"_LD-SOURCE-BESIDE"),
     (":", b"_LD-TOKENS?"),
     (":", b"_LD-WALK-TOKENS"),
+    (":", b"_LD-TOKENS-MODULE"),
+    (":", b"_LD-WALK-SOURCE"),
     (":", b"_LD-RELEASE"),
     (":", b"_LD-FAIL"),
     (":", b"_LD-GUARDED"),
@@ -194,6 +219,7 @@ CONSTANTS = (
     ("EVAL-S-TOKENS", 6),
     ("EVAL-S-MISMATCH", 7),
     ("/TOKEN-HEADER", 64),
+    ("TKF-F-SOURCE-BESIDE", 1),
 )
 
 VARIABLES = (
@@ -216,9 +242,13 @@ VARIABLES = (
     "_SEC-LINE",
     "MODULE-TOKENS",
     "_LD-TNAME-U",
+    "_LD-NAME-U",
     "_LD-TOKENS-CHOSEN",
+    "LOAD-STAMP",
     "_TKF-A",
     "_TKF-U",
+    "_LD-SRC-BUF",
+    "_LD-SRC-U",
 )
 
 
@@ -473,7 +503,7 @@ def _select_source(runtime: MegaForthRuntime, source: _HostSource) -> None:
 def test_load_slice_is_exact_and_publishes_complete_source_ledger() -> None:
     runtime = _load_mp64fs_load()
 
-    assert len(SOURCE_LEDGER) == 113
+    assert len(SOURCE_LEDGER) == 138
     assert all(runtime.find(name) is not None for name in DEFINITIONS)
     assert tuple(_constant(runtime, name) for name, _value in CONSTANTS) == (
         tuple(value for _name, value in CONSTANTS)
@@ -486,7 +516,9 @@ def test_load_slice_is_exact_and_publishes_complete_source_ledger() -> None:
         ("_RP-COMP", "_RP-I", 24),
         ("FS-MODULE-SOURCE", "MODULE-SOURCE", 40),
         ("_LD-FILE", "_LD-PATH", 40),
+        ("_LD-NAMES", "_LD-NAME-SLOT", 128 * 16),
         ("_LD-FROM-STK", "_LD-FROM-SP", 16 * 16),
+        ("_LD-SRC-FILE", "_LD-SRC-BUF", 40),
     )
     for name, following, size in sized_bodies:
         word = runtime.find(name)

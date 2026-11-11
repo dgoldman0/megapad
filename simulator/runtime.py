@@ -947,6 +947,11 @@ class MegaForthRuntime:
         # How often DICT-ROLLBACK and LATEST! have taken words out of the
         # dictionary.  A token replay ends when this moves under it.
         self._dictionary_unlinks = 0
+        # The file the BIOS would have loaded first, when an image boot
+        # supplied one, and the identity BOOT-ID gives: fixed the first
+        # time it is asked for (shared/boot_identity.py).
+        self.boot_file: bytes | None = None
+        self._boot_identity: int | None = None
         self._active_dispatches: list[_DispatchFrame] = []
         self._transient_words: dict[int, Word] = {}
         # :NONAME definitions by execution token, each with the tag written
@@ -1691,6 +1696,16 @@ class MegaForthRuntime:
             raise
         else:
             self._pop_bios_evaluator_frame(evaluator, frame)
+
+    def boot_identity(self) -> int:
+        """BIOS BOOT-ID: the identity of the BIOS this runtime stands for and
+        of the file an image boot loaded first."""
+
+        if self._boot_identity is None:
+            from shared.boot_identity import boot_identity
+
+            self._boot_identity = boot_identity(self.boot_file)
+        return self._boot_identity
 
     def bios_token_replay(self, context: ExecutionContext) -> None:
         """Execute ``TOKEN-REPLAY ( rec-addr rec-len tab-addr tab-slots -- )``."""
