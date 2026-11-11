@@ -1875,13 +1875,14 @@ class TestBIOS(unittest.TestCase):
         """RECT-FILL writes a w×h block of 16-bit pixels."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
-            # Fill 4×3 rectangle at 0x10000, stride=8 bytes (4 pixels * 2)
-            # Use addresses above BIOS ROM (~0x8100) to avoid corruption.
-            "0x10000 8 4 3 0xF800 RECT-FILL",  # red RGB565
+            # Fill 4×3 rectangle at 0x28000, stride=8 bytes (4 pixels * 2)
+            # 0x28000 lies between the data stack's base and the return
+            # stack, clear of the BIOS image and of both stacks.
+            "0x28000 8 4 3 0xF800 RECT-FILL",  # red RGB565
             # Check first pixel of each row
-            "0x10000 W@ .",                    # row 0
-            "0x10008 W@ .",                    # row 1 (0x10000 + stride 8)
-            "0x10010 W@ .",                    # row 2 (0x10000 + stride 16)
+            "0x28000 W@ .",                    # row 0
+            "0x28008 W@ .",                    # row 1 (0x28000 + stride 8)
+            "0x28010 W@ .",                    # row 2 (0x28000 + stride 16)
         ])
         # 0xF800 = 63488
         self.assertIn("63488 ", text)
@@ -1890,8 +1891,8 @@ class TestBIOS(unittest.TestCase):
         """RECT-FILL with w=0 or h=0 is a no-op."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
-            "0x10000 16 0 5 0xFFFF RECT-FILL",  # w=0
-            "0x10000 16 5 0 0xFFFF RECT-FILL",  # h=0
+            "0x28000 16 0 5 0xFFFF RECT-FILL",  # w=0
+            "0x28000 16 5 0 0xFFFF RECT-FILL",  # h=0
             "99 .",
         ])
         self.assertIn("99 ", text)
@@ -1900,15 +1901,15 @@ class TestBIOS(unittest.TestCase):
         """BLIT-GLYPH renders foreground pixels from a font bitmap."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
-            # Store an 8-byte glyph pattern at 0x10000
+            # Store an 8-byte glyph pattern at 0x28000
             # (addresses above BIOS ROM ~0x8100 to avoid corruption)
             # Row 0: 0xFF (all 8 bits set)
             # Rows 1-7: 0x00
-            "0xFF 0x10000 C!",
-            "0x00 0x10001 C!  0x00 0x10002 C!  0x00 0x10003 C!",
-            "0x00 0x10004 C!  0x00 0x10005 C!  0x00 0x10006 C!  0x00 0x10007 C!",
+            "0xFF 0x28000 C!",
+            "0x00 0x28001 C!  0x00 0x28002 C!  0x00 0x28003 C!",
+            "0x00 0x28004 C!  0x00 0x28005 C!  0x00 0x28006 C!  0x00 0x28007 C!",
             # Blit to pixel address 0x20000, stride=16, fg=0x07E0 (green)
-            "0x10000 0x20000 16 0x07E0 BLIT-GLYPH",
+            "0x28000 0x20000 16 0x07E0 BLIT-GLYPH",
             # Row 0 should have green pixels (all 8 set)
             "0x20000 W@ .",                    # first pixel of row 0
             "0x2000E W@ .",                    # last pixel of row 0 (col 7)
@@ -1934,10 +1935,10 @@ class TestBIOS(unittest.TestCase):
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
             # Write a known pattern: 2 bytes wide, 2 rows, stride=4
-            "0xAA 0x10000 C!  0xBB 0x10001 C!",  # row 0
-            "0xCC 0x10004 C!  0xDD 0x10005 C!",  # row 1 (stride=4)
+            "0xAA 0x28000 C!  0xBB 0x28001 C!",  # row 0
+            "0xCC 0x28004 C!  0xDD 0x28005 C!",  # row 1 (stride=4)
             # Copy to 0x20000
-            "0x10000 0x20000 4 2 2 VRAM-COPY",
+            "0x28000 0x20000 4 2 2 VRAM-COPY",
             # Read back
             "0x20000 C@ .",  # should be 0xAA = 170
             "0x20001 C@ .",  # should be 0xBB = 187
@@ -1953,8 +1954,8 @@ class TestBIOS(unittest.TestCase):
         """VRAM-COPY with w=0 or h=0 is a no-op."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
-            "0x10000 0x20000 16 0 5 VRAM-COPY",  # w=0
-            "0x10000 0x20000 16 5 0 VRAM-COPY",  # h=0
+            "0x28000 0x20000 16 0 5 VRAM-COPY",  # w=0
+            "0x28000 0x20000 16 5 0 VRAM-COPY",  # h=0
             "42 .",
         ])
         self.assertIn("42 ", text)
@@ -1964,14 +1965,14 @@ class TestBIOS(unittest.TestCase):
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
             # Fill 3 rows: row0=0x11, row1=0x22, row2=0x33, stride=4, w=2
-            "0x11 0x10000 C!  0x11 0x10001 C!",
-            "0x22 0x10004 C!  0x22 0x10005 C!",
-            "0x33 0x10008 C!  0x33 0x10009 C!",
-            # Copy row1+row2 (src=0x10004) over row0+row1 (dst=0x10000)
+            "0x11 0x28000 C!  0x11 0x28001 C!",
+            "0x22 0x28004 C!  0x22 0x28005 C!",
+            "0x33 0x28008 C!  0x33 0x28009 C!",
+            # Copy row1+row2 (src=0x28004) over row0+row1 (dst=0x28000)
             # This is dst < src → forward copy, should work fine
-            "0x10004 0x10000 4 2 2 VRAM-COPY",
-            "0x10000 C@ .",  # was 0x11, now should be 0x22 = 34
-            "0x10004 C@ .",  # was 0x22, now should be 0x33 = 51
+            "0x28004 0x28000 4 2 2 VRAM-COPY",
+            "0x28000 C@ .",  # was 0x11, now should be 0x22 = 34
+            "0x28004 C@ .",  # was 0x22, now should be 0x33 = 51
         ])
         self.assertIn("34 ", text)
         self.assertIn("51 ", text)
@@ -1983,13 +1984,13 @@ class TestBIOS(unittest.TestCase):
         # 'A' = 0x41 → offset 0x108, 'B' = 0x42 → offset 0x110
         # Place 0xFF in row 0 of each glyph so pixels appear.
         text = self._run_forth(sys, buf, [
-            # Store 2-char string "AB" at 0x10000
-            "65 0x10000 C!  66 0x10001 C!",
+            # Store 2-char string "AB" at 0x28000
+            "65 0x28000 C!  66 0x28001 C!",
             # Write glyph data for 'A' at 0x30108 and 'B' at 0x30110
             "0xFF 0x30108 C!",   # 'A' row 0 – all bits set
             "0xFF 0x30110 C!",   # 'B' row 0 – all bits set
             # BLIT-STRING ( c-addr len pixel-addr stride fg16 font-base -- )
-            "0x10000 2 0x20000 64 0x07E0 0x30000 BLIT-STRING",
+            "0x28000 2 0x20000 64 0x07E0 0x30000 BLIT-STRING",
             # Char 'A' glyph row 0 should have green pixels at 0x20000
             # Char 'B' starts at 0x20000 + 16 = 0x20010
             "0x20000 W@ .",
@@ -2005,7 +2006,7 @@ class TestBIOS(unittest.TestCase):
         """BLIT-STRING with len=0 is a no-op."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
-            "0x10000 0 0x20000 64 0xFFFF 0x30000 BLIT-STRING",
+            "0x28000 0 0x20000 64 0xFFFF 0x30000 BLIT-STRING",
             "88 .",
         ])
         self.assertIn("88 ", text)
