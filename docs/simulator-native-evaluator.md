@@ -2,7 +2,10 @@
 
 Status: step 1b of the [simulator speed plan](simulator-speed-plan.md),
 done on 2026-10-13 in three slices: the native dictionary, the native line
-walker, and plans that survive publication.
+walker, and plans that survive publication. A fourth slice, decided on
+2026-11-11, gives the walker a second token source, the records of a
+module's token form, and a tap for the token recorder. Its first stage, the
+replay, is built; [Token records](#token-records) holds the design of both.
 
 The hosted simulator compiles about 210,000 lines of KDOS and Akashic source
 at every boot. After step 1a this takes about 27 s, and almost all of it is
@@ -52,6 +55,7 @@ guest sees.
 | Side index (`DICT-INDEX!`) | `HostedDictionaryIndex` | native, same slot layout and order |
 | Admitted source lines | Python evaluator | native line walker |
 | Other source lines | Python evaluator | Python evaluator, through the native dictionary |
+| Record lines of a token stream | the replay loop in `runtime.py` | native line walker for the lines it can take, the replay loop for the rest |
 | Execution | Python dispatcher | native executor, Python for stops |
 
 `make test-simulator` keeps running the Python backend without building any
@@ -205,6 +209,205 @@ pointers, the continuation cookie counter, semantic steps, `HERE`, `LATEST`,
 every definition with its IR, the side index, the evaluator cells and UART
 output. Host-only counters may differ: dispatch root identifiers, and
 continuation metadata for return-stack slots that are no longer live.
+
+## Token records
+
+Decided on 2026-11-11. A module's token form is the record of what the
+interpreter did with its source
+([token-modules-proposal-2026-11-11.md](token-modules-proposal-2026-11-11.md)),
+and `TOKEN-REPLAY` runs the records through the interpreter's two steps.
+Two things made the form slow on the host. The replay ran in Python, where
+source has the walker, so a Desktop boot from token forms took more host
+time than a boot from source although the guest does less work. And a token
+build records a whole boot with every source line on the reference path,
+which takes most of a minute where a source build takes two seconds. The
+default Desktop build stays linked source until both are gone.
+
+This slice removes them in two stages. Stage 1, built, gives the walker a
+second token source, so that it replays records. Stage 2, designed below
+and not built, gives the walker a tap, so that a recording boot keeps the
+walker.
+
+### One disposal, two token sources
+
+What the interpreter does with a token it has found is stated once in the
+walker, as it is stated once in `runtime.py` (`_evaluate_found_word`,
+`_evaluate_found_number`) and once in the BIOS (`interp_found_word`,
+`interp_found_number`):
+
+- a directive is applied;
+- a word met while compiling is appended as a call, unless it is immediate;
+- any other word runs, if it is one the walker may run;
+- a number is compiled as a literal or pushed.
+
+In `line_walker.cpp` that is `dispose_word` and `dispose_number`, over
+`apply_directive` and `execute`. Two token sources feed it, and it is not
+told which of them a token came from.
+
+| | Source text (`dry_run`) | Token records (`dry_run_records`) |
+| --- | --- | --- |
+| A word | the token, looked up by name | a slot number: the word an IMPORT or DEFINED record bound to that slot. An IMPORT looks its name up, binds the next slot and gives the word |
+| A number | the token, converted in the current `BASE` | the value the record holds |
+| The input of a parsing word | the rest of the line | the TEXT record before the word, and nothing where there is none |
+| A line | the bytes up to the next LF | a LINE or LINES record and the records after it, up to the next LINE, LINES or END |
+
+A parsing word reads a `Cursor` in both cases, over the line or over the
+TEXT record's bytes. As in the replay loop, the input a TEXT record gives
+lasts until a word runs.
+
+### A record line
+
+The unit of a dry run and of a hand-back stays the source line. The walker
+evaluates a record line as it evaluates a source line: as a dry run on the
+virtual data stack and the undo log of the open definition, with every
+write held back until the dry run has succeeded. A record line holds back
+two writes that a source line does not have: the new `EVAL-LINE`, and the
+table cell of each slot the line binds. A line the walker rejects leaves no
+trace, and Python's loop takes it from its LINE record.
+
+The walker is entered at a record and runs line after line until it reaches
+one it cannot take, whose place it returns. The loop runs from there to the
+next LINE or LINES record and calls the walker again. Records that no LINE
+record precedes, at the start of a stream, are one line for this purpose.
+
+### Which record lines the walker evaluates
+
+A source line has the checked-line rule because Python evaluates an
+admitted line and any other line on two paths that differ in steps and
+stack traffic. Records have one Python path, the replay loop, so a record
+line needs no such rule: the walker evaluates every record line whose dry
+run succeeds. The dry run fails, and the line goes to the loop, when
+
+- a record is cut short or has an opcode the walker does not take, which
+  includes SKIPPED and any opcode it does not know;
+- a slot number names a slot that is not bound, or the word the line
+  itself defines, which is not in the dictionary until the line commits;
+- an IMPORT's name is not defined, or a binding would pass the end of the
+  table or fall outside ordinary memory;
+- the disposal rejects a token, by the native-only conditions listed above
+  for source lines: a word that runs guest code, an interpreted `."`,
+  `PROVIDED`, an unmatched control word, a stack underflow, a growth
+  preflight that fails, and the rest;
+- anything other than a comment word or a DEFINED record follows the
+  definition the line completes. The walker publishes a line's definition
+  when the line commits, so a later token that could find it, run it or
+  define another is Python's. The checked-line rule makes the same demand
+  of a source line, with its comment-only tail;
+- a TEXT record's input is still unread when the line ends, since only the
+  loop can carry it into the next line;
+- `EVAL-LINE` or a table cell the line writes lies among the data-stack
+  cells the line used, a table cell lies in the definition the line
+  publishes, or the line reads a `VALUE` whose cell is one of them. The
+  reference wrote `EVAL-LINE` before the line's words ran and each table
+  cell as it was bound. The walker writes them when the line commits, which
+  comes to the same wherever they do not overlap;
+- the line could exceed the step budget.
+
+The walker is not offered a line at all while a temporary or anonymous
+definition is open, while a conditional skip is open, while the input of a
+TEXT record is unread, or while the stacks, clocks or step meter are not
+the ones its settlement assumes. The loop runs those lines.
+
+### What a native record line does
+
+- `EVAL-LINE` takes the line's number.
+- Each slot the line binds gets its table cell, the header address of the
+  word found, in slot order.
+- The data stack takes the line's pushes, and the definition the line
+  completes is published through the native dictionary and index, as for a
+  source line.
+- One step is counted for each word that ran.
+
+It touches nothing else. `TOKEN-REPLAY` enters the BIOS evaluator once for
+the whole stream and leaves it once, in Python, so a record line has no
+`EVAL-DEPTH` traffic, no root continuation and no cookie.
+
+### The replay's failures have one owner
+
+`runtime.py`'s loop, `_run_token_records`, is the replay for both backends.
+It alone ends one: at END, with status 1 for a name that is not defined,
+with status 6 for a malformed stream and with status 7 for a stream that
+does not match this system. The walker's record source decodes only to find
+what it can take. What it cannot decode or bind it does not judge: the line
+goes back to the loop, which decodes it again, does what the records before
+the fault ask, and reports.
+
+- **Slot bounds and the table's size.** The walker checks them to stay
+  inside the table. A violation is a rejected line, and the status is the
+  loop's.
+- **A skip that differs from the record.** Every word that begins a
+  conditional skip is one the disposal rejects, so skips begin and end only
+  in lines the loop runs, where it compares them with the SKIPPED records.
+- **The dictionary's unlink count.** Only a word that runs guest code can
+  take entries out of the dictionary. Such a word runs only in a line of
+  the loop's, and the loop compares the count after each.
+- **END.** The walker stops before it.
+
+The loop keeps its place, the next record and the source line reached, in a
+`_TokenStream`, and runs either to the stream's end, for the reference
+backend, or to the next line record, for the native one.
+
+The words bound to a stream's slots are held once as well: in a Python list
+for the reference backend, and in the native stream object for the native
+one, where the loop reads and binds them through a view shaped like that
+list. A word the walker bound is looked up by its XT when the loop first
+uses its slot. It is still the live definition then, because the walker
+binds no slot while a temporary definition is open, and every other removal
+from the dictionary ends the replay.
+
+The record decoder itself exists twice, in the loop and in the walker's
+record source, as the tokenizer of source text exists in `SourceCursor` and
+in the walker's `Cursor`. That is what a second token source is. What the
+decoded tokens mean, and what a stream that cannot be decoded means, each
+exist once.
+
+### Exactness of a native replay
+
+A replay through the walker and a replay by the loop alone must agree as a
+native and a reference boot must agree: on all guest memory, both stack
+pointers, the cookie counter, semantic steps, `HERE`, `LATEST`, every
+definition with its IR, the side index, the evaluator cells and UART
+output. Host-only state may differ, as before.
+
+### What the recorder will be told (stage 2)
+
+A recording boot puts every source line on the reference path today,
+because the recorder's taps are in `_evaluate_token` and its hooks take the
+place of the two overlays that call the walker. Stage 2 gives the walker
+the same taps.
+
+The recorder (`simulator/token_recorder.py`) learns six things from the
+reference path. The walker will report five of them for each source line it
+evaluates, when the line commits:
+
+1. **The line**: its address, length and number, by which the recorder
+   finds the file the line belongs to and writes the line records.
+2. **A word found**, by its XT, with the token it was written as. The XT
+   is how the record writer tells one binding of a name from another: the
+   first record of an XT becomes an IMPORT and the later ones its slot.
+3. **The text a word took** when it ran, which is the bytes the cursor
+   moved over, unless the word is a comment.
+4. **A number converted**, by its value.
+5. **A definition completed**: the XT of the word the line publishes,
+   which becomes a DEFINED record if the file uses the word later.
+
+The sixth, where a conditional skip ended, stays with Python, since skips
+begin and end only in lines the walker hands back.
+
+The taps sit where the disposal is stated. `dry_run` has the token and the
+cursor before and after it, `dispose_word` says whether the word ran, and
+`dispose_number` has the value. A line's reports are among the things its
+dry run holds back, so a rejected line reports nothing and Python records
+that line on the reference path, as it records every line today. The walker
+gives a walk's reports to the recorder in line order with the walk's
+result. `RecordedUnit` stays the one recorder, and `shared/token_form.py`
+the one writer of the format.
+
+Stage 2 also lets the recorder's hooks on `_LD-WALK` and
+`SOURCE-EVALUATE-CHECKED`, which mark where a file begins, stand beside the
+walker's overlays instead of replacing them. Its test is that a Desktop
+recorded through the walker gives the token files, byte for byte, that a
+recording on the reference path gives.
 
 ## Plans that survive publication
 

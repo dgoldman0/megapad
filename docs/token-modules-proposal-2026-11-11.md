@@ -553,8 +553,13 @@ Desktop was marked unfit.
 ## The simulator
 
 `TOKEN-REPLAY` is the simulator's 460th core word and `BOOT-ID` its 461st.
-The replay runs in Python on the runtime's reference path and gives each
-record to the same two methods a source token reaches. Hybrid mode runs
+The replay is a loop in the runtime that gives each record to the same two
+methods a source token reaches. Under the native backend the native line
+walker takes the record lines it can evaluate itself, as it takes source
+lines, and leaves the other lines, the stream's end and every failure to
+that loop
+([simulator-native-evaluator.md](simulator-native-evaluator.md#token-records)).
+Hybrid mode runs
 Forth as the simulator does and loads the same files; its routine words
 exist before the image boots, and a token file finds them by name, as
 source does.
@@ -894,6 +899,14 @@ Practice's build.
 
 **Committed later steps.**
 
+- The host speed of the token path, decided on 2026-11-11, in two stages
+  ([simulator-native-evaluator.md](simulator-native-evaluator.md#token-records)).
+  Stage 1 is built: the simulator's native line walker replays record
+  lines, where the replay ran in Python. Stage 2 gives that walker a tap for
+  the recorder, so that a token build no longer records a whole boot on the
+  reference path. The default Desktop build stays linked source until a
+  token build and a token boot cost the tests no more host time than
+  source does.
 - The recorder on the machine, for the System Practice (decision 1).
 - The System Practice's build, which is what uses `--keep-module-source`.
   Its design takes up the three things that the rule's section
@@ -903,9 +916,6 @@ Practice's build.
 
 **Open, and not needed for the form to land.**
 
-- A native replay for the simulator. The replay runs in Python where the
-  source path has a native line walker, so a token boot takes more host
-  time in the simulator than a source boot, though it is the smaller load.
 - A BIOS word that feeds a buffer to the CRC unit. KDOS's loop over the
   unit costs 18.5 instructions a byte, where the unit takes
   eight bytes in one instruction. The cold-source containers' checksums,
