@@ -593,6 +593,15 @@ make test                     # broad sequential background suite
 make bench                    # raw CPU speed comparison
 ```
 
+Every test target builds the accelerator first, and that step copies its
+3 MB library into place even when nothing has changed. Pytest's cache plugin
+rewrote a 1.1 MB file of test IDs on each run as well. Runs through
+fantasy-engine's test tool (`python3 -m fantasy_engine.testing`) build the
+accelerator once per run and turn the cache off, which brings one test file's
+run from about 4.5 MB of writes to about 0.2 MB. Proposed: the `accel` target
+writes nothing when the library is current, which removes the remaining copy
+from every test target.
+
 Obtain approval before worker-spawning, unusually large-budget,
 greater-than-4-GiB, or broad resource-heavy runs. Never overlap test suites.
 Live TAP/internet qualification uses `make test-net` and is not ordinary unit
