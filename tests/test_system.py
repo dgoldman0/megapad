@@ -6332,6 +6332,89 @@ class TestBIOSDictMachineCode(unittest.TestCase):
         self.assertRegex(text, r"\[DEPTH\s+0\s+\]")
 
 
+class TestBIOSTokenReplay(unittest.TestCase):
+    """TOKEN-REPLAY runs a recorded token stream through the interpreter.
+
+    The streams and what each prints are in tests/token_streams.py; the
+    hosted word takes the same ones in
+    tests/simulator/test_token_replay.py.
+    """
+
+    REPORT = (
+        'CR ." status=" EVAL-STATUS @ . ." depth=" DEPTH . '
+        '." line=" EVAL-LINE @ .'
+    )
+
+    def setUp(self):
+        self._bios_harness = TestBIOS(methodName="test_print_zero")
+        self._bios_harness.setUp()
+
+    def _replay(self, records, slots, before=()):
+        sys_obj, buf = self._bios_harness._boot_bios()
+        lines = list(before) + ["CREATE TS"]
+        for start in range(0, len(records), 24):
+            lines.append(
+                " ".join(f"{byte} C," for byte in records[start:start + 24])
+            )
+        lines += [
+            f"CREATE TT {8 * max(slots, 1)} ALLOT",
+            # The mark keeps the echo of this line apart from its output.
+            f'CR ." [REPLAY]" TS {len(records)} TT {slots} TOKEN-REPLAY',
+            self.REPORT,
+        ]
+        text = self._bios_harness._run_forth(
+            sys_obj, buf, lines, max_steps=20_000_000
+        )
+        self.assertNotIn("Megapad-64 Forth BIOS", text)
+        output = text.rsplit("[REPLAY]", 1)[1]
+        printed, _, rest = output.partition("> CR")
+        report = rest.rsplit("status=", 1)[1].split("ok")[0]
+        printed = printed.rsplit(" ok", 1)[0]
+        return " ".join((printed + " status=" + report).split())
+
+    def test_streams_replay_as_the_hosted_word_does(self):
+        from tests.token_streams import STREAMS
+
+        for name, (make, expected) in sorted(STREAMS.items()):
+            with self.subTest(stream=name):
+                records, slots = make()
+                self.assertEqual(self._replay(records, slots), expected)
+
+    def test_a_word_that_unlinks_the_dictionary_ends_the_replay(self):
+        from shared.token_form import TokenWriter
+
+        writer = TokenWriter()
+        writer.word("here", b"HERE")
+        writer.word("latest", b"LATEST")
+        writer.word("rollback", b"DICT-ROLLBACK")
+        writer.number(5)
+        writer.word("dot", b".")
+        text = self._replay(writer.finish(), writer.slots)
+        self.assertEqual(
+            text,
+            "token stream does not match this system status=7 depth=0 line=0",
+        )
+
+    def test_a_replay_nested_under_a_failed_evaluation_runs_nothing(self):
+        from shared.token_form import TokenWriter
+
+        writer = TokenWriter()
+        writer.number(7)
+        writer.word("dot", b".")
+        records = writer.finish()
+        sys_obj, buf = self._bios_harness._boot_bios()
+        lines = ["CREATE TS", " ".join(f"{byte} C," for byte in records),
+                 "CREATE TT 32 ALLOT",
+                 f": NESTED  1 EVAL-STATUS !  TS {len(records)} TT 4 TOKEN-REPLAY ;",
+                 "CREATE NB 6 ALLOT  78 NB C!  69 NB 1+ C!  83 NB 2 + C!",
+                 "84 NB 3 + C!  69 NB 4 + C!  68 NB 5 + C!",
+                 'CR ." [RUN]" NB 6 EVALUATE CR ." [DEPTH " DEPTH . ." ]"']
+        text = self._bios_harness._run_forth(sys_obj, buf, lines)
+        ran = text.rsplit("[RUN]", 1)[1]
+        self.assertNotIn("7", ran.split("[DEPTH")[0])
+        self.assertRegex(ran, r"\[DEPTH\s+0\s+\]")
+
+
 class TestBIOSQuitCallback(unittest.TestCase):
     """QUIT runs the callback installed with QUIT-XT! once it has reset the
     return stack, which ABORT, ABORT" and QUIT all reach."""

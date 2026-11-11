@@ -516,34 +516,8 @@ interp_loop:
     ; R9 = entry (0 = not found), R1 = flags byte
     cmpi r9, 0
     breq interp_try_number
-
-    ; Found — check STATE
-    ldi64 r11, var_state
-    ldn r11, r11
-    cmpi r11, 0
-    breq interp_execute       ; STATE=0 → interpret
-
-    ; STATE=1 → compiling.  Check IMMEDIATE flag (bit 7)
-    mov r0, r1
-    andi r0, 0x80
-    brne interp_exec_jit_flush ; IMMEDIATE → flush peephole + execute
-
-    ; Not IMMEDIATE — JIT inline or compile call
-    ldi64 r11, jit_compile_word
+    ldi64 r11, interp_found_word
     call.l r11
-    lbr interp_loop
-
-interp_exec_jit_flush:
-    ; Clear peephole state — IMMEDIATE word may emit code at HERE
-    ldi r0, 0
-    ldi64 r11, var_jit_last_type
-    str r11, r0
-interp_execute:
-    ; Compute code field address and execute
-    ldi64 r11, entry_to_code
-    call.l r11
-    ; R9 = code pointer
-    call.l r9
     lbr interp_loop
 
 interp_try_number:
@@ -558,22 +532,8 @@ interp_try_number:
     ; R1 = value, R0 = 1 success / 0 fail
     cmpi r0, 0
     breq interp_undefined
-
-    ; Check STATE
-    ldi64 r11, var_state
-    ldn r11, r11
-    cmpi r11, 0
-    breq interp_push_number
-
-    ; Compiling — JIT compact literal or full compile_literal
-    ldi64 r11, jit_compile_literal
+    ldi64 r11, interp_found_number
     call.l r11
-    lbr interp_loop
-
-interp_push_number:
-    ; Push number (interpret mode)
-    subi r14, 8
-    str r14, r1
     lbr interp_loop
 
 interp_undefined:
@@ -660,6 +620,60 @@ interp_no_rsp_overflow:
     ldi64 r11, do_print_ok
     call.l r11
     lbr quit_loop
+
+; =====================================================================
+;  What the interpreter does with a token
+; =====================================================================
+; QUIT's loop, EVALUATE and TOKEN-REPLAY each find their next token their
+; own way: from the terminal's line, from a string, from a recorded stream.
+; What happens to a token once it is known to be a word or a number is
+; stated here once.
+
+; interp_found_word: R9 = dictionary entry, R1 = its flags byte.
+;   While interpreting, and for an IMMEDIATE word at any time, the word
+;   runs.  Otherwise it is compiled: inlined by the JIT or called.
+;   Returns R0 = 1 when the word ran and 0 when it was compiled.
+interp_found_word:
+    ldi64 r11, var_state
+    ldn r11, r11
+    cmpi r11, 0
+    breq interp_found_run     ; STATE=0: interpret
+    mov r0, r1
+    andi r0, 0x80
+    brne interp_found_run_flush
+    ; Not IMMEDIATE: JIT inline or compile a call
+    ldi64 r11, jit_compile_word
+    call.l r11
+    ldi r0, 0
+    ret.l
+interp_found_run_flush:
+    ; An IMMEDIATE word may emit code at HERE: clear the peephole state
+    ldi r0, 0
+    ldi64 r11, var_jit_last_type
+    str r11, r0
+interp_found_run:
+    ldi64 r11, entry_to_code
+    call.l r11
+    ; R9 = code pointer
+    call.l r9
+    ldi r0, 1
+    ret.l
+
+; interp_found_number: R1 = value.
+;   While compiling it becomes a literal, compact where the JIT has a
+;   compact form; otherwise it is pushed.
+interp_found_number:
+    ldi64 r11, var_state
+    ldn r11, r11
+    cmpi r11, 0
+    breq interp_number_push
+    ldi64 r11, jit_compile_literal
+    call.l r11
+    ret.l
+interp_number_push:
+    subi r14, 8
+    str r14, r1
+    ret.l
 
 ; =====================================================================
 ;  I/O Primitives
@@ -3377,6 +3391,10 @@ w_latest_store:
 
 .latest_store_valid:
     addi r14, 8               ; consume only after validation succeeds
+    ldi64 r11, var_dict_unlinks
+    ldn r1, r11
+    inc r1
+    str r11, r1               ; a replay under way must not trust its slots
     ldi64 r11, dict_epoch_begin
     call.l r11
 
@@ -3507,6 +3525,10 @@ w_dict_rollback:
     ldi64 r11, dict_epoch_begin
     call.l r11
     addi r14, 16              ; consume the validated pair
+    ldi64 r11, var_dict_unlinks
+    ldn r1, r11
+    inc r1
+    str r11, r1               ; a replay under way must not trust its slots
 
     ; Clear AUTHORITATIVE and raise BUILDING before the global hardware
     ; invalidation or pointer publication.  DCLR is a globally ordered
@@ -11719,28 +11741,10 @@ w_eval_loop_normal:
     call.l r11
     cmpi r9, 0
     breq w_eval_try_num
-    ; Found -- check STATE
-    ldi64 r11, var_state
-    ldn r11, r11
-    cmpi r11, 0
-    breq w_eval_exec
-    ; Compiling -- check IMMEDIATE
-    mov r0, r1
-    andi r0, 0x80
-    brne w_eval_exec_jit_flush ; IMMEDIATE -> flush + execute
-    ; JIT: inline or compile call
-    ldi64 r11, jit_compile_word
+    ldi64 r11, interp_found_word
     call.l r11
-    lbr w_eval_loop
-w_eval_exec_jit_flush:
-    ; Clear peephole state
-    ldi r0, 0
-    ldi64 r11, var_jit_last_type
-    str r11, r0
-w_eval_exec:
-    ldi64 r11, entry_to_code
-    call.l r11
-    call.l r9
+    cmpi r0, 0
+    lbreq w_eval_loop         ; compiled: nothing ran
     ; A word may invoke EVALUATE recursively.  Stop this source line as
     ; soon as that nested evaluation records an error.
     ldi64 r11, var_eval_status
@@ -11757,18 +11761,8 @@ w_eval_try_num:
     call.l r11
     cmpi r0, 0
     breq w_eval_undef
-    ; Check STATE
-    ldi64 r11, var_state
-    ldn r11, r11
-    cmpi r11, 0
-    breq w_eval_push_num
-    ; JIT: compact literal or full compile_literal
-    ldi64 r11, jit_compile_literal
+    ldi64 r11, interp_found_number
     call.l r11
-    lbr w_eval_loop
-w_eval_push_num:
-    subi r14, 8
-    str r14, r1
     lbr w_eval_loop
 w_eval_undef:
     ; Record a stable token copy and its zero-based TIB column before
@@ -11965,6 +11959,473 @@ eval_diag_token_copy:
     inc r1
     br eval_diag_token_copy
 eval_diag_token_done:
+    ret.l
+
+; =====================================================================
+;  TOKEN-REPLAY — run a recorded token stream
+; =====================================================================
+; TOKEN-REPLAY ( rec-addr rec-len tab-addr tab-slots -- )
+;
+; A token stream is what the interpreter did with a source file, written
+; down: which words it found, which numbers, and the text each parsing
+; word took.  Replaying it does the same work without splitting text into
+; tokens and with one dictionary search for each name instead of one for
+; each use.  Every found word and number goes through interp_found_word and
+; interp_found_number, as a token of a source line does, so the dictionary
+; that results is the one the source would have built.
+;
+; The stream is a sequence of records.  A first byte below 0xF0 starts a
+; two-byte slot number, high byte first: the word in that slot of the
+; table.  Otherwise the first byte is one of
+;
+;   F0 n name   IMPORT   look NAME up now, put it in the next slot, and
+;                        treat it as the word found
+;   F1 b        NUM1     a number, one signed byte
+;   F2 h        NUM2     two bytes, signed
+;   F3 w        NUM4     four bytes, signed
+;   F4 q        NUM8     eight bytes
+;   F5 n text   TEXT     the input for the next word: what it parses
+;   F6          LINE     the next source line begins
+;   F7 h        LINES    H source lines on, two bytes
+;   F8          SKIPPED  the skip a false [IF] or an [ELSE] began ends here
+;   F9          DEFINED  the word whose definition the last record completed
+;                        (LATEST) takes the next slot
+;   FF          END
+;
+; The table is TAB-SLOTS cells at TAB-ADDR, filled by this word in the order
+; of the IMPORT and DEFINED records.  No record reads or writes outside the stream or
+; the table: a slot must have been filled, an IMPORT needs a free slot, and
+; a record that would pass REC-LEN ends the replay.
+;
+; Statuses are EVALUATE's, with two more.  6: the stream is malformed.
+; 7: the stream does not match this system: conditional compilation took
+; another branch than it did when the stream was recorded, or a word the
+; stream ran took entries out of the dictionary (LATEST!, DICT-ROLLBACK),
+; after which the table's entries cannot be trusted.
+; A name that IMPORT cannot find is status 1 with the name as the token.
+; The input a caller was reading is saved and restored as EVALUATE's is.
+w_token_replay:
+    ; A top-level call starts a fresh status, as EVALUATE's does.
+    ldi64 r11, var_eval_depth
+    ldn r1, r11
+    cmpi r1, 0
+    brne w_tok_status_ready
+    ldi64 r11, eval_diag_clear
+    call.l r11
+w_tok_status_ready:
+    ; Run nothing after an earlier nested failure.
+    ldi64 r11, var_eval_depth
+    ldn r1, r11
+    cmpi r1, 0
+    breq w_tok_check_depth
+    ldi64 r11, var_eval_status
+    ldn r1, r11
+    cmpi r1, 0
+    breq w_tok_check_depth
+    addi r14, 32              ; drop the arguments, keep the first status
+    ret.l
+w_tok_check_depth:
+    ldi64 r11, var_eval_depth
+    ldn r1, r11
+    cmpi r1, 15
+    lbrgt w_tok_depth_err
+    inc r1
+    str r11, r1
+    ; Keep the caller's input; this replay's own starts empty.
+    ldi64 r11, eval_input_save
+    call.l r11
+    ldi r1, 0
+    ldi64 r11, var_tib_len
+    str r11, r1
+    ldi64 r11, var_to_in
+    str r11, r1
+    ; The replay's state lives on the return stack, below whatever the
+    ; words it runs push there:
+    ;   +0 cursor  +8 end  +16 table  +24 slots  +32 slots filled  +40 line
+    ;   +48 the dictionary's unlink count when the replay began
+    subi r15, 56
+    mov r11, r14
+    ldn r0, r11               ; tab-slots
+    addi r11, 8
+    ldn r7, r11               ; tab-addr
+    addi r11, 8
+    ldn r12, r11              ; rec-len
+    addi r11, 8
+    ldn r9, r11               ; rec-addr
+    addi r14, 32
+    add r12, r9               ; end
+    str r15, r9
+    mov r11, r15
+    addi r11, 8
+    str r11, r12
+    addi r11, 8
+    str r11, r7
+    addi r11, 8
+    str r11, r0
+    addi r11, 8
+    ldi r1, 0
+    str r11, r1
+    addi r11, 8
+    str r11, r1
+    addi r11, 8
+    ldi64 r7, var_dict_unlinks
+    ldn r7, r7
+    str r11, r7
+    cmp r12, r9
+    lbrcc w_tok_bad           ; the stream wraps the address space
+
+w_tok_loop:
+    ldn r9, r15               ; cursor
+    mov r11, r15
+    addi r11, 8
+    ldn r12, r11              ; end
+    cmp r9, r12
+    lbrcs w_tok_bad           ; the stream ended without END
+    ld.b r0, r9
+    ldi r7, 0xF0
+    cmp r0, r7
+    lbrcs w_tok_opcode
+    ; ---- a word by its slot ----
+    mov r11, r9
+    addi r11, 2
+    cmp r12, r11
+    lbrcc w_tok_bad
+    str r15, r11              ; cursor past the record
+    inc r9
+    ld.b r7, r9
+    lsli r0, 8
+    or r0, r7                 ; slot number
+    mov r11, r15
+    addi r11, 32
+    ldn r7, r11               ; slots filled
+    cmp r0, r7
+    lbrcs w_tok_bad           ; a slot no IMPORT has filled
+    lsli r0, 3
+    mov r11, r15
+    addi r11, 16
+    ldn r9, r11               ; table
+    add r9, r0
+    ldn r9, r9                ; dictionary entry
+w_tok_word:
+    mov r11, r9
+    addi r11, 8
+    ld.b r1, r11              ; flags byte
+    ldi64 r11, interp_found_word
+    call.l r11
+    cmpi r0, 0
+    lbreq w_tok_loop          ; compiled: nothing ran
+    ; The word ran.  Whatever input it was given is spent.
+    ldi64 r11, var_tib_len
+    ldn r1, r11
+    ldi64 r11, var_to_in
+    str r11, r1
+    ; Stop as soon as an evaluation nested in it records an error.
+    ldi64 r11, var_eval_status
+    ldn r1, r11
+    cmpi r1, 0
+    lbrne w_tok_done
+    ; The table holds entry addresses.  They stand only while no entry
+    ; has been taken out of the dictionary.
+    ldi64 r11, var_dict_unlinks
+    ldn r1, r11
+    mov r11, r15
+    addi r11, 48
+    ldn r0, r11
+    cmp r1, r0
+    lbrne w_tok_mismatch
+    ; A false [IF], or an [ELSE] after a true one, begins a skip.  The
+    ; source text it would skip is not in the stream; the stream marks
+    ; where the skip ended.
+    ldi64 r11, var_cond_skip_type
+    ldn r1, r11
+    cmpi r1, 0
+    lbreq w_tok_loop
+    ldn r9, r15
+    mov r11, r15
+    addi r11, 8
+    ldn r12, r11
+    cmp r9, r12
+    lbrcs w_tok_mismatch
+    ld.b r0, r9
+    ldi r7, 0xF8
+    cmp r0, r7
+    lbrne w_tok_mismatch      ; recorded with the other branch taken
+    inc r9
+    str r15, r9
+    ldi r1, 0
+    ldi64 r11, var_cond_skip_type
+    str r11, r1
+    ldi64 r11, var_cond_depth
+    str r11, r1
+    lbr w_tok_loop
+
+w_tok_opcode:
+    ; R0 = opcode, R9 = cursor, R12 = end
+    ldi r7, 0xF1
+    cmp r0, r7
+    breq w_tok_num1
+    ldi r7, 0xF6
+    cmp r0, r7
+    lbreq w_tok_line
+    ldi r7, 0xF0
+    cmp r0, r7
+    lbreq w_tok_import
+    ldi r7, 0xF5
+    cmp r0, r7
+    lbreq w_tok_text
+    ldi r7, 0xF9
+    cmp r0, r7
+    lbreq w_tok_defined
+    ldi r7, 0xF2
+    cmp r0, r7
+    breq w_tok_num2
+    ldi r7, 0xF3
+    cmp r0, r7
+    breq w_tok_num4
+    ldi r7, 0xF4
+    cmp r0, r7
+    breq w_tok_num8
+    ldi r7, 0xF7
+    cmp r0, r7
+    lbreq w_tok_lines
+    ldi r7, 0xFF
+    cmp r0, r7
+    lbreq w_tok_done
+    ldi r7, 0xF8
+    cmp r0, r7
+    lbreq w_tok_mismatch      ; a skip ended here when it was recorded
+    lbr w_tok_bad
+
+w_tok_num1:
+    mov r11, r9
+    addi r11, 2
+    cmp r12, r11
+    lbrcc w_tok_bad
+    str r15, r11
+    inc r9
+    ld.sb r1, r9
+    br w_tok_number
+w_tok_num2:
+    mov r11, r9
+    addi r11, 3
+    cmp r12, r11
+    lbrcc w_tok_bad
+    str r15, r11
+    inc r9
+    ld.sh r1, r9
+    br w_tok_number
+w_tok_num4:
+    mov r11, r9
+    addi r11, 5
+    cmp r12, r11
+    lbrcc w_tok_bad
+    str r15, r11
+    inc r9
+    ld.sw r1, r9
+    br w_tok_number
+w_tok_num8:
+    mov r11, r9
+    addi r11, 9
+    cmp r12, r11
+    lbrcc w_tok_bad
+    str r15, r11
+    inc r9
+    ldn r1, r9
+w_tok_number:
+    ldi64 r11, interp_found_number
+    call.l r11
+    lbr w_tok_loop
+
+w_tok_line:
+    inc r9
+    str r15, r9
+    ldi r0, 1
+w_tok_line_add:
+    mov r11, r15
+    addi r11, 40
+    ldn r1, r11
+    add r1, r0
+    str r11, r1
+    ldi64 r11, var_eval_line
+    str r11, r1
+    lbr w_tok_loop
+w_tok_lines:
+    mov r11, r9
+    addi r11, 3
+    cmp r12, r11
+    lbrcc w_tok_bad
+    str r15, r11
+    inc r9
+    ld.h r0, r9
+    br w_tok_line_add
+
+w_tok_text:
+    ; F5 n text: the input of the next word
+    mov r11, r9
+    addi r11, 2
+    cmp r12, r11
+    lbrcc w_tok_bad
+    inc r9
+    ld.b r13, r9              ; length, at most 255
+    inc r9                    ; the text
+    mov r11, r9
+    add r11, r13
+    cmp r12, r11
+    lbrcc w_tok_bad
+    str r15, r11              ; cursor past the text
+    ldi64 r7, tib_buffer
+    mov r1, r13
+w_tok_text_copy:
+    cmpi r1, 0
+    breq w_tok_text_set
+    ld.b r0, r9
+    st.b r7, r0
+    inc r9
+    inc r7
+    dec r1
+    br w_tok_text_copy
+w_tok_text_set:
+    ldi64 r11, var_tib_len
+    str r11, r13
+    ldi r1, 0
+    ldi64 r11, var_to_in
+    str r11, r1
+    lbr w_tok_loop
+
+w_tok_import:
+    ; F0 n name: find NAME as a source line would at this point
+    mov r11, r9
+    addi r11, 2
+    cmp r12, r11
+    lbrcc w_tok_bad
+    inc r9
+    ld.b r13, r9              ; name length
+    inc r9                    ; the name
+    cmpi r13, 0
+    lbreq w_tok_bad
+    mov r11, r9
+    add r11, r13
+    cmp r12, r11
+    lbrcc w_tok_bad
+    str r15, r11              ; cursor past the name
+    mov r11, r15
+    addi r11, 32
+    ldn r0, r11               ; slots filled
+    mov r11, r15
+    addi r11, 24
+    ldn r7, r11               ; slots in the table
+    cmp r0, r7
+    lbrcs w_tok_bad           ; the table is full
+    mov r12, r13
+    ldi64 r11, var_word_addr
+    str r11, r9
+    ldi64 r11, var_word_len
+    str r11, r12
+    ldi64 r11, find_word
+    call.l r11
+    ; R9 = entry (0 = not found)
+    cmpi r9, 0
+    lbreq w_tok_undefined
+    mov r11, r15
+    addi r11, 32
+    ldn r0, r11
+    mov r7, r0
+    inc r7
+    str r11, r7               ; one more slot filled
+    lsli r0, 3
+    mov r11, r15
+    addi r11, 16
+    ldn r7, r11
+    add r7, r0
+    str r7, r9                ; this slot holds the entry
+    lbr w_tok_word
+
+w_tok_defined:
+    ; F9: LATEST, the word just defined, takes the next slot
+    inc r9
+    str r15, r9
+    mov r11, r15
+    addi r11, 32
+    ldn r0, r11               ; slots filled
+    mov r11, r15
+    addi r11, 24
+    ldn r7, r11               ; slots in the table
+    cmp r0, r7
+    lbrcs w_tok_bad           ; the table is full
+    ldi64 r11, var_latest
+    ldn r9, r11
+    cmpi r9, 0
+    lbreq w_tok_bad           ; nothing is defined
+    mov r11, r15
+    addi r11, 32
+    mov r7, r0
+    inc r7
+    str r11, r7               ; one more slot filled
+    lsli r0, 3
+    mov r11, r15
+    addi r11, 16
+    ldn r7, r11
+    add r7, r0
+    str r7, r9
+    lbr w_tok_loop
+
+w_tok_undefined:
+    ; As for a source token that is neither a word nor a number.
+    ldi r1, 1
+    ldi64 r11, var_eval_status
+    str r11, r1
+    ldi64 r11, eval_diag_capture_token
+    call.l r11
+    ldi r1, 0
+    ldi64 r11, var_eval_column
+    str r11, r1
+    ldi64 r11, var_word_addr
+    ldn r9, r11
+    ldi64 r11, var_word_len
+    ldn r12, r11
+    ldi64 r11, print_counted
+    call.l r11
+    ldi64 r10, str_undefined
+    ldi64 r11, print_str
+    call.l r11
+    br w_tok_done
+
+w_tok_bad:
+    ldi r1, 6
+    ldi64 r10, str_token_bad
+    br w_tok_fail
+w_tok_mismatch:
+    ldi r1, 7
+    ldi64 r10, str_token_mismatch
+w_tok_fail:
+    ldi64 r11, var_eval_status
+    str r11, r1
+    ldi r1, 0
+    ldi64 r11, var_eval_column
+    str r11, r1
+    ldi64 r11, var_eval_token_len
+    str r11, r1
+    ldi64 r11, print_str
+    call.l r11
+w_tok_done:
+    addi r15, 56
+    ldi64 r11, eval_input_restore_one
+    call.l r11
+    ret.l
+
+w_tok_depth_err:
+    addi r14, 32              ; drop the arguments
+    ldi r1, 3
+    ldi64 r11, var_eval_status
+    str r11, r1
+    ldi r1, 0
+    ldi64 r11, var_eval_column
+    str r11, r1
+    ldi64 r11, var_eval_token_len
+    str r11, r1
+    ldi64 r10, str_eval_depth
+    ldi64 r11, print_str
+    call.l r11
     ret.l
 
 ; EVALUATE-CHECKED ( addr len -- status )
@@ -24766,12 +25227,22 @@ d_scan:
 
 ; The dictionary's code kind appends after it.
 ; === DICT-MACHINE-CODE? ===
-latest_entry:
 d_dict_machine_code_q:
     .dq d_scan
     .db 18
     .ascii "DICT-MACHINE-CODE?"
     ldi64 r11, w_dict_machine_code_q
+    call.l r11
+    ret.l
+
+; The token replay appends after it.
+; === TOKEN-REPLAY ===
+latest_entry:
+d_token_replay:
+    .dq d_dict_machine_code_q
+    .db 12
+    .ascii "TOKEN-REPLAY"
+    ldi64 r11, w_token_replay
     call.l r11
     ret.l
 
@@ -24899,6 +25370,12 @@ var_mp64fs_scan_index:
 
 ; EVALUATE nesting depth — prevents unbounded RSP growth
 var_eval_depth:
+    .dq 0
+
+; How often LATEST! and DICT-ROLLBACK have taken entries out of the
+; dictionary.  TOKEN-REPLAY holds entry addresses in its table and ends when
+; this count moves under it.
+var_dict_unlinks:
     .dq 0
 
 ; Each active EVALUATE frame owns a complete copy of its caller's input
@@ -25110,6 +25587,10 @@ str_eval_depth:
     .asciiz "EVALUATE depth limit exceeded\n"
 str_eval_length:
     .asciiz "EVALUATE input exceeds 255 bytes\n"
+str_token_bad:
+    .asciiz "token stream is malformed\n"
+str_token_mismatch:
+    .asciiz "token stream does not match this system\n"
 str_dict_full:
     .asciiz "Dictionary full\n"
 str_dict_overflow:

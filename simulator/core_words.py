@@ -3258,6 +3258,12 @@ def install_core(runtime: MegaForthRuntime) -> None:
         lambda context: context.data.push(forth_flag(False)),
     )
 
+    # The token replay follows.  KDOS loads a module's token form with it.
+    runtime.define_primitive(
+        b"TOKEN-REPLAY",
+        lambda context: runtime.bios_token_replay(context),
+    )
+
 
 def _scalar_float_word(service, shape: str, op: int | None):
     """Bind one BIOS-shaped scalar FP word to the hosted service."""
