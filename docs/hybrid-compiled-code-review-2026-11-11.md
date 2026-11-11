@@ -235,6 +235,22 @@ construct the emulator directly, and its journey that builds, installs and
 launches an applet belongs to the profile `desktop-local-applet`, which is
 not the physical Desktop journey.
 
+A test then ran both paths on this state and corrected one detail of the
+reading. The build did report success and install an image without code. The
+launch failed at the splice as read, but the loader's CATCH turned the throw
+into `ALOAD-E-UNEXPECTED`, so Desk showed "launch failed" and the
+dictionary-full code reached no caller.
+
+Both are refused at once now. BIOS `DICT-MACHINE-CODE?` states whether the
+words a Forth system compiles are MP64 machine code: the BIOS answers true,
+and the simulator and hybrid mode answer false. Akashic's `binimg` asks it in
+`IMG-VERIFY-SYSTEM` and refuses a build or a load with `IMG-E-UNSUPPORTED`.
+Its application builder and loader answer `ABUILD-E-UNSUPPORTED` and
+`ALOAD-E-UNSUPPORTED` before they read a file, and Pad and Desk say why in
+words. The rule is in [`simulator-contract.md`](simulator-contract.md),
+section 9, and the tests are Akashic's
+`local_testing/test_image_system_check.py`.
+
 ## Decided on 2026-11-11
 
 - For now, handling a machine-code image means loading and running one that
