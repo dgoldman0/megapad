@@ -111,10 +111,10 @@ them as one ([isa-reference.md](isa-reference.md)), so they take a single
 meaning: a chiplet has signalled this core. Microcores keep that branch
 (`rtl/core/mp64_cpu_micro.v`).
 
-Work crosses as descriptors in queues in lent memory, each queue index
-written by one side only. Each direction has its queues, so a chiplet asks
-MegaPad for I/O the way MegaPad hands it a job, and a core collects
-completions on its own stacks. Requests across the link take the form the
+Each chip hands work to the other as descriptors in queues in lent memory,
+each queue index written by one side only. Each direction has its queues, so
+a chiplet asks MegaPad for I/O the way MegaPad hands it a job, and a core
+collects completions on its own stacks. Requests across the link take the form the
 external-memory port already has: request, accept, response or error, and
 cancel with confirmation, each bounded in time (`rtl/mem/mp64_extmem.v`).
 
@@ -128,9 +128,9 @@ MegaPad holds a chiplet in reset, reads its identity over the sideband,
 loads the chiplet's runtime image from disk into a range lent read-only, and
 releases reset. The bridge refuses a request outside the lent ranges,
 records it and reports it. MegaPad cancels a job that misses its deadline
-and, when the cancel fails, resets the port; work the chiplet was doing
-returns to MegaPad's own engine where one exists. The sideband also carries
-wake, debug access and the self-tests of §2.
+and, when the cancel fails, resets the port; MegaPad's own engine, where one
+exists, then takes over the work the chiplet was doing. The sideband also
+carries wake, debug access and the self-tests of §2.
 
 Each die makes one check. MegaPad's bridge bounds everything a chiplet can
 reach in MegaPad's memory. Inside LM1, capability mode bounds each job to
@@ -154,7 +154,8 @@ LM1's two uses are structures in lent memory, built on the contract's
 hardware alone.
 
 A sandbox job is a queue descriptor pointing at a verified plan and its
-data, both created in lendable memory, and its result returns the same way.
+data, both created in lendable memory, and LM1 hands the result back the
+same way.
 
 Managed data (Part 9d of the release plan) is LM1 objects stored in lent
 memory, which Forth reads at the cost of any external-memory read. A handle
@@ -207,10 +208,10 @@ limit at the controller bound what a chiplet takes from Desk.
 - **LM1's spec:** external I/O, boot, the memory map, roots, the write
   barrier, safepoints, and capability mode as a required part.
 
-The external-memory controller needs the most work, since both chips meet
-there. Today it moves one 64-bit word per transaction for a core, always
-serves the tile engines first, and takes a 32-bit address
-(`rtl/mem/mp64_extmem.v`).
+The external-memory controller needs the most work, since every access to
+shared memory passes through it. Today it moves one 64-bit word per
+transaction for a core, always serves the tile engines first, and takes a
+32-bit address (`rtl/mem/mp64_extmem.v`).
 
 ## 10. Open
 
@@ -226,7 +227,8 @@ serves the tile engines first, and takes a 32-bit address
 - **Lendable memory in Akashic.** Zero-copy depends on the data handed to a
   job being created in lendable memory, and the job service's allocation has
   yet to be read with that in mind.
-- **A data cache on a production core** would need lent memory to bypass it.
+- **A data cache on a production core.** Reads of lent memory would have to
+  go around it.
 - **How often each chip touches shared data.** The sizing study for D8
   counts it. A workload in which LM1 walks shared objects far more than
   Forth reads them would reopen where shared data is stored.
