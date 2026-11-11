@@ -44219,6 +44219,49 @@ class TestKDOSModuleSystem(_KDOSTestBase):
         finally:
             os.unlink(img)
 
+    def test_a_caught_load_failure_lets_the_loading_file_go_on(self):
+        """A word that catches a failed load while its own file is loading
+        finds the evaluator as it was: its line continues, the next load
+        runs, and its file loads to the end."""
+        outer = (
+            b': TRY-BAD S" REQUIRE bad.f" EVALUATE ;\n'
+            b": CATCH-BAD ['] TRY-BAD CATCH ;\n"
+            b'CATCH-BAD ." [CAUGHT " . ." ][TAIL-RAN]"\n'
+            b'." [STATUS " EVAL-STATUS @ . EVAL-DEPTH @ . ." ]"\n'
+            b"REQUIRE good.f\n"
+            b'." [GOOD " GOOD-WORD . ." ]"\n'
+        )
+        bad = b"PROVIDED bad.f\n-77 THROW\n: BAD-TAIL 1 ;\n"
+        good = b"PROVIDED good.f\n: GOOD-WORD 4242 ;\n"
+        img = self._make_formatted_image()
+        fs = MP64FS.load(img)
+        fs.inject_file("outer.f", outer, ftype=FTYPE_FORTH)
+        fs.inject_file("bad.f", bad, ftype=FTYPE_FORTH)
+        fs.inject_file("good.f", good, ftype=FTYPE_FORTH)
+        fs.save(img)
+        try:
+            text = self._run_kdos(
+                [
+                    "ENTER-USERLAND",
+                    "LOAD outer.f",
+                    '." [PROMPT " EVAL-STATUS @ . EVAL-DEPTH @ . ." ]"',
+                    '." [MODULES " MODULE? good.f . MODULE? bad.f . ." ]"',
+                ],
+                max_steps=600_000_000,
+                storage_image=img,
+            )
+            # The file's own lines, each after the caught failure: the
+            # catching line's tail, a status read one level deep, and a
+            # module loaded and used.
+            self.assertIn("[CAUGHT -77 ][TAIL-RAN]", text)
+            self.assertRegex(text, r"\[STATUS\s+0\s+1\s+\]")
+            self.assertRegex(text, r"\[GOOD\s+4242\s+\]")
+            self.assertNotIn("uncaught THROW", text)
+            self.assertRegex(text, r"\n\[PROMPT\s+0\s+0\s+\]")
+            self.assertRegex(text, r"\n\[MODULES\s+-1\s+0\s+\]")
+        finally:
+            os.unlink(img)
+
     def test_require_idempotent(self):
         """REQUIRE does not reload an already-loaded module."""
         img = self._make_module_image({

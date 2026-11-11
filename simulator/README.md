@@ -2395,8 +2395,8 @@ and Git blob `c920305479e61c2a5d51719779ec9c9fba0c2b8f`. The complete current
 10,184-line, 357,426-byte `kdos.f` has SHA-256
 `b3d5211893432fb9b93acee1d330c84260b4a51c56ae0cecb265f54add3c5ff4`
 and Git blob `7aa48d675c1a1a6d6dd84731c3332a33b128155e`.
-The canonical source-mode CLI filter submits 6,817 non-comment records with
-221,013 payload bytes, or 227,830 UART bytes after one LF delimiter per
+The canonical source-mode CLI filter submits 6,818 non-comment records with
+221,032 payload bytes, or 227,850 UART bytes after one LF delimiter per
 record. These are structural source/transport identities, not a fresh
 wall-clock or complete-load qualification.
 

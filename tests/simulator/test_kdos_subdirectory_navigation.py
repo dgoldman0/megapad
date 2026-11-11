@@ -51,11 +51,11 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-subdirectory-navigation-6469-6564.f"
+    / "kdos-subdirectory-navigation-6478-6573.f"
 )
 
-FIRST_LINE = 6469
-LAST_LINE = 6564
+FIRST_LINE = 6478
+LAST_LINE = 6573
 SLICE_BYTES = 3_082
 SLICE_SHA256 = (
     "dc7f065cfac1fc3eb6efd1de7f4b0f472ff40e66fa14666e1087c18047e1d6c8"

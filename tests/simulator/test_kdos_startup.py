@@ -28,18 +28,18 @@ from tests.simulator.test_kdos_storage_block_volume import _variable
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
-FIXTURE = Path(__file__).with_name("fixtures") / "kdos-startup-10145-10184.f"
+FIXTURE = Path(__file__).with_name("fixtures") / "kdos-startup-10154-10193.f"
 
-FIRST_LINE = 10145
-LAST_LINE = 10184
+FIRST_LINE = 10154
+LAST_LINE = 10193
 FIXTURE_BYTES = 1_398
 FIXTURE_SHA256 = (
     "d75984f7fd3d55cb8c573da5b9f494ff1c1e8bba32b3537fa2270669add3ca8a"
 )
 FIXTURE_GIT_BLOB = "1354db80222545647369729b93526831ff0a21ec"
-KDOS_BYTES = 357_408
+KDOS_BYTES = 357_917
 KDOS_SHA256 = (
-    "8d0152dbd46beea7adc60b8938c6f00c5b33286e8c6f320a3bbdc66a1cb802a8"
+    "620d6e58bc8e9d17792799fe99e051a64f69ad9f12b88e5cb4fb4ed3c79f3531"
 )
 
 HOSTED_WORD_FIXED_BYTES = 17

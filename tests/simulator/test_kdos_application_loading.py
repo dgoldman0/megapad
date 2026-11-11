@@ -43,16 +43,16 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-application-loading-6213-6327.f"
+    / "kdos-application-loading-6221-6336.f"
 )
 
-FIRST_LINE = 6213
-LAST_LINE = 6327
-SLICE_BYTES = 4_240
+FIRST_LINE = 6221
+LAST_LINE = 6336
+SLICE_BYTES = 4_317
 SLICE_SHA256 = (
-    "514fe3ffe462c1571d3e45f75ec274186278a2f0201fb09c1476c142a5244141"
+    "d7dcf0aba6bafca16a71ee0ee8cb123e6ed39ab468092be19087129ce8872de4"
 )
-SLICE_GIT_BLOB = "e7463dc7365cc67799febd7c676773bb8dd0555c"
+SLICE_GIT_BLOB = "47a80d7b4cbd0721487e90093123fe9853640386"
 
 SOURCE_LEDGER = (
     (":", b"_APP-MPU-ON"),
@@ -567,7 +567,8 @@ def test_app_load_rejects_undefined_and_unfinished_source_transactionally() -> N
         runtime.dictionary.here,
         runtime.dictionary.latest,
     ) == dictionary_before
-    assert _variable(runtime, "EVAL-STATUS") == 1
+    # The THROW carries the failure; the loader leaves no status set.
+    assert _variable(runtime, "EVAL-STATUS") == 0
     assert _variable(runtime, "EVAL-LINE") == 2
     assert _variable(runtime, "LOAD-HOOK-TRACE") == 23
     _assert_loader_released(
@@ -591,7 +592,7 @@ def test_app_load_rejects_undefined_and_unfinished_source_transactionally() -> N
         runtime.dictionary.here,
         runtime.dictionary.latest,
     ) == dictionary_before
-    assert _variable(runtime, "EVAL-STATUS") == 4
+    assert _variable(runtime, "EVAL-STATUS") == 0
     assert _variable(runtime, "EVAL-LINE") == 1
     assert _variable(runtime, "LOAD-HOOK-TRACE") == 2323
     _assert_loader_released(

@@ -423,6 +423,13 @@ VARIABLE _SEC-LINE
 \ Every operation after allocation runs inside this guard.  Roll back module
 \ identities before their defining dictionary entries, reset compiler state,
 \ then release and restore the loader frame before rethrowing the exact code.
+\
+\ The THROW carries the failure from here on, so the evaluator's status goes
+\ back to zero.  A status left set would stop the line of whoever catches
+\ the THROW and keep every nested EVALUATE from running for as long as an
+\ enclosing evaluation is under way, which for a program started from a boot
+\ script is its whole life.  The line, column, token and THROW diagnostics
+\ stay as the failure left them.
 : _LD-FAIL  ( exception -- )
     >R
     EVAL-LINE @ >R
@@ -430,6 +437,7 @@ VARIABLE _SEC-LINE
     _LD-TXN-ROLLBACK
     _LD-ACTIVE-FRAME DUP 72 + @ SWAP 80 + @ DICT-ROLLBACK
     EVALUATOR-RESET
+    0 EVAL-STATUS !
     _LD-RELEASE
     _LD-TXN-AFTER-RELEASE
     R> EVAL-LINE ! R> THROW ;

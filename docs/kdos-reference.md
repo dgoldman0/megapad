@@ -1869,14 +1869,21 @@ exact caller source.  Status 5 remains sticky while enclosing evaluators
 unwind, preventing either the failed source tail or an enclosing line tail
 from executing.
 
-Three things lie outside the shadow.  The BIOS's own callers of its
+Two things lie outside the shadow.  The BIOS's own callers of its
 `EVALUATE`, the boot command and `FSLOAD`, reach the BIOS word.  So does any
-word compiled before the shadow; KDOS has none.  And status 5 stays sticky:
-a word that catches a failed load while it is itself running inside a loaded
-file or an evaluated string finds the depth restored but the status
-recorded, so the BIOS ends the line it is on and the enclosing load reports
-the same code.  A catcher at the prompt, or in a word called from it, is at
-depth zero, where the next evaluation starts with a fresh status.
+word compiled before the shadow; KDOS has none.
+
+The loader completes this for a failed load.  `LOAD`, `REQUIRE` and
+`APP-LOAD` turn a nonzero status into a `THROW`, and their failure path
+clears the status as it rethrows.  A word that catches a failed load, at the
+prompt or while a file that called it is still loading, therefore finds the
+evaluator as it was before that load: its own line continues, and a later
+load evaluates its file.  The code it caught tells the failure, and
+`EVAL-LINE`, `EVAL-COLUMN`, `EVAL-TOKEN` and `EVAL-THROW` stay as the
+failure left them.  A caller of `EVALUATE-CHECKED` or
+`SOURCE-EVALUATE-CHECKED` receives the status as a value instead.  There the
+status stays set, as described above, until the outermost evaluation ends
+or the caller clears it.
 
 Dictionary changes are not automatically transactional. A caller that
 snapshots `HERE` and `LATEST` must pass that pair to `DICT-ROLLBACK` on failure,
@@ -4203,8 +4210,9 @@ If source evaluation exits through a catchable guest `THROW`, KDOS first
 unwinds the evaluator to that loader frame's depth checkpoint, removes and
 frees every provisional registry entry owned by the frame (including
 successful nested chains merged into it), and restores the frame's saved
-`HERE`/`LATEST`. It then resets evaluator state, releases the transfer
-allocation, restores loader and relative-directory state, and rethrows. This
+`HERE`/`LATEST`. It then resets evaluator state, clears the evaluator's
+status, releases the transfer allocation, restores loader and
+relative-directory state, and rethrows. This
 makes compilation within the active dictionary zone transactional for admitted
 checked failures. Output, allocator/registry effects outside the provisional-ID
 chain, object/media effects, and other non-dictionary source effects are not
@@ -4217,7 +4225,8 @@ is unwound, the active transaction rolls back, allocation and frame are
 released, after-release runs, ambient loader/CWD state is restored, and the
 established outward error/throw convention is preserved. Checked statuses 1
 through 4 are rethrown as the same positive values, while status 5 maps back to
-the exact source code retained in `EVAL-THROW`. A failed checked extent read
+the exact source code retained in `EVAL-THROW`. `EVAL-STATUS` reads zero once
+the code is thrown, since the code carries the failure. A failed checked extent read
 rethrows the exact nonzero code retained in `DISK-IO-IOR`, also only after the
 common rollback and cleanup. `REQUIRE`,
 `PROVIDED`, their stack effects, and module identity are unchanged.

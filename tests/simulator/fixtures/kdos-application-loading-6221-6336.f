@@ -76,8 +76,9 @@
 \
 \ The common failure path restores evaluator depth, provisional module state,
 \ dictionary HERE/LATEST, compiler bookkeeping, the transfer allocation, the
-\ loader frame, and ambient CWD before rethrow.  Source status 5 maps back to
-\ EVAL-THROW; statuses 1 through 4 retain their checked status values.
+\ loader frame, and ambient CWD before rethrow, and clears the evaluator's
+\ status.  The code it rethrows tells the failure: source status 5 maps back
+\ to EVAL-THROW, and statuses 1 through 4 are thrown as their own values.
 \
 \ These are lifecycle guarantees, not application isolation.  Completed UART,
 \ storage, device, or writes to objects that predate the loader checkpoint are

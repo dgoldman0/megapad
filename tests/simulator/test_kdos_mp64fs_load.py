@@ -46,16 +46,16 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-mp64fs-load-5745-6212.f"
+    / "kdos-mp64fs-load-5745-6220.f"
 )
 
 FIRST_LINE = 5745
-LAST_LINE = 6212
-SLICE_BYTES = 17_973
+LAST_LINE = 6220
+SLICE_BYTES = 18_405
 SLICE_SHA256 = (
-    "5edc78bd9065d16bfbbb5f55030c36f07b99994de5e45d1d094da3b9f64c7cd5"
+    "a00f8c2ef72a321e54824be20fb7365436232331da8d736a5b3639a8a149db38"
 )
-SLICE_GIT_BLOB = "04a0a4de50c095ea7be27e45b4d07d5d84bdb962"
+SLICE_GIT_BLOB = "ffb6ce6db9fe6dce91994e239b48c5555630dd78"
 
 # Exact defining-word/name order in kdos.f.  Keeping the defining word in
 # the ledger makes source-layout changes visible even if a replacement happens
@@ -785,7 +785,8 @@ def test_nested_load_restores_parent_line_before_later_token_failure() -> None:
 
     assert runtime.main_context.data.snapshot() == (1,)
     runtime.main_context.data.clear()
-    assert _variable(runtime, "EVAL-STATUS") == 1
+    # The THROW carries the failure; the loader leaves no status set.
+    assert _variable(runtime, "EVAL-STATUS") == 0
     assert _variable(runtime, "EVAL-LINE") == 1
     assert _variable(runtime, "EVAL-COLUMN") == len(b"LOAD inner.f ")
     assert _eval_token(runtime) == b"missing-after-nested-load"
@@ -795,6 +796,58 @@ def test_nested_load_restores_parent_line_before_later_token_failure() -> None:
     assert _variable(runtime, "_LD-SP") == 0
     assert runtime.main_context.returns.snapshot() == ()
     assert runtime.spinlocks.owner(2) is None
+
+
+def test_a_caught_load_failure_lets_the_loading_file_go_on() -> None:
+    """A word that catches a failed load while its own file is loading finds
+    the evaluator as it was: its line continues, the next load runs, and its
+    file loads to the end."""
+
+    outer_source = (
+        b': TRY-BAD S" LOAD bad.f" EVALUATE ;\n'
+        b": CATCH-BAD ['] TRY-BAD CATCH ;\n"
+        b"CATCH-BAD 7 +\n"
+        b"LOAD good.f\n"
+        b": OUTER-DONE 99 ;\n"
+    )
+    bad_source = b": BAD-FIRST 1 ;\n-77 THROW\n: BAD-TAIL 2 ;\n"
+    good_source = b": GOOD-WORD 4242 ;\n"
+    image = _formatted_image(20)
+    for slot, (name, source) in enumerate(
+        (
+            (b"outer.f\0", outer_source),
+            (b"bad.f\0", bad_source),
+            (b"good.f\0", good_source),
+        )
+    ):
+        _write_entry(
+            image,
+            6 + slot,
+            name=name,
+            start=14 + slot,
+            count=1,
+            used=len(source),
+            entry_type=3,
+        )
+        image[(14 + slot) * SECTOR_SIZE : (15 + slot) * SECTOR_SIZE] = (
+            _sector_allocation(source, 1)
+        )
+    runtime = _load_mp64fs_load(image)
+    _mount(runtime)
+
+    runtime.evaluate(b"LOAD outer.f", source_name="caught-load-inside-a-load")
+
+    # The caught code, with the rest of the catching line applied to it.
+    assert runtime.main_context.data.snapshot() == ((-77 + 7) % 2**64,)
+    runtime.main_context.data.clear()
+    assert _variable(runtime, "EVAL-STATUS") == 0
+    assert _variable(runtime, "EVAL-DEPTH") == 0
+    assert runtime.find("BAD-FIRST") is None
+    assert runtime.find("BAD-TAIL") is None
+    assert _execute(runtime, "GOOD-WORD") == (4242,)
+    assert _execute(runtime, "OUTER-DONE") == (99,)
+    assert _variable(runtime, "_LD-SP") == 0
+    assert runtime.main_context.returns.snapshot() == ()
 
 
 def test_load_clean_guards_misses_empty_and_missing_path_restore_state() -> None:
@@ -1156,7 +1209,8 @@ def test_load_stops_at_undefined_status_and_rolls_back_definitions() -> None:
     assert runtime.find("AFTER-LOAD-UNDEFINED") is None
     assert runtime.dictionary.here == here_before
     assert runtime.dictionary.latest == latest_before
-    assert _variable(runtime, "EVAL-STATUS") == 1
+    # The THROW carries the failure; the loader leaves no status set.
+    assert _variable(runtime, "EVAL-STATUS") == 0
     assert _variable(runtime, "EVAL-LINE") == 2
     assert _eval_token(runtime) == b"missing-load-token"
     assert _variable(runtime, "LOAD-HOOK-TRACE") == 23
@@ -1201,7 +1255,8 @@ def test_load_rejects_unfinished_compiler_state_and_resets_evaluator() -> None:
     assert runtime.find("LOAD-LEFT-OPEN") is None
     assert runtime.dictionary.here == here_before
     assert runtime.dictionary.latest == latest_before
-    assert _variable(runtime, "EVAL-STATUS") == 4
+    # The THROW carries the failure; the loader leaves no status set.
+    assert _variable(runtime, "EVAL-STATUS") == 0
     assert _variable(runtime, "EVAL-LINE") == 1
     assert _variable(runtime, "LOAD-HOOK-TRACE") == 23
     assert _execute(runtime, "HEAP-FREE-BYTES") == (heap_before,)
