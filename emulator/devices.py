@@ -1905,8 +1905,9 @@ class SystemInfo(Device):
                  vram_base: int = 0,
                  vram_size: int = 0,
                  crypto_caps: int = 0,
-                 num_bus_ports: int = 1):
-        super().__init__("SysInfo", SYSINFO_BASE, 0x70)
+                 num_bus_ports: int = 1,
+                 chiplet_ports: int = 0):
+        super().__init__("SysInfo", SYSINFO_BASE, 0x78)
         if mem_size_kib is not None and bank0_size == (1 << 20):
             # Legacy caller: convert KiB → bytes
             bank0_size = mem_size_kib * 1024
@@ -1929,6 +1930,12 @@ class SystemInfo(Device):
             raise ValueError("SystemInfo num_bus_ports must be positive")
         self.crypto_caps = crypto_caps
         self.num_bus_ports = num_bus_ports
+        # The chiplet ports, packed as PORT_COUNT of the port window packs
+        # them: [7:0] ports built, [15:8] ID of port 0, [23:16] lent ranges
+        # per port.  Zero on a machine built without ports.
+        if chiplet_ports < 0 or chiplet_ports >> 24:
+            raise ValueError("SystemInfo chiplet_ports has reserved bits")
+        self.chiplet_ports = chiplet_ports
         # Legacy flags (kept for backward compat, not in RTL)
         self.has_storage = has_storage
         self.has_nic = has_nic
@@ -1949,6 +1956,7 @@ class SystemInfo(Device):
             0x58: self.vram_size,
             0x60: self.crypto_caps,
             0x68: self.num_bus_ports,
+            0x70: self.chiplet_ports,
         }
 
     def read8(self, offset: int) -> int:

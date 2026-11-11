@@ -1752,7 +1752,7 @@ module mp64_soc #(
                             (bus_mmio_size == BUS_DWORD) &&
                             (mmio_addr_eff[2:0] == 3'b000);
 
-    // SysInfo occupies the exact half-open range [0x300, 0x370).  Reject a
+    // SysInfo occupies the exact half-open range [0x300, 0x378).  Reject a
     // misaligned or crossing request as one bus access instead of allowing the
     // first byte to alias a valid register.
     wire [3:0] sysinfo_access_bytes = 4'd1 << bus_mmio_size;
@@ -1765,7 +1765,7 @@ module mp64_soc #(
         (bus_mmio_size == BUS_DWORD && mmio_addr_eff[2:0] == 3'b000);
     wire mmio_sel_sysinfo = bus_mmio_req
                             && (mmio_addr_eff >= 12'h300)
-                            && (sysinfo_access_end < 13'h370)
+                            && (sysinfo_access_end < 13'h378)
                             && sysinfo_access_aligned;
 
     reg [63:0] sysinfo_write_mask;
@@ -2363,6 +2363,11 @@ module mp64_soc #(
         //   0x60  CRYPTO_CAPS   — independently qualified capabilities
         //   0x68  NUM_BUS_PORTS — weighted-arbiter requester count, including
         //                           the physical WOTS requester slot
+        //   0x70  CHIPLET_PORTS — [7:0] chiplet ports built, [15:8] ID of
+        //                           port 0, [23:16] lent ranges per port; the
+        //                           value of PORT_COUNT in the port window,
+        //                           and zero on a die built without ports,
+        //                           whose window answers nothing
         if (mmio_sel_sysinfo) begin
             case (mmio_addr_eff[6:3])  // 64-bit aligned: offset >> 3
                 4'h0: mmio_rdata_mux = 64'h4D50_3634_0002_0001;  // BOARD_ID_VER
@@ -2379,6 +2384,10 @@ module mp64_soc #(
                 4'hB: mmio_rdata_mux = {32'd0, MP64_VRAM_DEFAULT_SIZE}; // 0x58
                 4'hC: mmio_rdata_mux = CRYPTO_CAPS;              // 0x60
                 4'hD: mmio_rdata_mux = N_BUS_PORTS;              // 0x68
+                4'hE: mmio_rdata_mux = (NUM_CHIPLET_PORTS > 0)   // 0x70
+                          ? {40'd0, CHIPLET_RANGES[7:0], CHIPLET_ID_BASE,
+                             NUM_CHIPLET_PORTS[7:0]}
+                          : 64'd0;
                 default: mmio_rdata_mux = 64'd0;
             endcase
             mmio_rdata_mux = (mmio_rdata_mux

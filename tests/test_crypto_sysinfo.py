@@ -25,14 +25,40 @@ def test_crypto_capability_and_requester_count_extend_exact_window():
     sysinfo = SystemInfo(
         crypto_caps=CRYPTO_CAP_CRC_REFLECT_RAW,
         num_bus_ports=9,
+        chiplet_ports=1 | (16 << 8) | (8 << 16),
     )
     bus.register(sysinfo)
 
-    assert sysinfo.size == 0x70
+    assert sysinfo.size == 0x78
     assert _read_le(bus, SYSINFO_BASE + 0x60, 8) == CRYPTO_CAP_CRC_REFLECT_RAW
     assert _read_le(bus, SYSINFO_BASE + 0x68, 8) == 9
+    assert _read_le(bus, SYSINFO_BASE + 0x70, 8) == 0x08_10_01
     with pytest.raises(BusError):
-        bus.read8(SYSINFO_BASE + 0x70)
+        bus.read8(SYSINFO_BASE + 0x78)
+
+
+def test_chiplet_ports_word_is_bounded_and_defaults_to_no_ports():
+    assert SystemInfo().read8(0x70) == 0
+    with pytest.raises(ValueError):
+        SystemInfo(chiplet_ports=1 << 24)
+    with pytest.raises(ValueError):
+        SystemInfo(chiplet_ports=-1)
+
+
+def test_system_reports_its_chiplet_ports_as_the_port_window_does():
+    system = _system()
+    word_addr = MMIO_START + SYSINFO_BASE + 0x70
+    port_count_addr = MMIO_START + 0xE00
+    # Two full cores and a cluster of four give the first port the ID 6.
+    assert system.cpu.mem_read64(word_addr) == 1 | (6 << 8) | (8 << 16)
+    assert system.cpu.mem_read64(word_addr) == (
+        system.cpu.mem_read64(port_count_addr))
+
+    bare = MegapadSystem(
+        ram_size=4096, num_cores=1, hbw_size=0, ext_mem_size=0,
+        vram_size=0, chiplet_ports=0,
+    )
+    assert bare.cpu.mem_read64(word_addr) == 0
 
 
 @pytest.mark.parametrize(
@@ -42,7 +68,9 @@ def test_crypto_capability_and_requester_count_extend_exact_window():
         (0x62, 4),
         (0x64, 8),
         (0x6F, 2),
-        (0x70, 1),
+        (0x77, 2),
+        (0x74, 8),
+        (0x78, 1),
     ],
 )
 def test_sysinfo_preflight_rejects_misaligned_crossing_and_outside_spans(
@@ -64,7 +92,7 @@ def test_capability_and_topology_register_writes_are_ignored():
         num_bus_ports=7,
     )
 
-    for offset in range(0x60, 0x70):
+    for offset in range(0x60, 0x78):
         sysinfo.write8(offset, 0xFF)
 
     assert sysinfo.crypto_caps == CRYPTO_CAP_CRC_REFLECT_RAW

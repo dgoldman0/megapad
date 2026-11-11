@@ -148,7 +148,7 @@ device occupies a small range:
 | **Timer** | `+0x0100` | 16 bytes | 32-bit timer with compare-match |
 | **Storage** | `+0x0200` | 37 bytes | Checked sector controller with completion, precise result, media identity, and capacity registers: the boot disk |
 | **Storage 1** | `+0x0280` | 37 bytes | The same controller: the settings disk, its medium write-protected |
-| **System Info** | `+0x0300` | 112 bytes | Board ID, topology, memory layout, crypto capabilities, requester count |
+| **System Info** | `+0x0300` | 120 bytes | Board ID, topology, memory layout, crypto capabilities, requester count, chiplet ports |
 | **NIC** | `+0x0400` | 128 bytes | Network interface controller |
 | **Mailbox** | `+0x0500` | 16 bytes | Inter-core IPI (data + send + status + ack) |
 | **Spinlock** | `+0x0600` | 64 bytes | 16 hardware locks, 4 bytes each; lock 8 is reserved by the checked MMIO crypto guard |
@@ -470,11 +470,12 @@ CLUSTER_EN.
 | VRAM_SIZE | `+0x58` | 64-bit | 4 MiB | Dedicated VRAM size in bytes |
 | CRYPTO_CAPS | `+0x60` | 64-bit | `0xF` | Bit 0: reflected/raw CRC; bit 1: checked SHA3/SHAKE; bit 2: raw Keccak-f[1600]; bit 3: production WOTS chain |
 | NUM_BUS_PORTS | `+0x68` | 64-bit | varies | Exact weighted-arbiter requester count: full cores + clusters + NIC + disk + WOTS |
+| CHIPLET_PORTS | `+0x70` | 64-bit | `0x08_10_01` | [7:0] chiplet ports built, [15:8] ID of port 0, [23:16] lent ranges per port: the value of `PORT_COUNT` in the chiplet port window. Zero on a machine built without ports, whose port window answers nothing |
 
 Byte reads return the corresponding little-endian byte. Halfword, word, and
 qword accesses must be naturally aligned and wholly contained in the device
 window; invalid spans fault before any prefix of a write is published. Writes
-to CRYPTO_CAPS and NUM_BUS_PORTS are acknowledged and ignored. The requester
+to CRYPTO_CAPS, NUM_BUS_PORTS and CHIPLET_PORTS are acknowledged and ignored. The requester
 count includes three appended DMA requesters—NIC, disk, and WOTS—after the
 full-core and microcluster ports. WOTS is appended after disk, so the existing
 NIC and disk physical indices do not move. See

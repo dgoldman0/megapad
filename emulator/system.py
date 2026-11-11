@@ -1372,6 +1372,7 @@ class MegapadSystem:
             num_bus_ports=(
                 self.num_full_cores + self.num_clusters + 3
             ),
+            chiplet_ports=self._native_system.chiplet_port_count_word,
         )
         self.mailbox = MailboxDevice(
             num_cores=self.num_cores,

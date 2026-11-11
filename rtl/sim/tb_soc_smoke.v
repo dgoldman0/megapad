@@ -253,16 +253,24 @@ module tb_soc_smoke;
         check("SysInfo rejects a misaligned access",
               u_soc.bus_mmio_ack === 1'b0);
 
-        force u_soc.bus_mmio_addr = 12'h36F;
+        force u_soc.bus_mmio_addr = 12'h377;
         #1;
         check("SysInfo rejects a crossing access",
               u_soc.bus_mmio_ack === 1'b0);
 
-        force u_soc.bus_mmio_addr = 12'h370;
+        force u_soc.bus_mmio_addr = 12'h378;
         force u_soc.bus_mmio_size = BUS_BYTE;
         #1;
         check("SysInfo does not alias beyond its exact window",
               u_soc.bus_mmio_ack === 1'b0);
+
+        force u_soc.bus_mmio_addr = 12'h370;
+        force u_soc.bus_mmio_size = BUS_DWORD;
+        #1;
+        check("SysInfo reports the chiplet ports, their first ID and ranges",
+              u_soc.bus_mmio_ack === 1'b1
+              && u_soc.bus_mmio_rdata ==
+                 {40'd0, 8'd8, u_soc.CHIPLET_ID_BASE, 8'd1});
 
         force u_soc.bus_mmio_addr = 12'h360;
         force u_soc.bus_mmio_size = BUS_DWORD;

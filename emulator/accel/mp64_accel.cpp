@@ -10374,7 +10374,7 @@ static inline void preflight_sysinfo_fallback_span(
         uint64_t addr,
         uint32_t byte_count) {
     static constexpr uint64_t SYSINFO_OFFSET = 0x0300;
-    static constexpr uint64_t SYSINFO_SIZE = 0x0070;
+    static constexpr uint64_t SYSINFO_SIZE = 0x0078;
     const uint64_t sysinfo_start = cb.mmio_start + SYSINFO_OFFSET;
     const uint64_t sysinfo_end = sysinfo_start + SYSINFO_SIZE;
     const uint64_t access_end = addr + byte_count;
