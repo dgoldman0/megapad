@@ -94,26 +94,60 @@ module mp64_mailbox #(
     // An ID names a participant when it is a full core's or a port's.
     function id_is_participant;
         input [ID_BITS-1:0] id;
-        integer             idv;
         begin
-            idv = {{(32-ID_BITS){1'b0}}, id};
-            id_is_participant = (idv < N_CORES) ||
-                (N_PORTS > 0 && idv >= PORT_ID_BASE_I &&
-                 idv - PORT_ID_BASE_I < N_PORTS);
+            id_is_participant =
+                ({{(32-ID_BITS){1'b0}}, id} < N_CORES) ||
+                (N_PORTS > 0 &&
+                 {{(32-ID_BITS){1'b0}}, id} >= PORT_ID_BASE_I &&
+                 {{(32-ID_BITS){1'b0}}, id} - PORT_ID_BASE_I < N_PORTS);
         end
     endfunction
 
-    function integer participant_of;
+    function [31:0] participant_of;
         input [ID_BITS-1:0] id;
-        integer             idv;
         begin
-            idv = {{(32-ID_BITS){1'b0}}, id};
-            if (idv < N_CORES)
-                participant_of = idv;
-            else
-                participant_of = N_CORES + (idv - PORT_ID_BASE_I);
+            participant_of =
+                ({{(32-ID_BITS){1'b0}}, id} < N_CORES)
+                ? {{(32-ID_BITS){1'b0}}, id}
+                : N_CORES + ({{(32-ID_BITS){1'b0}}, id} - PORT_ID_BASE_I);
         end
     endfunction
+
+    // Each ID that a write names is decoded here, outside the clocked
+    // block, so the pending masks are indexed by plain wires.
+    localparam integer PIDX_W = (P <= 1) ? 1 : $clog2(P);
+
+    wire              mmio_id_ok = id_is_participant(wdata[ID_BITS-1:0]);
+    wire [31:0]       mmio_pidx_w = participant_of(wdata[ID_BITS-1:0]);
+    wire [PIDX_W-1:0] mmio_pidx  = mmio_pidx_w[PIDX_W-1:0];
+
+    wire [N_CORES-1:0] csr_id_ok;
+    wire [PIDX_W-1:0]  csr_pidx [0:N_CORES-1];
+    wire [NP_W-1:0]    take_id_ok;
+    wire [PIDX_W-1:0]  take_pidx [0:NP_W-1];
+    wire [NP_W-1:0]    send_id_ok;
+    wire [PIDX_W-1:0]  send_pidx [0:NP_W-1];
+
+    genvar di;
+    generate
+        for (di = 0; di < N_CORES; di = di + 1) begin : csr_id_gen
+            wire [31:0] w = participant_of(csr_ipi_wdata[di*64 +: ID_BITS]);
+            assign csr_id_ok[di] =
+                (csr_ipi_wdata[di*64 + ID_BITS +: 64 - ID_BITS] == 0) &&
+                id_is_participant(csr_ipi_wdata[di*64 +: ID_BITS]);
+            assign csr_pidx[di] = w[PIDX_W-1:0];
+        end
+        for (di = 0; di < NP_W; di = di + 1) begin : port_id_gen
+            wire [31:0] tw = participant_of(port_take_src[di*ID_BITS +: ID_BITS]);
+            wire [31:0] sw = participant_of(port_send_dst[di*ID_BITS +: ID_BITS]);
+            assign take_id_ok[di] =
+                id_is_participant(port_take_src[di*ID_BITS +: ID_BITS]);
+            assign take_pidx[di]  = tw[PIDX_W-1:0];
+            assign send_id_ok[di] =
+                id_is_participant(port_send_dst[di*ID_BITS +: ID_BITS]);
+            assign send_pidx[di]  = sw[PIDX_W-1:0];
+        end
+    endgenerate
 
     // IPI output = any pending bit set for that core.  The external flag
     // follows the bits set by chiplet ports alone.
@@ -264,10 +298,8 @@ module mp64_mailbox #(
 
                     // ACK: write source ID → clear pending bit from that source
                     MBOX_ACK: begin
-                        if (id_is_participant(wdata[ID_BITS-1:0])) begin
-                            mbox_pending[requester_id][
-                                participant_of(wdata[ID_BITS-1:0])] <= 1'b0;
-                        end
+                        if (mmio_id_ok)
+                            mbox_pending[requester_id][mmio_pidx] <= 1'b0;
                     end
                     default: ;
                 endcase
@@ -299,20 +331,14 @@ module mp64_mailbox #(
             // --- CSR-side IPI ack (per-core, bypasses bus arbiter) ---
             for (wi = 0; wi < N_CORES; wi = wi + 1) begin
                 if (csr_ipi_wen[wi] &&
-                    csr_ipi_addr[wi*8 +: 8] == CSR_IPIACK &&
-                    csr_ipi_wdata[wi*64 + ID_BITS +: 64 - ID_BITS] == 0 &&
-                    id_is_participant(csr_ipi_wdata[wi*64 +: ID_BITS])) begin
-                    mbox_pending[wi][participant_of(
-                        csr_ipi_wdata[wi*64 +: ID_BITS])] <= 1'b0;
-                end
+                    csr_ipi_addr[wi*8 +: 8] == CSR_IPIACK && csr_id_ok[wi])
+                    mbox_pending[wi][csr_pidx[wi]] <= 1'b0;
             end
 
             // --- A port's bridge delivered a doorbell: clear its source ---
             for (wi = 0; wi < N_PORTS; wi = wi + 1) begin
-                if (port_take_valid[wi] &&
-                    id_is_participant(port_take_src[wi*ID_BITS +: ID_BITS]))
-                    mbox_pending[N_CORES + wi][participant_of(
-                        port_take_src[wi*ID_BITS +: ID_BITS])] <= 1'b0;
+                if (port_take_valid[wi] && take_id_ok[wi])
+                    mbox_pending[N_CORES + wi][take_pidx[wi]] <= 1'b0;
             end
 
             // Every send follows every clear, so a signal raised in the
@@ -320,30 +346,20 @@ module mp64_mailbox #(
 
             // --- SEND: write target ID → set pending bit on target ---
             if (req && wen && is_mbox && requester_in_mailbox_range &&
-                mbox_reg == MBOX_SEND &&
-                id_is_participant(wdata[ID_BITS-1:0])) begin
-                mbox_pending[participant_of(wdata[ID_BITS-1:0])][
-                    requester_id] <= 1'b1;
-            end
+                mbox_reg == MBOX_SEND && mmio_id_ok)
+                mbox_pending[mmio_pidx][requester_id] <= 1'b1;
 
             // --- CSR-side IPI send ---
             for (wi = 0; wi < N_CORES; wi = wi + 1) begin
                 if (csr_ipi_wen[wi] &&
-                    csr_ipi_addr[wi*8 +: 8] == CSR_MBOX &&
-                    csr_ipi_wdata[wi*64 + ID_BITS +: 64 - ID_BITS] == 0 &&
-                    id_is_participant(csr_ipi_wdata[wi*64 +: ID_BITS])) begin
-                    mbox_pending[participant_of(
-                        csr_ipi_wdata[wi*64 +: ID_BITS])][wi] <= 1'b1;
-                end
+                    csr_ipi_addr[wi*8 +: 8] == CSR_MBOX && csr_id_ok[wi])
+                    mbox_pending[csr_pidx[wi]][wi] <= 1'b1;
             end
 
             // --- A port rings a participant ---
             for (wi = 0; wi < N_PORTS; wi = wi + 1) begin
-                if (port_send_valid[wi] &&
-                    id_is_participant(port_send_dst[wi*ID_BITS +: ID_BITS]))
-                    mbox_pending[participant_of(
-                        port_send_dst[wi*ID_BITS +: ID_BITS])][
-                            N_CORES + wi] <= 1'b1;
+                if (port_send_valid[wi] && send_id_ok[wi])
+                    mbox_pending[send_pidx[wi]][N_CORES + wi] <= 1'b1;
             end
         end
     end
