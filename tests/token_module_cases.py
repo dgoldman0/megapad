@@ -449,6 +449,25 @@ def _cases() -> dict[str, Case]:
         [load("a.f"), load("s.f", "LOAD"), load("c.f"), *show("C")], r"c\.ft",
     )
 
+    # What the stamp leaves out: a source file whose load ended before the
+    # first token file was met, and anything defined outside a file.  The
+    # stamp starts at that token file with the files loading then, so
+    # neither is in it.
+    cases["a source file that ended before the first token file is in no stamp"] = Case(
+        files={"s.f": plain, "a.ft": tokens("a", 11, stamp=start)},
+        lines=[TOKENS_ON, load("s.f", "LOAD"), ": TYPED-WORD 5 ;", STAMP_LINE,
+               load("a.f"), value("A"), 'CR ." [S " S-WORD TYPED-WORD + . ." ]"',
+               STAMP_LINE],
+        must=[r"\[STAMP 0 0 \]", r"\[A 11 \]", r"\[S 12 \]", stamp_shown(s_a[1])],
+        must_not=["cannot be loaded"],
+        count={"[THROW 0 ]": 2},
+    )
+    stale(
+        "a file stamped as if an earlier, finished source file were in the stamp",
+        {"s.f": plain, "a.ft": tokens("a", 11, stamp=stamps(plain, A)[1])},
+        [load("s.f", "LOAD"), load("a.f"), *show("A")], r"a\.ft",
+    )
+
     # A token file that other code holds in memory and hands to the replay,
     # as a loader of containers does: the source file whose line does so is
     # the innermost file of the load.  Its text holds the token file without

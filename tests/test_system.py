@@ -45741,6 +45741,79 @@ class TestKDOSTokenModules(_KDOSTestBase):
                     failures(case, self._run_volume(case.files, case.lines)), []
                 )
 
+    def test_a_reset_that_keeps_memory_accepts_the_same_token_file_again(self):
+        """BOOT-ID is hashed again at each boot from the BIOS's code as it
+        then stands in memory, and from KDOS as the BIOS loads it again.  A
+        session writes nothing below the BIOS's first variable, so the
+        second boot gives the same identity and uses the same token file."""
+        from asm import assemble
+        from shared.boot_identity import boot_identity, stamp_start
+        from tests.token_module_cases import TOKENS_ON, load, tokens, value
+
+        with open(os.path.join(PROJECT_ROOT, "kdos.f"), "rb") as f:
+            kdos = f.read()
+        identity = boot_identity(kdos)
+        fs = MP64FS(total_sectors=8192)
+        fs.format()
+        fs.inject_file("kdos.f", kdos, ftype=FTYPE_FORTH)
+        fs.inject_file(
+            "a.ft", tokens("a", 11, stamp=stamp_start(identity)), ftype=FTYPE_FORTH
+        )
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+        fs.save(path)
+        labels = {}
+        with open(BIOS_PATH) as f:
+            code = bytes(assemble(f.read(), labels_out=labels))
+        below = labels["var_state"]
+        lines = [
+            'CR ." [ID " BOOT-ID 32 RSHIFT . BOOT-ID 4294967295 AND . ." ]"',
+            TOKENS_ON, load("a.f"), value("A"),
+        ]
+        shown = rf"\[ID {identity >> 32} {identity & 0xFFFFFFFF} \]"
+
+        def session(sys_obj, buf):
+            """Type LINES once the machine waits, and run until it waits
+            again with nothing left to type."""
+            data = ("\n".join(lines) + "\n").encode()
+            start, pos, total = len(buf), 0, 0
+            while total < 400_000_000 and not sys_obj.cpu.halted:
+                if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
+                    if pos >= len(data):
+                        break
+                    chunk = _next_line_chunk(data, pos)
+                    sys_obj.uart.inject_input(chunk)
+                    pos += len(chunk)
+                    continue
+                batch = sys_obj.run_batch(min(100_000, 400_000_000 - total))
+                if batch == 0 and sys_obj.cpu.idle:
+                    break
+                total += max(batch, 1)
+            return " ".join(uart_text(buf[start:]).split())
+
+        try:
+            sys_obj = make_system(
+                ram_kib=1024, storage_image=path,
+                ext_mem_mib=KDOS_TEST_EXT_MEM_MIB,
+            )
+            buf = capture_uart(sys_obj)
+            sys_obj.load_binary(0, code)
+            sys_obj.boot()
+            first = session(sys_obj, buf)
+            self.assertEqual(bytes(sys_obj.cpu.mem[:below]), code[:below])
+            sys_obj.boot()  # a reset: the processor starts again, memory stays
+            second = session(sys_obj, buf)
+            self.assertEqual(bytes(sys_obj.cpu.mem[:below]), code[:below])
+        finally:
+            os.unlink(path)
+        for text in (first, second):
+            self.assertIn("KDOS", text)
+            self.assertRegex(text, shown)
+            self.assertRegex(text, r"\[THROW 0 \]")
+            self.assertRegex(text, r"\[A 11 \]")
+            self.assertEqual(text.count("[load-a]"), 1)
+            self.assertNotIn("cannot be loaded", text)
+
     def test_files_the_simulator_recorded_load_on_the_bios(self):
         from tests.token_module_cases import (
             RECORDED_LINES,
