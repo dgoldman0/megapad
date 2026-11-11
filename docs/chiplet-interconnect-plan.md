@@ -27,8 +27,9 @@ the main bus serves one transaction at a time (`rtl/bus/mp64_bus.v`), every
 other core waits behind it. LM1 switches to another hardware thread while a
 read is on its way (`spec/00-overview.md` §4.6 in lm1). Most of that data is
 also Desk's own, which Forth reads constantly and LM1 mainly collects. And
-since MegaPad's cores read memory uncached, a second chip writing the same
-memory leaves every core reading the current value.
+since MegaPad's cores cache instructions only and read data straight from
+memory, every core reads the current value of memory that a second chip has
+written.
 
 ## 2. The contract every chiplet meets
 
