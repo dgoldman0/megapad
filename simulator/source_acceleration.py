@@ -210,13 +210,19 @@ _SPECS = (
 )
 
 
-# EVALUATE-CHECKED runs BIOS EVALUATE through this word, which KDOS's
-# EVALUATE shares: CATCH around the primitive, and the evaluator's depth
-# given back when an exception passes.  The checked-line overlay stands for
-# both bodies, so it binds this one by digest as well.
+# EVALUATE-CHECKED runs BIOS EVALUATE through _EVALUATE-GUARDED, which
+# KDOS's EVALUATE shares.  That word hands the primitive to
+# _EVALUATION-GUARDED, the one statement of the guard: CATCH around an
+# evaluator, and the evaluator's depth given back when an exception passes.
+# The checked-line overlay stands for all three bodies, so it binds these
+# two by digest as well.
+_EVALUATION_GUARDED_NAME = b"_EVALUATION-GUARDED"
+_EVALUATION_GUARDED_DIGEST = (
+    "f6c51620aa44298f16ffcbffa3d48e7b0d0de31fe939eb7c1f18ed84be832eb4"
+)
 _EVALUATE_GUARDED_NAME = b"_EVALUATE-GUARDED"
 _EVALUATE_GUARDED_DIGEST = (
-    "aa094eeadd9463b615b5dd1a7cc50c2c9aba47a5cf3cb4dd5a84ea6e292bf468"
+    "64847366de7f60241ae5d603050a0da8fbad01ac9f3c79482eb2999cf1d6cff5"
 )
 
 
@@ -340,6 +346,12 @@ def install_kdos_source_accelerators(
         )
         installed.append(spec.name)
 
+    if runtime.token_recorder is not None:
+        # A build is recording the token form of each source file.  The
+        # recorder takes the two walks back, so every line reaches the
+        # reference evaluator, where the record is made.
+        runtime.token_recorder.bind_walks()
+
     return SourceAccelerationReport(tuple(installed), tuple(skipped))
 
 
@@ -369,7 +381,10 @@ def _build_checked_line_accelerator(
     guarded = _require_call(runtime, word, 0, _EVALUATE_GUARDED_NAME)
     if normalized_colon_digest(runtime, guarded) != _EVALUATE_GUARDED_DIGEST:
         raise ValueError("KDOS _EVALUATE-GUARDED is not the exact guarded body")
-    evaluate = _require_literal_word(runtime, guarded, 3, b"EVALUATE")
+    guard = _require_call(runtime, guarded, 1, _EVALUATION_GUARDED_NAME)
+    if normalized_colon_digest(runtime, guard) != _EVALUATION_GUARDED_DIGEST:
+        raise ValueError("KDOS _EVALUATION-GUARDED is not the exact guard")
+    evaluate = _require_literal_word(runtime, guarded, 0, b"EVALUATE")
     if not isinstance(evaluate.implementation, PrimitiveDefinition):
         raise ValueError("KDOS _EVALUATE-GUARDED does not bind primitive EVALUATE")
     eval_status = _require_call(runtime, word, 12, b"EVAL-STATUS").body_address

@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The `bios.asm` dictionary link chain contains **561** entries.  The numbered
+The `bios.asm` dictionary link chain contains **563** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -1149,6 +1149,18 @@ secret-boundary qualifications are recorded in
 |---|------|-------------|-----|-------------|
 | 559 | `DICT-MACHINE-CODE?` | `( -- flag )` | | True when the words compiled into this dictionary are MP64 machine code, so that a machine-code dictionary image can be built from it and run in it. The BIOS always answers true; a Forth system that keeps its definitions in another form answers false |
 
+### Token Replay (1 word)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 560 | `TOKEN-REPLAY` | `( rec-addr rec-len tab-addr tab-slots -- )` | | Run a recorded token stream: the words the interpreter found in a source file, its numbers and the text its parsing words took, through the interpreter's own found-word and found-number steps. The table is `tab-slots` cells that the word fills with the entries it finds. Statuses are EVALUATE's, with 6 for a malformed stream and 7 for one that does not match this system. The records are listed at `w_token_replay` in `bios.asm`. |
+
+### Boot Identity (1 word)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 561 | `BOOT-ID` | `( -- u )` | | The identity of what booted: a hash of this BIOS's code and dictionary, the bytes below its first variable, followed by the bytes of the first file `FSLOAD` loaded since reset, which is KDOS for a boot from disk. Asked before any file was loaded, it is the BIOS's own and stays that until the next reset. It is never zero. A module's token file holds the `BOOT-ID` of the system it was built for, and KDOS uses the file only where this word gives the same cell. `shared/boot_identity.py` computes the same cell for the hosted simulator and for the tools that build images. |
+
 ### Checked WOTS Chain (1 word)
 
 | # | Word | Stack Effect | Imm | Description |
@@ -1221,11 +1233,12 @@ machine reset.
 ### Newest Dictionary Chain Segment (last → earlier)
 
 The complete authoritative link chain is the `.dq` chain in `bios.asm`.
-`DICT-MACHINE-CODE?` closes the newest appended segment, after the string
-scan, the QUIT callback and the storage unit words:
+`BOOT-ID` closes the newest appended segment, after the token replay, the
+dictionary's code kind, the string scan, the QUIT callback and the storage
+unit words:
 
 ```
-DICT-MACHINE-CODE? → SCAN → QUIT-XT!
+BOOT-ID → TOKEN-REPLAY → DICT-MACHINE-CODE? → SCAN → QUIT-XT!
 → UNIT-DISK-FLUSH-GEN-CHECKED → UNIT-DISK-WRITE-GEN-CHECKED
 → UNIT-DISK-READ-GEN-CHECKED → UNIT-DISK-CAPS → UNIT-DISK-MEDIA-GEN
 → UNIT-DISK-SECTORS → UNIT-DISK@ → DISK-UNITS

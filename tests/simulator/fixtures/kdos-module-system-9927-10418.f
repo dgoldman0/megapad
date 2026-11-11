@@ -420,19 +420,25 @@ CREATE _MOD-FILE-KEY 24 ALLOT
 : _MOD-READ-WALK  ( -- )
     _LD-READ
     \ Pre-register the exact source-buffer slice before executing anything.
-    _MOD-PRESCAN IF
+    \ A token file names its module in its header.
+    _LD-TOKENS? DUP >R IF
+        _LD-TOKENS-MODULE
+    ELSE
+        _MOD-PRESCAN
+    THEN
+    IF
         _MOD-INSERT _MOD-JOIN           ( inserted? )
         _MOD-FILE-NOTE
-        0= IF EXIT THEN
+        0= IF R> DROP EXIT THEN
     ELSE
         2DROP
     THEN
-    _LD-WALK ;
+    R> IF _LD-WALK-TOKENS ELSE _LD-WALK THEN ;
 : _MOD-LOAD-BODY  ( -- )
     _LD-RESOLVE TRUE _LD-FOUND? 0= IF EXIT THEN
     _LD-FILE MF.USED @ 0= IF ."  Empty module" CR EXIT THEN
     _MOD-FILE-LOADED? IF EXIT THEN
-    _LD-SAVE
+    _LD-SAVE _LD-NAME-KEEP
     _LD-FILE MF.USED @ LD-SZ !
     \ Module source is a reclaimable loader allocation, not permanent XMEM.
     _LD-FILE MF.RESERVE @ ALLOCATE IF

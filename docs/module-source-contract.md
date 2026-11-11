@@ -78,9 +78,17 @@ For each `LOAD` and each `REQUIRE` the loader makes these calls, in this
 order, on the source that is selected when the load begins.
 
 1. DIR@, once.  The loader keeps the token until the load ends.
-2. RESOLVE, once, with the path as it was written and a cleared file record.
+2. RESOLVE, with a cleared file record: once, with the path as it was
+   written.  When `MODULE-TOKENS` is set it is called first with that path
+   and a `t` added, which names the module's token form, and then, if that
+   names no file, with the path itself.
 3. READ, at most once, and only after a RESOLVE that returned zero.  The
    loader makes no other call to the source between a RESOLVE and its READ.
+   When the file read is a token file that says its source ships beside
+   it, the loader then calls RESOLVE once more, with a second cleared
+   record and the file's own name without its last letter, which names the
+   source in the folder the first RESOLVE made current.  If that finds the
+   file, READ follows for it, into a buffer of its own.
 4. The calls of every load nested in the file's text, each complete before
    the next line is evaluated.
 5. DIR!, once, with the token of step 1.  The loader makes this call however
@@ -122,8 +130,10 @@ returns `MS-E-NOT-FOUND` when the path names no file and
 loader reports those two (see [Reports](#reports)).  For a failure of its
 own, such as an I/O error, it returns another nonzero value, which the
 loader throws, or throws one itself; the caller of `LOAD` or `REQUIRE`
-receives the value either way.  A RESOLVE that fails may leave any directory
-current, since the loader gives the saved one back.
+receives the value either way.  A RESOLVE that returns `MS-E-NOT-FOUND`
+leaves the source's current directory as it was, because the loader may ask
+for another name from the same place.  After any other failure it may leave
+any directory current, since the loader gives the saved one back.
 
 ## READ
 
@@ -216,6 +226,7 @@ consumed the path from the input by the time any of these is reported.
 
 - RESOLVE mounts the filesystem if `FS-ENSURE` can, walks the path with
   `_RESOLVE-PATH`, and looks the final name up in the directory it reached.
+  When the name is not there it puts `CWD` back to where the walk began.
   It leaves the path in `PATHBUF` and `NAMEBUF`, as `PARSE-NAME` does.
 - The current directory is `CWD`, and a token is its value: a directory's
   slot, or 255 for the root.

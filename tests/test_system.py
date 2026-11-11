@@ -1875,13 +1875,14 @@ class TestBIOS(unittest.TestCase):
         """RECT-FILL writes a w×h block of 16-bit pixels."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
-            # Fill 4×3 rectangle at 0x10000, stride=8 bytes (4 pixels * 2)
-            # Use addresses above BIOS ROM (~0x8100) to avoid corruption.
-            "0x10000 8 4 3 0xF800 RECT-FILL",  # red RGB565
+            # Fill 4×3 rectangle at 0x28000, stride=8 bytes (4 pixels * 2)
+            # 0x28000 lies between the data stack's base and the return
+            # stack, clear of the BIOS image and of both stacks.
+            "0x28000 8 4 3 0xF800 RECT-FILL",  # red RGB565
             # Check first pixel of each row
-            "0x10000 W@ .",                    # row 0
-            "0x10008 W@ .",                    # row 1 (0x10000 + stride 8)
-            "0x10010 W@ .",                    # row 2 (0x10000 + stride 16)
+            "0x28000 W@ .",                    # row 0
+            "0x28008 W@ .",                    # row 1 (0x28000 + stride 8)
+            "0x28010 W@ .",                    # row 2 (0x28000 + stride 16)
         ])
         # 0xF800 = 63488
         self.assertIn("63488 ", text)
@@ -1890,8 +1891,8 @@ class TestBIOS(unittest.TestCase):
         """RECT-FILL with w=0 or h=0 is a no-op."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
-            "0x10000 16 0 5 0xFFFF RECT-FILL",  # w=0
-            "0x10000 16 5 0 0xFFFF RECT-FILL",  # h=0
+            "0x28000 16 0 5 0xFFFF RECT-FILL",  # w=0
+            "0x28000 16 5 0 0xFFFF RECT-FILL",  # h=0
             "99 .",
         ])
         self.assertIn("99 ", text)
@@ -1900,15 +1901,15 @@ class TestBIOS(unittest.TestCase):
         """BLIT-GLYPH renders foreground pixels from a font bitmap."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
-            # Store an 8-byte glyph pattern at 0x10000
+            # Store an 8-byte glyph pattern at 0x28000
             # (addresses above BIOS ROM ~0x8100 to avoid corruption)
             # Row 0: 0xFF (all 8 bits set)
             # Rows 1-7: 0x00
-            "0xFF 0x10000 C!",
-            "0x00 0x10001 C!  0x00 0x10002 C!  0x00 0x10003 C!",
-            "0x00 0x10004 C!  0x00 0x10005 C!  0x00 0x10006 C!  0x00 0x10007 C!",
+            "0xFF 0x28000 C!",
+            "0x00 0x28001 C!  0x00 0x28002 C!  0x00 0x28003 C!",
+            "0x00 0x28004 C!  0x00 0x28005 C!  0x00 0x28006 C!  0x00 0x28007 C!",
             # Blit to pixel address 0x20000, stride=16, fg=0x07E0 (green)
-            "0x10000 0x20000 16 0x07E0 BLIT-GLYPH",
+            "0x28000 0x20000 16 0x07E0 BLIT-GLYPH",
             # Row 0 should have green pixels (all 8 set)
             "0x20000 W@ .",                    # first pixel of row 0
             "0x2000E W@ .",                    # last pixel of row 0 (col 7)
@@ -1934,10 +1935,10 @@ class TestBIOS(unittest.TestCase):
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
             # Write a known pattern: 2 bytes wide, 2 rows, stride=4
-            "0xAA 0x10000 C!  0xBB 0x10001 C!",  # row 0
-            "0xCC 0x10004 C!  0xDD 0x10005 C!",  # row 1 (stride=4)
+            "0xAA 0x28000 C!  0xBB 0x28001 C!",  # row 0
+            "0xCC 0x28004 C!  0xDD 0x28005 C!",  # row 1 (stride=4)
             # Copy to 0x20000
-            "0x10000 0x20000 4 2 2 VRAM-COPY",
+            "0x28000 0x20000 4 2 2 VRAM-COPY",
             # Read back
             "0x20000 C@ .",  # should be 0xAA = 170
             "0x20001 C@ .",  # should be 0xBB = 187
@@ -1953,8 +1954,8 @@ class TestBIOS(unittest.TestCase):
         """VRAM-COPY with w=0 or h=0 is a no-op."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
-            "0x10000 0x20000 16 0 5 VRAM-COPY",  # w=0
-            "0x10000 0x20000 16 5 0 VRAM-COPY",  # h=0
+            "0x28000 0x20000 16 0 5 VRAM-COPY",  # w=0
+            "0x28000 0x20000 16 5 0 VRAM-COPY",  # h=0
             "42 .",
         ])
         self.assertIn("42 ", text)
@@ -1964,14 +1965,14 @@ class TestBIOS(unittest.TestCase):
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
             # Fill 3 rows: row0=0x11, row1=0x22, row2=0x33, stride=4, w=2
-            "0x11 0x10000 C!  0x11 0x10001 C!",
-            "0x22 0x10004 C!  0x22 0x10005 C!",
-            "0x33 0x10008 C!  0x33 0x10009 C!",
-            # Copy row1+row2 (src=0x10004) over row0+row1 (dst=0x10000)
+            "0x11 0x28000 C!  0x11 0x28001 C!",
+            "0x22 0x28004 C!  0x22 0x28005 C!",
+            "0x33 0x28008 C!  0x33 0x28009 C!",
+            # Copy row1+row2 (src=0x28004) over row0+row1 (dst=0x28000)
             # This is dst < src → forward copy, should work fine
-            "0x10004 0x10000 4 2 2 VRAM-COPY",
-            "0x10000 C@ .",  # was 0x11, now should be 0x22 = 34
-            "0x10004 C@ .",  # was 0x22, now should be 0x33 = 51
+            "0x28004 0x28000 4 2 2 VRAM-COPY",
+            "0x28000 C@ .",  # was 0x11, now should be 0x22 = 34
+            "0x28004 C@ .",  # was 0x22, now should be 0x33 = 51
         ])
         self.assertIn("34 ", text)
         self.assertIn("51 ", text)
@@ -1983,13 +1984,13 @@ class TestBIOS(unittest.TestCase):
         # 'A' = 0x41 → offset 0x108, 'B' = 0x42 → offset 0x110
         # Place 0xFF in row 0 of each glyph so pixels appear.
         text = self._run_forth(sys, buf, [
-            # Store 2-char string "AB" at 0x10000
-            "65 0x10000 C!  66 0x10001 C!",
+            # Store 2-char string "AB" at 0x28000
+            "65 0x28000 C!  66 0x28001 C!",
             # Write glyph data for 'A' at 0x30108 and 'B' at 0x30110
             "0xFF 0x30108 C!",   # 'A' row 0 – all bits set
             "0xFF 0x30110 C!",   # 'B' row 0 – all bits set
             # BLIT-STRING ( c-addr len pixel-addr stride fg16 font-base -- )
-            "0x10000 2 0x20000 64 0x07E0 0x30000 BLIT-STRING",
+            "0x28000 2 0x20000 64 0x07E0 0x30000 BLIT-STRING",
             # Char 'A' glyph row 0 should have green pixels at 0x20000
             # Char 'B' starts at 0x20000 + 16 = 0x20010
             "0x20000 W@ .",
@@ -2005,7 +2006,7 @@ class TestBIOS(unittest.TestCase):
         """BLIT-STRING with len=0 is a no-op."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
-            "0x10000 0 0x20000 64 0xFFFF 0x30000 BLIT-STRING",
+            "0x28000 0 0x20000 64 0xFFFF 0x30000 BLIT-STRING",
             "88 .",
         ])
         self.assertIn("88 ", text)
@@ -5929,10 +5930,13 @@ class TestBIOSTACC(unittest.TestCase):
 
     def test_tacc_dictionary_tail_chain(self):
         """WOTS, AES's block-mode words, SHA-384, the storage unit words, the
-        QUIT callback, the string scan and the dictionary's code kind append
-        after the unchanged full-TACC dictionary tail."""
+        QUIT callback, the string scan, the dictionary's code kind, the token
+        replay and the boot's identity append after the unchanged full-TACC
+        dictionary tail."""
         labels = self._labels
         chain = (
+            ("d_boot_id", "d_token_replay"),
+            ("d_token_replay", "d_dict_machine_code_q"),
             ("d_dict_machine_code_q", "d_scan"),
             ("d_scan", "d_quit_xt_store"),
             ("d_quit_xt_store", "d_unit_disk_flush_gen_checked"),
@@ -5973,7 +5977,7 @@ class TestBIOSTACC(unittest.TestCase):
             ("d_caller_span_status", "d_entropy_ready"),
         )
         self.assertEqual(
-            labels["latest_entry"], labels["d_dict_machine_code_q"])
+            labels["latest_entry"], labels["d_boot_id"])
         for current, previous in chain:
             link = int.from_bytes(
                 self._code[labels[current]:labels[current] + 8],
@@ -5990,7 +5994,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 561)
+        self.assertEqual(len(seen), 563)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -6330,6 +6334,195 @@ class TestBIOSDictMachineCode(unittest.TestCase):
         self.assertRegex(text, r"\[BYTES\s+244\s+160\s+\]")
         self.assertRegex(text, r"\[TARGET\s+-1\s+\]")
         self.assertRegex(text, r"\[DEPTH\s+0\s+\]")
+
+
+class TestBIOSBootId(unittest.TestCase):
+    """BOOT-ID is the identity of what booted: this BIOS's code and the
+    first file it loaded.  shared/boot_identity.py computes the same cell,
+    and the hosted word (tests/simulator/test_boot_id.py) gives it."""
+
+    ASK = [
+        'CR ." [ID " BOOT-ID 32 RSHIFT . BOOT-ID 4294967295 AND . ." ]"',
+        'CR ." [AGAIN " BOOT-ID 32 RSHIFT . BOOT-ID 4294967295 AND . ." ]"',
+        'CR ." [DEPTH " DEPTH . ." ]"',
+    ]
+
+    def setUp(self):
+        self._bios_harness = TestBIOS(methodName="test_print_zero")
+        self._bios_harness.setUp()
+
+    def _identity(self, bios_code=None, files=()):
+        """Boot BIOS_CODE with FILES on its disk and return what BOOT-ID
+        gives, asked twice."""
+
+        harness = self._bios_harness
+        path = None
+        if files:
+            fs = MP64FS(total_sectors=8192)
+            fs.format()
+            for name, data in files:
+                fs.inject_file(name, data, ftype=FTYPE_FORTH)
+            with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+                path = f.name
+                fs.save(path)
+        try:
+            sys_obj = make_system(ram_kib=1024, storage_image=path)
+            buf = capture_uart(sys_obj)
+            sys_obj.load_binary(
+                0, harness.bios_code if bios_code is None else bios_code
+            )
+            harness._register_accel_hooks(sys_obj)
+            sys_obj.boot()
+            text = harness._run_forth(sys_obj, buf, self.ASK)
+        finally:
+            if path is not None:
+                os.unlink(path)
+        self.assertRegex(text, r"\[DEPTH\s+0\s+\]")
+        asked = []
+        for mark in ("ID", "AGAIN"):
+            high, low = re.search(
+                r"\[%s\s+(\d+)\s+(\d+)\s+\]" % mark, text
+            ).groups()
+            asked.append((int(high) << 32) | int(low))
+        self.assertEqual(asked[0], asked[1])
+        return asked[0]
+
+    def _code_and_labels(self):
+        from asm import assemble
+
+        labels = {}
+        with open(BIOS_PATH) as f:
+            source = f.read()
+        return bytearray(assemble(source, labels_out=labels)), labels
+
+    def test_before_any_file_it_is_the_bioss_own_code(self):
+        from shared.boot_identity import bios_code, boot_identity
+
+        code, labels = self._code_and_labels()
+        self.assertEqual(bytes(code[:labels["var_state"]]), bios_code())
+        self.assertEqual(self._identity(), boot_identity())
+
+    def test_one_changed_byte_of_bios_code_changes_it(self):
+        from shared.boot_identity import boot_identity
+
+        code, labels = self._code_and_labels()
+        # A letter of the name of a word this boot never looks for.
+        code[labels["d_token_replay"] + 9] ^= 0x01
+        changed = self._identity(bios_code=bytes(code))
+        self.assertNotEqual(changed, boot_identity())
+        self.assertEqual(
+            changed, boot_identity(bios=bytes(code[:labels["var_state"]]))
+        )
+        # The messages and the variables lie past the code and are not
+        # part of it.
+        code, labels = self._code_and_labels()
+        self.assertGreater(labels["str_token_bad"], labels["var_state"])
+        code[labels["str_token_bad"] + 1] ^= 0x20
+        self.assertEqual(self._identity(bios_code=bytes(code)), boot_identity())
+
+    def test_the_first_file_loaded_is_part_of_it(self):
+        from shared.boot_identity import boot_identity
+
+        first = b": FIRST-FILE 77 ;\n\\ nine odd bytes\n"
+        self.assertTrue(len(first) % 8)
+        booted = self._identity(files=(("first.f", first),))
+        self.assertEqual(booted, boot_identity(first))
+        self.assertNotEqual(booted, boot_identity())
+        # One byte of the file, and only the file loaded first, counts.
+        other = first.replace(b"77", b"78")
+        self.assertEqual(
+            self._identity(files=(("first.f", other),)), boot_identity(other)
+        )
+        self.assertNotEqual(boot_identity(other), booted)
+        self.assertEqual(
+            self._identity(
+                files=(("first.f", first), ("second.f", b": SECOND 1 ;\n"))
+            ),
+            booted,
+        )
+
+
+class TestBIOSTokenReplay(unittest.TestCase):
+    """TOKEN-REPLAY runs a recorded token stream through the interpreter.
+
+    The streams and what each prints are in tests/token_streams.py; the
+    hosted word takes the same ones in
+    tests/simulator/test_token_replay.py.
+    """
+
+    REPORT = (
+        'CR ." status=" EVAL-STATUS @ . ." depth=" DEPTH . '
+        '." line=" EVAL-LINE @ .'
+    )
+
+    def setUp(self):
+        self._bios_harness = TestBIOS(methodName="test_print_zero")
+        self._bios_harness.setUp()
+
+    def _replay(self, records, slots, before=()):
+        sys_obj, buf = self._bios_harness._boot_bios()
+        lines = list(before) + ["CREATE TS"]
+        for start in range(0, len(records), 24):
+            lines.append(
+                " ".join(f"{byte} C," for byte in records[start:start + 24])
+            )
+        lines += [
+            f"CREATE TT {8 * max(slots, 1)} ALLOT",
+            # The mark keeps the echo of this line apart from its output.
+            f'CR ." [REPLAY]" TS {len(records)} TT {slots} TOKEN-REPLAY',
+            self.REPORT,
+        ]
+        text = self._bios_harness._run_forth(
+            sys_obj, buf, lines, max_steps=20_000_000
+        )
+        self.assertNotIn("Megapad-64 Forth BIOS", text)
+        output = text.rsplit("[REPLAY]", 1)[1]
+        printed, _, rest = output.partition("> CR")
+        report = rest.rsplit("status=", 1)[1].split("ok")[0]
+        printed = printed.rsplit(" ok", 1)[0]
+        return " ".join((printed + " status=" + report).split())
+
+    def test_streams_replay_as_the_hosted_word_does(self):
+        from tests.token_streams import STREAMS
+
+        for name, (make, expected) in sorted(STREAMS.items()):
+            with self.subTest(stream=name):
+                records, slots = make()
+                self.assertEqual(self._replay(records, slots), expected)
+
+    def test_a_word_that_unlinks_the_dictionary_ends_the_replay(self):
+        from shared.token_form import TokenWriter
+
+        writer = TokenWriter()
+        writer.word("here", b"HERE")
+        writer.word("latest", b"LATEST")
+        writer.word("rollback", b"DICT-ROLLBACK")
+        writer.number(5)
+        writer.word("dot", b".")
+        text = self._replay(writer.finish(), writer.slots)
+        self.assertEqual(
+            text,
+            "token stream does not match this system status=7 depth=0 line=0",
+        )
+
+    def test_a_replay_nested_under_a_failed_evaluation_runs_nothing(self):
+        from shared.token_form import TokenWriter
+
+        writer = TokenWriter()
+        writer.number(7)
+        writer.word("dot", b".")
+        records = writer.finish()
+        sys_obj, buf = self._bios_harness._boot_bios()
+        lines = ["CREATE TS", " ".join(f"{byte} C," for byte in records),
+                 "CREATE TT 32 ALLOT",
+                 f": NESTED  1 EVAL-STATUS !  TS {len(records)} TT 4 TOKEN-REPLAY ;",
+                 "CREATE NB 6 ALLOT  78 NB C!  69 NB 1+ C!  83 NB 2 + C!",
+                 "84 NB 3 + C!  69 NB 4 + C!  68 NB 5 + C!",
+                 'CR ." [RUN]" NB 6 EVALUATE CR ." [DEPTH " DEPTH . ." ]"']
+        text = self._bios_harness._run_forth(sys_obj, buf, lines)
+        ran = text.rsplit("[RUN]", 1)[1]
+        self.assertNotIn("7", ran.split("[DEPTH")[0])
+        self.assertRegex(ran, r"\[DEPTH\s+0\s+\]")
 
 
 class TestBIOSQuitCallback(unittest.TestCase):
@@ -16809,7 +17002,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 561)
+        self.assertEqual(len(seen), 563)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -18433,12 +18626,14 @@ class TestBIOSEntropyFill(unittest.TestCase):
     def test_dictionary_append_preserves_every_older_link(self):
         """WOTS, then AES's block-mode words, then SHA-384, then the storage
         unit words, then the QUIT callback, then the string scan, then the
-        dictionary's code kind append without changing any older dictionary
-        link."""
+        dictionary's code kind, then the token replay, then the boot's
+        identity append without changing any older dictionary link."""
         labels = self._bios_labels
         self.assertEqual(
-            labels["latest_entry"], labels["d_dict_machine_code_q"])
+            labels["latest_entry"], labels["d_boot_id"])
         for current, previous in (
+            ("d_boot_id", "d_token_replay"),
+            ("d_token_replay", "d_dict_machine_code_q"),
             ("d_dict_machine_code_q", "d_scan"),
             ("d_scan", "d_quit_xt_store"),
             ("d_disk_units", "d_sha384_final"),
@@ -45516,6 +45711,139 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
             r"\[NX-COLD\s+-1\s+1\s+0\s+41\s+32\s+-1\s+-1\s+-1\s+"
             r"4242\s+-1\s+0\s+0\s+0\s+0\s+\]",
         )
+
+
+class TestKDOSTokenModules(_KDOSTestBase):
+    """KDOS loads modules from token files.
+
+    The cases are in tests/token_module_cases.py: what each volume holds,
+    what is typed, and what the output must show.  The hosted simulator
+    runs the same ones in tests/simulator/test_kdos_token_modules.py.
+    """
+
+    def _run_volume(self, files, lines):
+        from tests.token_module_cases import volume
+
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+        try:
+            volume(files).save(path)
+            return self._run_kdos(lines, storage_image=path)
+        finally:
+            os.unlink(path)
+
+    def test_the_cases_run_as_they_do_in_the_simulator(self):
+        from tests.token_module_cases import CASES, failures
+
+        for name, case in sorted(CASES.items()):
+            with self.subTest(case=name):
+                self.assertEqual(
+                    failures(case, self._run_volume(case.files, case.lines)), []
+                )
+
+    def test_a_reset_that_keeps_memory_accepts_the_same_token_file_again(self):
+        """BOOT-ID is hashed again at each boot from the BIOS's code as it
+        then stands in memory, and from KDOS as the BIOS loads it again.  A
+        session writes nothing below the BIOS's first variable, so the
+        second boot gives the same identity and uses the same token file.
+        KDOS is part of that identity: a file built for the BIOS alone is
+        refused by a machine that booted KDOS from disk, both times."""
+        from asm import assemble
+        from shared.boot_identity import boot_identity
+        from tests.token_module_cases import (
+            OTHER_SYSTEM, TOKENS_ON, load, show, tokens, value,
+        )
+
+        with open(os.path.join(PROJECT_ROOT, "kdos.f"), "rb") as f:
+            kdos = f.read()
+        identity = boot_identity(kdos)
+        fs = MP64FS(total_sectors=8192)
+        fs.format()
+        fs.inject_file("kdos.f", kdos, ftype=FTYPE_FORTH)
+        fs.inject_file(
+            "a.ft", tokens("a", 11, boot_id=identity), ftype=FTYPE_FORTH
+        )
+        fs.inject_file(
+            "c.ft", tokens("c", 30, boot_id=boot_identity()), ftype=FTYPE_FORTH
+        )
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+        fs.save(path)
+        labels = {}
+        with open(BIOS_PATH) as f:
+            code = bytes(assemble(f.read(), labels_out=labels))
+        below = labels["var_state"]
+        lines = [
+            'CR ." [ID " BOOT-ID 32 RSHIFT . BOOT-ID 4294967295 AND . ." ]"',
+            TOKENS_ON, load("a.f"), value("A"), load("c.f"), *show("C"),
+        ]
+        shown = rf"\[ID {identity >> 32} {identity & 0xFFFFFFFF} \]"
+
+        def session(sys_obj, buf):
+            """Type LINES once the machine waits, and run until it waits
+            again with nothing left to type."""
+            data = ("\n".join(lines) + "\n").encode()
+            start, pos, total = len(buf), 0, 0
+            while total < 400_000_000 and not sys_obj.cpu.halted:
+                if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
+                    if pos >= len(data):
+                        break
+                    chunk = _next_line_chunk(data, pos)
+                    sys_obj.uart.inject_input(chunk)
+                    pos += len(chunk)
+                    continue
+                batch = sys_obj.run_batch(min(100_000, 400_000_000 - total))
+                if batch == 0 and sys_obj.cpu.idle:
+                    break
+                total += max(batch, 1)
+            return " ".join(uart_text(buf[start:]).split())
+
+        try:
+            sys_obj = make_system(
+                ram_kib=1024, storage_image=path,
+                ext_mem_mib=KDOS_TEST_EXT_MEM_MIB,
+            )
+            buf = capture_uart(sys_obj)
+            sys_obj.load_binary(0, code)
+            sys_obj.boot()
+            first = session(sys_obj, buf)
+            self.assertEqual(bytes(sys_obj.cpu.mem[:below]), code[:below])
+            sys_obj.boot()  # a reset: the processor starts again, memory stays
+            second = session(sys_obj, buf)
+            self.assertEqual(bytes(sys_obj.cpu.mem[:below]), code[:below])
+        finally:
+            os.unlink(path)
+        for text in (first, second):
+            self.assertIn("KDOS", text)
+            self.assertRegex(text, shown)
+            self.assertRegex(text, r"\[THROW 0 \]")
+            self.assertRegex(text, r"\[A 11 \]")
+            self.assertEqual(text.count("[load-a]"), 1)
+            self.assertNotIn("a.ft cannot be loaded", text)
+            self.assertIn(OTHER_SYSTEM, text)
+            self.assertIn("Token file c.ft cannot be loaded", text)
+            self.assertRegex(text, r"\[THROW 7 \]")
+            self.assertRegex(text, r"\[DEF-C 0 \]")
+
+    def test_files_the_simulator_recorded_load_on_the_bios(self):
+        from tests.token_module_cases import (
+            RECORDED_LINES,
+            RECORDED_SHOWS,
+            RECORDED_SOURCES,
+            TOKENS_ON,
+            Case,
+            failures,
+            recorded_volume,
+        )
+
+        shows = Case(files={}, lines=[], must=list(RECORDED_SHOWS))
+        from_source = self._run_volume(RECORDED_SOURCES, RECORDED_LINES)
+        self.assertEqual(failures(shows, from_source), [])
+        from_tokens = self._run_volume(
+            recorded_volume(RECORDED_SOURCES, "top.f"),
+            [TOKENS_ON, *RECORDED_LINES],
+        )
+        self.assertEqual(failures(shows, from_tokens), [])
 
 
 class TestModuleProvidedGuard(_KDOSTestBase):

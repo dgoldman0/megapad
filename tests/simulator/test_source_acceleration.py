@@ -336,14 +336,16 @@ def test_checked_line_overlay_requires_the_exact_guarded_evaluator() -> None:
     runtime = _load_module_system()
     guarded = runtime.find("_EVALUATE-GUARDED")
     assert guarded is not None
-    bios_evaluate = guarded.implementation.operations[3].value
-    # The same EVALUATE-CHECKED text over a guarded word that still runs the
-    # BIOS primitive under CATCH but no longer unwinds the evaluator.  The
-    # overlay stands for both bodies, so it must not install.
+    bios_evaluate = guarded.implementation.operations[0].value
+    # The same EVALUATE-CHECKED and _EVALUATE-GUARDED text over a guard that
+    # still runs the BIOS primitive under CATCH but no longer unwinds the
+    # evaluator.  The overlay stands for all three bodies, so it must not
+    # install.
     runtime.evaluate(
         (
-            f": _EVALUATE-GUARDED  EVAL-DEPTH @ >R [ {bios_evaluate} ] LITERAL "
-            "CATCH R> DROP ;\n"
+            ": _EVALUATION-GUARDED  EVAL-DEPTH @ >R CATCH R> DROP ;\n"
+            f": _EVALUATE-GUARDED  [ {bios_evaluate} ] LITERAL "
+            "_EVALUATION-GUARDED ;\n"
             ": EVALUATE-CHECKED  _EVALUATE-GUARDED DUP IF EVAL-THROW ! 2DROP "
             "EVAL-S-THROW DUP EVAL-STATUS ! EXIT THEN DROP EVAL-STATUS @ ;\n"
         ).encode("ascii")

@@ -46,16 +46,16 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-mp64fs-load-5745-6218.f"
+    / "kdos-mp64fs-load-5745-6486.f"
 )
 
 FIRST_LINE = 5745
-LAST_LINE = 6218
-SLICE_BYTES = 18_664
+LAST_LINE = 6486
+SLICE_BYTES = 30_015
 SLICE_SHA256 = (
-    "b0ddc76ade6a0a8157d4478c685096e2f2d6a202dd5f9cf8a67872a39d35a0e2"
+    "bd01a2e2ab9083e97f986be1b42a3d197091121151b22b28620e28627bdeae19"
 )
-SLICE_GIT_BLOB = "a82b8a12d8531367401b7e35818b905ce7bc0d64"
+SLICE_GIT_BLOB = "9f4195a6c9b62030b599a34e51e329b4294dd8f2"
 
 # Exact defining-word/name order in kdos.f.  Keeping the defining word in
 # the ledger makes source-layout changes visible even if a replacement happens
@@ -116,9 +116,19 @@ SOURCE_LEDGER = (
     (":", b"MODULE-SOURCE!"),
     ("CREATE", b"_LD-FILE"),
     (":", b"_LD-PATH"),
+    ("VARIABLE", b"MODULE-TOKENS"),
+    ("CREATE", b"_LD-TNAME"),
+    ("VARIABLE", b"_LD-TNAME-U"),
+    ("VARIABLE", b"_LD-NAME-U"),
+    ("VARIABLE", b"_LD-TOKENS-CHOSEN"),
+    (":", b"_LD-NAME-RESOLVE"),
     (":", b"_LD-RESOLVE"),
     (":", b"_LD-READ"),
     (":", b"_LD-FOUND?"),
+    ("CREATE", b"_LD-NAMES"),
+    (":", b"_LD-NAME-SLOT"),
+    (":", b"_LD-NAME-KEEP"),
+    (":", b"_LD-NAME"),
     ("CREATE", b"_LD-FROM-STK"),
     ("VARIABLE", b"_LD-FROM-SP"),
     (":", b"_LD-FROM-SAVE"),
@@ -129,6 +139,7 @@ SOURCE_LEDGER = (
     ("CONSTANT", b"EVAL-S-DEPTH"),
     ("CONSTANT", b"EVAL-S-UNFINISHED"),
     ("CONSTANT", b"EVAL-S-THROW"),
+    (":", b"_EVALUATION-GUARDED"),
     (":", b"_EVALUATE-GUARDED"),
     (":", b"EVALUATE"),
     (":", b"EVALUATE-CHECKED"),
@@ -144,6 +155,37 @@ SOURCE_LEDGER = (
     (":", b"SOURCE-EVALUATE-CHECKED"),
     (":", b"_LD-STATUS-THROW"),
     (":", b"_LD-WALK"),
+    ("CONSTANT", b"EVAL-S-TOKENS"),
+    ("CONSTANT", b"EVAL-S-MISMATCH"),
+    ("CONSTANT", b"/TOKEN-HEADER"),
+    (":", b"TKF.HEADER"),
+    (":", b"TKF.SLOTS"),
+    (":", b"TKF.RECORDS"),
+    (":", b"TKF.SOURCE"),
+    (":", b"TKF.FLAGS"),
+    (":", b"TKF.BOOT-ID"),
+    ("CONSTANT", b"TKF-F-SOURCE-BESIDE"),
+    (":", b"_TEXT-ID"),
+    (":", b"TKF.TEXT-ID"),
+    (":", b"TKF.ID"),
+    ("CREATE", b"_TKF-MAGIC"),
+    (":", b"TOKEN-FILE?"),
+    ("VARIABLE", b"_TKF-A"),
+    ("VARIABLE", b"_TKF-U"),
+    (":", b"_TKF-VALID?"),
+    (":", b"_TKF-ARGS"),
+    (":", b"TOKENS-CURRENT?"),
+    (":", b"TOKEN-EVALUATE-CHECKED"),
+    (":", b"_LD-TOKENS-NAMED"),
+    ("CREATE", b"_LD-SRC-FILE"),
+    ("VARIABLE", b"_LD-SRC-BUF"),
+    ("VARIABLE", b"_LD-SRC-U"),
+    (":", b"_LD-SIBLING"),
+    (":", b"_LD-SRC-READ"),
+    (":", b"_LD-SOURCE-BESIDE"),
+    (":", b"_LD-TOKENS?"),
+    (":", b"_LD-WALK-TOKENS"),
+    (":", b"_LD-TOKENS-MODULE"),
     (":", b"_LD-RELEASE"),
     (":", b"_LD-FAIL"),
     (":", b"_LD-GUARDED"),
@@ -168,6 +210,10 @@ CONSTANTS = (
     ("EVAL-S-DEPTH", 3),
     ("EVAL-S-UNFINISHED", 4),
     ("EVAL-S-THROW", 5),
+    ("EVAL-S-TOKENS", 6),
+    ("EVAL-S-MISMATCH", 7),
+    ("/TOKEN-HEADER", 64),
+    ("TKF-F-SOURCE-BESIDE", 1),
 )
 
 VARIABLES = (
@@ -188,6 +234,14 @@ VARIABLES = (
     "_SEC-RAW-LEN",
     "_SEC-EVAL-LEN",
     "_SEC-LINE",
+    "MODULE-TOKENS",
+    "_LD-TNAME-U",
+    "_LD-NAME-U",
+    "_LD-TOKENS-CHOSEN",
+    "_TKF-A",
+    "_TKF-U",
+    "_LD-SRC-BUF",
+    "_LD-SRC-U",
 )
 
 
@@ -442,7 +496,7 @@ def _select_source(runtime: MegaForthRuntime, source: _HostSource) -> None:
 def test_load_slice_is_exact_and_publishes_complete_source_ledger() -> None:
     runtime = _load_mp64fs_load()
 
-    assert len(SOURCE_LEDGER) == 90
+    assert len(SOURCE_LEDGER) == 132
     assert all(runtime.find(name) is not None for name in DEFINITIONS)
     assert tuple(_constant(runtime, name) for name, _value in CONSTANTS) == (
         tuple(value for _name, value in CONSTANTS)
@@ -455,7 +509,9 @@ def test_load_slice_is_exact_and_publishes_complete_source_ledger() -> None:
         ("_RP-COMP", "_RP-I", 24),
         ("FS-MODULE-SOURCE", "MODULE-SOURCE", 40),
         ("_LD-FILE", "_LD-PATH", 40),
+        ("_LD-NAMES", "_LD-NAME-SLOT", 128 * 16),
         ("_LD-FROM-STK", "_LD-FROM-SP", 16 * 16),
+        ("_LD-SRC-FILE", "_LD-SRC-BUF", 40),
     )
     for name, following, size in sized_bodies:
         word = runtime.find(name)
@@ -1187,7 +1243,7 @@ def test_the_bios_evaluate_itself_still_leaves_its_frame_under_a_throw() -> None
     guarded = runtime.find("_EVALUATE-GUARDED")
     assert guarded is not None
     bios_evaluate = runtime.dictionary.resolve(
-        guarded.implementation.operations[3].value
+        guarded.implementation.operations[0].value
     )
     shadow = runtime.find("EVALUATE")
     assert shadow is not None and shadow is not bios_evaluate
@@ -1709,6 +1765,8 @@ def test_builtin_source_resolves_the_path_it_is_given() -> None:
         record,
         builtin,
     ) == (MS_E_NOT_FOUND,)
-    assert _variable(runtime, "CWD") == 7
+    # A path that names no file leaves the directory it was resolved from,
+    # though the walk went into pkg: the loader may ask for another name.
+    assert _variable(runtime, "CWD") == 0xFF
     assert runtime.drain_uart_output() == b""
     assert runtime.main_context.returns.snapshot() == ()

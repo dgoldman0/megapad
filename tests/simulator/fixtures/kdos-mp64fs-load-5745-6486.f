@@ -210,8 +210,12 @@ VARIABLE _FMS-FILE
     DROP _FMS-FILE ! _PATH!
     FS-ENSURE
     FS-OK @ 0= IF MS-E-NO-FILESYSTEM EXIT THEN
+    \ A path that names no file leaves the current directory as it was,
+    \ so that the loader can ask for another name from the same place.
+    CWD @ >R
     _RESOLVE-PATH
-    FIND-BY-NAME DUP -1 = IF DROP MS-E-NOT-FOUND EXIT THEN
+    FIND-BY-NAME DUP -1 = IF DROP R> CWD ! MS-E-NOT-FOUND EXIT THEN
+    R> DROP
     DUP _FMS-FILE @ MF.HANDLE !
     DUP _LD-SLOT-BYTES _FMS-FILE @ MF.RESERVE !
     DUP DIRENT                          ( slot de )
@@ -245,9 +249,43 @@ CREATE _LD-FILE /MODULE-FILE ALLOT
     BEGIN
         DUP 127 < IF 2DUP + C@ 0<> ELSE FALSE THEN
     WHILE 1+ REPEAT ;
-: _LD-RESOLVE  ( -- ior )
+\ MODULE-TOKENS  Nonzero: LOAD and REQUIRE read a file's token form when
+\ the file has one beside it, named as the file with a t added (util.f,
+\ util.ft).  Zero, as KDOS starts: every file is read as it is named.
+VARIABLE MODULE-TOKENS
+0 MODULE-TOKENS !
+\ The path as the loader parsed it, with room for the t, and the bytes of
+\ it that named the file found.
+CREATE _LD-TNAME 128 ALLOT
+VARIABLE _LD-TNAME-U
+VARIABLE _LD-NAME-U
+VARIABLE _LD-TOKENS-CHOSEN
+
+\ _LD-NAME-RESOLVE ( u -- ior )  Resolve the first U bytes of _LD-TNAME.
+: _LD-NAME-RESOLVE  ( u -- ior )
+    DUP _LD-NAME-U !
     _LD-FILE /MODULE-FILE 0 FILL
-    _LD-PATH _LD-FILE MODULE-SOURCE @ DUP MS.RESOLVE @ EXECUTE ;
+    _LD-TNAME SWAP _LD-FILE MODULE-SOURCE @ DUP MS.RESOLVE @ EXECUTE ;
+
+\ _LD-RESOLVE ( -- ior )  Find the file to read for the path the loader
+\ parsed.  With MODULE-TOKENS set the path's token form is looked for
+\ first, by the path with a t added, and the path itself when there is
+\ none; a source leaves its directory as it was when a path names no
+\ file.  The file found gives the module its identity in the registry
+\ of loaded files, so a repeated REQUIRE costs one resolution either way.
+: _LD-RESOLVE  ( -- ior )
+    0 _LD-TOKENS-CHOSEN !
+    _LD-PATH DUP _LD-TNAME-U !  _LD-TNAME SWAP CMOVE
+    \ Token forms asked for, and room in the path for the t.
+    MODULE-TOKENS @ 0<> _LD-TNAME-U @ 127 < AND IF
+        116 _LD-TNAME _LD-TNAME-U @ + C!
+        _LD-TNAME-U @ 1+ _LD-NAME-RESOLVE
+        DUP MS-E-NOT-FOUND <> IF
+            DUP 0= IF -1 _LD-TOKENS-CHOSEN ! THEN EXIT
+        THEN
+        DROP
+    THEN
+    _LD-TNAME-U @ _LD-NAME-RESOLVE ;
 : _LD-READ  ( -- )
     LD-BUF @ _LD-FILE MODULE-SOURCE @ DUP MS.READ @ EXECUTE THROW ;
 \ _LD-FOUND? ( ior module? -- flag )  True when RESOLVE found the file.
@@ -261,6 +299,18 @@ CREATE _LD-FILE /MODULE-FILE ALLOT
     OVER MS-E-NOT-FOUND <> IF DROP THROW THEN
     NIP IF ."  Module not found: " ELSE ."  Not found: " THEN
     PATHBUF .ZSTR CR FALSE ;
+
+\ Each loader frame keeps the name its file was found by, so that a file
+\ which cannot be loaded is named after the loads nested in it have used
+\ the path buffers again.  A slot is a count byte and up to 127 bytes.
+CREATE _LD-NAMES _LD-MAXLVL 128 * ALLOT
+: _LD-NAME-SLOT  ( -- addr )
+    _LD-SP @ _LD-FRAME / 1- 128 * _LD-NAMES + ;
+\ _LD-NAME-KEEP ( -- )  Note the name RESOLVE found for the frame just
+\ saved.
+: _LD-NAME-KEEP  ( -- )
+    _LD-TNAME _LD-NAME-U @ _LD-NAME-SLOT 2DUP C! 1+ SWAP CMOVE ;
+: _LD-NAME  ( -- c-addr u )  _LD-NAME-SLOT COUNT ;
 
 \ Each LOAD and REQUIRE keeps the source and directory it started from,
 \ and gives the directory back to that source when it ends.  A source the
@@ -302,17 +352,24 @@ VARIABLE _LD-FROM-SP
 
 \ BIOS EVALUATE keeps each caller's input frame outside the return stack, so
 \ a THROW that crosses it leaves the frame, and the evaluator's depth, in
-\ place.  BIOS owns complete input-frame restoration through
-\ EVALUATOR-UNWIND; KDOS owns CATCH/HANDLER semantics, and so it owns giving
-\ the evaluator its depth back when an exception passes.  This word does that
-\ once for both evaluator words below: it notes the depth, runs BIOS EVALUATE
-\ under CATCH, and on an exception reconstructs every abandoned input frame
-\ down to the depth it noted.  CATCH has restored addr/len beneath the code.
-: _EVALUATE-GUARDED  ( i*x addr len -- j*x 0 | i*x addr len exception )
+\ place, and BIOS TOKEN-REPLAY keeps its frame the same way.  BIOS owns
+\ complete input-frame restoration through EVALUATOR-UNWIND; KDOS owns
+\ CATCH/HANDLER semantics, and so it owns giving the evaluator its depth
+\ back when an exception passes.  _EVALUATION-GUARDED does that once, for
+\ every word that runs one of the two BIOS evaluators: it notes the depth,
+\ runs the evaluator XT names under CATCH, and on an exception reconstructs
+\ every abandoned input frame down to the depth it noted.  CATCH has
+\ restored the evaluator's arguments beneath the code.
+: _EVALUATION-GUARDED  ( i*x xt -- j*x 0 | i*x exception )
     EVAL-DEPTH @ >R
-    ['] EVALUATE CATCH
+    CATCH
     DUP IF R@ EVALUATOR-UNWIND THEN
     R> DROP ;
+
+\ _EVALUATE-GUARDED is that guard around BIOS EVALUATE.  It takes the BIOS
+\ word's execution token here, before KDOS shadows the name.
+: _EVALUATE-GUARDED  ( i*x addr len -- j*x 0 | i*x addr len exception )
+    ['] EVALUATE _EVALUATION-GUARDED ;
 
 \ From this point onward KDOS deliberately shadows the BIOS entries EVALUATE
 \ and EVALUATE-CHECKED with words of the same public names.
@@ -415,6 +472,217 @@ VARIABLE _SEC-LINE
     REPEAT
     EVALUATE-FINISH _LD-STATUS-THROW ;
 
+\ ── Token form of a source file ─────────────────────────────────────
+\
+\ A token file is what the interpreter did with a source file, recorded:
+\ the words it found, the numbers, and the text each parsing word took.
+\ BIOS TOKEN-REPLAY runs the record through the interpreter's own steps,
+\ so the dictionary that results is the one the source builds, without
+\ splitting text into tokens and with one search for each name.
+\
+\ The file is a header and the records.  TOKEN-REPLAY keeps the words it
+\ has found in a table of cells, which is allocated for the replay:
+\   +0   "MFTOKEN1"
+\   +8   bytes before the records, 4 bytes      +12  cells in the table, 4
+\   +16  bytes of records, 8                    +24  bytes of the source, 8
+\   +32  CRC-32 of the source, 4                +36  CRC-32 of the records, 4
+\   +40  lines in the source, 4                 +44  bytes of module name, 2
+\   +46  flags, 2                               +48  a system's BOOT-ID, 8
+\   +64  the module name its source PROVIDES
+\
+\ The cell at +48 is BIOS BOOT-ID of the system the file was built for:
+\ the identity of that system's BIOS and of its KDOS.  Flag 1 says that
+\ the file's source ships beside it, under the file's name without its
+\ last letter.  A file with no records only names its module: it stands
+\ on a volume for a module that is loaded before the volume is mounted,
+\ so that a REQUIRE of its path finds it loaded.
+6 CONSTANT EVAL-S-TOKENS
+7 CONSTANT EVAL-S-MISMATCH
+
+64 CONSTANT /TOKEN-HEADER
+: TKF.HEADER   ( addr -- u )  8 + L@ ;
+: TKF.SLOTS    ( addr -- u )  12 + L@ ;
+: TKF.RECORDS  ( addr -- u )  16 + @ ;
+: TKF.SOURCE   ( addr -- u )  24 + @ ;
+: TKF.FLAGS    ( addr -- u )  46 + W@ ;
+: TKF.BOOT-ID  ( addr -- u )  48 + @ ;
+1 CONSTANT TKF-F-SOURCE-BESIDE
+
+\ One source text is told from another by its CRC-32 and its length, held
+\ in one cell.  _TEXT-ID gives the cell for a text in memory, and
+\ TKF.TEXT-ID gives it for the source a token file was recorded from, out
+\ of the file's header.
+: _TEXT-ID  ( addr len -- id )
+    DUP >R CRC32-IEEE-BUF 32 LSHIFT R> XOR ;
+: TKF.TEXT-ID  ( addr -- id )  DUP 32 + L@ 32 LSHIFT SWAP TKF.SOURCE XOR ;
+: TKF.ID       ( addr -- id-addr id-len )  DUP /TOKEN-HEADER + SWAP 44 + W@ ;
+
+CREATE _TKF-MAGIC  77 C, 70 C, 84 C, 79 C, 75 C, 69 C, 78 C, 49 C,
+
+\ TOKEN-FILE? ( addr len -- flag )  True when the bytes begin as a token
+\ file does.
+: TOKEN-FILE?  ( addr len -- flag )
+    /TOKEN-HEADER U< IF DROP FALSE EXIT THEN
+    8 _TKF-MAGIC 8 COMPARE 0= ;
+
+\ _TKF-VALID? ( addr len -- flag )  True when the header's sizes account
+\ for exactly LEN bytes, so the records lie inside them.
+VARIABLE _TKF-A
+VARIABLE _TKF-U
+: _TKF-VALID?  ( addr len -- flag )
+    _TKF-U ! _TKF-A !
+    _TKF-A @ _TKF-U @ TOKEN-FILE? 0= IF FALSE EXIT THEN
+    _TKF-A @ TKF.HEADER
+    DUP /TOKEN-HEADER U< IF DROP FALSE EXIT THEN
+    DUP 7 AND IF DROP FALSE EXIT THEN
+    DUP _TKF-U @ U> IF DROP FALSE EXIT THEN
+    _TKF-A @ 44 + W@ /TOKEN-HEADER + OVER U> IF DROP FALSE EXIT THEN
+    _TKF-U @ SWAP -                         ( rest )
+    _TKF-A @ TKF.RECORDS = ;
+
+\ _TKF-ARGS ( addr table -- rec-addr rec-len table slots )
+: _TKF-ARGS  ( addr table -- rec-addr rec-len table slots )
+    >R DUP DUP TKF.HEADER + OVER TKF.RECORDS ROT TKF.SLOTS R> SWAP ;
+
+\ TOKENS-CURRENT? ( addr -- flag )  The staleness rule, stated here and
+\ nowhere else: the token file at ADDR was built for this system.  Its
+\ header holds the BOOT-ID of the system it was built for, and the BIOS
+\ gives this system's.  Where the file's source ships beside it the
+\ loader asks one thing more, that the source is the one the file was
+\ recorded from (_LD-TOKENS?).  Nothing else enters: not the files loaded
+\ before this one, nor their order.
+: TOKENS-CURRENT?  ( addr -- flag )
+    TKF.BOOT-ID BOOT-ID = ;
+
+\ TOKEN-EVALUATE-CHECKED ( i*x addr len -- j*x status )
+\   Run a token file held in memory, as SOURCE-EVALUATE-CHECKED runs a
+\   source buffer: the same statuses, the same data-stack effects, and the
+\   same check that nothing is left unfinished.  The table lives in an
+\   allocation of its own for as long as the replay runs, and nothing of
+\   this word's stays on the data stack meanwhile.  A buffer that is not a
+\   whole token file, or holds no records, is status 6.  A file that was
+\   built for another system is status 7 and runs nothing: nothing stands
+\   in its place here, and the caller names the file.  A table that
+\   cannot be allocated throws.
+: TOKEN-EVALUATE-CHECKED  ( i*x addr len -- j*x status )
+    2DUP _TKF-VALID? 0= IF
+        2DROP EVAL-S-TOKENS DUP EVAL-STATUS ! EXIT
+    THEN
+    DROP
+    DUP TKF.RECORDS 0= IF
+        DROP EVAL-S-TOKENS DUP EVAL-STATUS ! EXIT
+    THEN
+    DUP TOKENS-CURRENT? 0= IF
+        DROP
+        ."  Token form recorded on another system:"
+        ."  this volume was built for another system" CR
+        EVAL-S-MISMATCH DUP EVAL-STATUS ! EXIT
+    THEN
+    DUP TKF.SLOTS 1 MAX CELLS ALLOCATE THROW
+    DUP >R _TKF-ARGS
+    ['] TOKEN-REPLAY _EVALUATION-GUARDED
+    R> FREE
+    DUP IF
+        EVAL-THROW ! 2DROP 2DROP
+        EVAL-S-THROW DUP EVAL-STATUS !
+        EXIT
+    THEN
+    DROP EVAL-STATUS @
+    DUP EVAL-S-OK <> IF EXIT THEN DROP
+    EVALUATE-FINISH ;
+
+: _LD-TOKENS-NAMED  ( -- )  ."  Token file " _LD-NAME TYPE ;
+
+\ Where a token file's source ships beside it, the file is also checked
+\ against that source, and a file that is stale either way gives way to
+\ the source.  The source is read into a buffer of its own, which then
+\ takes the place of the token file's or is given back.
+CREATE _LD-SRC-FILE /MODULE-FILE ALLOT
+VARIABLE _LD-SRC-BUF
+VARIABLE _LD-SRC-U
+
+\ _LD-SIBLING ( -- c-addr u )  The source's name in the folder the token
+\ file was found in: the file's own name without its last letter.
+: _LD-SIBLING  ( -- c-addr u )
+    _LD-NAME 1-
+    2DUP + >R
+    BEGIN
+        DUP 0> IF 2DUP + 1- C@ 47 <> ELSE FALSE THEN
+    WHILE 1- REPEAT
+    + R> OVER - ;
+
+: _LD-SRC-READ  ( -- id )
+    _LD-SRC-BUF @ _LD-SRC-FILE MODULE-SOURCE @ DUP MS.READ @ EXECUTE THROW
+    _LD-SRC-BUF @ _LD-SRC-U @ _TEXT-ID ;
+
+\ _LD-SOURCE-BESIDE ( -- id true | false )  Read the source beside the
+\ token file and give its identity; false when no such file is there.
+: _LD-SOURCE-BESIDE  ( -- id true | false )
+    _LD-NAME NIP 2 < IF FALSE EXIT THEN
+    _LD-SRC-FILE /MODULE-FILE 0 FILL
+    _LD-SIBLING _LD-SRC-FILE MODULE-SOURCE @ DUP MS.RESOLVE @ EXECUTE
+    DUP MS-E-NOT-FOUND = IF DROP FALSE EXIT THEN
+    THROW
+    _LD-SRC-FILE MF.USED @ _LD-SRC-U !
+    _LD-SRC-FILE MF.RESERVE @ 1 MAX ALLOCATE THROW _LD-SRC-BUF !
+    ['] _LD-SRC-READ CATCH ?DUP IF _LD-SRC-BUF @ FREE THROW THEN
+    TRUE ;
+
+\ _LD-TOKENS? ( -- flag )  True when the file read is a token file to
+\ replay, whatever it is called.  A file found as a token form must be
+\ one; anything else ends the load.  A token file whose source ships
+\ beside it is used when it was built for this system and that source is
+\ the one it was recorded from, by length and CRC-32.  Otherwise the
+\ source takes its place in the loader's buffer, the file is named, and
+\ the answer is false.
+: _LD-TOKENS?  ( -- flag )
+    LD-BUF @ LD-SZ @ TOKEN-FILE? DUP 0= _LD-TOKENS-CHOSEN @ AND
+    0 _LD-TOKENS-CHOSEN !
+    IF
+        _LD-TOKENS-NAMED ."  is not a token file" CR
+        EVAL-S-MISMATCH THROW
+    THEN
+    DUP 0= IF EXIT THEN
+    LD-BUF @ LD-SZ @ _TKF-VALID? 0= IF EXIT THEN
+    LD-BUF @ TKF.FLAGS TKF-F-SOURCE-BESIDE AND 0= IF EXIT THEN
+    _LD-SOURCE-BESIDE 0= IF EXIT THEN           ( true id )
+    LD-BUF @ TKF.TEXT-ID =  LD-BUF @ TOKENS-CURRENT? AND IF
+        _LD-SRC-BUF @ FREE EXIT
+    THEN
+    DROP
+    _LD-TOKENS-NAMED ."  is out of date: loading its source" CR
+    LD-BUF @ FREE
+    _LD-SRC-BUF @ LD-BUF !  _LD-SRC-U @ LD-SZ !
+    _LD-NAME-SLOT DUP C@ 1- SWAP C!
+    FALSE ;
+
+\ _LD-WALK-TOKENS ( -- )  Replay the token file the loader read.  A file
+\ that cannot be replayed ends the load, and is named here: no source
+\ stands behind it.
+: _LD-WALK-TOKENS  ( -- )
+    LD-BUF @ LD-SZ @ _TKF-VALID? IF
+        LD-BUF @ TKF.RECORDS 0= IF
+            _LD-TOKENS-NAMED
+            ."  only names its module, which is not loaded" CR
+            EVAL-S-MISMATCH THROW
+        THEN
+    THEN
+    LD-BUF @ LD-SZ @ TOKEN-EVALUATE-CHECKED
+    DUP EVAL-S-TOKENS = OVER EVAL-S-MISMATCH = OR IF
+        _LD-TOKENS-NAMED ."  cannot be loaded" CR
+    THEN
+    _LD-STATUS-THROW ;
+
+\ _LD-TOKENS-MODULE ( -- id-addr id-len flag )  The module the token
+\ file names; false when it names none or its header cannot be trusted.
+: _LD-TOKENS-MODULE  ( -- id-addr id-len flag )
+    LD-BUF @ LD-SZ @ _TKF-VALID? IF
+        LD-BUF @ TKF.ID DUP 0<>
+    ELSE
+        0 0 FALSE
+    THEN ;
+
+
 : _LD-RELEASE  ( -- )
     LD-BUF @ FREE
     _LD-RESTORE ;
@@ -451,12 +719,12 @@ VARIABLE _SEC-LINE
 
 : _LD-READ-WALK  ( -- )
     _LD-READ
-    _LD-WALK ;
+    _LD-TOKENS? IF _LD-WALK-TOKENS ELSE _LD-WALK THEN ;
 
 : _LOAD-BODY  ( -- )
     _LD-RESOLVE FALSE _LD-FOUND? 0= IF EXIT THEN
     _LD-FILE MF.USED @ 0= IF ."  Empty file" CR EXIT THEN
-    _LD-SAVE
+    _LD-SAVE _LD-NAME-KEEP
     _LD-FILE MF.USED @ LD-SZ !
     \ Source text is temporary.  ALLOCATE routes it to XMEM when present;
     \ the span the source asks for bounds its read and is reclaimed after

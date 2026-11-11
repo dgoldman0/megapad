@@ -289,6 +289,31 @@ No fix is designed. The BIOS already faults on a bounded dictionary, so one
 direction is for KDOS to bound the kernel dictionary at the heap's base once
 the heap exists.
 
+### A load that fails after its file entered userland faults in its rollback (found 2026-11-11)
+
+When a load fails, `_LD-FAIL` in `kdos.f` rolls the dictionary back to the
+`HERE` and `LATEST` that the loader frame saved when the load began. If the
+file's own text has run `ENTER-USERLAND` since then, that `HERE` lies in the
+kernel dictionary while the active dictionary is the userland one, and
+`DICT-ROLLBACK` refuses a target outside the active interval with a
+dictionary fault. A caller that catches the load sees -8 in place of the
+load's own failure, and with nobody to catch it the fault ends the session
+at the prompt. `LOAD` of a file that holds `ENTER-USERLAND` and then loads a
+file that throws -77 shows it: the catch sees -8.
+
+An Akashic boot is this case. Its `autoexec.f` begins with `ENTER-USERLAND`,
+so a module that fails to load during the boot throws through `autoexec.f`'s
+own load and ends in that fault. The failing module's own message is printed
+first, so the boot still ends loudly and names the cause; what is lost is
+the failure's own code and the rollback of what the script defined. A token
+file that is refused because its volume was built for another system ends
+the boot this way, and so does a source module with an undefined word.
+
+The direction for a fix: a frame whose saved `HERE` is no longer inside the
+active dictionary has nothing it can roll back, and should release its
+buffer and rethrow the failure it was given. Nothing is changed in KDOS
+here: the defect is off the path of the work in hand.
+
 ## 3. Architecture at a glance
 
 The standard disk boot compiles `kdos.f` into Bank 0.  KDOS then runs

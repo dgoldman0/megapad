@@ -114,6 +114,8 @@ _ANONYMOUS_SLOT_MARK = 0x4E4F_4E41
 
 _BIOS_EVALUATE_MAX_BYTES = 255
 _BIOS_EVALUATE_MAX_DEPTH = 16
+# TOKEN-REPLAY's number records: opcode -> bytes of the signed value.
+_TOKEN_NUMBER_BYTES = {0xF1: 1, 0xF2: 2, 0xF3: 4, 0xF4: 8}
 _BIOS_EVAL_TOKEN_CAPACITY = 256
 _BIOS_SQUOTE_BUFFER_BYTES = 256
 _BIOS_SQUOTE_MAX_PAYLOAD = _BIOS_SQUOTE_BUFFER_BYTES - 1
@@ -493,6 +495,9 @@ class _EvaluationState:
     token_count: int = 0
     definitions: list[Word] = field(default_factory=list)
     bios_evaluator: bool = False
+    # The token recorder's record of the source file this line belongs to,
+    # when one is being recorded (simulator/token_recorder.py).
+    recording: object | None = None
 
     @property
     def compiler(self) -> _Compiler | None:
@@ -936,6 +941,17 @@ class MegaForthRuntime:
         self._provided: set[bytes] = set()
         self._active_input_states: list[_EvaluationState] = []
         self._bios_evaluator: _BiosEvaluatorState | None = None
+        # A build may record what the interpreter does with each source
+        # file, to write the file's token form (simulator/token_recorder.py).
+        self.token_recorder = None
+        # How often DICT-ROLLBACK and LATEST! have taken words out of the
+        # dictionary.  A token replay ends when this moves under it.
+        self._dictionary_unlinks = 0
+        # The file the BIOS would have loaded first, when an image boot
+        # supplied one, and the identity BOOT-ID gives: fixed the first
+        # time it is asked for (shared/boot_identity.py).
+        self.boot_file: bytes | None = None
+        self._boot_identity: int | None = None
         self._active_dispatches: list[_DispatchFrame] = []
         self._transient_words: dict[int, Word] = {}
         # :NONAME definitions by execution token, each with the tag written
@@ -1548,6 +1564,8 @@ class MegaForthRuntime:
         ) else 0
         if status:
             evaluator.status_cell.write(status)
+        if self.token_recorder is not None:
+            self.token_recorder.finished(len(evaluator.frames), status)
         context.data.push(status)
 
     def bios_evaluator_reset(self) -> None:
@@ -1660,6 +1678,13 @@ class MegaForthRuntime:
             _compiler_state=evaluator.compiler_state,
             bios_evaluator=True,
         )
+        if self.token_recorder is not None:
+            state.recording = self.token_recorder.line(
+                address,
+                length,
+                depth,
+                evaluator.line_cell.read(),
+            )
         try:
             self._evaluate_line(state)
         except _UndefinedWord as error:
@@ -1671,6 +1696,249 @@ class MegaForthRuntime:
             raise
         else:
             self._pop_bios_evaluator_frame(evaluator, frame)
+
+    def boot_identity(self) -> int:
+        """BIOS BOOT-ID: the identity of the BIOS this runtime stands for and
+        of the file an image boot loaded first."""
+
+        if self._boot_identity is None:
+            from shared.boot_identity import boot_identity
+
+            self._boot_identity = boot_identity(self.boot_file)
+        return self._boot_identity
+
+    def bios_token_replay(self, context: ExecutionContext) -> None:
+        """Execute ``TOKEN-REPLAY ( rec-addr rec-len tab-addr tab-slots -- )``."""
+
+        with self._session_owner_lock:
+            self._require_session_owner_access("replay a token stream")
+            if not isinstance(context, ExecutionContext):
+                raise TypeError("context must be an ExecutionContext")
+            evaluator = self._require_bios_evaluator()
+            try:
+                self._bios_token_replay(evaluator, context)
+            except (_GuestControlTransfer, _GuestFaultRequest):
+                raise
+            except BaseException:
+                self._fail_closed_bios_evaluator(evaluator)
+                raise
+
+    def _bios_token_replay(
+        self,
+        evaluator: _BiosEvaluatorState,
+        context: ExecutionContext,
+    ) -> None:
+        """Replay a recorded token stream; see ``w_token_replay`` in bios.asm.
+
+        The stream is what the interpreter did with a source file.  Each
+        found word and number goes through the same two methods a source
+        token does, so the definitions that result are the source's.
+        """
+
+        depth = self._validated_bios_evaluator_depth(evaluator)
+        if depth == 0:
+            self._clear_bios_evaluator_diagnostics(evaluator)
+
+        if depth and evaluator.status_cell.read() != 0:
+            for _ in range(4):
+                context.data.pop()
+            return
+
+        if depth >= _BIOS_EVALUATE_MAX_DEPTH:
+            for _ in range(4):
+                context.data.pop()
+            evaluator.status_cell.write(3)
+            evaluator.column_cell.write(0)
+            evaluator.token_length = 0
+            self.write_uart_bytes(b"EVALUATE depth limit exceeded\n")
+            return
+
+        slots = context.data.pop()
+        table = context.data.pop()
+        length = context.data.pop()
+        address = context.data.pop()
+
+        frame = _BiosEvaluationFrame(context)
+        evaluator.frames.append(frame)
+        evaluator.depth_cell.write(len(evaluator.frames))
+        meter, _starting_steps = self._meter_for_public_call(None)
+        empty = SourceCursor(b"", source_name="<TOKEN-REPLAY>")
+        state = _EvaluationState(
+            context,
+            empty,
+            meter,
+            _compiler_state=evaluator.compiler_state,
+            bios_evaluator=True,
+        )
+
+        self._active_input_states.append(state)
+        try:
+            self._run_token_stream(
+                evaluator, state, empty, address, length, table, slots
+            )
+        except _UndefinedWord as error:
+            self._capture_bios_undefined(evaluator, error)
+            self._pop_bios_evaluator_frame(evaluator, frame)
+        except (_GuestControlTransfer, _GuestFaultRequest):
+            # As for EVALUATE: the input frame stays until KDOS unwinds it.
+            raise
+        else:
+            self._pop_bios_evaluator_frame(evaluator, frame)
+        finally:
+            active = self._active_input_states.pop()
+            if active is not state:
+                raise AssertionError("active input cursor stack is corrupted")
+
+    def _run_token_stream(
+        self,
+        evaluator: _BiosEvaluatorState,
+        state: _EvaluationState,
+        empty: SourceCursor,
+        address: int,
+        length: int,
+        table: int,
+        slots: int,
+    ) -> None:
+        """Run the records of one stream; returns when it ends or fails."""
+
+        def fail(status: int, message: bytes) -> None:
+            evaluator.status_cell.write(status)
+            evaluator.column_cell.write(0)
+            evaluator.token_length = 0
+            self.write_uart_bytes(message)
+
+        def malformed() -> None:
+            fail(6, b"token stream is malformed\n")
+
+        def mismatch() -> None:
+            fail(7, b"token stream does not match this system\n")
+
+        if u64(address + length) < address:
+            malformed()
+            return
+        stream = self.memory.read_bytes(address, length)
+        size = len(stream)
+        words: list[Word] = []
+        unlinks = self._dictionary_unlinks
+        line = 0
+        index = 0
+        while True:
+            if index >= size:
+                malformed()
+                return
+            opcode = stream[index]
+            if opcode < 0xF0:
+                if index + 2 > size:
+                    malformed()
+                    return
+                slot = (opcode << 8) | stream[index + 1]
+                index += 2
+                if slot >= len(words):
+                    malformed()
+                    return
+                word = words[slot]
+            elif opcode == 0xF0:
+                if index + 2 > size:
+                    malformed()
+                    return
+                count = stream[index + 1]
+                limit = index + 2 + count
+                if count == 0 or limit > size:
+                    malformed()
+                    return
+                name = stream[index + 2 : limit]
+                index = limit
+                if len(words) >= slots:
+                    malformed()
+                    return
+                try:
+                    found = self.dictionary.find(name)
+                except ValueError:
+                    found = None
+                if found is None:
+                    raise _UndefinedWord(name, state.cursor.location)
+                self.memory.write64(
+                    u64(table + len(words) * CELL_BYTES),
+                    found.header_address,
+                )
+                words.append(found)
+                word = found
+            elif opcode in _TOKEN_NUMBER_BYTES:
+                count = _TOKEN_NUMBER_BYTES[opcode]
+                limit = index + 1 + count
+                if limit > size:
+                    malformed()
+                    return
+                value = int.from_bytes(
+                    stream[index + 1 : limit], "little", signed=True
+                )
+                index = limit
+                self._evaluate_found_number(u64(value), state)
+                continue
+            elif opcode == 0xF5:
+                if index + 2 > size:
+                    malformed()
+                    return
+                limit = index + 2 + stream[index + 1]
+                if limit > size:
+                    malformed()
+                    return
+                state.cursor = SourceCursor(
+                    stream[index + 2 : limit],
+                    source_name="<TOKEN-REPLAY>",
+                )
+                index = limit
+                continue
+            elif opcode == 0xF6:
+                index += 1
+                line += 1
+                evaluator.line_cell.write(line)
+                continue
+            elif opcode == 0xF7:
+                if index + 3 > size:
+                    malformed()
+                    return
+                line += int.from_bytes(stream[index + 1 : index + 3], "little")
+                index += 3
+                evaluator.line_cell.write(line)
+                continue
+            elif opcode == 0xF9:
+                index += 1
+                defined = self.dictionary.latest_word
+                if len(words) >= slots or defined is None:
+                    malformed()
+                    return
+                self.memory.write64(
+                    u64(table + len(words) * CELL_BYTES),
+                    defined.header_address,
+                )
+                words.append(defined)
+                continue
+            elif opcode == 0xFF:
+                return
+            elif opcode == 0xF8:
+                mismatch()
+                return
+            else:
+                malformed()
+                return
+
+            if not self._evaluate_found_word(word, state):
+                continue
+            # The word ran.  Whatever input it was given is spent.
+            state.cursor = empty
+            if evaluator.status_cell.read() != 0:
+                return
+            if self._dictionary_unlinks != unlinks:
+                mismatch()
+                return
+            if state.conditional_skip is not None:
+                if index < size and stream[index] == 0xF8:
+                    index += 1
+                    state.conditional_skip = None
+                else:
+                    mismatch()
+                    return
 
     def _capture_bios_undefined(
         self,
@@ -2282,6 +2550,7 @@ class MegaForthRuntime:
             self.dictionary.rollback_to(saved_here, saved_latest)
         except (TypeError, ValueError, RuntimeError) as exc:
             self._request_dictionary_fault(context, str(exc))
+        self._dictionary_unlinks += 1
         self.dictionary_index.rebuild()
 
     def set_dictionary_latest(
@@ -2297,6 +2566,7 @@ class MegaForthRuntime:
             self.dictionary.set_latest(latest)
         except (TypeError, ValueError, RuntimeError) as exc:
             self._request_dictionary_fault(context, str(exc))
+        self._dictionary_unlinks += 1
         self.dictionary_index.rebuild()
 
     def new_context(self) -> ExecutionContext:
@@ -3029,6 +3299,11 @@ class MegaForthRuntime:
                 else:
                     self._skip_conditional_token(token, state)
                     may_run_guest = True
+                    if (
+                        state.recording is not None
+                        and state.conditional_skip is None
+                    ):
+                        state.recording.skip_ended()
                 # A nonzero status ends the line.  Only guest code can set it
                 # without raising, so a token that ran none leaves it zero.
                 if state.bios_evaluator and may_run_guest:
@@ -3083,7 +3358,34 @@ class MegaForthRuntime:
             # the BIOS parser admits any non-space token up to the 255-byte
             # input bound.  Such a token is an ordinary guest lookup miss.
             word = None
-        if word is not None and isinstance(word.implementation, DirectiveDefinition):
+        recording = state.recording
+        if word is not None:
+            if recording is None:
+                return self._evaluate_found_word(word, state)
+            return recording.found_word(self, word, token, state)
+
+        number = self._parse_number(token)
+        if number is not None:
+            if recording is not None:
+                recording.found_number(number)
+            self._evaluate_found_number(number, state)
+            return False
+
+        location = self._token_location(state)
+        if state.bios_evaluator:
+            raise _UndefinedWord(token, location)
+        raise SourceError(f"unknown word {token!r}", location)
+
+    def _evaluate_found_word(self, word: Word, state: _EvaluationState) -> bool:
+        """What the interpreter does with a word it found.
+
+        While interpreting, and for an immediate word at any time, the word
+        runs; otherwise a call to it is compiled.  True when it ran.  Source
+        lines and the token replay both come here, as the BIOS's loops both
+        go through its ``interp_found_word``.
+        """
+
+        if isinstance(word.implementation, DirectiveDefinition):
             if (
                 state.compiler is not None
                 and state.compiler.compile_mode
@@ -3103,29 +3405,23 @@ class MegaForthRuntime:
                 self._apply_directive(word.implementation.kind, state)
             return True
 
-        if word is not None:
-            if (
-                state.compiler is not None
-                and state.compiler.compile_mode
-                and not word.immediate
-            ):
-                state.compiler.operations.append(Call(word.xt))
-                return False
-            self._execute_guarded(word, state.context, state.meter)
-            return True
-
-        number = self._parse_number(token)
-        if number is not None:
-            if state.compiler is not None and state.compiler.compile_mode:
-                state.compiler.operations.append(Literal(number))
-            else:
-                state.context.data.push(number)
+        if (
+            state.compiler is not None
+            and state.compiler.compile_mode
+            and not word.immediate
+        ):
+            state.compiler.operations.append(Call(word.xt))
             return False
+        self._execute_guarded(word, state.context, state.meter)
+        return True
 
-        location = self._token_location(state)
-        if state.bios_evaluator:
-            raise _UndefinedWord(token, location)
-        raise SourceError(f"unknown word {token!r}", location)
+    def _evaluate_found_number(self, number: int, state: _EvaluationState) -> None:
+        """What the interpreter does with a number: compile it or push it."""
+
+        if state.compiler is not None and state.compiler.compile_mode:
+            state.compiler.operations.append(Literal(number))
+        else:
+            state.context.data.push(number)
 
     def _apply_directive(
         self,

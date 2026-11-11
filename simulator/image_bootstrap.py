@@ -224,6 +224,8 @@ def prepare_image_bootstrap(
         )
 
     geometry, boot_file, source = _read_bios_boot_file(runtime)
+    # The file as the BIOS reads it is part of the boot's identity.
+    runtime.boot_file = bytes(source)
     prepared_source = blank_terminal_autoexec_invocation(source)
     semantic_steps = _evaluate_checked_source(
         runtime,
