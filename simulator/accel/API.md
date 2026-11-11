@@ -28,7 +28,8 @@ to return-stack backing still falls through before the cache lookup.
 The optional `dense_regions` iterable contains distinct `(base, size, buffer)`
 descriptors. Each buffer must export writable, one-dimensional, C-contiguous
 bytes, with capacity exactly equal to the nonzero declared size. The program
-retains a buffer lease through its own independent view until destruction,
+retains a buffer lease through its own independent view until it is destroyed
+or collected (see Ownership and collection below),
 keeping its exporter alive and preventing resizing. Releasing the caller's
 view does not affect this lease. All sparse and dense guest spans must be nonwrapping and
 mutually disjoint; dense host byte spans must not overlap each other either.
@@ -368,3 +369,39 @@ started with, bound to this extension's own `tile_execute_values`. It also
 binds the service's identity guard with `bind_tile_guard(callable)`; the
 program calls it once, at the first tile word of a run, and leaves every tile
 word of that run to Python when it returns false.
+
+## Ownership and collection
+
+`NativeProgram`, `NativeDictionary` and `NativeLineWalker` take part in
+Python's cycle collection, through the one type setup in `collected.h`. A
+machine is a cycle through its dictionary: the runtime owns the dictionary,
+and the dictionary owns every definition's implementation and cached view,
+which lead back to the runtime. A line walker owns the dictionary as well,
+and the program holds the machine's tile service and memory through its tile
+guard. Each class shows the collector every Python reference it owns, so a
+machine that nothing refers to any longer is freed in one collection, and
+its memory with it.
+
+| Class | Python references it owns |
+|---|---|
+| `NativeProgram` | the continuation type, the tile guard, the routine capsule, each sparse region's page dictionary, each dense region's lease |
+| `NativeDictionary` | `memory`, each record's implementation and cached view, its own reference to each page dictionary and its own dense leases |
+| `NativeLineWalker` | the dictionary, the open definition's location, the state of a failed walk |
+
+When the collector reclaims a cycle it empties the owners in it. A program
+then holds no plan, routine, guard or region, and a run returns to Python at
+once. A dictionary is detached and keeps its records' metadata with no
+implementation and no cached view. A line walker drops the location and the
+failed state and keeps its dictionary, which it refers into for as long as it
+exists; the dictionary breaks the machine's cycle by dropping its own
+references.
+
+The collector may traverse an owner whenever Python code runs, and releasing
+a reference can run Python code. An owner therefore moves a reference out of
+its member or container before the reference is released, and a traversal
+meets only live references. `publish_rollback` takes the removed records out
+of the dictionary first for that reason.
+
+`NativeColonBody` owns no Python reference. `TileIdentityGuard` keeps
+classes, functions of theirs and a module, none of which a machine owns, and
+stays outside collection.

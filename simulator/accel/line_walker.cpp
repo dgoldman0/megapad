@@ -462,6 +462,26 @@ public:
         return state;
     }
 
+    // Cycle collection (collected.h). The walker owns the dictionary
+    // object, the open definition's source location and the state of a
+    // failed walk. The dictionary leads back to the machine.
+    int gc_traverse(visitproc visit, void* arg) const noexcept {
+        Py_VISIT(dictionary_object_.ptr());
+        Py_VISIT(compiler_.location.ptr());
+        Py_VISIT(error_state_.ptr());
+        return 0;
+    }
+
+    // The dictionary object stays: dictionary_ refers into it for as long
+    // as the walker exists, and the dictionary breaks the machine's cycle
+    // by dropping its own references.
+    void gc_clear() noexcept {
+        py::object location = std::move(compiler_.location);
+        compiler_.location = py::none();
+        py::object state = std::move(error_state_);
+        error_state_ = py::none();
+    }
+
 private:
     struct Admitted {
         uint64_t uid;
@@ -1409,7 +1429,8 @@ private:
 }  // namespace
 
 void register_bindings(py::module_& module) {
-    py::class_<NativeLineWalker>(module, "NativeLineWalker")
+    py::class_<NativeLineWalker>(module, "NativeLineWalker",
+                                 collected::setup<NativeLineWalker>())
         .def(py::init<py::object, const py::dict&, const py::list&, int, const py::tuple&,
                       const py::tuple&, Cell, Cell, Cell, Cell, Cell>(),
              py::arg("dictionary"), py::arg("directive_values"), py::arg("primitives"),

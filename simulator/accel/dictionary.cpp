@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <iterator>
 #include <stdexcept>
 
 namespace megapad::dictionary {
@@ -282,6 +283,25 @@ void NativeDictionary::set_view(size_t index, py::object view) {
     records_.at(index).view = std::move(view);
 }
 
+int NativeDictionary::gc_traverse(visitproc visit, void* arg) const noexcept {
+    Py_VISIT(memory_.ptr());
+    for (const Record& record : records_) {
+        Py_VISIT(record.implementation.ptr());
+        Py_VISIT(record.view.ptr());
+    }
+    return guest_.gc_traverse(visit, arg);
+}
+
+void NativeDictionary::gc_clear() noexcept {
+    py::object memory = std::move(memory_);
+    memory_ = py::none();
+    for (Record& record : records_) {
+        py::object implementation = std::move(record.implementation);
+        py::object view = std::move(record.view);
+    }
+    guest_.gc_clear();
+}
+
 void NativeDictionary::set_action(Cell xt, uint64_t uid, bool has_action, Cell action_xt,
                                   Cell action_ip) {
     const auto found = by_xt_.find(xt);
@@ -358,6 +378,14 @@ std::vector<Cell> NativeDictionary::publish_rollback(size_t depth, Cell here, bo
         }
     }
 
+    // Releasing a record's Python references can run Python code, and the
+    // collector may then traverse this dictionary. The removed records
+    // therefore leave it before they are destroyed and release their
+    // references when this call returns. Their room is taken here, before
+    // the first change.
+    std::vector<Record> released;
+    released.reserve(records_.size() > depth ? records_.size() - depth : 0);
+
     // Finish every lineage check before revoking allocations. Removals
     // revoke even when LATEST! leaves HERE unchanged, while a retained word
     // can lose only its body through a partial frontier rewind.
@@ -377,7 +405,10 @@ std::vector<Cell> NativeDictionary::publish_rollback(size_t depth, Cell here, bo
     }
     std::vector<Cell> removed;
     for (size_t i = depth; i < records_.size(); ++i) removed.push_back(records_[i].xt);
-    records_.erase(records_.begin() + static_cast<std::ptrdiff_t>(depth), records_.end());
+    const auto first_removed = records_.begin() + static_cast<std::ptrdiff_t>(depth);
+    released.assign(std::make_move_iterator(first_removed),
+                    std::make_move_iterator(records_.end()));
+    records_.erase(first_removed, records_.end());
     if (!removed.empty()) {
         header_limit_ = 0;
         for (const Record& record : records_)
@@ -634,7 +665,8 @@ void register_bindings(py::module_& module) {
         .def("operations", [](const NativeColonBodyHandle& self) {
             return ir_tuples(*self.body);
         });
-    py::class_<NativeDictionary>(module, "NativeDictionary")
+    py::class_<NativeDictionary>(module, "NativeDictionary",
+                                 collected::setup<NativeDictionary>())
         .def(py::init<Cell, Cell, py::object, const py::iterable&, Cell, const py::iterable&,
                       bool, Cell, Cell>(),
              py::arg("start_address"), py::arg("active_limit"), py::arg("memory"),

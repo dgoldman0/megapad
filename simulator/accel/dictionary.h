@@ -10,6 +10,7 @@
 // shared region views, never a copy.
 #pragma once
 
+#include "collected.h"
 #include "guest_memory.h"
 
 #include <pybind11/pybind11.h>
@@ -220,6 +221,14 @@ public:
     Cell read64(Cell address);
     void write64(Cell address, Cell value);
     uint8_t read8(Cell address);
+
+    // Cycle collection (collected.h). The dictionary owns the memory, each
+    // record's implementation and cached view, and its regions' pages and
+    // leases. Implementations and views lead back to the machine.
+    int gc_traverse(visitproc visit, void* arg) const noexcept;
+    // Afterwards the dictionary is detached, and its records keep their
+    // metadata with no implementation and no cached view.
+    void gc_clear() noexcept;
 
 private:
     Cell checked_advance(Cell width, const char* operation) const;

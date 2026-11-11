@@ -96,6 +96,25 @@ inline std::vector<Region> build_regions(const py::iterable& regions, Cell page_
     return built;
 }
 
+// Cycle collection (collected.h): a region owns its page dictionary and,
+// when dense, the memoryview its lease exports the buffer from.
+inline int traverse_regions(const std::vector<Region>& regions, visitproc visit,
+                            void* arg) noexcept {
+    for (const Region& region : regions) {
+        Py_VISIT(region.pages.ptr());
+        if (region.dense_lease && region.dense_lease->view() != nullptr)
+            Py_VISIT(region.dense_lease->view()->obj);
+    }
+    return 0;
+}
+
+// Drop every region. The owner has none while their references are
+// released, and an access afterwards finds no region to serve it.
+inline void release_regions(std::vector<Region>& regions) noexcept {
+    std::vector<Region> released;
+    released.swap(regions);
+}
+
 // Byte access to ordinary regions for host-side services such as the native
 // dictionary. Every access must lie wholly inside one region; callers have
 // already proven that, as the Python services do before touching memory.
@@ -192,6 +211,11 @@ public:
     }
 
     void write8(Cell address, uint8_t value) { write(address, &value, 1); }
+
+    int gc_traverse(visitproc visit, void* arg) const noexcept {
+        return traverse_regions(regions_, visit, arg);
+    }
+    void gc_clear() noexcept { release_regions(regions_); }
 
 private:
     const Region* find(Cell address, Cell length) const {

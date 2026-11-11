@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import gc
+import weakref
+
 import pytest
 
 from asm import assemble
@@ -14,7 +17,7 @@ from hybrid.runtime import (
 )
 from simulator.errors import ForthAbort
 from simulator.memory import EXTERNAL_BASE
-from simulator.runtime import ExecutionResult, YieldedExecution
+from simulator.runtime import ExecutionResult, MegaForthRuntime, YieldedExecution
 
 
 CALLBACK = """
@@ -69,6 +72,43 @@ def hybrid(request):
 
 def stack(hybrid):
     return hybrid.semantic.main_context.data.snapshot()
+
+
+def _used_and_dropped(executor, close):
+    """Weak references to a machine that ran a routine and was let go."""
+
+    owner = HybridRuntime.create(executor=executor,
+                                 geometry={"bank0_size": 1 << 20, "external_size": 1 << 20})
+    owner.register(RoutineDeclaration("H+", code("add r4, r5\nret.l"),
+                                      input_cells=2, output_cells=1))
+    runtime = owner.semantic
+    runtime.evaluate(b": SUMS ( n -- total ) 0 SWAP 0 DO I H+ LOOP ; 10 SUMS")
+    assert stack(owner) == (sum(range(10)),)
+    if executor == "native":
+        # The native program holds the runner's call capsule.
+        assert runtime._native_execution.routine_owner is owner
+    probes = weakref.ref(owner), weakref.ref(runtime), weakref.ref(runtime.memory)
+    if close:
+        owner.close()
+    return probes
+
+
+@pytest.mark.parametrize("close", (True, False), ids=("closed", "left open"))
+@pytest.mark.parametrize("executor", ("python", "native"))
+def test_a_dropped_machine_is_freed(executor, close):
+    if executor == "native":
+        pytest.importorskip("_megaforth_native")
+
+    def machines():
+        return sum(isinstance(candidate, MegaForthRuntime) for candidate in gc.get_objects())
+
+    gc.collect()
+    before = machines()
+    probes = _used_and_dropped(executor, close)
+    gc.collect()
+    # The collector found the machine unreachable, and it is gone.
+    assert [probe() for probe in probes] == [None, None, None]
+    assert machines() == before
 
 
 def test_a_routine_takes_and_gives_cells_on_the_data_stack(hybrid):

@@ -5,6 +5,7 @@
 #include "../../shared/accel/keccak_bindings.h"
 #include "../../shared/accel/tile_values_bindings.h"
 #include "../../shared/accel/routine_call.h"
+#include "collected.h"
 #include "guest_memory.h"
 #include "dictionary.h"
 
@@ -942,6 +943,27 @@ public:
         plans_.clear();
         overlaid_.clear();
         does_.clear();
+    }
+
+    // Cycle collection (collected.h). The program owns the continuation
+    // type, the tile guard, the routine capsule and its regions' pages and
+    // leases. Through the guard it holds the machine's tile service and
+    // memory.
+    int gc_traverse(visitproc visit, void* arg) const noexcept {
+        Py_VISIT(continuation_type_.ptr());
+        Py_VISIT(tile_guard_.ptr());
+        Py_VISIT(routine_entry_.ptr());
+        return megapad::guest::traverse_regions(regions_, visit, arg);
+    }
+
+    // Afterwards the program holds no plan, routine or region: a run finds
+    // nothing planned and returns to Python at once.
+    void gc_clear() noexcept {
+        clear();
+        bind_routines(py::none());
+        py::object guard = std::move(tile_guard_);
+        py::object continuation_type = std::move(continuation_type_);
+        megapad::guest::release_regions(regions_);
     }
 
     // Record where the children of one DOES> continue and return the index a
@@ -2367,7 +2389,8 @@ PYBIND11_MODULE(_megaforth_native, module) {
     module.attr("MACHINE_CALLBACK") = py::int_(static_cast<uint32_t>(MACHINE_CALLBACK));
     module.attr("MACHINE_RETURN") = py::int_(static_cast<uint32_t>(MACHINE_RETURN));
     module.doc() = "Native execution of generic hosted Forth semantic plans";
-    py::class_<NativeProgram>(module, "NativeProgram")
+    py::class_<NativeProgram>(module, "NativeProgram",
+                              megapad::collected::setup<NativeProgram>())
         .def(py::init<const py::iterable&, Cell, py::object, const py::iterable&>(),
              py::arg("regions"), py::arg("page_size"), py::arg("continuation_type"),
              py::arg("dense_regions") = py::tuple())
