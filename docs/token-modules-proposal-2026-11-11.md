@@ -892,6 +892,27 @@ a pass of 358 instructions less the empty loop's 34. In the three profiles
 the stamp's own words were hit 3, 21 and 47 times in 398,848, 643,584 and
 1,191,680 samples, which agrees with it.
 
+A boot was also measured with and without the stamp. The same builder
+wrote the Desktop's two token images twice, once on this branch and once on
+a copy whose KDOS never asks for the stamp and whose BIOS does not hash at
+its first `FSLOAD`, and the emulator booted each to Desk's entry at a
+resolution of 100,000 instructions.
+
+| To Desk's entry | With the stamp | Without | The stamp |
+|---|---:|---:|---:|
+| Linked chunks: instructions | 428,900,000 | 428,400,000 | 500,000 |
+| system cycles | 582,719,371 | 582,053,472 | 665,899 |
+| System volume, token files alone: instructions | 675,200,000 | 674,600,000 | 600,000 |
+| system cycles | 898,342,400 | 897,551,063 | 791,337 |
+
+That is seven or eight milliseconds at 100 MHz, about a thousandth of the
+boot, and it agrees with the parts timed above. In the simulator the
+difference is smaller than what one run differs from the next. Three runs
+each took 3.8, 3.8 and 3.9 host seconds with the stamp and 3.6, 4.1 and 4.1
+without for the linked Desktop, and 13.6, 14.5 and 15.8 against 15.0, 14.3
+and 15.1 with the system volume, on a machine other work shared; the guest
+ran 4,524 and 22,858 more semantic steps with the stamp.
+
 ### Sizes
 
 | | Files | Source | Token forms | |
