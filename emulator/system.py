@@ -1199,7 +1199,8 @@ class MegapadSystem:
                  rtc_epoch_ms: Optional[int] = None,
                  terminal_cols: int = 80,
                  terminal_rows: int = 24,
-                 worker_count: Optional[int] = None):
+                 worker_count: Optional[int] = None,
+                 chiplet_ports: int = 1):
         self.ram_size = ram_size          # Bank 0 (system RAM)
         self.num_full_cores = num_cores   # full (major) cores
         self.num_clusters = num_clusters
@@ -1242,6 +1243,12 @@ class MegapadSystem:
             self.num_cores,
             num_cores + num_clusters + 3,
             worker_count,
+            chiplet_ports,
+        )
+        # Chiplet ports are mailbox participants whose IDs follow the cores'.
+        self.num_chiplet_ports = self._native_system.chiplet_port_count
+        self.first_chiplet_port_id = (
+            self._native_system.first_chiplet_port_id
         )
         self._native_system.attach_mem(self._shared_mem, ram_size)
         if hbw_size > 0:
@@ -1366,7 +1373,10 @@ class MegapadSystem:
                 self.num_full_cores + self.num_clusters + 3
             ),
         )
-        self.mailbox = MailboxDevice(num_cores=self.num_cores)
+        self.mailbox = MailboxDevice(
+            num_cores=self.num_cores,
+            num_ports=self.num_chiplet_ports,
+        )
         self.mailbox.attach_ipi_router(
             pending_mask=self._native_system.ipi_pending_mask,
             pending_snapshot=self._native_system.ipi_pending_snapshot,

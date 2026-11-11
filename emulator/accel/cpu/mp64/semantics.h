@@ -83,6 +83,20 @@ inline void flags_unpack(State& state, uint8_t value) noexcept {
     state.flag_s = (value >> 7) & 1;
 }
 
+// A state that belongs to a machine with chiplet ports reports the
+// external-flag line that a port's signal raises. Other states have the
+// ef_flags field alone.
+template <typename State>
+inline auto chiplet_flag(const State& state, int) noexcept
+        -> decltype(state.chiplet_flag()) {
+    return state.chiplet_flag();
+}
+
+template <typename State>
+inline bool chiplet_flag(const State&, long) noexcept {
+    return false;
+}
+
 template <typename State>
 inline bool eval_cond(const State& state, int condition) noexcept {
     switch (condition) {
@@ -100,7 +114,7 @@ inline bool eval_cond(const State& state, int condition) noexcept {
         case CC_BQ: return state.q_out == 1;
         case CC_BNQ: return state.q_out == 0;
         case CC_SAT: return state.flag_s == 1;
-        case CC_EF: return state.ef_flags != 0;
+        case CC_EF: return state.ef_flags != 0 || chiplet_flag(state, 0);
         case CC_NV: return false;
         default: return false;
     }

@@ -628,6 +628,9 @@ class Megapad64:
 
         # External flag inputs (EF1-EF4) — directly settable
         self.ef_flags: int = 0  # 4 bits
+        # The external-flag line that a chiplet port's signal raises. A
+        # machine with chiplet ports replaces this for each of its cores.
+        self.chiplet_flag = lambda: False
 
         # I/O ports (4-bit, 7 ports each direction — 1802-style)
         self.port_out: list[int] = [0] * 8  # port 0 unused, 1-7
@@ -1073,7 +1076,7 @@ class Megapad64:
         if cc == CC_BQ:  return self.q_out == 1
         if cc == CC_BNQ: return self.q_out == 0
         if cc == CC_SAT: return self.flag_s == 1
-        if cc == CC_EF:  return self.ef_flags != 0
+        if cc == CC_EF:  return self.ef_flags != 0 or self.chiplet_flag()
         if cc == CC_NV:  return False
         return False
 

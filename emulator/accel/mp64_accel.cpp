@@ -350,62 +350,86 @@ struct MemoryMappings : GuestMemoryMap {
 
 class InterruptRouter {
 public:
-    void configure(int core_count) {
+    // The mailbox's participants are the cores, then the chiplet ports,
+    // whose IDs follow the cores'. The pending table is shared with the
+    // simulator; this router adds the lock and the line mirrors that
+    // concurrently running cores read.
+    void configure(int core_count, int port_count = 0) {
         std::lock_guard<std::mutex> guard(mutex_);
         core_count_ = core_count;
-        pending_.assign(
-            static_cast<std::size_t>(core_count) *
-                static_cast<std::size_t>(core_count),
-            0);
+        table_.configure(core_count, port_count);
         ipi_lines_ =
+            std::make_unique<std::atomic<uint8_t>[]>(
+                static_cast<std::size_t>(core_count));
+        ef_lines_ =
             std::make_unique<std::atomic<uint8_t>[]>(
                 static_cast<std::size_t>(core_count));
         for (int core_id = 0; core_id < core_count; core_id++) {
             ipi_lines_[static_cast<std::size_t>(core_id)].store(
                 0, std::memory_order_relaxed);
+            ef_lines_[static_cast<std::size_t>(core_id)].store(
+                0, std::memory_order_relaxed);
         }
     }
 
+    // Both are fixed by configure, before any core runs.
+    int port_count() const noexcept { return table_.port_count(); }
+    int first_port_id() const noexcept { return table_.first_port_id(); }
+
+    // A core signals another core or a chiplet port.
     bool send_ipi(int requester_id, int target_id) {
         std::lock_guard<std::mutex> guard(mutex_);
-        if (!valid_core_unlocked(requester_id) ||
-            !valid_core_unlocked(target_id) ||
-            requester_id == target_id)
+        if (!table_.is_core(requester_id))
             return false;
-        pending_[pending_index_unlocked(target_id, requester_id)] = 1;
-        ipi_lines_[static_cast<std::size_t>(target_id)].store(
-            1, std::memory_order_release);
-        return true;
+        return send_unlocked(requester_id, target_id);
+    }
+
+    // A chiplet port signals a core or another port.
+    bool port_send(int port, int target_id) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (port < 0 || port >= table_.port_count())
+            return false;
+        return send_unlocked(table_.port_id(port), target_id);
     }
 
     bool acknowledge_ipi(int target_id, int source_id) {
         std::lock_guard<std::mutex> guard(mutex_);
-        if (!valid_core_unlocked(target_id) ||
-            !valid_core_unlocked(source_id))
+        if (!table_.is_core(target_id) ||
+            !table_.is_participant(source_id))
             return false;
-        const std::size_t index =
-            pending_index_unlocked(target_id, source_id);
-        const bool was_pending = pending_[index] != 0;
-        pending_[index] = 0;
-        if (!has_pending_unlocked(target_id)) {
+        const bool was_pending =
+            table_.acknowledge(target_id, source_id);
+        if (!table_.any_pending(target_id)) {
             ipi_lines_[static_cast<std::size_t>(target_id)].store(
                 0, std::memory_order_release);
         }
+        ef_lines_[static_cast<std::size_t>(target_id)].store(
+            table_.port_pending(target_id) ? 1 : 0,
+            std::memory_order_release);
         return was_pending;
+    }
+
+    // The lowest ID whose doorbell waits for the port, or -1.
+    int port_doorbell(int port) const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (port < 0 || port >= table_.port_count())
+            return megapad::chiplet::MailboxPending::no_source;
+        return table_.lowest_source(table_.port_id(port));
+    }
+
+    // The port's chiplet has taken the doorbell from source_id.
+    bool port_take(int port, int source_id) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (port < 0 || port >= table_.port_count())
+            return false;
+        return table_.acknowledge(table_.port_id(port), source_id);
     }
 
     uint64_t pending_mask(int target_id) const {
         std::lock_guard<std::mutex> guard(mutex_);
-        if (!valid_core_unlocked(target_id))
+        if (!table_.is_core(target_id))
             return 0;
-        uint64_t mask = 0;
-        const int visible_sources = std::min(core_count_, 64);
-        for (int source_id = 0; source_id < visible_sources; source_id++) {
-            if (pending_[
-                    pending_index_unlocked(target_id, source_id)] != 0)
-                mask |= uint64_t{1} << source_id;
-        }
-        return mask;
+        return table_.pending_mask(target_id);
     }
 
     bool ipi_line(int core_id) const {
@@ -425,6 +449,15 @@ public:
             std::memory_order_release);
     }
 
+    // The core's external-flag line: a chiplet port's signal waits for it.
+    bool ef_line(int core_id) const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!valid_core_unlocked(core_id))
+            return false;
+        return ef_lines_[static_cast<std::size_t>(core_id)].load(
+                   std::memory_order_acquire) != 0;
+    }
+
     // Configuration is immutable after SystemState construction, so this
     // address remains stable for the router lifetime. The Linux/x86-64 JIT
     // performs the equivalent acquire observation with an ordinary byte
@@ -437,21 +470,22 @@ public:
         return &ipi_lines_[static_cast<std::size_t>(core_id)];
     }
 
+    // Stable for the router lifetime, like the IPI mirror. A core reads it
+    // when it evaluates the external-flag branch condition.
+    const std::atomic<uint8_t>* ef_line_mirror(
+            int core_id) const noexcept {
+        if (core_id < 0 || core_id >= core_count_)
+            return nullptr;
+        return &ef_lines_[static_cast<std::size_t>(core_id)];
+    }
+
     std::vector<uint64_t> pending_snapshot() const {
         std::lock_guard<std::mutex> guard(mutex_);
         std::vector<uint64_t> masks(
             static_cast<std::size_t>(core_count_), 0);
-        const int visible_sources = std::min(core_count_, 64);
         for (int target_id = 0; target_id < core_count_; target_id++) {
-            for (int source_id = 0;
-                 source_id < visible_sources;
-                 source_id++) {
-                if (pending_[
-                        pending_index_unlocked(
-                            target_id, source_id)] != 0)
-                    masks[static_cast<std::size_t>(target_id)] |=
-                        uint64_t{1} << source_id;
-            }
+            masks[static_cast<std::size_t>(target_id)] =
+                table_.pending_mask(target_id);
         }
         return masks;
     }
@@ -461,26 +495,25 @@ private:
         return core_id >= 0 && core_id < core_count_;
     }
 
-    std::size_t pending_index_unlocked(
-            int target_id, int source_id) const {
-        return static_cast<std::size_t>(target_id) *
-                   static_cast<std::size_t>(core_count_) +
-               static_cast<std::size_t>(source_id);
-    }
-
-    bool has_pending_unlocked(int target_id) const {
-        for (int source_id = 0; source_id < core_count_; source_id++) {
-            if (pending_[
-                    pending_index_unlocked(target_id, source_id)] != 0)
-                return true;
+    bool send_unlocked(int source_id, int target_id) {
+        if (!table_.send(source_id, target_id))
+            return false;
+        if (table_.is_core(target_id)) {
+            ipi_lines_[static_cast<std::size_t>(target_id)].store(
+                1, std::memory_order_release);
+            if (table_.is_port(source_id)) {
+                ef_lines_[static_cast<std::size_t>(target_id)].store(
+                    1, std::memory_order_release);
+            }
         }
-        return false;
+        return true;
     }
 
     mutable std::mutex mutex_;
     int core_count_ = 0;
-    std::vector<uint8_t> pending_;
+    megapad::chiplet::MailboxPending table_;
     std::unique_ptr<std::atomic<uint8_t>[]> ipi_lines_;
+    std::unique_ptr<std::atomic<uint8_t>[]> ef_lines_;
 };
 
 // ---------------------------------------------------------------------------
@@ -1917,6 +1950,17 @@ struct CPUState {
     // preserve the historical manually settable interrupt-line latch.
     InterruptRouter* interrupts = nullptr;
     std::atomic<bool> private_irq_ipi{false};
+
+    // The external-flag line that a chiplet port's signal raises for this
+    // core. The EF branch condition holds when this line or ef_flags is set.
+    bool chiplet_flag() const noexcept {
+        if (interrupts == nullptr)
+            return false;
+        const std::atomic<uint8_t>* line =
+            interrupts->ef_line_mirror(core_id);
+        return line != nullptr &&
+            line->load(std::memory_order_acquire) != 0;
+    }
 
     // Standalone states own one private mapping.  System-owned states borrow
     // their parent's shared mapping and leave private_memory empty.
@@ -5194,7 +5238,8 @@ struct SystemState {
             int full_core_count,
             int all_core_count = 0,
             int main_bus_port_count = 0,
-            int worker_count = 1) {
+            int worker_count = 1,
+            int chiplet_port_count = 0) {
         PersistentWorkerPool::validate_worker_count(worker_count);
         if (full_core_count < 1 || full_core_count > 255)
             throw std::invalid_argument(
@@ -5204,6 +5249,11 @@ struct SystemState {
         if (all_core_count < full_core_count || all_core_count > 255)
             throw std::invalid_argument(
                 "all_core_count must include every full core and fit in 8 bits");
+        // Port IDs follow the cores' in the same 8-bit ID space.
+        if (chiplet_port_count < 0 ||
+            all_core_count + chiplet_port_count > 256)
+            throw std::invalid_argument(
+                "chiplet port IDs must follow the cores' and fit in 8 bits");
 
         const int micro_core_count = all_core_count - full_core_count;
         const int required_cluster_ports =
@@ -5226,7 +5276,7 @@ struct SystemState {
         main_bus.configure(
             main_bus_port_count,
             main_bus_port_count - 1);
-        shared_interrupts.configure(all_core_count);
+        shared_interrupts.configure(all_core_count, chiplet_port_count);
         shared_crypto.init();
         shared_crypto.configure_wots(
             shared_memory.mem_size,
@@ -31824,6 +31874,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
                         asserted, std::memory_order_release);
                 }
             })
+        .def_property_readonly("chiplet_flag", [](const CPUState& s) {
+            return s.chiplet_flag();
+        })
         .def("ipi_pending_mask", [](const CPUState& s) {
             return s.interrupts != nullptr
                 ? s.interrupts->pending_mask(s.core_id)
@@ -33715,7 +33768,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
                      int full_core_count,
                      int all_core_count,
                      int main_bus_port_count,
-                     py::object worker_count_object) {
+                     py::object worker_count_object,
+                     int chiplet_port_count) {
                  if (
                      PyBool_Check(worker_count_object.ptr()) ||
                      !PyLong_Check(worker_count_object.ptr())
@@ -33743,12 +33797,24 @@ PYBIND11_MODULE(_mp64_accel, m) {
                      full_core_count,
                      all_core_count,
                      main_bus_port_count,
-                     static_cast<int>(worker_count));
+                     static_cast<int>(worker_count),
+                     chiplet_port_count);
              }),
              py::arg("full_core_count"),
              py::arg("all_core_count") = 0,
              py::arg("main_bus_port_count") = 0,
-             py::arg("worker_count") = 1)
+             py::arg("worker_count") = 1,
+             py::arg("chiplet_port_count") = 0)
+        .def_property_readonly(
+            "chiplet_port_count",
+            [](const SystemState& system) {
+                return system.shared_interrupts.port_count();
+            })
+        .def_property_readonly(
+            "first_chiplet_port_id",
+            [](const SystemState& system) {
+                return system.shared_interrupts.first_port_id();
+            })
         .def_property_readonly(
             "full_core_count", &SystemState::full_core_count)
         .def_property_readonly(
@@ -36894,6 +36960,38 @@ PYBIND11_MODULE(_mp64_accel, m) {
             [](const SystemState& system) {
                 return system.shared_interrupts.pending_snapshot();
             })
+        .def(
+            "ef_line",
+            [](const SystemState& system, int core_id) {
+                return system.shared_interrupts.ef_line(core_id);
+            },
+            py::arg("core_id"))
+        .def(
+            "chiplet_port_send",
+            [](SystemState& system, int port, int target_id) {
+                return system.shared_interrupts.port_send(
+                    port, target_id);
+            },
+            py::arg("port"),
+            py::arg("target_id"))
+        .def(
+            "chiplet_port_doorbell",
+            [](const SystemState& system, int port) -> py::object {
+                const int source =
+                    system.shared_interrupts.port_doorbell(port);
+                if (source < 0)
+                    return py::none();
+                return py::int_(source);
+            },
+            py::arg("port"))
+        .def(
+            "chiplet_port_take",
+            [](SystemState& system, int port, int source_id) {
+                return system.shared_interrupts.port_take(
+                    port, source_id);
+            },
+            py::arg("port"),
+            py::arg("source_id"))
         .def_property_readonly(
             "mappings_sealed",
             [](const SystemState& system) {

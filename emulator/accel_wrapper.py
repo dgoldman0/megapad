@@ -543,7 +543,7 @@ def {_attr}(self, v):
         if cc == CC_BQ:  return self.q_out == 1
         if cc == CC_BNQ: return self.q_out == 0
         if cc == CC_SAT: return self.flag_s == 1
-        if cc == CC_EF:  return self.ef_flags != 0
+        if cc == CC_EF:  return self.ef_flags != 0 or bool(self._cs.chiplet_flag)
         if cc == CC_NV:  return False
         return False
 

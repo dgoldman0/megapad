@@ -2395,15 +2395,19 @@ class NetworkDevice(Device):
 class MailboxDevice(Device):
     """Inter-core mailbox with IPI delivery."""
 
-    def __init__(self, num_cores: int = 4):
+    def __init__(self, num_cores: int = 4, num_ports: int = 0):
         super().__init__("Mailbox", MBOX_BASE, 0x10)
         self.num_cores = num_cores
+        # Chiplet ports are participants beside the cores.  Port p has the
+        # ID num_cores + p: a core rings it by sending to that ID and
+        # acknowledges its signal by that ID.
+        self.num_ports = num_ports
         # data[sender] = 64-bit value written by sender
         self.data: list[int] = [0] * num_cores
         # Standalone devices retain local pending state.  MegapadSystem
         # attaches the SystemState router so MMIO and native CSR accesses
         # observe one pending mask and interrupt line.
-        self._pending: list[int] = [0] * num_cores
+        self._pending: list[int] = [0] * (num_cores + num_ports)
         self._router_pending = None
         self._router_snapshot = None
         self._router_send = None
@@ -2458,11 +2462,12 @@ class MailboxDevice(Device):
         if (
             not requester_valid
             or not 0 <= requester_id < self.num_cores
-            or not 0 <= target_id < self.num_cores
+            or not 0 <= target_id < self.num_cores + self.num_ports
             or target_id == requester_id
         ):
             return False
-        if publish_payload:
+        # A port has no data slot: a chiplet's data crosses in lent memory.
+        if publish_payload and target_id < self.num_cores:
             self.data[target_id] = self.data[requester_id]
         if self._router_send is not None:
             sent = bool(self._router_send(requester_id, target_id))
@@ -2487,7 +2492,7 @@ class MailboxDevice(Device):
         if (
             not requester_valid
             or not 0 <= requester_id < self.num_cores
-            or not 0 <= source_id < self.num_cores
+            or not 0 <= source_id < self.num_cores + self.num_ports
         ):
             return False
         if self._router_ack is not None:
