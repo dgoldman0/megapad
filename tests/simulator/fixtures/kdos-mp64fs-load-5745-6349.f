@@ -210,8 +210,12 @@ VARIABLE _FMS-FILE
     DROP _FMS-FILE ! _PATH!
     FS-ENSURE
     FS-OK @ 0= IF MS-E-NO-FILESYSTEM EXIT THEN
+    \ A path that names no file leaves the current directory as it was,
+    \ so that the loader can ask for another name from the same place.
+    CWD @ >R
     _RESOLVE-PATH
-    FIND-BY-NAME DUP -1 = IF DROP MS-E-NOT-FOUND EXIT THEN
+    FIND-BY-NAME DUP -1 = IF DROP R> CWD ! MS-E-NOT-FOUND EXIT THEN
+    R> DROP
     DUP _FMS-FILE @ MF.HANDLE !
     DUP _LD-SLOT-BYTES _FMS-FILE @ MF.RESERVE !
     DUP DIRENT                          ( slot de )
@@ -245,9 +249,41 @@ CREATE _LD-FILE /MODULE-FILE ALLOT
     BEGIN
         DUP 127 < IF 2DUP + C@ 0<> ELSE FALSE THEN
     WHILE 1+ REPEAT ;
-: _LD-RESOLVE  ( -- ior )
+\ MODULE-TOKENS  Nonzero: LOAD and REQUIRE read a file's token form when
+\ the file has one beside it, named as the file with a t added (util.f,
+\ util.ft).  Zero, as KDOS starts: every file is read as it is named.
+VARIABLE MODULE-TOKENS
+0 MODULE-TOKENS !
+CREATE _LD-TNAME 128 ALLOT
+VARIABLE _LD-TNAME-U
+VARIABLE _LD-TOKENS-CHOSEN
+
+\ _LD-NAME-RESOLVE ( u -- ior )  Resolve the first U bytes of _LD-TNAME.
+: _LD-NAME-RESOLVE  ( u -- ior )
     _LD-FILE /MODULE-FILE 0 FILL
-    _LD-PATH _LD-FILE MODULE-SOURCE @ DUP MS.RESOLVE @ EXECUTE ;
+    _LD-TNAME SWAP _LD-FILE MODULE-SOURCE @ DUP MS.RESOLVE @ EXECUTE ;
+
+\ _LD-RESOLVE ( -- ior )  Find the file to read for the path the loader
+\ parsed.  With MODULE-TOKENS set the path's token form is looked for
+\ first, by the path with a t added, and the path itself when there is
+\ none; a source leaves its directory as it was when a path names no
+\ file.  The file found gives the module its identity in the registry
+\ of loaded files, so a repeated REQUIRE costs one resolution either way.
+: _LD-RESOLVE  ( -- ior )
+    0 _LD-TOKENS-CHOSEN !
+    _LD-PATH NIP MODULE-TOKENS @ 0= OVER 126 > OR IF
+        \ No token forms asked for, or no room in a path for the t.
+        DROP _LD-FILE /MODULE-FILE 0 FILL
+        _LD-PATH _LD-FILE MODULE-SOURCE @ DUP MS.RESOLVE @ EXECUTE EXIT
+    THEN
+    _LD-TNAME-U !
+    _LD-PATH DROP _LD-TNAME _LD-TNAME-U @ CMOVE
+    116 _LD-TNAME _LD-TNAME-U @ + C!
+    _LD-TNAME-U @ 1+ _LD-NAME-RESOLVE
+    DUP MS-E-NOT-FOUND <> IF
+        DUP 0= IF -1 _LD-TOKENS-CHOSEN ! THEN EXIT
+    THEN
+    DROP _LD-TNAME-U @ _LD-NAME-RESOLVE ;
 : _LD-READ  ( -- )
     LD-BUF @ _LD-FILE MODULE-SOURCE @ DUP MS.READ @ EXECUTE THROW ;
 \ _LD-FOUND? ( ior module? -- flag )  True when RESOLVE found the file.
@@ -302,17 +338,24 @@ VARIABLE _LD-FROM-SP
 
 \ BIOS EVALUATE keeps each caller's input frame outside the return stack, so
 \ a THROW that crosses it leaves the frame, and the evaluator's depth, in
-\ place.  BIOS owns complete input-frame restoration through
-\ EVALUATOR-UNWIND; KDOS owns CATCH/HANDLER semantics, and so it owns giving
-\ the evaluator its depth back when an exception passes.  This word does that
-\ once for both evaluator words below: it notes the depth, runs BIOS EVALUATE
-\ under CATCH, and on an exception reconstructs every abandoned input frame
-\ down to the depth it noted.  CATCH has restored addr/len beneath the code.
-: _EVALUATE-GUARDED  ( i*x addr len -- j*x 0 | i*x addr len exception )
+\ place, and BIOS TOKEN-REPLAY keeps its frame the same way.  BIOS owns
+\ complete input-frame restoration through EVALUATOR-UNWIND; KDOS owns
+\ CATCH/HANDLER semantics, and so it owns giving the evaluator its depth
+\ back when an exception passes.  _EVALUATION-GUARDED does that once, for
+\ every word that runs one of the two BIOS evaluators: it notes the depth,
+\ runs the evaluator XT names under CATCH, and on an exception reconstructs
+\ every abandoned input frame down to the depth it noted.  CATCH has
+\ restored the evaluator's arguments beneath the code.
+: _EVALUATION-GUARDED  ( i*x xt -- j*x 0 | i*x exception )
     EVAL-DEPTH @ >R
-    ['] EVALUATE CATCH
+    CATCH
     DUP IF R@ EVALUATOR-UNWIND THEN
     R> DROP ;
+
+\ _EVALUATE-GUARDED is that guard around BIOS EVALUATE.  It takes the BIOS
+\ word's execution token here, before KDOS shadows the name.
+: _EVALUATE-GUARDED  ( i*x addr len -- j*x 0 | i*x addr len exception )
+    ['] EVALUATE _EVALUATION-GUARDED ;
 
 \ From this point onward KDOS deliberately shadows the BIOS entries EVALUATE
 \ and EVALUATE-CHECKED with words of the same public names.
@@ -415,6 +458,94 @@ VARIABLE _SEC-LINE
     REPEAT
     EVALUATE-FINISH _LD-STATUS-THROW ;
 
+\ ── Token form of a source file ─────────────────────────────────────
+\
+\ A token file is what the interpreter did with a source file, recorded:
+\ the words it found, the numbers, and the text each parsing word took.
+\ BIOS TOKEN-REPLAY runs the record through the interpreter's own steps,
+\ so the dictionary that results is the one the source builds, without
+\ splitting text into tokens and with one search for each name.
+\
+\ The file is a header and the records.  TOKEN-REPLAY keeps the words it
+\ has found in a table of cells, which is allocated for the replay:
+\   +0   "MFTOKEN1"
+\   +8   bytes before the records, 4 bytes      +12  cells in the table, 4
+\   +16  bytes of records, 8                    +24  bytes of the source, 8
+\   +32  CRC-32 of the source, 4                +36  CRC-32 of the records, 4
+\   +40  lines in the source, 4                 +44  bytes of module name, 2
+\   +64  the module name its source PROVIDES
+6 CONSTANT EVAL-S-TOKENS
+7 CONSTANT EVAL-S-MISMATCH
+
+64 CONSTANT /TOKEN-HEADER
+: TKF.HEADER   ( addr -- u )  8 + L@ ;
+: TKF.SLOTS    ( addr -- u )  12 + L@ ;
+: TKF.RECORDS  ( addr -- u )  16 + @ ;
+: TKF.SOURCE   ( addr -- u )  24 + @ ;
+: TKF.ID       ( addr -- id-addr id-len )  DUP /TOKEN-HEADER + SWAP 44 + W@ ;
+
+CREATE _TKF-MAGIC  77 C, 70 C, 84 C, 79 C, 75 C, 69 C, 78 C, 49 C,
+
+\ TOKEN-FILE? ( addr len -- flag )  True when the bytes begin as a token
+\ file does.
+: TOKEN-FILE?  ( addr len -- flag )
+    /TOKEN-HEADER U< IF DROP FALSE EXIT THEN
+    8 _TKF-MAGIC 8 COMPARE 0= ;
+
+\ _TKF-VALID? ( addr len -- flag )  True when the header's sizes account
+\ for exactly LEN bytes, so the records lie inside them.
+VARIABLE _TKF-A
+VARIABLE _TKF-U
+: _TKF-VALID?  ( addr len -- flag )
+    _TKF-U ! _TKF-A !
+    _TKF-A @ _TKF-U @ TOKEN-FILE? 0= IF FALSE EXIT THEN
+    _TKF-A @ TKF.HEADER
+    DUP /TOKEN-HEADER U< IF DROP FALSE EXIT THEN
+    DUP 7 AND IF DROP FALSE EXIT THEN
+    DUP _TKF-U @ U> IF DROP FALSE EXIT THEN
+    _TKF-A @ 44 + W@ /TOKEN-HEADER + OVER U> IF DROP FALSE EXIT THEN
+    _TKF-U @ SWAP -                         ( rest )
+    _TKF-A @ TKF.RECORDS = ;
+
+\ _TKF-ARGS ( addr table -- rec-addr rec-len table slots )
+: _TKF-ARGS  ( addr table -- rec-addr rec-len table slots )
+    >R DUP DUP TKF.HEADER + OVER TKF.RECORDS ROT TKF.SLOTS R> SWAP ;
+
+\ TOKEN-EVALUATE-CHECKED ( i*x addr len -- j*x status )
+\   Run a token file held in memory, as SOURCE-EVALUATE-CHECKED runs a
+\   source buffer: the same statuses, the same data-stack effects, and the
+\   same check that nothing is left unfinished.  The table lives in an
+\   allocation of its own for as long as the replay runs, and nothing of
+\   this word's stays on the data stack meanwhile.  A buffer that is not a
+\   whole token file is status 6; a table that cannot be allocated throws.
+: TOKEN-EVALUATE-CHECKED  ( i*x addr len -- j*x status )
+    2DUP _TKF-VALID? 0= IF
+        2DROP EVAL-S-TOKENS DUP EVAL-STATUS ! EXIT
+    THEN
+    DROP DUP TKF.SLOTS 1 MAX CELLS ALLOCATE THROW
+    DUP >R _TKF-ARGS
+    ['] TOKEN-REPLAY _EVALUATION-GUARDED
+    R> FREE
+    DUP IF
+        EVAL-THROW ! 2DROP 2DROP
+        EVAL-S-THROW DUP EVAL-STATUS !
+        EXIT
+    THEN
+    DROP EVAL-STATUS @
+    DUP EVAL-S-OK <> IF EXIT THEN DROP
+    EVALUATE-FINISH ;
+
+\ _LD-TOKENS? ( -- flag )  True when the file read is a token file,
+\ whatever it is called.  A file found as a token form must be one;
+\ anything else is status 7.
+: _LD-TOKENS?  ( -- flag )
+    LD-BUF @ LD-SZ @ TOKEN-FILE? DUP 0= _LD-TOKENS-CHOSEN @ AND
+    0 _LD-TOKENS-CHOSEN !
+    IF EVAL-S-MISMATCH THROW THEN ;
+
+: _LD-WALK-TOKENS  ( -- )
+    LD-BUF @ LD-SZ @ TOKEN-EVALUATE-CHECKED _LD-STATUS-THROW ;
+
 : _LD-RELEASE  ( -- )
     LD-BUF @ FREE
     _LD-RESTORE ;
@@ -451,7 +582,7 @@ VARIABLE _SEC-LINE
 
 : _LD-READ-WALK  ( -- )
     _LD-READ
-    _LD-WALK ;
+    _LD-TOKENS? IF _LD-WALK-TOKENS ELSE _LD-WALK THEN ;
 
 : _LOAD-BODY  ( -- )
     _LD-RESOLVE FALSE _LD-FOUND? 0= IF EXIT THEN

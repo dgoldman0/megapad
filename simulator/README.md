@@ -879,6 +879,11 @@ definition as semantic operations, so it answers false, and hybrid mode
 answers with it. Akashic's image library asks the word before it builds or
 loads an MF64 image and refuses where the answer is false.
 
+`TOKEN-REPLAY` follows it. It runs a recorded token stream on the runtime's
+reference path, giving each word and number to `_evaluate_found_word` and
+`_evaluate_found_number`, the two methods a source token reaches, so a token
+load builds the definitions its source builds.
+
 ### Semantic evaluator and checked source
 
 The hosted BIOS now exposes `EVALUATE`, the early `EVALUATE-CHECKED`,
@@ -912,8 +917,9 @@ Nested evaluation consumes the active outer public step budget and cannot
 acquire a fresh allowance.
 
 Exact KDOS source now shadows `EVALUATE` and the early checked entry. Both
-run the BIOS `EVALUATE` through `_EVALUATE-GUARDED`, whose `CATCH` unwinds to
-the evaluator depth it noted when a guest exception passes. `EVALUATE`
+run the BIOS `EVALUATE` through `_EVALUATE-GUARDED`, which hands it to
+`_EVALUATION-GUARDED`, whose `CATCH` unwinds to the evaluator depth it noted
+when a guest exception passes. `EVALUATE`
 rethrows it; `EVALUATE-CHECKED` records its exact code in `EVAL-THROW` and
 returns status 5 normally.
 `SOURCE-EVALUATE-CHECKED` walks LF-delimited input, strips one terminal CR from
@@ -2403,8 +2409,8 @@ and Git blob `c920305479e61c2a5d51719779ec9c9fba0c2b8f`. The complete current
 10,184-line, 357,426-byte `kdos.f` has SHA-256
 `b3d5211893432fb9b93acee1d330c84260b4a51c56ae0cecb265f54add3c5ff4`
 and Git blob `7aa48d675c1a1a6d6dd84731c3332a33b128155e`.
-The canonical source-mode CLI filter submits 6,798 non-comment records with
-220,582 payload bytes, or 227,380 UART bytes after one LF delimiter per
+The canonical source-mode CLI filter submits 6,874 non-comment records with
+223,192 payload bytes, or 230,066 UART bytes after one LF delimiter per
 record. These are structural source/transport identities, not a fresh
 wall-clock or complete-load qualification.
 
@@ -2458,7 +2464,7 @@ still free, mounted MP64FS, zero modules, balanced stacks, and no held lock. A
 post-boot checked definition returned 42, followed by allocation/free, CRC32,
 ring FIFO, and module-listing checks. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
-459 core words and expects 1,520 KDOS publications and 1,971 unique
+460 core words and expects 1,543 KDOS publications and 1,995 unique
 bindings.
 
 The contiguous unchanged KDOS core now reaches EOF. The integration branch is

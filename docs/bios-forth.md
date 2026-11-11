@@ -487,6 +487,7 @@ text.
 | `EVALUATE-FINISH` | `( -- status )` | End a multi-line checked operation, returning 4 if compiler or cross-line conditional state is unfinished, otherwise 0. |
 | `EVALUATOR-RESET` | `( -- )` | Clear compiler bookkeeping after the caller invokes `DICT-ROLLBACK` with its saved `HERE/LATEST` pair. Does not roll back the dictionary itself, erase diagnostics, or change the enclosing evaluator depth. |
 | `EVALUATOR-UNWIND` | `( depth -- )` | Restore abandoned nested input frames down to a previously captured `EVAL-DEPTH @` checkpoint.  Negative or above-current targets are ignored. |
+| `TOKEN-REPLAY` | `( rec-addr rec-len tab-addr tab-slots -- )` | Run a recorded token stream through the interpreter's found-word and found-number steps, as `EVALUATE` runs a string.  It keeps an input frame and the statuses as `EVALUATE` does, with status 6 for a malformed stream and 7 for one that does not match this system.  KDOS's `TOKEN-EVALUATE-CHECKED` is the caller. |
 | `EVAL-STATUS` | `( -- addr )` | Address of the last status cell. |
 | `EVAL-LINE` | `( -- addr )` | Address of the one-based source-line context/diagnostic cell. |
 | `EVAL-COLUMN` | `( -- addr )` | Address of the zero-based failing-token column cell. |

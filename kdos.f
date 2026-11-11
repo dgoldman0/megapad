@@ -6082,17 +6082,24 @@ VARIABLE _LD-FROM-SP
 
 \ BIOS EVALUATE keeps each caller's input frame outside the return stack, so
 \ a THROW that crosses it leaves the frame, and the evaluator's depth, in
-\ place.  BIOS owns complete input-frame restoration through
-\ EVALUATOR-UNWIND; KDOS owns CATCH/HANDLER semantics, and so it owns giving
-\ the evaluator its depth back when an exception passes.  This word does that
-\ once for both evaluator words below: it notes the depth, runs BIOS EVALUATE
-\ under CATCH, and on an exception reconstructs every abandoned input frame
-\ down to the depth it noted.  CATCH has restored addr/len beneath the code.
-: _EVALUATE-GUARDED  ( i*x addr len -- j*x 0 | i*x addr len exception )
+\ place, and BIOS TOKEN-REPLAY keeps its frame the same way.  BIOS owns
+\ complete input-frame restoration through EVALUATOR-UNWIND; KDOS owns
+\ CATCH/HANDLER semantics, and so it owns giving the evaluator its depth
+\ back when an exception passes.  _EVALUATION-GUARDED does that once, for
+\ every word that runs one of the two BIOS evaluators: it notes the depth,
+\ runs the evaluator XT names under CATCH, and on an exception reconstructs
+\ every abandoned input frame down to the depth it noted.  CATCH has
+\ restored the evaluator's arguments beneath the code.
+: _EVALUATION-GUARDED  ( i*x xt -- j*x 0 | i*x exception )
     EVAL-DEPTH @ >R
-    ['] EVALUATE CATCH
+    CATCH
     DUP IF R@ EVALUATOR-UNWIND THEN
     R> DROP ;
+
+\ _EVALUATE-GUARDED is that guard around BIOS EVALUATE.  It takes the BIOS
+\ word's execution token here, before KDOS shadows the name.
+: _EVALUATE-GUARDED  ( i*x addr len -- j*x 0 | i*x addr len exception )
+    ['] EVALUATE _EVALUATION-GUARDED ;
 
 \ From this point onward KDOS deliberately shadows the BIOS entries EVALUATE
 \ and EVALUATE-CHECKED with words of the same public names.
@@ -6244,13 +6251,6 @@ VARIABLE _TKF-U
     _TKF-U @ SWAP -                         ( rest )
     _TKF-A @ TKF.RECORDS = ;
 
-\ As _EVALUATE-GUARDED, around TOKEN-REPLAY's four arguments.
-: _TOKEN-REPLAY-GUARDED  ( i*x a u t n -- j*x 0 | i*x a u t n exception )
-    EVAL-DEPTH @ >R
-    ['] TOKEN-REPLAY CATCH
-    DUP IF R@ EVALUATOR-UNWIND THEN
-    R> DROP ;
-
 \ _TKF-ARGS ( addr table -- rec-addr rec-len table slots )
 : _TKF-ARGS  ( addr table -- rec-addr rec-len table slots )
     >R DUP DUP TKF.HEADER + OVER TKF.RECORDS ROT TKF.SLOTS R> SWAP ;
@@ -6268,7 +6268,7 @@ VARIABLE _TKF-U
     THEN
     DROP DUP TKF.SLOTS 1 MAX CELLS ALLOCATE THROW
     DUP >R _TKF-ARGS
-    _TOKEN-REPLAY-GUARDED
+    ['] TOKEN-REPLAY _EVALUATION-GUARDED
     R> FREE
     DUP IF
         EVAL-THROW ! 2DROP 2DROP

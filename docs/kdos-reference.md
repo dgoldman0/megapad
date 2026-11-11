@@ -1862,9 +1862,11 @@ execution-context-local `HANDLER` table, and BIOS `EVALUATE` keeps each
 caller's input frame outside the return stack, so a `THROW` that crosses it
 leaves the frame and the evaluator's depth in place.  Immediately above this
 whole-buffer compiler, KDOS deliberately shadows both BIOS words with words of
-the same public names.  They share `_EVALUATE-GUARDED`, which notes
-`EVAL-DEPTH @`, runs the BIOS `EVALUATE` under `CATCH`, and on a source
-exception invokes `EVALUATOR-UNWIND` down to the depth it noted.
+the same public names.  They share `_EVALUATE-GUARDED`, which hands the
+BIOS `EVALUATE` to `_EVALUATION-GUARDED`.  That word notes `EVAL-DEPTH @`,
+runs the evaluator it is given under `CATCH`, and on a source exception
+invokes `EVALUATOR-UNWIND` down to the depth it noted; the loader's token
+walk runs `TOKEN-REPLAY` under the same word.
 
 KDOS's `EVALUATE` rethrows the exception.  Whoever catches it, at any
 distance, finds the evaluator at the depth it had when that `EVALUATE` was
@@ -3517,7 +3519,7 @@ evaluator with canonical XMEM, HBW, VRAM, and valid MP64FS media. It published
 1,452 KDOS words and finished with an authoritative 1,764-binding dictionary
 index. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
-459 core words and expects 1,520 KDOS publications and 1,971 unique
+460 core words and expects 1,543 KDOS publications and 1,995 unique
 bindings. The historical
 run is semantic evidence, not native/exact-full-core timing evidence, and adds
 no `rich-terminal.f`, projection, compositor, viewer, or rich-input work.

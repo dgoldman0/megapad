@@ -65,7 +65,7 @@ CANONICAL_INDEX_SLOTS = 65_536
 CANONICAL_INDEX_BYTES = CANONICAL_INDEX_SLOTS * 16
 # The unique names in the dictionary once this slice has loaded: the hosted
 # core words and KDOS's definitions through the slice's last line.
-BOOT_NAMES = 768
+BOOT_NAMES = 769
 # A 4 MiB XMEM gives the boot table 2,048 slots, which hold the boot's names
 # below the three quarters at which the table doubles.
 GROWTH_EXTERNAL_SIZE = 4 << 20

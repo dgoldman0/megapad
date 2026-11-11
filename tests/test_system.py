@@ -5930,10 +5930,11 @@ class TestBIOSTACC(unittest.TestCase):
 
     def test_tacc_dictionary_tail_chain(self):
         """WOTS, AES's block-mode words, SHA-384, the storage unit words, the
-        QUIT callback, the string scan and the dictionary's code kind append
-        after the unchanged full-TACC dictionary tail."""
+        QUIT callback, the string scan, the dictionary's code kind and the
+        token replay append after the unchanged full-TACC dictionary tail."""
         labels = self._labels
         chain = (
+            ("d_token_replay", "d_dict_machine_code_q"),
             ("d_dict_machine_code_q", "d_scan"),
             ("d_scan", "d_quit_xt_store"),
             ("d_quit_xt_store", "d_unit_disk_flush_gen_checked"),
@@ -5974,7 +5975,7 @@ class TestBIOSTACC(unittest.TestCase):
             ("d_caller_span_status", "d_entropy_ready"),
         )
         self.assertEqual(
-            labels["latest_entry"], labels["d_dict_machine_code_q"])
+            labels["latest_entry"], labels["d_token_replay"])
         for current, previous in chain:
             link = int.from_bytes(
                 self._code[labels[current]:labels[current] + 8],
@@ -5991,7 +5992,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 561)
+        self.assertEqual(len(seen), 562)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -16893,7 +16894,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 561)
+        self.assertEqual(len(seen), 562)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -18517,12 +18518,13 @@ class TestBIOSEntropyFill(unittest.TestCase):
     def test_dictionary_append_preserves_every_older_link(self):
         """WOTS, then AES's block-mode words, then SHA-384, then the storage
         unit words, then the QUIT callback, then the string scan, then the
-        dictionary's code kind append without changing any older dictionary
-        link."""
+        dictionary's code kind, then the token replay append without changing
+        any older dictionary link."""
         labels = self._bios_labels
         self.assertEqual(
-            labels["latest_entry"], labels["d_dict_machine_code_q"])
+            labels["latest_entry"], labels["d_token_replay"])
         for current, previous in (
+            ("d_token_replay", "d_dict_machine_code_q"),
             ("d_dict_machine_code_q", "d_scan"),
             ("d_scan", "d_quit_xt_store"),
             ("d_disk_units", "d_sha384_final"),

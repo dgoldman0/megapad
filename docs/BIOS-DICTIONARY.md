@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The `bios.asm` dictionary link chain contains **561** entries.  The numbered
+The `bios.asm` dictionary link chain contains **562** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -1149,6 +1149,12 @@ secret-boundary qualifications are recorded in
 |---|------|-------------|-----|-------------|
 | 559 | `DICT-MACHINE-CODE?` | `( -- flag )` | | True when the words compiled into this dictionary are MP64 machine code, so that a machine-code dictionary image can be built from it and run in it. The BIOS always answers true; a Forth system that keeps its definitions in another form answers false |
 
+### Token Replay (1 word)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 560 | `TOKEN-REPLAY` | `( rec-addr rec-len tab-addr tab-slots -- )` | | Run a recorded token stream: the words the interpreter found in a source file, its numbers and the text its parsing words took, through the interpreter's own found-word and found-number steps. The table is `tab-slots` cells that the word fills with the entries it finds. Statuses are EVALUATE's, with 6 for a malformed stream and 7 for one that does not match this system. The records are listed at `w_token_replay` in `bios.asm`. |
+
 ### Checked WOTS Chain (1 word)
 
 | # | Word | Stack Effect | Imm | Description |
@@ -1221,11 +1227,11 @@ machine reset.
 ### Newest Dictionary Chain Segment (last → earlier)
 
 The complete authoritative link chain is the `.dq` chain in `bios.asm`.
-`DICT-MACHINE-CODE?` closes the newest appended segment, after the string
-scan, the QUIT callback and the storage unit words:
+`TOKEN-REPLAY` closes the newest appended segment, after the dictionary's
+code kind, the string scan, the QUIT callback and the storage unit words:
 
 ```
-DICT-MACHINE-CODE? → SCAN → QUIT-XT!
+TOKEN-REPLAY → DICT-MACHINE-CODE? → SCAN → QUIT-XT!
 → UNIT-DISK-FLUSH-GEN-CHECKED → UNIT-DISK-WRITE-GEN-CHECKED
 → UNIT-DISK-READ-GEN-CHECKED → UNIT-DISK-CAPS → UNIT-DISK-MEDIA-GEN
 → UNIT-DISK-SECTORS → UNIT-DISK@ → DISK-UNITS
