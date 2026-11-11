@@ -3071,6 +3071,19 @@ w_dict_limit_fetch:
     str r14, r1
     ret.l
 
+; DICT-MACHINE-CODE? ( -- flag )
+; True when the words compiled into this dictionary are MP64 machine code.
+; This BIOS compiles every definition to machine code and runs it, so the
+; answer here is always true: a dictionary image of machine code can be built
+; from this dictionary and run in it.  A Forth system that keeps its
+; definitions in another form answers false.
+w_dict_machine_code_q:
+    ldi r1, 0
+    dec r1                    ; canonical true, all 64 bits set
+    subi r14, 8
+    str r14, r1
+    ret.l
+
 ; DICT-FAULT-XT! ( xt -- )
 w_dict_fault_xt_store:
     ldn r1, r14
@@ -24743,12 +24756,22 @@ d_quit_xt_store:
 
 ; The string scan appends after it.
 ; === SCAN ===
-latest_entry:
 d_scan:
     .dq d_quit_xt_store
     .db 4
     .ascii "SCAN"
     ldi64 r11, w_scan
+    call.l r11
+    ret.l
+
+; The dictionary's code kind appends after it.
+; === DICT-MACHINE-CODE? ===
+latest_entry:
+d_dict_machine_code_q:
+    .dq d_scan
+    .db 18
+    .ascii "DICT-MACHINE-CODE?"
+    ldi64 r11, w_dict_machine_code_q
     call.l r11
     ret.l
 

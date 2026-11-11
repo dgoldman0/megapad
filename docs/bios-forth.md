@@ -532,7 +532,7 @@ available afterward.
 
 ---
 
-## Dictionary Bounds and Acceleration (9 words)
+## Dictionary Bounds and Acceleration (11 words)
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -546,6 +546,7 @@ available afterward.
 | `DICT-INDEX-NOTIFY!` | `( count xt -- )` | Arm one call of xt as the final step of the first named definition or `LATEST!` that leaves the index count at or above count; an xt of zero disarms. The owner uses it to grow its table. |
 | `DICT-ROLLBACK` | `( saved-here saved-latest -- )` | Validate a contiguous active-zone checkpoint, clear cached bindings globally, publish both dictionary pointers, and rebuild the side index. |
 | `LATEST!` | `( entry -- )` | Validate and publish any terminating replacement dictionary chain without changing `HERE`, clear cached bindings globally, and rebuild the side index. |
+| `DICT-MACHINE-CODE?` | `( -- flag )` | True when the words compiled into this dictionary are MP64 machine code. The BIOS compiles every definition to machine code and runs it, so it always answers true. A Forth system that keeps its definitions in another form, as the hosted simulator does, answers false. A library that builds or loads machine-code dictionary images asks this before it does either. |
 
 The linked list remains authoritative. Names through 31 bytes are eligible for
 the 1,024-entry `EXT.DICT` working-set cache; the BIOS index covers every name

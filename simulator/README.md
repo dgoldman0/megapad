@@ -873,6 +873,12 @@ a callback that itself aborts, or after any other host escape, the context is
 failed closed as described above. `QUIT-XT!` is appended after `:NONAME` at
 the end of the hosted core vocabulary, and the string scan `SCAN` after it.
 
+`DICT-MACHINE-CODE?` follows `SCAN`. The BIOS answers true, because it
+compiles every definition to MP64 machine code. This runtime keeps each
+definition as semantic operations, so it answers false, and hybrid mode
+answers with it. Akashic's image library asks the word before it builds or
+loads an MF64 image and refuses where the answer is false.
+
 ### Semantic evaluator and checked source
 
 The hosted BIOS now exposes `EVALUATE`, the early `EVALUATE-CHECKED`,
@@ -2452,7 +2458,7 @@ still free, mounted MP64FS, zero modules, balanced stacks, and no held lock. A
 post-boot checked definition returned 42, followed by allocation/free, CRC32,
 ring FIFO, and module-listing checks. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
-458 core words and expects 1,520 KDOS publications and 1,970 unique
+459 core words and expects 1,520 KDOS publications and 1,971 unique
 bindings.
 
 The contiguous unchanged KDOS core now reaches EOF. The integration branch is

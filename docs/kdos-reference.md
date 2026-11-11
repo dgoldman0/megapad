@@ -3517,7 +3517,7 @@ evaluator with canonical XMEM, HBW, VRAM, and valid MP64FS media. It published
 1,452 KDOS words and finished with an authoritative 1,764-binding dictionary
 index. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
-458 core words and expects 1,520 KDOS publications and 1,970 unique
+459 core words and expects 1,520 KDOS publications and 1,971 unique
 bindings. The historical
 run is semantic evidence, not native/exact-full-core timing evidence, and adds
 no `rich-terminal.f`, projection, compositor, viewer, or rich-input work.

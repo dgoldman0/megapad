@@ -3248,6 +3248,16 @@ def install_core(runtime: MegaForthRuntime) -> None:
         lambda context: _scan(runtime, context),
     )
 
+    # The dictionary's code kind follows.  This runtime keeps every
+    # definition as semantic operations, so no word it compiles is MP64
+    # machine code: a machine-code dictionary image can neither be built
+    # from this dictionary nor run in it.  Hybrid mode shares the answer,
+    # since its compiled words are these same definitions.
+    runtime.define_primitive(
+        b"DICT-MACHINE-CODE?",
+        lambda context: context.data.push(forth_flag(False)),
+    )
+
 
 def _scalar_float_word(service, shape: str, op: int | None):
     """Bind one BIOS-shaped scalar FP word to the hosted service."""

@@ -5929,10 +5929,11 @@ class TestBIOSTACC(unittest.TestCase):
 
     def test_tacc_dictionary_tail_chain(self):
         """WOTS, AES's block-mode words, SHA-384, the storage unit words, the
-        QUIT callback and the string scan append after the unchanged
-        full-TACC dictionary tail."""
+        QUIT callback, the string scan and the dictionary's code kind append
+        after the unchanged full-TACC dictionary tail."""
         labels = self._labels
         chain = (
+            ("d_dict_machine_code_q", "d_scan"),
             ("d_scan", "d_quit_xt_store"),
             ("d_quit_xt_store", "d_unit_disk_flush_gen_checked"),
             ("d_unit_disk_flush_gen_checked", "d_unit_disk_write_gen_checked"),
@@ -5971,7 +5972,8 @@ class TestBIOSTACC(unittest.TestCase):
             ("d_tamac", "d_caller_span_status"),
             ("d_caller_span_status", "d_entropy_ready"),
         )
-        self.assertEqual(labels["latest_entry"], labels["d_scan"])
+        self.assertEqual(
+            labels["latest_entry"], labels["d_dict_machine_code_q"])
         for current, previous in chain:
             link = int.from_bytes(
                 self._code[labels[current]:labels[current] + 8],
@@ -5988,7 +5990,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 560)
+        self.assertEqual(len(seen), 561)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -6300,6 +6302,34 @@ class TestBIOSScan(unittest.TestCase):
         ])
         # 266 is 0x10A: its low byte is the LF.
         self.assertRegex(text, r"\[WIDE\s+2\s+3\s+\]")
+
+
+class TestBIOSDictMachineCode(unittest.TestCase):
+    """DICT-MACHINE-CODE? is true where the words Forth compiles are MP64
+    machine code, which the BIOS's own always are."""
+
+    def setUp(self):
+        self._bios_harness = TestBIOS(methodName="test_print_zero")
+        self._bios_harness.setUp()
+
+    def test_the_bios_says_its_dictionary_is_machine_code(self):
+        sys_obj, buf = self._bios_harness._boot_bios()
+        text = self._bios_harness._run_forth(sys_obj, buf, [
+            'CR ." [CODE " DICT-MACHINE-CODE? . ." ]"',
+            ": ASKED DICT-MACHINE-CODE? ;",
+            'CR ." [COMPILED " ASKED . ." ]"',
+            # What the answer states: the definition begins with the
+            # compiler's call sequence, sep r16 (F4 A0) and an inline XT.
+            "CR .\" [BYTES \" ' ASKED C@ . ' ASKED 1+ C@ . .\" ]\"",
+            "CR .\" [TARGET \" ' ASKED 2 + @ ' DICT-MACHINE-CODE? = . .\" ]\"",
+            'CR ." [DEPTH " DEPTH . ." ]"',
+        ])
+        self.assertNotIn("Megapad-64 Forth BIOS", text)
+        self.assertRegex(text, r"\[CODE\s+-1\s+\]")
+        self.assertRegex(text, r"\[COMPILED\s+-1\s+\]")
+        self.assertRegex(text, r"\[BYTES\s+244\s+160\s+\]")
+        self.assertRegex(text, r"\[TARGET\s+-1\s+\]")
+        self.assertRegex(text, r"\[DEPTH\s+0\s+\]")
 
 
 class TestBIOSQuitCallback(unittest.TestCase):
@@ -16779,7 +16809,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 560)
+        self.assertEqual(len(seen), 561)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -18402,11 +18432,14 @@ class TestBIOSEntropyFill(unittest.TestCase):
 
     def test_dictionary_append_preserves_every_older_link(self):
         """WOTS, then AES's block-mode words, then SHA-384, then the storage
-        unit words, then the QUIT callback, then the string scan append
-        without changing any older dictionary link."""
+        unit words, then the QUIT callback, then the string scan, then the
+        dictionary's code kind append without changing any older dictionary
+        link."""
         labels = self._bios_labels
-        self.assertEqual(labels["latest_entry"], labels["d_scan"])
+        self.assertEqual(
+            labels["latest_entry"], labels["d_dict_machine_code_q"])
         for current, previous in (
+            ("d_dict_machine_code_q", "d_scan"),
             ("d_scan", "d_quit_xt_store"),
             ("d_disk_units", "d_sha384_final"),
             ("d_sha384_final", "d_sha384_init"),

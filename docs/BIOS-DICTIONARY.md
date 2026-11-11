@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The `bios.asm` dictionary link chain contains **560** entries.  The numbered
+The `bios.asm` dictionary link chain contains **561** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -1143,6 +1143,12 @@ secret-boundary qualifications are recorded in
 | 479 | `DICT-ROLLBACK` | `( saved-here saved-latest -- )` | | Validate a contiguous-zone checkpoint, globally clear cached bindings, atomically publish HERE/LATEST, and rebuild the side index |
 | 480 | `LATEST!` | `( entry -- )` | | Publish any valid terminating dictionary head without changing HERE, globally clear cached bindings, and rebuild the side index |
 
+### Dictionary Code Kind (1 word)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 559 | `DICT-MACHINE-CODE?` | `( -- flag )` | | True when the words compiled into this dictionary are MP64 machine code, so that a machine-code dictionary image can be built from it and run in it. The BIOS always answers true; a Forth system that keeps its definitions in another form answers false |
+
 ### Checked WOTS Chain (1 word)
 
 | # | Word | Stack Effect | Imm | Description |
@@ -1215,11 +1221,11 @@ machine reset.
 ### Newest Dictionary Chain Segment (last → earlier)
 
 The complete authoritative link chain is the `.dq` chain in `bios.asm`.
-`SCAN` closes the newest appended segment, after the QUIT callback and the
-storage unit words:
+`DICT-MACHINE-CODE?` closes the newest appended segment, after the string
+scan, the QUIT callback and the storage unit words:
 
 ```
-SCAN → QUIT-XT!
+DICT-MACHINE-CODE? → SCAN → QUIT-XT!
 → UNIT-DISK-FLUSH-GEN-CHECKED → UNIT-DISK-WRITE-GEN-CHECKED
 → UNIT-DISK-READ-GEN-CHECKED → UNIT-DISK-CAPS → UNIT-DISK-MEDIA-GEN
 → UNIT-DISK-SECTORS → UNIT-DISK@ → DISK-UNITS

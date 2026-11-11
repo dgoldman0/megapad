@@ -196,3 +196,8 @@ outside this mode. The last is the staged design in
 stands between this mode and a dictionary the BIOS compiled, such as an MF64
 image, is reviewed in
 [`hybrid-compiled-code-review-2026-11-11.md`](hybrid-compiled-code-review-2026-11-11.md).
+
+A hybrid session answers `DICT-MACHINE-CODE?` false, as the simulator does. A
+routine's body is machine code, but the words Forth compiles here are not, so
+a library that builds or loads machine-code dictionary images refuses in this
+mode as it does in the simulator.

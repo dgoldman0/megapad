@@ -3579,7 +3579,7 @@ mounted media, zero modules, balanced stacks, and released locks, followed by
 a checked post-boot definition, allocation/free, CRC32, ring FIFO, and module
 listing. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
-458 core words and expects 1,520 KDOS publications and 1,970 unique
+459 core words and expects 1,520 KDOS publications and 1,971 unique
 bindings; it submits 6,798 lines (220,582 payload bytes, 227,380 CLI UART bytes).
 
 The startup filesystem path is literal. `DISK?` false skips `FS-LOAD` and does
@@ -3780,6 +3780,23 @@ execution tokens, and executable entries.  The simulator may read, copy, hash,
 and persist MF64 files as opaque data, but it does not execute them or claim to
 validate their native semantics.  Source loading is the initial simulator
 path.
+
+Guest code learns this from `DICT-MACHINE-CODE?`, which the BIOS answers true
+and this runtime answers false: the words compiled here are semantic
+definitions, and none is MP64 machine code. Hybrid mode gives the same answer,
+because its compiled words are these same definitions. Akashic's `binimg` asks
+the word before it builds or loads an image and refuses with
+`IMG-E-UNSUPPORTED` where the answer is false, so a build marks and installs
+nothing and a load leaves the dictionary as it was. Its application builder and
+loader carry the refusal as `ABUILD-E-UNSUPPORTED` and `ALOAD-E-UNSUPPORTED`,
+and Pad and Desk show it in words. The word is asked when code runs. No source
+is compiled differently for it, so one source text serves every backend, and
+so does any compiled form of that text.
+
+The cells `_RELOC-ACTIVE`, `_RELOC-COUNT` and `_RELOC-BUF` exist here so that
+source which names them loads. The hosted compiler records nothing into them,
+and with the refusal in place nothing arms them either. `LATEST!` still refuses
+a header chain that has no hosted definitions, as described in section 11.
 
 A future semantic warm artifact uses a distinct magic, version, extension,
 and manifest kind.  It is never emitted under the MF64 identity.  Its cache

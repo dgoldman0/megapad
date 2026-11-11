@@ -63,6 +63,13 @@ BIOS_WORDS = (
 
 CANONICAL_INDEX_SLOTS = 65_536
 CANONICAL_INDEX_BYTES = CANONICAL_INDEX_SLOTS * 16
+# The unique names in the dictionary once this slice has loaded: the hosted
+# core words and KDOS's definitions through the slice's last line.
+BOOT_NAMES = 768
+# A 4 MiB XMEM gives the boot table 2,048 slots, which hold the boot's names
+# below the three quarters at which the table doubles.
+GROWTH_EXTERNAL_SIZE = 4 << 20
+GROWTH_BOOT_SLOTS = 2_048
 
 
 def _verified_slice() -> bytes:
@@ -420,33 +427,42 @@ def test_one_slot_boot_index_doubles_until_half_the_free_tail_refuses() -> None:
 
 
 def test_index_doubles_at_three_quarters_and_frees_the_old_table() -> None:
-    runtime = _runtime_with_external_size(2 << 20)
+    runtime = _runtime_with_external_size(GROWTH_EXTERNAL_SIZE)
     grow = _grow_xt(runtime)
-    table_bytes = 1_024 * 16
+    table_bytes = GROWTH_BOOT_SLOTS * 16
+    watermark = GROWTH_BOOT_SLOTS * 3 // 4
     assert _execute(runtime, "DICT-INDEX@") == (
         EXTERNAL_BASE,
-        1_024,
-        767,
+        GROWTH_BOOT_SLOTS,
+        BOOT_NAMES,
         DICT_INDEX_BOUND | DICT_INDEX_AUTHORITATIVE,
     )
-    assert runtime.dictionary_index.notification == (768, grow)
+    assert runtime.dictionary_index.notification == (watermark, grow)
     floor = EXTERNAL_BASE + table_bytes
     assert _pointer(runtime, "XMEM-FLOOR") == floor
 
     # A general allocation first, so the grown table does not start at the
-    # floor.  The boot table holds 767 names, one short of the 768 at which
-    # it doubles, so the next name is the one that crosses.
+    # floor.
     assert _execute(runtime, "XMEM-ALLOT", 100) == (floor,)
 
+    # Names up to one short of the watermark stay in the boot table.
+    _define_words(runtime, "BELOW", watermark - 1 - BOOT_NAMES)
+    assert _execute(runtime, "DICT-INDEX@")[:3] == (
+        EXTERNAL_BASE,
+        GROWTH_BOOT_SLOTS,
+        watermark - 1,
+    )
+
+    # The next name is the one that crosses.
     _define_words(runtime, "CROSS", 1)
     grown = floor + 112
     assert _execute(runtime, "DICT-INDEX@") == (
         grown,
-        2_048,
-        768,
+        2 * GROWTH_BOOT_SLOTS,
+        watermark,
         DICT_INDEX_BOUND | DICT_INDEX_AUTHORITATIVE,
     )
-    assert runtime.dictionary_index.notification == (1_536, grow)
+    assert runtime.dictionary_index.notification == (2 * watermark, grow)
     assert _pointer(runtime, "XMEM-HERE") == grown + 2 * table_bytes
     assert _pointer(runtime, "XMEM-FLOOR") == floor
     assert _pointer(runtime, "XMEM-FL") == EXTERNAL_BASE
@@ -458,24 +474,30 @@ def test_index_doubles_at_three_quarters_and_frees_the_old_table() -> None:
 
 
 def test_xmem_reset_rebinds_a_grown_table_at_the_floor() -> None:
-    runtime = _runtime_with_external_size(2 << 20)
-    floor = EXTERNAL_BASE + 1_024 * 16
+    runtime = _runtime_with_external_size(GROWTH_EXTERNAL_SIZE)
+    floor = EXTERNAL_BASE + GROWTH_BOOT_SLOTS * 16
     assert _execute(runtime, "XMEM-ALLOT", 100) == (floor,)
-    _define_words(runtime, "GROWN", 22)
-    assert _execute(runtime, "DICT-INDEX@")[:2] == (floor + 112, 2_048)
+    # Enough names to cross the watermark, and 21 more.
+    grown_names = GROWTH_BOOT_SLOTS * 3 // 4 - BOOT_NAMES + 22
+    _define_words(runtime, "GROWN", grown_names)
+    assert _execute(runtime, "DICT-INDEX@")[:2] == (
+        floor + 112,
+        2 * GROWTH_BOOT_SLOTS,
+    )
 
     assert _execute(runtime, "XMEM-RESET") == ()
-    raised = floor + 2_048 * 16
+    raised = floor + 2 * GROWTH_BOOT_SLOTS * 16
     assert _execute(runtime, "DICT-INDEX@") == (
         floor,
-        2_048,
-        789,
+        2 * GROWTH_BOOT_SLOTS,
+        BOOT_NAMES + grown_names,
         DICT_INDEX_BOUND | DICT_INDEX_AUTHORITATIVE,
     )
     assert _pointer(runtime, "XMEM-HERE") == raised
     assert _pointer(runtime, "XMEM-FLOOR") == raised
     assert _pointer(runtime, "XMEM-FL") == 0
-    for name in (b"GROWN-0", b"GROWN-21", b"_DICT-XMEM-RESET"):
+    last = f"GROWN-{grown_names - 1}".encode()
+    for name in (b"GROWN-0", last, b"_DICT-XMEM-RESET"):
         word = runtime.find(name)
         assert word is not None
         assert _table_probe(runtime, name)[1] == word.header_address

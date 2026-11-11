@@ -119,6 +119,17 @@ def test_a_routine_takes_and_gives_cells_on_the_data_stack(hybrid):
     assert (hybrid.transitions, hybrid.callback_requests) == (1, 0)
 
 
+def test_the_dictionary_is_not_machine_code_though_a_routine_is(hybrid):
+    """DICT-MACHINE-CODE? speaks of the words Forth compiles.  Hybrid mode
+    compiles them as the simulator does, so it gives the simulator's answer
+    with a machine routine in its dictionary."""
+
+    hybrid.register(RoutineDeclaration("H+", code("add r4, r5\nret.l"), input_cells=2, output_cells=1))
+    hybrid.semantic.evaluate(
+        b": ASKED DICT-MACHINE-CODE? ; DICT-MACHINE-CODE? ASKED 40 2 H+")
+    assert stack(hybrid) == (0, 0, 42)
+
+
 def test_a_callback_runs_a_forth_word_on_the_callers_stacks(hybrid):
     runtime = hybrid.semantic
     hybrid.register(callback_routine("HCB", "PROBE"))

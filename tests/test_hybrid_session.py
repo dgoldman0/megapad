@@ -219,6 +219,26 @@ def test_hybrid_machine_budget_survives_session_idle_and_resume(tmp_path, execut
     assert hybrid.closed
 
 
+@pytest.mark.parametrize("executor", ("python", "native"))
+def test_a_hybrid_session_says_its_dictionary_is_not_machine_code(executor):
+    """A hybrid session compiles Forth as the simulator does, so it answers
+    DICT-MACHINE-CODE? as the simulator does, although a machine routine is
+    in its dictionary and runs."""
+
+    hybrid = _runtime(executor)
+    hybrid.semantic.evaluate(
+        b"VARIABLE ASKED  : ROOT 40 H-INC DICT-MACHINE-CODE? + ASKED ! ;")
+    session = HybridSession(hybrid, "ROOT")
+    session.boot()
+    assert session.run_boundary().stop_reason.value == "completed"
+    semantic = hybrid.semantic
+    # 41 from the routine, plus a false flag; a true one would leave 40.
+    assert semantic.memory.read64(semantic.find("ASKED").body_address) == 41
+    assert hybrid.machine_instructions == 2
+    session.close()
+    assert hybrid.closed
+
+
 def test_session_close_cancels_owned_suspension_before_closing_composition():
     hybrid = _runtime("python")
     hybrid.semantic.evaluate(b": ROOT KEY DROP ;")
