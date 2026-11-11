@@ -18,11 +18,19 @@
 // each message once and in order can carry them.  One memory request is
 // outstanding at a time.
 //
-// Request channel (chiplet -> MegaPad):  addr, wdata, wen, size.
+// Request channel (chiplet -> MegaPad):  addr, wdata, wen, size, len.
 //   Sizes are the bus sizes (byte, half, word, dword), naturally aligned.
 //   Sub-word write data sits in the low bits.  A read returns the aligned
 //   64-bit word that contains the address.
-// Response channel (MegaPad -> chiplet): rdata, code.
+//   len is the number of 64-bit words beyond the first: 0 for one access,
+//   up to 255 for a burst of consecutive words.  A read burst is one
+//   request and len + 1 responses.  A write burst is len + 1 request
+//   messages, the first with addr and len and each with its word of data,
+//   and one response.  The whole burst is admitted or refused at its start,
+//   and each word is its own access at external memory.
+// Response channel (MegaPad -> chiplet): rdata, code, last.
+//   last marks the final response of a request.  A response other than
+//   LK_OK ends a burst and carries last.
 //   LK_OK         the access completed
 //   LK_REFUSED    outside the lent ranges, misaligned, or the port is closed
 //   LK_MEM_ERROR  external memory timed out or reported an error
@@ -42,7 +50,8 @@
 //                    [5] ID_DONE
 //                    [23:16] this port's ID   [39:32] ranges per port
 //   0x10 FAULT_ADDR  address of the first refused request since the clear
-//   0x18 FAULT_INFO  [1:0] size [2] wen [7:4] reason [31:16] refusals
+//   0x18 FAULT_INFO  [1:0] size [2] wen [7:4] reason [15:8] len
+//                    [31:16] refusals
 //   0x20 RANGE_SEL   range addressed by the three registers below
 //   0x28 RANGE_BASE  staged base (write); installed base (read)
 //   0x30 RANGE_LIMIT staged limit, exclusive (write); installed limit (read)
@@ -83,6 +92,7 @@ module mp64_chiplet_port #(
     input  wire [63:0] lk_rq_wdata,
     input  wire        lk_rq_wen,
     input  wire [1:0]  lk_rq_size,
+    input  wire [7:0]  lk_rq_len,      // words beyond the first
     input  wire        lk_rq_cancel,
 
     // === Link: memory response channel (MegaPad -> chiplet) ===
@@ -90,6 +100,7 @@ module mp64_chiplet_port #(
     input  wire        lk_rs_ready,
     output reg  [63:0] lk_rs_rdata,
     output reg  [1:0]  lk_rs_code,
+    output reg         lk_rs_last,     // final response of the request
 
     // === Link: doorbell to the chiplet ===
     output wire        lk_dbt_valid,
@@ -189,6 +200,7 @@ module mp64_chiplet_port #(
     reg [1:0]  fault_size;
     reg        fault_wen;
     reg [3:0]  fault_why;
+    reg [7:0]  fault_len;
     reg [15:0] refusals;
 
     reg        id_done;
@@ -209,19 +221,22 @@ module mp64_chiplet_port #(
     // ========================================================================
     // Request state
     // ========================================================================
-    localparam [1:0] ST_IDLE  = 2'd0;
-    localparam [1:0] ST_CHECK = 2'd1;
-    localparam [1:0] ST_MEM   = 2'd2;
-    localparam [1:0] ST_RESP  = 2'd3;
+    localparam [2:0] ST_IDLE  = 3'd0;
+    localparam [2:0] ST_CHECK = 3'd1;
+    localparam [2:0] ST_MEM   = 3'd2;
+    localparam [2:0] ST_RESP  = 3'd3;
+    localparam [2:0] ST_WDATA = 3'd4;   // a write burst awaits its next word
 
-    reg [1:0]  state;
-    reg [63:0] rq_addr;
+    reg [2:0]  state;
+    reg [63:0] rq_addr;        // address of the current word
     reg [63:0] rq_wdata;
     reg        rq_wen;
     reg [1:0]  rq_size;
+    reg [7:0]  rq_left;        // words of the burst after the current one
     reg        rq_cancelled;
 
-    assign lk_rq_ready = link_up && (state == ST_IDLE);
+    assign lk_rq_ready = link_up &&
+                         (state == ST_IDLE || state == ST_WDATA);
     assign lk_rs_valid = link_up && (state == ST_RESP);
 
     assign m_req   = (state == ST_MEM);
@@ -233,12 +248,18 @@ module mp64_chiplet_port #(
     // ========================================================================
     // Admission check on the latched request
     // ========================================================================
+    // The check runs once, in ST_CHECK, when rq_left still holds the burst's
+    // length, so it covers every word of a burst.  A burst is made of whole
+    // 64-bit words.
+    wire        rq_burst = (rq_left != 8'd0);
     wire [3:0]  rq_bytes = 4'd1 << rq_size;
-    wire [64:0] rq_end   = {1'b0, rq_addr} + {61'd0, rq_bytes};
+    wire [11:0] rq_span  = rq_burst ? {({1'b0, rq_left} + 9'd1), 3'b000}
+                                    : {8'd0, rq_bytes};
+    wire [64:0] rq_end   = {1'b0, rq_addr} + {53'd0, rq_span};
     wire        rq_aligned =
-        (rq_size == BUS_BYTE) ||
-        (rq_size == BUS_HALF  && rq_addr[0]   == 1'b0) ||
-        (rq_size == BUS_WORD  && rq_addr[1:0] == 2'b00) ||
+        (!rq_burst && rq_size == BUS_BYTE) ||
+        (!rq_burst && rq_size == BUS_HALF  && rq_addr[0]   == 1'b0) ||
+        (!rq_burst && rq_size == BUS_WORD  && rq_addr[1:0] == 2'b00) ||
         (rq_size == BUS_DWORD && rq_addr[2:0] == 3'b000);
     wire        rq_in_ext = (rq_addr >= EXT_BASE) &&
                             (rq_end <= {1'b0, EXT_LIMIT});
@@ -311,6 +332,7 @@ module mp64_chiplet_port #(
             fault_size   <= 2'd0;
             fault_wen    <= 1'b0;
             fault_why    <= 4'd0;
+            fault_len    <= 8'd0;
             refusals     <= 16'd0;
             id_done      <= 1'b0;
             id_start     <= 1'b0;
@@ -322,9 +344,11 @@ module mp64_chiplet_port #(
             rq_wdata     <= 64'd0;
             rq_wen       <= 1'b0;
             rq_size      <= BUS_DWORD;
+            rq_left      <= 8'd0;
             rq_cancelled <= 1'b0;
             lk_rs_rdata  <= 64'd0;
             lk_rs_code   <= LK_OK;
+            lk_rs_last   <= 1'b1;
             dbt_hold     <= 1'b0;
             lk_dbt_src   <= 8'd0;
             attn_pending <= 1'b0;
@@ -394,12 +418,14 @@ module mp64_chiplet_port #(
                         rq_wdata <= lk_rq_wdata;
                         rq_wen   <= lk_rq_wen;
                         rq_size  <= lk_rq_size;
+                        rq_left  <= lk_rq_len;
                         state    <= ST_CHECK;
                     end
                 end
 
                 ST_CHECK: begin
                     lk_rs_rdata <= 64'd0;
+                    lk_rs_last  <= 1'b1;
                     if (rq_cancelled || lk_rq_cancel || !link_up) begin
                         lk_rs_code <= LK_CANCELLED;
                         state      <= ST_RESP;
@@ -418,23 +444,64 @@ module mp64_chiplet_port #(
                         if (rq_cancelled || lk_rq_cancel || !link_up) begin
                             lk_rs_rdata <= 64'd0;
                             lk_rs_code  <= LK_CANCELLED;
+                            lk_rs_last  <= 1'b1;
+                            state       <= ST_RESP;
                         end else if (m_error) begin
                             lk_rs_rdata <= 64'd0;
                             lk_rs_code  <= LK_MEM_ERROR;
+                            lk_rs_last  <= 1'b1;
+                            state       <= ST_RESP;
+                        end else if (rq_wen && rq_left != 8'd0) begin
+                            // A written word of a burst: take the next one.
+                            rq_addr <= rq_addr + 64'd8;
+                            rq_left <= rq_left - 8'd1;
+                            state   <= ST_WDATA;
                         end else begin
+                            // A read word, or the last written word.
                             lk_rs_rdata <= rq_wen ? 64'd0 : m_rdata;
                             lk_rs_code  <= LK_OK;
+                            lk_rs_last  <= (rq_left == 8'd0);
+                            state       <= ST_RESP;
                         end
-                        state <= ST_RESP;
+                    end
+                end
+
+                ST_WDATA: begin
+                    if (!link_up || lk_rq_cancel) begin
+                        lk_rs_rdata <= 64'd0;
+                        lk_rs_code  <= LK_CANCELLED;
+                        lk_rs_last  <= 1'b1;
+                        state       <= ST_RESP;
+                    end else if (lk_rq_valid) begin
+                        rq_wdata <= lk_rq_wdata;
+                        state    <= ST_MEM;
                     end
                 end
 
                 ST_RESP: begin
+                    if (lk_rq_cancel)
+                        rq_cancelled <= 1'b1;
                     // A chiplet that has gone back into reset takes no
                     // response; drop it and reopen.
-                    if (!link_up || (lk_rs_valid && lk_rs_ready))
+                    if (!link_up) begin
                         state <= ST_IDLE;
+                    end else if (lk_rs_valid && lk_rs_ready) begin
+                        if (lk_rs_last) begin
+                            state <= ST_IDLE;
+                        end else if (rq_cancelled || lk_rq_cancel) begin
+                            // A read burst cancelled between its words.
+                            lk_rs_rdata <= 64'd0;
+                            lk_rs_code  <= LK_CANCELLED;
+                            lk_rs_last  <= 1'b1;
+                        end else begin
+                            rq_addr <= rq_addr + 64'd8;
+                            rq_left <= rq_left - 8'd1;
+                            state   <= ST_MEM;
+                        end
+                    end
                 end
+
+                default: state <= ST_IDLE;
             endcase
 
             // ---------------- Refusal record ----------------
@@ -447,6 +514,7 @@ module mp64_chiplet_port #(
                     fault_size <= rq_size;
                     fault_wen  <= rq_wen;
                     fault_why  <= rq_why;
+                    fault_len  <= rq_left;
                     if (ctl_attn_en)
                         attn_pending <= 1'b1;
                 end
@@ -482,7 +550,7 @@ module mp64_chiplet_port #(
                                        (state != ST_IDLE), sb_ready,
                                        sb_stopped, sb_present};
             R_FAULT_ADDR: reg_rdata = fault_addr;
-            R_FAULT_INFO: reg_rdata = {32'd0, refusals, 8'd0, fault_why,
+            R_FAULT_INFO: reg_rdata = {32'd0, refusals, fault_len, fault_why,
                                        1'b0, fault_wen, fault_size};
             R_RANGE_SEL:  reg_rdata = {{(64-RANGE_BITS){1'b0}}, range_sel};
             R_RANGE_BASE: reg_rdata = range_sel_valid

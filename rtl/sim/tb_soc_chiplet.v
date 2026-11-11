@@ -88,7 +88,8 @@ module tb_soc_chiplet;
     reg         cl_rq_valid, cl_rq_wen, cl_rq_cancel, cl_rs_ready;
     reg  [63:0] cl_rq_addr, cl_rq_wdata;
     reg  [1:0]  cl_rq_size;
-    wire        cl_rq_ready, cl_rs_valid;
+    reg  [7:0]  cl_rq_len;
+    wire        cl_rq_ready, cl_rs_valid, cl_rs_last;
     wire [63:0] cl_rs_rdata;
     wire [1:0]  cl_rs_code;
     wire        cl_dbt_valid, cl_dbr_ready;
@@ -143,9 +144,10 @@ module tb_soc_chiplet;
         .cl_rq_valid(cl_rq_valid), .cl_rq_ready(cl_rq_ready),
         .cl_rq_addr(cl_rq_addr), .cl_rq_wdata(cl_rq_wdata),
         .cl_rq_wen(cl_rq_wen), .cl_rq_size(cl_rq_size),
-        .cl_rq_cancel(cl_rq_cancel),
+        .cl_rq_len(cl_rq_len), .cl_rq_cancel(cl_rq_cancel),
         .cl_rs_valid(cl_rs_valid), .cl_rs_ready(cl_rs_ready),
         .cl_rs_rdata(cl_rs_rdata), .cl_rs_code(cl_rs_code),
+        .cl_rs_last(cl_rs_last),
         .cl_dbt_valid(cl_dbt_valid), .cl_dbt_ready(cl_dbt_ready),
         .cl_dbt_src(cl_dbt_src),
         .cl_dbr_valid(cl_dbr_valid), .cl_dbr_ready(cl_dbr_ready),
@@ -285,6 +287,7 @@ module tb_soc_chiplet;
         rst_n = 1'b0;
         cl_rq_valid = 0; cl_rq_wen = 0; cl_rq_cancel = 0; cl_rs_ready = 0;
         cl_rq_addr = 0; cl_rq_wdata = 0; cl_rq_size = BUS_DWORD;
+        cl_rq_len = 8'd0;
         cl_dbt_ready = 0; cl_dbr_valid = 0; cl_dbr_dst = 0;
         cl_sb_id_ack = 0; cl_sb_id_data = 0;
 
@@ -381,6 +384,26 @@ module tb_soc_chiplet;
               core_rd == 64'hBBBB_0000_0000_0002);
         check("and the chiplet gets its word",
               rs_code == 2'd0 && rs_data == 64'hAAAA_0000_0000_0001);
+
+        $display("\nA burst through the SoC");
+        xmem[17'h00210] = 64'hD000_0000_0000_0000;
+        xmem[17'h00211] = 64'hD000_0000_0000_0001;
+        xmem[17'h00212] = 64'hD000_0000_0000_0002;
+        cl_rq_len = 8'd2;
+        link_request(64'h0010_1080, 64'd0, 1'b0);
+        cl_rq_len = 8'd0;
+        link_response;
+        check("a read burst's first word arrives, more to come",
+              rs_code == 2'd0 && rs_data == 64'hD000_0000_0000_0000);
+        link_response;
+        check("then its second",
+              rs_code == 2'd0 && rs_data == 64'hD000_0000_0000_0001);
+        link_response;
+        check("and its third, marked last by the bridge",
+              rs_code == 2'd0 && rs_data == 64'hD000_0000_0000_0002);
+        link_access(64'h0010_1008, 64'd0, 1'b0);
+        check("a single access follows the burst",
+              rs_code == 2'd0 && rs_data == 64'hFEED_FACE_CAFE_BEEF);
 
         $display("\nDoorbells");
         mmio_access(MB_SEND, {56'd0, PORT_ID}, 1'b1, BUS_BYTE);

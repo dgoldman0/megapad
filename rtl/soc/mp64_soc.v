@@ -116,11 +116,13 @@ module mp64_soc #(
     input  wire [CP_W*64-1:0] cl_rq_wdata,
     input  wire [CP_W-1:0]    cl_rq_wen,
     input  wire [CP_W*2-1:0]  cl_rq_size,
+    input  wire [CP_W*8-1:0]  cl_rq_len,
     input  wire [CP_W-1:0]    cl_rq_cancel,
     output wire [CP_W-1:0]    cl_rs_valid,
     input  wire [CP_W-1:0]    cl_rs_ready,
     output wire [CP_W*64-1:0] cl_rs_rdata,
     output wire [CP_W*2-1:0]  cl_rs_code,
+    output wire [CP_W-1:0]    cl_rs_last,
     // Doorbell to the chiplet, and from it
     output wire [CP_W-1:0]    cl_dbt_valid,
     input  wire [CP_W-1:0]    cl_dbt_ready,
@@ -2004,11 +2006,13 @@ module mp64_soc #(
                     .lk_rq_wdata  (cl_rq_wdata[cpi*64 +: 64]),
                     .lk_rq_wen    (cl_rq_wen[cpi]),
                     .lk_rq_size   (cl_rq_size[cpi*2 +: 2]),
+                    .lk_rq_len    (cl_rq_len[cpi*8 +: 8]),
                     .lk_rq_cancel (cl_rq_cancel[cpi]),
                     .lk_rs_valid  (cl_rs_valid[cpi]),
                     .lk_rs_ready  (cl_rs_ready[cpi]),
                     .lk_rs_rdata  (cl_rs_rdata[cpi*64 +: 64]),
                     .lk_rs_code   (cl_rs_code[cpi*2 +: 2]),
+                    .lk_rs_last   (cl_rs_last[cpi]),
                     .lk_dbt_valid (cl_dbt_valid[cpi]),
                     .lk_dbt_ready (cl_dbt_ready[cpi]),
                     .lk_dbt_src   (cl_dbt_src[cpi*8 +: 8]),
@@ -2052,6 +2056,7 @@ module mp64_soc #(
                 assign cl_rs_valid[cpi]              = 1'b0;
                 assign cl_rs_rdata[cpi*64 +: 64]     = 64'd0;
                 assign cl_rs_code[cpi*2 +: 2]        = 2'd0;
+                assign cl_rs_last[cpi]               = 1'b0;
                 assign cl_dbt_valid[cpi]             = 1'b0;
                 assign cl_dbt_src[cpi*8 +: 8]        = 8'd0;
                 assign cl_dbr_ready[cpi]             = 1'b0;

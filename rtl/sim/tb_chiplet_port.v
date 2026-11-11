@@ -72,8 +72,10 @@ module tb_chiplet_port;
     reg         lk_rq_valid, lk_rq_wen, lk_rq_cancel;
     reg  [63:0] lk_rq_addr, lk_rq_wdata;
     reg  [1:0]  lk_rq_size;
+    reg  [7:0]  lk_rq_len;
     wire        lk_rq_ready;
     wire        lk_rs_valid;
+    wire        lk_rs_last;
     reg         lk_rs_ready;
     wire [63:0] lk_rs_rdata;
     wire [1:0]  lk_rs_code;
@@ -117,9 +119,10 @@ module tb_chiplet_port;
         .lk_rq_valid(lk_rq_valid), .lk_rq_ready(lk_rq_ready),
         .lk_rq_addr(lk_rq_addr), .lk_rq_wdata(lk_rq_wdata),
         .lk_rq_wen(lk_rq_wen), .lk_rq_size(lk_rq_size),
-        .lk_rq_cancel(lk_rq_cancel),
+        .lk_rq_len(lk_rq_len), .lk_rq_cancel(lk_rq_cancel),
         .lk_rs_valid(lk_rs_valid), .lk_rs_ready(lk_rs_ready),
         .lk_rs_rdata(lk_rs_rdata), .lk_rs_code(lk_rs_code),
+        .lk_rs_last(lk_rs_last),
         .lk_dbt_valid(lk_dbt_valid), .lk_dbt_ready(lk_dbt_ready),
         .lk_dbt_src(lk_dbt_src),
         .lk_dbr_valid(lk_dbr_valid), .lk_dbr_ready(lk_dbr_ready),
@@ -280,6 +283,103 @@ module tb_chiplet_port;
 
     integer prev_n;
 
+    // ------------------------------------------------------------------
+    // Bursts
+    // ------------------------------------------------------------------
+    reg [63:0] b_data [0:15];
+    reg [1:0]  b_code [0:15];
+    reg        b_last [0:15];
+    integer    b_n;
+    reg        b_done;
+
+    // Take responses until the one marked last.  cancel_after n raises
+    // lk_rq_cancel while response n is being taken (0 = never).
+    task take_responses;
+        input integer cancel_after;
+        begin
+            b_n = 0;
+            b_done = 1'b0;
+            guard = 0;
+            while (!b_done && guard < 4000) begin
+                @(posedge clk);
+                guard = guard + 1;
+                if (lk_rs_valid) begin
+                    b_data[b_n] = lk_rs_rdata;
+                    b_code[b_n] = lk_rs_code;
+                    b_last[b_n] = lk_rs_last;
+                    b_done = lk_rs_last;
+                    b_n = b_n + 1;
+                    lk_rs_ready <= 1'b1;
+                    if (cancel_after != 0 && b_n == cancel_after)
+                        lk_rq_cancel <= 1'b1;
+                    @(posedge clk);
+                    lk_rs_ready <= 1'b0;
+                end
+            end
+            lk_rq_cancel <= 1'b0;
+            @(posedge clk);
+        end
+    endtask
+
+    task burst_read;
+        input [63:0] addr;
+        input [7:0]  len;
+        input [1:0]  size;
+        input integer cancel_after;
+        begin
+            @(posedge clk);
+            lk_rq_valid <= 1'b1; lk_rq_addr <= addr; lk_rq_wdata <= 64'd0;
+            lk_rq_wen <= 1'b0; lk_rq_size <= size; lk_rq_len <= len;
+            guard = 0;
+            @(posedge clk);
+            while (!lk_rq_ready && guard < 2000) begin
+                @(posedge clk); guard = guard + 1;
+            end
+            lk_rq_valid <= 1'b0; lk_rq_len <= 8'd0;
+            take_responses(cancel_after);
+        end
+    endtask
+
+    // Send len + 1 words, base, base + 1, ...  stop_at n withholds word n
+    // and raises lk_rq_cancel in its place (0 = send them all).
+    task burst_write;
+        input [63:0] addr;
+        input [7:0]  len;
+        input [63:0] base;
+        input integer stop_at;
+        integer k;
+        reg     ended;
+        begin
+            ended = 1'b0;
+            @(posedge clk);
+            lk_rq_valid <= 1'b1; lk_rq_addr <= addr; lk_rq_wdata <= base;
+            lk_rq_wen <= 1'b1; lk_rq_size <= 2'd3; lk_rq_len <= len;
+            guard = 0;
+            @(posedge clk);
+            while (!lk_rq_ready && guard < 2000) begin
+                @(posedge clk); guard = guard + 1;
+            end
+            lk_rq_len <= 8'd0;
+            for (k = 1; k <= len && !ended; k = k + 1) begin
+                if (stop_at != 0 && k == stop_at) begin
+                    lk_rq_valid <= 1'b0;
+                    lk_rq_cancel <= 1'b1;
+                    ended = 1'b1;
+                end else begin
+                    lk_rq_wdata <= base + k;
+                    @(posedge clk);
+                    while (!lk_rq_ready && !lk_rs_valid && guard < 4000) begin
+                        @(posedge clk); guard = guard + 1;
+                    end
+                    if (lk_rs_valid)
+                        ended = 1'b1;       // the bridge ended the burst
+                end
+            end
+            lk_rq_valid <= 1'b0;
+            take_responses(0);
+        end
+    endtask
+
     initial begin
         pass_count = 0; fail_count = 0; test_num = 0;
         mem_latency = 2; mem_count = 0; mem_fail = 1'b0;
@@ -287,7 +387,7 @@ module tb_chiplet_port;
         rst_n = 1'b0;
         reg_sel = 0; reg_wen = 0; reg_addr = 0; reg_wdata = 0;
         lk_rq_valid = 0; lk_rq_wen = 0; lk_rq_cancel = 0;
-        lk_rq_addr = 0; lk_rq_wdata = 0; lk_rq_size = 2'd3;
+        lk_rq_addr = 0; lk_rq_wdata = 0; lk_rq_size = 2'd3; lk_rq_len = 8'd0;
         lk_rs_ready = 0; lk_dbt_ready = 0; lk_dbr_valid = 0; lk_dbr_dst = 0;
         sb_present = 1'b1; sb_stopped = 0; sb_ready = 0;
         sb_id_ack = 0; sb_id_data = 0;
@@ -561,6 +661,65 @@ module tb_chiplet_port;
         link_access(64'h0030_0000, 64'd0, 1'b0, 2'd3, 0);
         check("released again, the port serves requests",
               rs_code == LK_OK);
+
+        // --------------------------------------------------------------
+        $display("\nBursts");
+        // Range 1 is [0x0030_0000, 0x0030_1000), read and write.
+        mem[12'h040] = 64'hB000; mem[12'h041] = 64'hB001;
+        mem[12'h042] = 64'hB002; mem[12'h043] = 64'hB003;
+        prev_n = mem_count;
+        burst_read(64'h0030_0200, 8'd3, 2'd3, 0);
+        check("a read burst of four words gives four responses",
+              b_n == 4 && mem_count == prev_n + 4);
+        check("the words arrive in order",
+              b_data[0] == 64'hB000 && b_data[1] == 64'hB001 &&
+              b_data[2] == 64'hB002 && b_data[3] == 64'hB003);
+        check("only the fourth is marked last",
+              !b_last[0] && !b_last[1] && !b_last[2] && b_last[3]);
+        prev_n = mem_count;
+        burst_read(64'h0030_0FF0, 8'd3, 2'd3, 0);
+        check("a burst that leaves the range is refused whole, once",
+              b_n == 1 && b_code[0] == LK_REFUSED && b_last[0] &&
+              mem_count == prev_n);
+        reg_read(R_FAULT_INFO);
+        check("the record holds the burst's length", rd[15:8] == 8'd3);
+        reg_write(R_STATUS, 64'h10);
+        burst_read(64'h0030_0200, 8'd1, 2'd2, 0);
+        check("a burst of sub-word accesses is refused as misaligned",
+              b_n == 1 && b_code[0] == LK_REFUSED);
+        reg_read(R_FAULT_INFO);
+        check("with that reason", rd[7:4] == 4'd2);
+        reg_write(R_STATUS, 64'h10);
+
+        prev_n = mem_count;
+        burst_write(64'h0030_0300, 8'd2, 64'hC0DE_0000, 0);
+        check("a write burst of three words gives one response, OK",
+              b_n == 1 && b_code[0] == LK_OK && b_last[0]);
+        check("the three words are in memory",
+              mem_count == prev_n + 3 &&
+              mem[12'h060] == 64'hC0DE_0000 &&
+              mem[12'h061] == 64'hC0DE_0001 &&
+              mem[12'h062] == 64'hC0DE_0002);
+
+        prev_n = mem_count;
+        burst_read(64'h0030_0200, 8'd3, 2'd3, 1);
+        check("a read burst cancelled after its first word ends CANCELLED",
+              b_n == 2 && b_code[0] == LK_OK &&
+              b_code[1] == LK_CANCELLED && b_last[1]);
+        check("no further word is read", mem_count == prev_n + 1);
+        prev_n = mem_count;
+        burst_write(64'h0030_0400, 8'd3, 64'hFACE_0000, 2);
+        check("a write burst cancelled before its third word ends CANCELLED",
+              b_n == 1 && b_code[0] == LK_CANCELLED && b_last[0]);
+        check("the words already sent are written",
+              mem_count == prev_n + 2 && mem[12'h081] == 64'hFACE_0001);
+        mem_fail = 1'b1;
+        burst_write(64'h0030_0500, 8'd2, 64'h1, 0);
+        check("a memory error ends a write burst at its first word",
+              b_n == 1 && b_code[0] == LK_MEM_ERROR && b_last[0]);
+        mem_fail = 1'b0;
+        link_access(64'h0030_0000, 64'd0, 1'b0, 2'd3, 0);
+        check("single accesses still work after bursts", rs_code == LK_OK);
 
         $display("\n============================================");
         $display(" tb_chiplet_port: %0d passed, %0d failed",

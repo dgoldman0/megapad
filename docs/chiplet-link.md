@@ -51,7 +51,7 @@ zero and ignores writes.
 | `+0x80` | `CTRL` | R/W | [0] `ENABLE`, [1] `RESET_HOLD`, [2] `STOP_REQ`, [3] `DOORBELL_EN`, [4] `ATTN_EN`, [15:8] `ATTN_CORE` |
 | `+0x88` | `STATUS` | R, W1C | [0] `PRESENT`, [1] `STOPPED`, [2] `READY`, [3] `BUSY`, [4] `FAULT`, [5] `ID_DONE`, [23:16] port ID, [39:32] lent ranges |
 | `+0x90` | `FAULT_ADDR` | R | Address of the first refused request since `FAULT` was cleared |
-| `+0x98` | `FAULT_INFO` | R | [1:0] size, [2] write, [7:4] reason, [31:16] refusals |
+| `+0x98` | `FAULT_INFO` | R | [1:0] size, [2] write, [7:4] reason, [15:8] burst length, [31:16] refusals |
 | `+0xA0` | `RANGE_SEL` | R/W | Range addressed by the three registers below |
 | `+0xA8` | `RANGE_BASE` | R/W | Write: staged base. Read: installed base |
 | `+0xB0` | `RANGE_LIMIT` | R/W | Write: staged limit, exclusive. Read: installed limit |
@@ -109,10 +109,19 @@ chiplet is absent or held in reset.
 | `wdata` | 64 | Write data; a sub-word write puts its data in the low bits |
 | `wen` | 1 | 1 for a write |
 | `size` | 2 | 0 byte, 1 half-word, 2 word, 3 double word |
+| `len` | 8 | Words beyond the first: 0 for one access, up to 255 for a burst |
 
 One request is outstanding at a time: the bridge takes the next one after
-the chiplet has taken the response. `cancel`, a level beside the channel,
-abandons the outstanding request.
+the chiplet has taken its last response. `cancel`, a level beside the
+channel, abandons the outstanding request.
+
+A burst covers `len + 1` consecutive 64-bit words from `addr`, so it uses
+size 3 and an address aligned to 8. A read burst is one request message and
+`len + 1` responses. A write burst is `len + 1` request messages, the first
+with `addr` and `len` and each with its word in `wdata`, and one response.
+The bridge admits or refuses the whole burst at its start, against one lent
+range. Each word is then its own access at external memory, so another
+client's access can fall between two words of a burst.
 
 ### Memory response (MegaPad to chiplet)
 
@@ -120,12 +129,15 @@ abandons the outstanding request.
 |-------|-------|---------|
 | `rdata` | 64 | For a read, the aligned 64-bit word that contains the address |
 | `code` | 2 | 0 `OK`, 1 `REFUSED`, 2 `MEM_ERROR`, 3 `CANCELLED` |
+| `last` | 1 | Set on the final response of a request |
 
-Every request is answered. `REFUSED` means the bridge admitted nothing and
-memory is untouched. `MEM_ERROR` means external memory timed out or reported
-an error. `CANCELLED` answers a cancelled request; a write it had started
-may or may not have landed, because an access that has reached memory runs
-to its end.
+Every request is answered, and its final response carries `last`. `REFUSED`
+means the bridge admitted nothing and memory is untouched. `MEM_ERROR` means
+external memory timed out or reported an error. `CANCELLED` answers a
+cancelled request; a write it had started may or may not have landed,
+because an access that has reached memory runs to its end. A response other
+than `OK` ends a burst: the words before it were read or written, and none
+after it is.
 
 An access is one transaction at external memory. A sub-word write reads and
 rewrites its word inside that one transaction, and the arbiter grants one
@@ -217,8 +229,6 @@ to zero.
   functions and the queues and memory it asks for, and work crosses as
   descriptors in queues in lent memory. Both are formats in memory, defined
   with KDOS's system module for chiplets.
-- **Bursts.** A request moves one word. Several words per request would cut
-  the round trips of a queue descriptor.
 - **IDs above 63.** The 64-bit pending mask covers IDs 0 to 63: the 16
   cores and 48 ports. A die with more ports needs a wider mask.
 - **System Info.** The port count is read from `PORT_COUNT`. System Info
