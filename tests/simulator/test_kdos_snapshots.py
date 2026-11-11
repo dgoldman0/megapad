@@ -20,15 +20,15 @@ ALLOCATOR_FIXTURE = FIXTURE_DIRECTORY / "kdos-allocator-118-547.f"
 SNAPSHOT_FIXTURE = FIXTURE_DIRECTORY / "kdos-snapshots-548-619.f"
 
 MEGAPAD_REVISION = "b8e1a7e174fb50d7ea3cb5f5f8d10917ed329ec4"
-KDOS_GIT_BLOB = "09519e0f8a2c395c1c7cde318b3611f19f10f916"
+KDOS_GIT_BLOB = "c63376227a12f173bdebc5e3a57f8f75de50d61a"
 
 SLICES = (
     (
         BASE_FIXTURE,
         39,
         69,
-        "e3918ffeab18446da9e9b190b4d0b82382a3ed5e9fcc220680b5164ab261d01c",
-        "ecef2fef19b54559367f1a162a97558776ab6ee8",
+        "441836c13652cb8518cfb9f22d8eefc0a2e30090a6e5b624b6c9b23abd939ac4",
+        "30e9748fda02cf57adcbd6cf2de4bdad647a54f9",
     ),
     (
         PARSE_FIXTURE,

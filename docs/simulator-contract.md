@@ -452,12 +452,15 @@ The hosted backend may accelerate that ordinary path only through an
 identity-bound execution overlay on exact source-compiled colon definitions.
 The current admitted set is `EVALUATE-CHECKED`,
 `SOURCE-EVALUATE-CHECKED`, `_LD-STATUS-THROW`, `_CRC-BUF-CHECKED`,
-`_LD-WALK`, and the module pre-scan helper `_PS-LINE-LEN`. Their guest words,
+`_LD-WALK`, and the line measure `_LINE-LEN`. Their guest words,
 XTs, bodies, and compiled operations remain unchanged. Installation occurs
 after checked KDOS and session-root evaluation but before ordinary autoexec.
 Complete normalized IR digests gate all six overlays; the checked-source gate
 additionally pins the exact `_SEC-MEASURE` and `_SEC-ADVANCE` bodies that it
-subsumes. A missing, changed, rolled-back, or XT-reused word executes through
+subsumes. KDOS states what a physical line is in two words, `_LINE-LEN` and
+`_LINE-TEXT`, and the overlays measure lines themselves, so the checked-source
+and loader-walk gates also pin those two bodies, and every gate that reaches
+`_LINE-LEN` requires its `SCAN` to be the BIOS's own. A missing, changed, rolled-back, or XT-reused word executes through
 the normal colon dispatcher. A positive source or checksum span must also fit
 wholly inside one ordinary guest-memory region; otherwise that call falls back
 before mutation.
@@ -3576,8 +3579,8 @@ mounted media, zero modules, balanced stacks, and released locks, followed by
 a checked post-boot definition, allocation/free, CRC32, ring FIFO, and module
 listing. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
-457 core words and expects 1,519 KDOS publications and 1,968 unique
-bindings; it submits 6,818 lines (221,032 payload bytes, 227,850 CLI UART bytes).
+458 core words and expects 1,520 KDOS publications and 1,970 unique
+bindings; it submits 6,798 lines (220,582 payload bytes, 227,380 CLI UART bytes).
 
 The startup filesystem path is literal. `DISK?` false skips `FS-LOAD` and does
 not clear a stale true `FS-OK`. A successful load stores the exact lowercase

@@ -37,26 +37,26 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-module-system-9661-10154.f"
+    / "kdos-module-system-9659-10144.f"
 )
 
-FIRST_LINE = 9661
-FIXTURE_LAST_LINE = 10154
-LAST_LINE = 10153
-FIXTURE_BYTES = 16_229
+FIRST_LINE = 9659
+FIXTURE_LAST_LINE = 10144
+LAST_LINE = 10143
+FIXTURE_BYTES = 16_014
 FIXTURE_SHA256 = (
-    "cf818fbb9facbe2a06a825a6ba3cd6738b73d97793f423829b4386bc89b03a9d"
+    "6d15e788c6523365ddcdaac49c0451c33d56765650910329dc0144143c5f7d18"
 )
-FIXTURE_GIT_BLOB = "881609bc61944004c8f8442eb22a527f132ebbd8"
-SLICE_BYTES = 16_157
+FIXTURE_GIT_BLOB = "5bff92821227f11cbf6c3f30f802ac24a3c220be"
+SLICE_BYTES = 15_942
 SLICE_SHA256 = (
-    "e3b84f6fbb348c2275c2e4339bdb92f398e621c437dcc975949611d0e367d265"
+    "b93700e360154ffa643edb128868ac9bf3441828f9e9d83d16ca7602916fd317"
 )
-SLICE_GIT_BLOB = "7b616252e40b75bdd9fa82fbc5fc6c0f2c47ae64"
+SLICE_GIT_BLOB = "0c7816e9d40a69e3a356e6004ee7c01b802508d8"
 
 CELL_BYTES = 8
 HOSTED_WORD_FIXED_BYTES = 17
-HOSTED_DICTIONARY_GROWTH = 2_487
+HOSTED_DICTIONARY_GROWTH = 2_458
 MODULE_LOCK_ID = 5
 INLINE_BUCKETS = 16
 MODULE_NODE_HEADER_BYTES = 32
@@ -124,7 +124,6 @@ SOURCE_LEDGER = (
     ("VARIABLE", b"_PS-PTR", CELL_BYTES),
     ("VARIABLE", b"_PS-REM", CELL_BYTES),
     ("VARIABLE", b"_PS-LINE-U", CELL_BYTES),
-    (":", b"_PS-LINE-LEN", 0),
     (":", b"_MOD-PRESCAN", 0),
     (":", b"_MOD-PARSE-ID", 0),
     (":", b"PROVIDED-SPAN", 0),
@@ -366,8 +365,8 @@ def test_module_slice_is_exact_linked_initialized_and_load_effects_are_exact() -
 
     runtime = _evaluate_module_system(runtime)
 
-    assert len(SOURCE_LEDGER) == 75
-    assert sum(definer == ":" for definer, _name, _body in SOURCE_LEDGER) == 46
+    assert len(SOURCE_LEDGER) == 74
+    assert sum(definer == ":" for definer, _name, _body in SOURCE_LEDGER) == 45
     assert sum(
         definer == "VARIABLE" for definer, _name, _body in SOURCE_LEDGER
     ) == 16
@@ -376,7 +375,7 @@ def test_module_slice_is_exact_linked_initialized_and_load_effects_are_exact() -
     assert sum(
         definer == "CONSTANT" for definer, _name, _body in SOURCE_LEDGER
     ) == 7
-    assert sum(len(name) for _definer, name, _body in SOURCE_LEDGER) == 859
+    assert sum(len(name) for _definer, name, _body in SOURCE_LEDGER) == 847
     assert sum(body for _definer, _name, body in SOURCE_LEDGER) == 353
     assert sum(
         HOSTED_WORD_FIXED_BYTES + len(name) + body

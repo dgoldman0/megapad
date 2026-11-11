@@ -332,21 +332,13 @@ CREATE _PS-TAG  9 ALLOT   \ "PROVIDED" + NUL
 VARIABLE _PS-PTR
 VARIABLE _PS-REM
 VARIABLE _PS-LINE-U
-: _PS-LINE-LEN  ( addr rem -- len )
-    0
-    BEGIN
-        DUP 2 PICK < IF
-            2 PICK OVER + C@ 10 = IF TRUE ELSE 1+ FALSE THEN
-        ELSE TRUE THEN
-    UNTIL
-    NIP NIP ;
 
 : _MOD-PRESCAN  ( -- id-addr id-len found? )
     LD-BUF @ _PS-PTR !
     LD-SZ @ _PS-REM !
     BEGIN _PS-REM @ 0> WHILE
-        _PS-PTR @ _PS-REM @ _PS-LINE-LEN DUP _PS-LINE-U !
-        DUP 0> IF _PS-PTR @ OVER 1- + C@ 13 = IF 1- THEN THEN DUP LD-LEN !
+        _PS-PTR @ _PS-REM @ _LINE-LEN DUP _PS-LINE-U !
+        _PS-PTR @ SWAP _LINE-TEXT DUP LD-LEN !
         _PS-PTR @ SWAP _PS-SKIP-WS
         2DUP _PS-TOKEN-LEN 8 = IF
             OVER _PS-MATCH8? IF

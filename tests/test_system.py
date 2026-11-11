@@ -5928,11 +5928,12 @@ class TestBIOSTACC(unittest.TestCase):
         return tuple(base + offset for offset in (0, 64, 128, 192, 512))
 
     def test_tacc_dictionary_tail_chain(self):
-        """WOTS, AES's block-mode words, SHA-384, the storage unit words and
-        the QUIT callback append after the unchanged full-TACC dictionary
-        tail."""
+        """WOTS, AES's block-mode words, SHA-384, the storage unit words, the
+        QUIT callback and the string scan append after the unchanged
+        full-TACC dictionary tail."""
         labels = self._labels
         chain = (
+            ("d_scan", "d_quit_xt_store"),
             ("d_quit_xt_store", "d_unit_disk_flush_gen_checked"),
             ("d_unit_disk_flush_gen_checked", "d_unit_disk_write_gen_checked"),
             ("d_unit_disk_write_gen_checked", "d_unit_disk_read_gen_checked"),
@@ -5970,7 +5971,7 @@ class TestBIOSTACC(unittest.TestCase):
             ("d_tamac", "d_caller_span_status"),
             ("d_caller_span_status", "d_entropy_ready"),
         )
-        self.assertEqual(labels["latest_entry"], labels["d_quit_xt_store"])
+        self.assertEqual(labels["latest_entry"], labels["d_scan"])
         for current, previous in chain:
             link = int.from_bytes(
                 self._code[labels[current]:labels[current] + 8],
@@ -5987,7 +5988,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 559)
+        self.assertEqual(len(seen), 560)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -6237,6 +6238,68 @@ class TestBIOSInstructionFaults(unittest.TestCase):
         self.assertIn("A=-21 0 ", text)
         self.assertIn("B=-10 0 ", text)
         self.assertIn("C=-23 0 ", text)
+
+
+class TestBIOSScan(unittest.TestCase):
+    """SCAN steps to the first occurrence of a byte in a string."""
+
+    def setUp(self):
+        self._bios_harness = TestBIOS(methodName="test_print_zero")
+        self._bios_harness.setUp()
+
+    def _run(self, lines):
+        sys_obj, buf = self._bios_harness._boot_bios()
+        text = self._bios_harness._run_forth(
+            sys_obj,
+            buf,
+            [
+                # "ab<LF>cd<LF>" then a guard byte the scans must not reach.
+                "CREATE SB 8 ALLOT  SB 8 0 FILL",
+                "97 SB C!  98 SB 1+ C!  10 SB 2 + C!  99 SB 3 + C!",
+                "100 SB 4 + C!  10 SB 5 + C!  10 SB 6 + C!",
+                ": .SCAN  ( c-addr u -- )  SWAP SB - . . ;",
+            ] + lines,
+        )
+        self.assertNotIn("Megapad-64 Forth BIOS", text)
+        return text
+
+    def test_scan_finds_the_first_match_and_keeps_the_rest(self):
+        text = self._run([
+            'CR ." [MID " SB 5 10 SCAN .SCAN ." ]"',
+            'CR ." [FIRST " SB 5 97 SCAN .SCAN ." ]"',
+            'CR ." [LAST " SB 5 100 SCAN .SCAN ." ]"',
+            'CR ." [SECOND " SB 3 + 3 10 SCAN .SCAN ." ]"',
+            'CR ." [DEPTH " DEPTH . ." ]"',
+        ])
+        self.assertRegex(text, r"\[MID\s+2\s+3\s+\]")
+        self.assertRegex(text, r"\[FIRST\s+0\s+5\s+\]")
+        self.assertRegex(text, r"\[LAST\s+4\s+1\s+\]")
+        self.assertRegex(text, r"\[SECOND\s+5\s+1\s+\]")
+        self.assertRegex(text, r"\[DEPTH\s+0\s+\]")
+
+    def test_scan_without_a_match_ends_at_the_strings_end(self):
+        """The count bounds the scan: a match just past it is not found."""
+        text = self._run([
+            'CR ." [NONE " SB 2 10 SCAN .SCAN ." ]"',
+            'CR ." [ABSENT " SB 6 120 SCAN .SCAN ." ]"',
+        ])
+        self.assertRegex(text, r"\[NONE\s+2\s+0\s+\]")
+        self.assertRegex(text, r"\[ABSENT\s+6\s+0\s+\]")
+
+    def test_scan_leaves_an_empty_or_negative_count_as_it_is(self):
+        text = self._run([
+            'CR ." [EMPTY " SB 0 10 SCAN .SCAN ." ]"',
+            'CR ." [NEGATIVE " SB -3 10 SCAN .SCAN ." ]"',
+        ])
+        self.assertRegex(text, r"\[EMPTY\s+0\s+0\s+\]")
+        self.assertRegex(text, r"\[NEGATIVE\s+0\s+-3\s+\]")
+
+    def test_scan_compares_one_byte_of_the_character(self):
+        text = self._run([
+            'CR ." [WIDE " SB 5 266 SCAN .SCAN ." ]"',
+        ])
+        # 266 is 0x10A: its low byte is the LF.
+        self.assertRegex(text, r"\[WIDE\s+2\s+3\s+\]")
 
 
 class TestBIOSQuitCallback(unittest.TestCase):
@@ -12459,6 +12522,42 @@ class TestKDOSCheckedCompiler(_KDOSTestBase):
         ])
         self.assertRegex(text, r"\[SOURCE-BRACKET\s+4\s+0\s+\]")
 
+    def test_line_words_state_what_a_physical_line_is(self):
+        """_LINE-LEN is the bytes before a line's LF, or all that remains;
+        _LINE-TEXT is that length without one terminal CR."""
+        text = self._run_kdos([
+            # "ab<LF>cd<CR><LF><LF>l"
+            "CREATE LT 16 ALLOT  LT 16 0 FILL",
+            "97 LT C!  98 LT 1+ C!  10 LT 2 + C!  99 LT 3 + C!  100 LT 4 + C!",
+            "13 LT 5 + C!  10 LT 6 + C!  10 LT 7 + C!  108 LT 8 + C!",
+            'CR ." [LINE-LEN " LT 9 _LINE-LEN . LT 3 + 6 _LINE-LEN . '
+            'LT 7 + 2 _LINE-LEN . LT 8 + 1 _LINE-LEN . ." ]"',
+            'CR ." [LINE-BOUND " LT 2 _LINE-LEN . LT 0 _LINE-LEN . '
+            'LT -4 _LINE-LEN . DEPTH . ." ]"',
+            'CR ." [LINE-TEXT " LT 3 + 3 _LINE-TEXT . LT 2 _LINE-TEXT . '
+            'LT 0 _LINE-TEXT . LT 5 + 1 _LINE-TEXT . DEPTH . ." ]"',
+        ])
+        self.assertRegex(text, r"\[LINE-LEN\s+2\s+3\s+0\s+1\s+\]")
+        self.assertRegex(text, r"\[LINE-BOUND\s+2\s+0\s+0\s+0\s+\]")
+        self.assertRegex(text, r"\[LINE-TEXT\s+2\s+2\s+0\s+0\s+0\s+\]")
+
+    def test_source_checked_takes_lines_that_end_in_cr_lf(self):
+        """A line's one terminal CR is no part of what is evaluated."""
+        text = self._run_kdos([
+            "VARIABLE SC-A  VARIABLE SC-B  VARIABLE SC-C",
+            "CREATE CRB 64 ALLOT",
+            # "~" stands for CR and "|" for LF until CRB-FIX puts them in.
+            'S" 11 SC-A !~|22 SC-B !~||33 SC-C !" CRB SWAP CMOVE',
+            ": CRB-FIX  32 0 DO",
+            "    CRB I + C@ 126 = IF 13 CRB I + C! THEN",
+            "    CRB I + C@ 124 = IF 10 CRB I + C! THEN",
+            "  LOOP ;",
+            "CRB-FIX",
+            'CR ." [CRLF-SOURCE " CRB 32 SOURCE-EVALUATE-CHECKED . '
+            'SC-A @ . SC-B @ . SC-C @ . EVAL-LINE @ . ." ]"',
+        ])
+        self.assertRegex(text, r"\[CRLF-SOURCE\s+0\s+11\s+22\s+33\s+4\s+\]")
+
     def test_source_checked_contains_throw_and_skips_both_tails(self):
         """Status 5 contains THROW and no failed or enclosing tail executes."""
         text = self._run_kdos([
@@ -16680,7 +16779,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 559)
+        self.assertEqual(len(seen), 560)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -18303,11 +18402,12 @@ class TestBIOSEntropyFill(unittest.TestCase):
 
     def test_dictionary_append_preserves_every_older_link(self):
         """WOTS, then AES's block-mode words, then SHA-384, then the storage
-        unit words, then the QUIT callback append without changing any older
-        dictionary link."""
+        unit words, then the QUIT callback, then the string scan append
+        without changing any older dictionary link."""
         labels = self._bios_labels
-        self.assertEqual(labels["latest_entry"], labels["d_quit_xt_store"])
+        self.assertEqual(labels["latest_entry"], labels["d_scan"])
         for current, previous in (
+            ("d_scan", "d_quit_xt_store"),
             ("d_disk_units", "d_sha384_final"),
             ("d_sha384_final", "d_sha384_init"),
             ("d_sha384_init", "d_aes_cbc_iv_store"),
@@ -44470,6 +44570,38 @@ class TestKDOSModuleSystem(_KDOSTestBase):
             self.assertNotIn("uncaught THROW", text)
             self.assertRegex(text, r"\n\[PROMPT\s+0\s+0\s+\]")
             self.assertRegex(text, r"\n\[MODULES\s+-1\s+0\s+\]")
+        finally:
+            os.unlink(img)
+
+    def test_require_takes_a_file_whose_lines_end_in_cr_lf(self):
+        """The loader and its prescan drop a line's one terminal CR: the
+        module's name, its words and a line that is only a CR."""
+        source = (
+            b"\\ a module saved with CR LF line ends\r\n"
+            b"PROVIDED crlf.f\r\n"
+            b"\r\n"
+            b": CRLF-WORD 4242 ;\r\n"
+            b"1 CRLF-RUNS +!"
+        )
+        img = self._make_formatted_image()
+        fs = MP64FS.load(img)
+        fs.inject_file("crlf.f", source, ftype=FTYPE_FORTH)
+        fs.save(img)
+        try:
+            text = self._run_kdos(
+                [
+                    "ENTER-USERLAND",
+                    "VARIABLE CRLF-RUNS  0 CRLF-RUNS !",
+                    "REQUIRE crlf.f",
+                    "REQUIRE crlf.f",
+                    'CR ." [CRLF-FILE " CRLF-WORD . CRLF-RUNS @ . '
+                    'MODULE? crlf.f . _MOD-COUNT . ." ]"',
+                ],
+                max_steps=600_000_000,
+                storage_image=img,
+            )
+            self.assertRegex(text, r"\[CRLF-FILE\s+4242\s+1\s+-1\s+1\s+\]")
+            self.assertNotIn("(not found)", text)
         finally:
             os.unlink(img)
 

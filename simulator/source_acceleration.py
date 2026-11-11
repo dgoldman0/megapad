@@ -43,7 +43,7 @@ WALK_ITERATION = "iteration"
 _SCAN_CHUNK_BYTES = 4096
 _FIRST_SCAN_CHUNK_BYTES = 256
 _SEC_MEASURE_DIGEST = (
-    "8baea05066c381040309e896a87a46325be8435e62345b982cafe782c6b9375f"
+    "ef14ccde633b7f8232fc5b303613133ce0bdd5249b7d8645c3788b690679f3c2"
 )
 _SEC_ADVANCE_DIGEST = (
     "ce1b43e6121fb2ff09f93dd4d4236339ce0e6f5e6a8657d71f97ea679d804594"
@@ -167,6 +167,21 @@ class _AccelerationSpec:
     digest: str
 
 
+# KDOS states what a physical source line is in two words, which its checked
+# evaluator, its loader and its module prescan all call: _LINE-LEN, the bytes
+# before the line's LF, found with BIOS SCAN, and _LINE-TEXT, that length
+# without one terminal CR.  The overlays below measure lines themselves, so
+# each binds both words by digest wherever the word it replaces calls them.
+_LINE_LEN_NAME = b"_LINE-LEN"
+_LINE_LEN_DIGEST = (
+    "63a7b56904d1b08e409e3ae76c37da62a423b081c7492dd592d33a6d0f22032d"
+)
+_LINE_TEXT_NAME = b"_LINE-TEXT"
+_LINE_TEXT_DIGEST = (
+    "d2f14030556b22c428a11a1491a8acc533a56a5217772c5d10a5632fb98e7352"
+)
+
+
 # These digests cover the complete normalized IR for the exact KDOS words.
 # Call operands include their bound target name, implementation kind, and
 # immediacy, while address-specific Call XTs are deliberately excluded.
@@ -189,12 +204,9 @@ _SPECS = (
     ),
     _AccelerationSpec(
         b"_LD-WALK",
-        "49b1216e6664746d888e5ce8f77b1a3a2e8ef3ecd6ed779cd02290ea0b7ce7e6",
+        "fb9d26854bd5ea1c2229cc2a1d9e2b797001364b5d8892669c0078521ccff391",
     ),
-    _AccelerationSpec(
-        b"_PS-LINE-LEN",
-        "9ef000822d309fbb556936eb8176f7de70627f92dcdd2fe27baf1289790b01d9",
-    ),
+    _AccelerationSpec(_LINE_LEN_NAME, _LINE_LEN_DIGEST),
 )
 
 
@@ -310,8 +322,11 @@ def install_kdos_source_accelerators(
                     word,
                     primitives,
                 )
-            elif spec.name == b"_PS-LINE-LEN":
-                applicable, callback = _build_line_length_accelerator(runtime)
+            elif spec.name == _LINE_LEN_NAME:
+                applicable, callback = _build_line_length_accelerator(
+                    runtime,
+                    word,
+                )
             else:  # pragma: no cover - the closed spec table makes this impossible.
                 raise AssertionError(f"unknown source accelerator {spec.name!r}")
         except (KeyError, ValueError):
@@ -459,10 +474,12 @@ def _build_checked_source_accelerator(
         raise ValueError("SOURCE-EVALUATE-CHECKED has a changed line advance")
     finish = _require_call(runtime, word, 40, b"EVALUATE-FINISH")
 
+    _require_line_words(runtime, measure, 4, 11)
+
     cur = _require_call(runtime, word, 2, b"_SEC-CUR").body_address
     rem = _require_call(runtime, word, 0, b"_SEC-REM").body_address
-    raw_len = _require_call(runtime, measure, 25, b"_SEC-RAW-LEN").body_address
-    eval_len = _require_call(runtime, measure, 27, b"_SEC-EVAL-LEN").body_address
+    raw_len = _require_call(runtime, measure, 6, b"_SEC-RAW-LEN").body_address
+    eval_len = _require_call(runtime, measure, 12, b"_SEC-EVAL-LEN").body_address
     line = _require_call(runtime, word, 5, b"_SEC-LINE").body_address
     eval_line = _require_call(runtime, word, 16, b"EVAL-LINE").body_address
     cur_cell = GuestCell(runtime.memory, cur)
@@ -553,16 +570,17 @@ def _build_loader_walk_accelerator(
     word: Word,
     primitives: tuple[frozenset[Word], dict[Word, int]],
 ):
-    evaluator = _require_call(runtime, word, 65, b"EVALUATE-CHECKED")
-    status_throw = _require_call(runtime, word, 66, b"_LD-STATUS-THROW")
-    finish = _require_call(runtime, word, 88, b"EVALUATE-FINISH")
-    if _require_call(runtime, word, 89, b"_LD-STATUS-THROW") is not status_throw:
+    evaluator = _require_call(runtime, word, 36, b"EVALUATE-CHECKED")
+    status_throw = _require_call(runtime, word, 37, b"_LD-STATUS-THROW")
+    finish = _require_call(runtime, word, 59, b"EVALUATE-FINISH")
+    if _require_call(runtime, word, 60, b"_LD-STATUS-THROW") is not status_throw:
         raise ValueError("_LD-WALK does not bind one stable status translator")
+    _require_line_words(runtime, word, 22, 29)
 
     buffer = _require_call(runtime, word, 0, b"LD-BUF").body_address
     size = _require_call(runtime, word, 7, b"LD-SZ").body_address
     cur = _require_call(runtime, word, 2, b"LD-CUR").body_address
-    line_len = _require_call(runtime, word, 42, b"LD-LEN").body_address
+    line_len = _require_call(runtime, word, 23, b"LD-LEN").body_address
     line = _require_call(runtime, word, 5, b"LD-LINE").body_address
     eval_line = _require_call(runtime, word, 16, b"EVAL-LINE").body_address
     buffer_cell = GuestCell(runtime.memory, buffer)
@@ -634,7 +652,35 @@ def _build_loader_walk_accelerator(
     return applicable, callback
 
 
-def _build_line_length_accelerator(runtime: MegaForthRuntime):
+def _require_scan(runtime: MegaForthRuntime, line_len: Word) -> None:
+    """Require that _LINE-LEN finds its LF with the BIOS's own SCAN."""
+
+    _require_initial_primitive(
+        runtime,
+        _require_call(runtime, line_len, 2, b"SCAN"),
+    )
+
+
+def _require_line_words(
+    runtime: MegaForthRuntime,
+    word: Word,
+    length_index: int,
+    text_index: int,
+) -> None:
+    """Require that WORD measures its line with KDOS's exact two line words."""
+
+    line_len = _require_call(runtime, word, length_index, _LINE_LEN_NAME)
+    if normalized_colon_digest(runtime, line_len) != _LINE_LEN_DIGEST:
+        raise ValueError(f"{word.name!r} measures lines with a changed _LINE-LEN")
+    _require_scan(runtime, line_len)
+    line_text = _require_call(runtime, word, text_index, _LINE_TEXT_NAME)
+    if normalized_colon_digest(runtime, line_text) != _LINE_TEXT_DIGEST:
+        raise ValueError(f"{word.name!r} trims lines with a changed _LINE-TEXT")
+
+
+def _build_line_length_accelerator(runtime: MegaForthRuntime, word: Word):
+    _require_scan(runtime, word)
+
     def applicable(context: ExecutionContext) -> bool:
         if context.data.depth() < 2:
             return False

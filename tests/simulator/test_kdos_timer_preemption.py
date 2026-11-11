@@ -28,11 +28,11 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-timer-preemption-7002-7035.f"
+    / "kdos-timer-preemption-7000-7033.f"
 )
 
-FIRST_LINE = 7002
-LAST_LINE = 7035
+FIRST_LINE = 7000
+LAST_LINE = 7033
 SLICE_BYTES = 1_143
 SLICE_SHA256 = (
     "e55c6bf6e2df1fd6f543105822ac24217083dbeebe94bae0f631ac34d6dcd653"

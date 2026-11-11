@@ -1835,6 +1835,13 @@ the first failure, so neither later tokens on that line nor later lines are
 executed.  At end-of-buffer it checks for an unfinished definition or
 cross-line conditional.
 
+What a physical line is, KDOS states once, in two private words.
+`_LINE-LEN ( addr rem -- len )` is the bytes before the line's LF, or all
+that remains when no LF follows; it finds the LF with BIOS `SCAN`.
+`_LINE-TEXT ( addr len -- len' )` is that length without one terminal CR.
+This word, the loader's walk of a file and the module prescan all measure
+their lines with the two.
+
 | Constant | Value | Meaning |
 |----------|-------|---------|
 | `EVAL-S-OK` | 0 | Success |
@@ -3510,7 +3517,7 @@ evaluator with canonical XMEM, HBW, VRAM, and valid MP64FS media. It published
 1,452 KDOS words and finished with an authoritative 1,764-binding dictionary
 index. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
-457 core words and expects 1,519 KDOS publications and 1,968 unique
+458 core words and expects 1,520 KDOS publications and 1,970 unique
 bindings. The historical
 run is semantic evidence, not native/exact-full-core timing evidence, and adds
 no `rich-terminal.f`, projection, compositor, viewer, or rich-input work.

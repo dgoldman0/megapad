@@ -46,16 +46,16 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-mp64fs-load-5745-6220.f"
+    / "kdos-mp64fs-load-5745-6218.f"
 )
 
 FIRST_LINE = 5745
-LAST_LINE = 6220
-SLICE_BYTES = 18_405
+LAST_LINE = 6218
+SLICE_BYTES = 18_664
 SLICE_SHA256 = (
-    "a00f8c2ef72a321e54824be20fb7365436232331da8d736a5b3639a8a149db38"
+    "b0ddc76ade6a0a8157d4478c685096e2f2d6a202dd5f9cf8a67872a39d35a0e2"
 )
-SLICE_GIT_BLOB = "ffb6ce6db9fe6dce91994e239b48c5555630dd78"
+SLICE_GIT_BLOB = "a82b8a12d8531367401b7e35818b905ce7bc0d64"
 
 # Exact defining-word/name order in kdos.f.  Keeping the defining word in
 # the ledger makes source-layout changes visible even if a replacement happens
@@ -132,6 +132,8 @@ SOURCE_LEDGER = (
     (":", b"_EVALUATE-GUARDED"),
     (":", b"EVALUATE"),
     (":", b"EVALUATE-CHECKED"),
+    (":", b"_LINE-LEN"),
+    (":", b"_LINE-TEXT"),
     ("VARIABLE", b"_SEC-CUR"),
     ("VARIABLE", b"_SEC-REM"),
     ("VARIABLE", b"_SEC-RAW-LEN"),
@@ -440,7 +442,7 @@ def _select_source(runtime: MegaForthRuntime, source: _HostSource) -> None:
 def test_load_slice_is_exact_and_publishes_complete_source_ledger() -> None:
     runtime = _load_mp64fs_load()
 
-    assert len(SOURCE_LEDGER) == 88
+    assert len(SOURCE_LEDGER) == 90
     assert all(runtime.find(name) is not None for name in DEFINITIONS)
     assert tuple(_constant(runtime, name) for name, _value in CONSTANTS) == (
         tuple(value for _name, value in CONSTANTS)
@@ -541,6 +543,37 @@ def test_checked_source_walks_blank_crlf_and_cross_line_compiler_state() -> None
     assert _execute(runtime, "WALKED", 0) == (41,)
     assert _execute(runtime, "WALKED", 8) == (9,)
     assert runtime.drain_uart_output() == b""
+
+
+def test_line_words_state_what_a_physical_line_is() -> None:
+    """_LINE-LEN is the bytes before a line's LF, or all that remains;
+    _LINE-TEXT is that length without one terminal CR."""
+
+    runtime = _load_mp64fs_load()
+    text = b"ab\ncd\r\n\nlast"
+    base = runtime.define_created("LINE-WORD-SOURCE", initial_body=text).body_address
+
+    def line_len(offset: int, remaining: int) -> tuple[int, ...]:
+        return _execute(runtime, "_LINE-LEN", base + offset, remaining)
+
+    def line_text(offset: int, length: int) -> tuple[int, ...]:
+        return _execute(runtime, "_LINE-TEXT", base + offset, length)
+
+    assert line_len(0, len(text)) == (2,)
+    assert line_len(3, len(text) - 3) == (3,)
+    assert line_len(7, len(text) - 7) == (0,)
+    # No LF follows: the line is all that remains.
+    assert line_len(8, 4) == (4,)
+    # The count bounds the line, an LF past it or not.
+    assert line_len(0, 2) == (2,)
+    assert line_len(0, 0) == (0,)
+    assert line_len(0, (-5) % 2**64) == (0,)
+
+    assert line_text(3, 3) == (2,)
+    assert line_text(0, 2) == (2,)
+    assert line_text(0, 0) == (0,)
+    assert line_text(5, 1) == (0,)
+    assert runtime.main_context.data.snapshot() == ()
 
 
 def test_checked_source_stops_at_first_undefined_token() -> None:

@@ -663,6 +663,53 @@ def _quit_xt_store(
     runtime.set_quit_xt(context.data.pop())
 
 
+_SCAN_CHUNK_BYTES = 256
+
+
+def _scan(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    """``SCAN ( c-addr u char -- c-addr' u' )``.
+
+    The rest of the string from its first ``char`` on, or the string's end
+    with a zero count when it holds none.  A count of zero or less leaves
+    the string as it is, as the BIOS loop does.
+    """
+
+    char = context.data.pop() & 0xFF
+    length = context.data.pop()
+    address = context.data.pop()
+    remaining = s64(length)
+    if remaining <= 0:
+        context.data.push(address)
+        context.data.push(length)
+        return
+    needle = bytes((char,))
+    while remaining > 0:
+        count = min(remaining, _SCAN_CHUNK_BYTES)
+        try:
+            payload = runtime.memory.read_bytes(address, count)
+        except MemoryAccessError:
+            payload = b""
+        if len(payload) != count:
+            # The chunk leaves ordinary memory.  The BIOS reads a byte at a
+            # time and stops at the first match, so read as it does: a
+            # match before the boundary is found, and a fault falls on the
+            # byte the BIOS would fault on.
+            if runtime.memory.read8(address) == char:
+                break
+            address = u64(address + 1)
+            remaining -= 1
+            continue
+        index = payload.find(needle)
+        if index >= 0:
+            address = u64(address + index)
+            remaining -= index
+            break
+        address = u64(address + count)
+        remaining -= count
+    context.data.push(address)
+    context.data.push(remaining)
+
+
 def _idle_ms(
     runtime: MegaForthRuntime,
     idle_until_xt: int,
@@ -3193,6 +3240,12 @@ def install_core(runtime: MegaForthRuntime) -> None:
     runtime.define_primitive(
         b"QUIT-XT!",
         lambda context: _quit_xt_store(runtime, context),
+    )
+
+    # The string scan follows.  KDOS finds each source line's end with it.
+    runtime.define_primitive(
+        b"SCAN",
+        lambda context: _scan(runtime, context),
     )
 
 

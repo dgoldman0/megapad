@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from shared.cells import TRUE, u64
 from simulator.runtime import (
     ColonDefinition,
@@ -27,7 +29,7 @@ _ACCELERATED_WORDS = (
     b"_LD-STATUS-THROW",
     b"_CRC-BUF-CHECKED",
     b"_LD-WALK",
-    b"_PS-LINE-LEN",
+    b"_LINE-LEN",
 )
 
 
@@ -353,15 +355,74 @@ def test_checked_line_overlay_requires_the_exact_guarded_evaluator() -> None:
     assert b"EVALUATE-CHECKED" not in report.installed
 
 
-def test_changed_word_is_skipped_and_rolled_back_xt_cannot_inherit_overlay() -> None:
+def _kdos_definition(name: str) -> bytes:
+    """The text of one colon definition, as kdos.f holds it."""
+
+    lines = (Path(__file__).resolve().parents[2] / "kdos.f").read_text().splitlines()
+    start = next(
+        index for index, line in enumerate(lines) if line.startswith(f": {name} ")
+    )
+    end = next(
+        index for index in range(start, len(lines)) if lines[index].endswith(" ;")
+    )
+    return ("\n".join(lines[start : end + 1]) + "\n").encode("ascii")
+
+
+def test_line_overlays_require_the_exact_line_words() -> None:
+    """The loader's walk measures its lines with _LINE-LEN and _LINE-TEXT.
+    Its overlay measures them itself, so it stands only for a walk compiled
+    over KDOS's own two words."""
+
     runtime = _load_module_system()
-    runtime.evaluate(b": _PS-LINE-LEN 2DROP 77 ;")
+    # The same walk over a _LINE-TEXT that keeps a line's terminal CR.
+    runtime.evaluate(b": _LINE-TEXT  NIP ;\n" + _kdos_definition("_LD-WALK"))
 
     report = install_kdos_source_accelerators(runtime)
 
-    assert b"_PS-LINE-LEN" not in report.installed
-    assert b"_PS-LINE-LEN" in report.skipped
-    assert _execute(runtime, "_PS-LINE-LEN", 0, 1) == (77,)
+    assert b"_LD-WALK" in report.skipped
+    assert b"_LD-WALK" not in report.installed
+
+
+def test_checked_source_overlay_requires_the_exact_line_words() -> None:
+    """SOURCE-EVALUATE-CHECKED measures its lines through _SEC-MEASURE, and
+    that through the same two words."""
+
+    runtime = _load_module_system()
+    runtime.evaluate(
+        b": _LINE-TEXT  NIP ;\n"
+        + _kdos_definition("_SEC-MEASURE")
+        + _kdos_definition("SOURCE-EVALUATE-CHECKED")
+    )
+
+    report = install_kdos_source_accelerators(runtime)
+
+    assert b"SOURCE-EVALUATE-CHECKED" in report.skipped
+    assert b"SOURCE-EVALUATE-CHECKED" not in report.installed
+
+
+def test_line_length_overlay_requires_the_bios_scan() -> None:
+    """_LINE-LEN compiled over another primitive named SCAN keeps its own
+    body: the overlay stands for the BIOS's scan only."""
+
+    runtime = _load_module_system()
+    runtime.define_primitive(b"SCAN", lambda context: None)
+    runtime.evaluate(_kdos_definition("_LINE-LEN"))
+
+    report = install_kdos_source_accelerators(runtime)
+
+    assert b"_LINE-LEN" in report.skipped
+    assert b"_LINE-LEN" not in report.installed
+
+
+def test_changed_word_is_skipped_and_rolled_back_xt_cannot_inherit_overlay() -> None:
+    runtime = _load_module_system()
+    runtime.evaluate(b": _LINE-LEN 2DROP 77 ;")
+
+    report = install_kdos_source_accelerators(runtime)
+
+    assert b"_LINE-LEN" not in report.installed
+    assert b"_LINE-LEN" in report.skipped
+    assert _execute(runtime, "_LINE-LEN", 0, 1) == (77,)
 
     checkpoint = (runtime.dictionary.here, runtime.dictionary.latest)
     runtime.evaluate(b": REUSED-XT 1 ;")

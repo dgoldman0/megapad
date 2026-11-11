@@ -3098,6 +3098,37 @@ w_quit_xt_store:
     str r11, r1
     ret.l
 
+; SCAN ( c-addr u char -- c-addr' u' )
+; Step past the bytes of the string that differ from char.  c-addr' u' is
+; the rest of the string from the first char on, or the string's end with
+; u' zero when it holds none.  A count of zero or less leaves the string
+; as it is.
+w_scan:
+    ldn r13, r14              ; char
+    addi r14, 8
+    andi r13, 0xFF
+    ldn r12, r14              ; u
+    mov r11, r14
+    addi r11, 8
+    ldn r9, r11               ; c-addr
+    cmpi r12, 0
+    breq w_scan_done
+    lbrmi w_scan_done
+w_scan_loop:
+    ld.b r0, r9
+    cmp r0, r13
+    breq w_scan_done
+    inc r9
+    dec r12
+    cmpi r12, 0
+    brne w_scan_loop
+w_scan_done:
+    str r14, r12              ; u'
+    mov r11, r14
+    addi r11, 8
+    str r11, r9               ; c-addr'
+    ret.l
+
 ; DICT-INDEX! ( base slots -- status )
 ;   status 0: disabled, or installed and authoritative
 ;   status 1: invalid arguments; the previous binding is unchanged
@@ -24702,12 +24733,22 @@ d_unit_disk_flush_gen_checked:
 
 ; The QUIT callback appends after the storage unit words.
 ; === QUIT-XT! ===
-latest_entry:
 d_quit_xt_store:
     .dq d_unit_disk_flush_gen_checked
     .db 8
     .ascii "QUIT-XT!"
     ldi64 r11, w_quit_xt_store
+    call.l r11
+    ret.l
+
+; The string scan appends after it.
+; === SCAN ===
+latest_entry:
+d_scan:
+    .dq d_quit_xt_store
+    .db 4
+    .ascii "SCAN"
+    ldi64 r11, w_scan
     call.l r11
     ret.l
 

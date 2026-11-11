@@ -311,6 +311,7 @@ stack) or **compiled inline** (the `S"` and `."` pattern).
 | `WORD` | `( delim -- addr )` | Parse the next token delimited by *delim* from the input buffer.  Returns a counted-string address. |
 | `COUNT` | `( c-addr -- addr len )` | Convert a counted string (length byte at c-addr) to an address+length pair. |
 | `COMPARE` | `( a1 n1 a2 n2 -- result )` | Compare two strings lexicographically.  Returns 0 if equal, negative if first < second, positive if first > second. |
+| `SCAN` | `( c-addr u char -- c-addr' u' )` | Step past the bytes of the string that differ from *char*.  Returns the rest of the string from the first *char* on, or the string's end with a zero count when it holds none.  A count of zero or less leaves the string as it is.  KDOS finds the end of each source line with it. |
 | `CHAR` | `( "c" -- n )` | Parse the next word and push its first character's ASCII value. |
 | `[CHAR]` | `( "c" -- )` | Compile-time version of CHAR — compiles the character as a literal. Immediate. |
 | `UCHAR` | `( c -- C )` | Convert a lowercase ASCII letter to uppercase.  Non-letters pass through unchanged. |

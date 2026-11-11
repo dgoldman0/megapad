@@ -43,7 +43,7 @@ JIT-ON
 \ =====================================================================
 \  Note: BIOS v1.0 provides all ANS core words including OFF, >=, <=,
 \  W@, W!, L@, L!, .ZSTR, UCHAR, 2OVER, 2SWAP, 2ROT, TALIGN, MOVE,
-\  COMPARE, ABORT, ABORT", LEAVE, EVALUATE, EVALUATE-CHECKED,
+\  COMPARE, SCAN, ABORT, ABORT", LEAVE, EVALUATE, EVALUATE-CHECKED,
 \  EVALUATE-FINISH, EVALUATOR-RESET, EVALUATOR-UNWIND, EVAL-STATUS,
 \  EVAL-LINE, EVAL-COLUMN, EVAL-DEPTH, EVAL-THROW, EVAL-TOKEN,
 \  DICT-INDEX!, DICT-INDEX@, DICT-ROLLBACK, LATEST!,
@@ -6080,6 +6080,22 @@ VARIABLE _LD-FROM-SP
     THEN
     DROP EVAL-STATUS @ ;
 
+\ Source is walked a physical line at a time: by SOURCE-EVALUATE-CHECKED,
+\ by the loader, and by the module prescan.  These two words are the one
+\ statement of what a line is.  BIOS SCAN finds the LF, so a line costs by
+\ its length in the BIOS's loop, not in a loop of Forth words.
+\
+\ _LINE-LEN ( addr rem -- len )  The bytes of the line at ADDR: those before
+\ its LF, or all REM when no LF follows.  Zero when REM is zero or less.
+: _LINE-LEN  ( addr rem -- len )
+    TUCK 10 SCAN NIP - ;
+
+\ _LINE-TEXT ( addr len -- len' )  LEN without the line's one terminal CR.
+: _LINE-TEXT  ( addr len -- len' )
+    DUP 0> IF
+        TUCK 1- + C@ 13 = IF 1- THEN
+    ELSE NIP THEN ;
+
 VARIABLE _SEC-CUR
 VARIABLE _SEC-REM
 VARIABLE _SEC-RAW-LEN
@@ -6089,18 +6105,8 @@ VARIABLE _SEC-LINE
 \ _SEC-MEASURE ( -- )  Measure the next LF-delimited physical line.
 \ _SEC-RAW-LEN includes a trailing CR; _SEC-EVAL-LEN does not.
 : _SEC-MEASURE  ( -- )
-    _SEC-REM @ 0
-    BEGIN
-        DUP 2 PICK < IF
-            _SEC-CUR @ OVER + C@ 10 = IF TRUE ELSE 1+ FALSE THEN
-        ELSE TRUE THEN
-    UNTIL
-    NIP DUP _SEC-RAW-LEN ! _SEC-EVAL-LEN !
-    _SEC-EVAL-LEN @ 0> IF
-        _SEC-CUR @ _SEC-EVAL-LEN @ 1- + C@ 13 = IF
-            -1 _SEC-EVAL-LEN +!
-        THEN
-    THEN ;
+    _SEC-CUR @ _SEC-REM @ _LINE-LEN DUP _SEC-RAW-LEN !
+    _SEC-CUR @ SWAP _LINE-TEXT _SEC-EVAL-LEN ! ;
 
 \ _SEC-ADVANCE ( -- )  Consume the measured line and an LF, if present.
 : _SEC-ADVANCE  ( -- )
@@ -6143,16 +6149,8 @@ VARIABLE _SEC-LINE
     BEGIN LD-SZ @ 0> WHILE
         1 LD-LINE +!
         LD-LINE @ EVAL-LINE !
-        LD-SZ @ 0
-        BEGIN
-            DUP 2 PICK < IF
-                LD-CUR @ OVER + C@ 10 = IF TRUE ELSE 1+ FALSE THEN
-            ELSE TRUE THEN
-        UNTIL
-        NIP LD-LEN !
-        LD-LEN @ DUP 0> IF
-            LD-CUR @ OVER 1- + C@ 13 = IF 1- THEN
-        THEN
+        LD-CUR @ LD-SZ @ _LINE-LEN LD-LEN !
+        LD-CUR @ LD-LEN @ _LINE-TEXT
         DUP 0> IF
             LD-CUR @ SWAP EVALUATE-CHECKED _LD-STATUS-THROW
         ELSE DROP THEN
@@ -9992,21 +9990,13 @@ CREATE _PS-TAG  9 ALLOT   \ "PROVIDED" + NUL
 VARIABLE _PS-PTR
 VARIABLE _PS-REM
 VARIABLE _PS-LINE-U
-: _PS-LINE-LEN  ( addr rem -- len )
-    0
-    BEGIN
-        DUP 2 PICK < IF
-            2 PICK OVER + C@ 10 = IF TRUE ELSE 1+ FALSE THEN
-        ELSE TRUE THEN
-    UNTIL
-    NIP NIP ;
 
 : _MOD-PRESCAN  ( -- id-addr id-len found? )
     LD-BUF @ _PS-PTR !
     LD-SZ @ _PS-REM !
     BEGIN _PS-REM @ 0> WHILE
-        _PS-PTR @ _PS-REM @ _PS-LINE-LEN DUP _PS-LINE-U !
-        DUP 0> IF _PS-PTR @ OVER 1- + C@ 13 = IF 1- THEN THEN DUP LD-LEN !
+        _PS-PTR @ _PS-REM @ _LINE-LEN DUP _PS-LINE-U !
+        _PS-PTR @ SWAP _LINE-TEXT DUP LD-LEN !
         _PS-PTR @ SWAP _PS-SKIP-WS
         2DUP _PS-TOKEN-LEN 8 = IF
             OVER _PS-MATCH8? IF

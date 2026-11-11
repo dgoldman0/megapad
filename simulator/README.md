@@ -871,7 +871,7 @@ there, so an abort that crossed a `CATCH` leaves the context usable: the next
 `THROW` is uncaught and the next line runs. With no callback installed, with
 a callback that itself aborts, or after any other host escape, the context is
 failed closed as described above. `QUIT-XT!` is appended after `:NONAME` at
-the end of the hosted core vocabulary.
+the end of the hosted core vocabulary, and the string scan `SCAN` after it.
 
 ### Semantic evaluator and checked source
 
@@ -918,10 +918,12 @@ removes completed and unfinished work while retaining the failure diagnostic.
 
 Image-backed sessions install fail-closed execution overlays for the exact
 source-compiled `EVALUATE-CHECKED`, `SOURCE-EVALUATE-CHECKED`,
-`_LD-STATUS-THROW`, `_CRC-BUF-CHECKED`, `_LD-WALK`, and `_PS-LINE-LEN`
+`_LD-STATUS-THROW`, `_CRC-BUF-CHECKED`, `_LD-WALK`, and `_LINE-LEN`
 definitions before running autoexec. Normalized complete-IR digests gate each
 word, with the checked-source overlay also pinning the private measure and
-advance bodies it subsumes. The dictionary still contains the original colon
+advance bodies it subsumes, and the checked-source and loader-walk overlays
+pinning KDOS's two line words, `_LINE-LEN` and `_LINE-TEXT`, over the BIOS's
+own `SCAN`. The dictionary still contains the original colon
 definitions and XTs. A changed or reclaimed word, a reused XT, or a positive
 span outside one ordinary RAM region takes the unchanged colon path.
 
@@ -2395,8 +2397,8 @@ and Git blob `c920305479e61c2a5d51719779ec9c9fba0c2b8f`. The complete current
 10,184-line, 357,426-byte `kdos.f` has SHA-256
 `b3d5211893432fb9b93acee1d330c84260b4a51c56ae0cecb265f54add3c5ff4`
 and Git blob `7aa48d675c1a1a6d6dd84731c3332a33b128155e`.
-The canonical source-mode CLI filter submits 6,818 non-comment records with
-221,032 payload bytes, or 227,850 UART bytes after one LF delimiter per
+The canonical source-mode CLI filter submits 6,798 non-comment records with
+220,582 payload bytes, or 227,380 UART bytes after one LF delimiter per
 record. These are structural source/transport identities, not a fresh
 wall-clock or complete-load qualification.
 
@@ -2450,7 +2452,7 @@ still free, mounted MP64FS, zero modules, balanced stacks, and no held lock. A
 post-boot checked definition returned 42, followed by allocation/free, CRC32,
 ring FIFO, and module-listing checks. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
-457 core words and expects 1,519 KDOS publications and 1,968 unique
+458 core words and expects 1,520 KDOS publications and 1,970 unique
 bindings.
 
 The contiguous unchanged KDOS core now reaches EOF. The integration branch is

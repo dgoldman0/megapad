@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The `bios.asm` dictionary link chain contains **559** entries.  The numbered
+The `bios.asm` dictionary link chain contains **560** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -360,7 +360,7 @@ byte independently.
 | 86 | `BYE` | `( -- )` | | Flush TX buffer, print "Bye!" and halt the CPU |
 | 87 | `TX-FLUSH` | `( -- )` | | Publish the emulator ring batch, or wait for physical line idle |
 
-### String & Parsing (8 words)
+### String & Parsing (9 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
@@ -369,6 +369,7 @@ byte independently.
 | 90 | `WORD` | `( char "ccc" -- c-addr )` | | Parse input delimited by char, store counted string at HERE (transient) |
 | 91 | `COUNT` | `( c-addr -- addr len )` | | Convert counted string to (addr len) pair |
 | 92 | `COMPARE` | `( addr1 u1 addr2 u2 -- n )` | | Compare two strings: returns -1 (less), 0 (equal), or 1 (greater) |
+| 558 | `SCAN` | `( c-addr u char -- c-addr' u' )` | | Step to the first byte of the string equal to `char`: the rest of the string from there, or its end with a zero count when it holds none; a count of zero or less leaves the string as it is |
 | 93 | `CHAR` | `( "name" -- c )` | | Parse next word, push its first character |
 | 94 | `[CHAR]` | `( "name" -- )` | ✓ | Compile literal of next word's first character |
 | 95 | `UCHAR` | `( c -- C )` | | Convert lowercase ASCII to uppercase |
@@ -1214,10 +1215,11 @@ machine reset.
 ### Newest Dictionary Chain Segment (last → earlier)
 
 The complete authoritative link chain is the `.dq` chain in `bios.asm`.
-`QUIT-XT!` closes the newest appended segment, after the storage unit words:
+`SCAN` closes the newest appended segment, after the QUIT callback and the
+storage unit words:
 
 ```
-QUIT-XT!
+SCAN → QUIT-XT!
 → UNIT-DISK-FLUSH-GEN-CHECKED → UNIT-DISK-WRITE-GEN-CHECKED
 → UNIT-DISK-READ-GEN-CHECKED → UNIT-DISK-CAPS → UNIT-DISK-MEDIA-GEN
 → UNIT-DISK-SECTORS → UNIT-DISK@ → DISK-UNITS

@@ -463,7 +463,7 @@ buffer), then tokenises and interprets:
 `HEX` `DECIMAL` `BASE` `SPACE` `SPACES` `TYPE` `ACCEPT` `.ZSTR` `TX-FLUSH`
 
 **String & parsing**
-`S"` `."` `WORD` `COUNT` `COMPARE` `CHAR` `[CHAR]` `UCHAR`
+`S"` `."` `WORD` `COUNT` `COMPARE` `SCAN` `CHAR` `[CHAR]` `UCHAR`
 
 **Control flow**
 `IF` `ELSE` `THEN` `BEGIN` `UNTIL` `WHILE` `REPEAT` `AGAIN`
