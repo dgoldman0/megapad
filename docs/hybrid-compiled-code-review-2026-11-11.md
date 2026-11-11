@@ -163,30 +163,32 @@ where today's hybrid mode stops.
 | Return stack | `forth_next` pushes return addresses on r15, and `w_do` emits inline code that keeps the loop frame there | `admitted` refuses a write to r15 outside CALL.L and RET.L. Semantic return cells also carry continuation records (plan, "Compiler and retained-stack boundary") |
 | `CREATE` and `DOES>` | `w_create` emits a 30-byte trampoline, `w_to_body` answers XT+30, and `does_runtime` patches the trampoline | A semantic body is XT+8, and `>BODY` requires a semantic `CREATE` word |
 | Headers and lookup | The loader links the image's headers into the chain with `LATEST!` | `Dictionary.set_latest` in `simulator/dictionary.py` accepts zero or a live semantic ancestor and refuses any other chain |
-| Calls out of the image | With the JIT off, `jit_compile_word` falls back to `compile_call`, so every primitive is a call. The loader patches each import with the XT found by name, which in a semantic session is a semantic XT | A callback exists only at a site the manifest declares, with one fixed target word. Nothing takes an XT from the instruction stream |
+| Calls out of the image | Every word that `jit_compile_word` does not inline becomes a `compile_call`; with the JIT off that is every word. The loader patches each import with the XT found by name, which in a semantic session is a semantic XT | A callback exists only at a site the manifest declares, with one fixed target word. Nothing takes an XT from the instruction stream |
 | `EXECUTE` and `THROW` | `w_execute` calls the XT on the stack | `EXECUTE` of an image word needs a semantic `Word` for it. Unwinding past machine entries already works (`hybrid-runtime.md`, "Callbacks") |
 | BIOS addresses | `_IMG-FIXED-ABI?` in `binimg.f` keeps references to low addresses that have no dictionary entry, BIOS runtime helpers among them, verbatim | A semantic session has no BIOS code at those addresses. Such an image is also tied to the BIOS build it was compiled under |
-| Inlined code | KDOS compiles itself between `JIT-ON` and `JIT-OFF` (lines 39 and 10182 of `kdos.f`), so its words hold primitives inlined from `jit_inline_table` and `jit_bigram_table`. Akashic's modules and applets compile with the JIT off | Inlined loads and stores would need the machine to reach all memory, MMIO included, which the mode denies |
+| Inlined code | KDOS turns the JIT on at its start and off only after `autoexec.f` returns (`JIT-ON` and `JIT-OFF`, lines 39 and 10182 of `kdos.f`), and the Desktop's autoexec runs Desk without returning. KDOS, every module the boot loads and an applet built in Pad therefore hold the primitives of `jit_inline_table` and `jit_bigram_table` inline, `@` and `!` among them. Code compiled at the prompt after a boot is compiled with the JIT off | An inlined load or store reaches whatever address is on the stack. The machine would need the session's ordinary memory, and MMIO wherever code stores to a device, which the mode denies |
 | Publication | An image loads from guest code at run time, into the dictionary or into XMEM | `HybridRuntime.register` is a host operation at an idle boundary, and a body lease covers one routine |
 | Rollback | `binimg` has no unload, and Akashic's applet loader rolls back with `DICT-ROLLBACK` | Revocation follows the body lease of one routine |
-| Devices, snapshots, cores | Image code compiled with the JIT off reaches devices only through BIOS words | Machine MMIO, native snapshots and multicore execution are all denied |
+| Devices, snapshots, cores | Image code reaches devices through BIOS words, and through any store it inlines to a device address | Machine MMIO, native snapshots and multicore execution are all denied |
 
-The row on calls out of the image has a cost that the table cannot show. If
-each primitive call crossed into a semantic word, each would cost what
-`hybrid-runtime.md` measures for a callback, between 1.1 and 1.2 microseconds
-with the native executor. That figure is an inference from the document's
+The row on calls out of the image has a cost that the table cannot show. In a
+semantic session every call to a BIOS word would cross into a semantic word,
+at what `hybrid-runtime.md` measures for a callback, between 1.1 and 1.2
+microseconds with the native executor. The eighteen primitives of
+`jit_inline_table` never cross in code compiled with the JIT on, and every
+other BIOS word still does. The figure is an inference from the document's
 table and has no measurement of image code behind it. It means an island
-must run the common primitives without a crossing, or stay with small
-images.
+serves code whose inner loops stay within the inlined primitives, or small
+images, unless it learns to run more BIOS words without a crossing.
 
 ## Routes
 
 | | A. Native authority (stage D5) | B. Image island | C. Lifting |
 | --- | --- | --- | --- |
 | What it is | The whole session is native, BIOS and KDOS included, and the semantic engine accelerates regions of it | The routine runner learns the chip's Forth convention, and an image runs as machine code inside a semantic session | An image's words are translated into semantic definitions when it is spliced, by recognizing the BIOS compiler's templates; anything else is refused |
-| What it needs | The two designs D5 lacks. Nothing from D1 to D4. The one existing piece of this kind is the emulator's accel hooks (`_ACCEL_HOOKS` in `emulator/session.py`), which replace four BIOS graphics routines | A new stage beside D2: `sep r16` and `sep r17`, r14 and r15 on the shared stacks, decoding at run time, the image's headers adopted as words at `LATEST!`, calls to semantic XTs as callbacks, and a listed set of BIOS helpers | A template table generated from `bios.asm` or checked against the emulator, and semantic words that keep the native body layout |
-| What it covers | Every image and the BIOS itself | Images compiled with the JIT off whose outside references are named imports or listed BIOS helpers, which is what Akashic's applet images are | Images made only of recognized templates |
-| What it proves | The machine code, as the emulator does | The image's machine code, with BIOS primitives still semantic | The file and its loader; no instruction executes |
+| What it needs | The two designs D5 lacks. Nothing from D1 to D4. The one existing piece of this kind is the emulator's accel hooks (`_ACCEL_HOOKS` in `emulator/session.py`), which replace four BIOS graphics routines | A new stage beside D2: `sep r16` and `sep r17`, r14 and r15 on the shared stacks, the session's ordinary memory open to inlined loads and stores, decoding at run time, the image's headers adopted as words at `LATEST!`, calls to semantic XTs as callbacks, and a listed set of fixed BIOS and KDOS addresses that it provides itself | A template table generated from `bios.asm` or checked against the emulator, and semantic words that keep the native body layout |
+| What it covers | Every image and the BIOS itself | Images whose outside references are named imports or addresses on that list, with or without inlined primitives. Akashic's applet images are of that kind | Images made only of recognized templates |
+| What it proves | The machine code, as the emulator does | The image's machine code, with the BIOS words it calls still semantic | The file and its loader; no instruction executes |
 | Size | The largest; in effect an accelerated emulator | Comparable to steps 3 to 5 of the integration cleanup | Comparable to B, with less risk at run time and a standing coupling to the compiler's output |
 | Journey and contract | A journey under it is a new, slower gate. The simulator contract is untouched | Simulator mode still refuses images. A hybrid journey could cover applets | Works in simulator mode too, so sections 2 and 9 of the contract change and the ordinary journey could load images |
 
