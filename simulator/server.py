@@ -11,9 +11,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from shared.session_options import (
-    configured_production_executor, link_pace, retained_policy, rich_terminal_policy,
+    add_storage_options,
+    configured_production_executor,
+    link_pace,
+    retained_policy,
+    rich_terminal_policy,
 )
 from shared.screen_profile import ScreenChangeProfile
+from shared.storage import STORAGE_UNIT_TABLE
 from shared_session import DEFAULT_SOCKET, SessionServer
 from simulator.image_bootstrap import (
     ImageBootstrapPreparation,
@@ -62,23 +67,38 @@ def _nonnegative_int(value: str) -> int:
     return parsed
 
 
-def settings_image_path(args) -> Path | None:
-    """The settings disk image a session attaches, which must exist."""
+def storage_image_paths(args) -> tuple[Path | None, ...]:
+    """The image a session attaches to each storage unit, in unit order;
+    None leaves the unit without a medium.  Every image given must exist."""
 
-    if args.settings_storage is None:
-        return None
-    path = args.settings_storage.resolve()
-    if not path.is_file():
-        raise ValueError(f"settings storage image does not exist: {path}")
-    return path
+    paths = []
+    for unit in STORAGE_UNIT_TABLE:
+        path = getattr(args, unit.host_name)
+        if path is not None:
+            path = path.resolve()
+            if not path.is_file():
+                raise ValueError(f"{unit.label} image does not exist: {path}")
+        paths.append(path)
+    return tuple(paths)
 
 
-def settings_storage_service(path: Path | None) -> HostedStorageService | None:
-    """The settings disk: its image, write-protected, or no medium."""
+def storage_services(
+    paths: tuple[Path | None, ...],
+) -> dict[str, HostedStorageService | None]:
+    """Each storage unit's disk by the runtime argument that takes it: the
+    unit's image, write-protected where its medium is, or None for no
+    medium."""
 
-    if path is None:
-        return None
-    return HostedStorageService(image_path=path, write_protected=True)
+    return {
+        unit.host_name: (
+            None
+            if path is None
+            else HostedStorageService(
+                image_path=path, write_protected=unit.write_protected,
+            )
+        )
+        for unit, path in zip(STORAGE_UNIT_TABLE, paths, strict=True)
+    }
 
 
 def build_argument_parser(
@@ -86,12 +106,7 @@ def build_argument_parser(
     description: str = "Run a shared MegaPad semantic-simulator session",
 ) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument("--storage", type=Path, required=True)
-    parser.add_argument(
-        "--settings-storage", type=Path,
-        help="settings disk image, attached write-protected to the second "
-             "storage controller",
-    )
+    add_storage_options(parser, path_type=Path, boot_required=True)
     parser.add_argument("--socket", default=DEFAULT_SOCKET)
     parser.add_argument("--ram-kib", type=_positive_int, default=1024)
     parser.add_argument("--ext-mem-mib", type=_nonnegative_int, default=128)
@@ -195,10 +210,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
         )
     if args.terminal_link_pace is not None and args.rich_terminal_policy is None:
         raise ValueError("--terminal-link-pace requires --rich-terminal-policy")
-    storage_path = args.storage.resolve()
-    if not storage_path.is_file():
-        raise ValueError(f"storage image does not exist: {storage_path}")
-    settings_path = settings_image_path(args)
+    image_paths = storage_image_paths(args)
     executor = configured_production_executor(args.executor)
     # Resolve the environment before image preparation so a bad value fails
     # without first running autoexec. None selects the executor's default.
@@ -223,11 +235,9 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
         initial_epoch_ms=time.time_ns() // 1_000_000,
     )
     memory.mmio.rtc.bind_monotonic_clock(time.monotonic_ns)
-    storage = HostedStorageService(image_path=storage_path)
     preparation = prepare_image_bootstrap(
         memory=memory,
-        storage=storage,
-        settings_storage=settings_storage_service(settings_path),
+        **storage_services(image_paths),
         terminal_cols=args.cols,
         terminal_rows=args.rows,
         semantic_step_budget=args.semantic_step_budget,

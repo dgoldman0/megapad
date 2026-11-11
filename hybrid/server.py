@@ -15,10 +15,9 @@ from shared.session_options import configured_production_executor
 from shared_session import SessionServer
 from simulator.image_bootstrap import ImageBootstrapPreparation, prepare_image_bootstrap
 from simulator.platform import create_one_core_address_space
-from simulator.server import settings_image_path, settings_storage_service
+from simulator.server import storage_image_paths, storage_services
 from simulator.server import build_argument_parser as semantic_argument_parser
 from simulator.session import configured_semantic_quantum_steps
-from simulator.storage import HostedStorageService
 
 
 # A host turn runs at most this many machine instructions before the session
@@ -84,10 +83,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
         raise ValueError("--retained-terminal-policy requires --rich-terminal-policy")
     if args.terminal_link_pace is not None and args.rich_terminal_policy is None:
         raise ValueError("--terminal-link-pace requires --rich-terminal-policy")
-    storage_path = args.storage.resolve()
-    if not storage_path.is_file():
-        raise ValueError(f"storage image does not exist: {storage_path}")
-    settings_path = settings_image_path(args)
+    image_paths = storage_image_paths(args)
     quantum_steps = configured_semantic_quantum_steps(args.semantic_quantum_steps)
     executor = configured_production_executor(args.executor)
     # Every image is read and checked before any runtime or socket exists.
@@ -107,13 +103,11 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
         dense_backing=True,
     )
     memory.mmio.rtc.bind_monotonic_clock(time.monotonic_ns)
-    storage = HostedStorageService(image_path=storage_path)
-    settings_storage = settings_storage_service(settings_path)
+    services = storage_services(image_paths)
     hybrid = HybridRuntime.create(
         executor=executor,
         memory=memory,
-        storage=storage,
-        settings_storage=settings_storage,
+        **services,
         machine_instruction_budget=args.machine_instruction_budget,
     )
     session = None
@@ -123,8 +117,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
             hybrid.register_manifest(manifest)
         preparation = prepare_image_bootstrap(
             memory=memory,
-            storage=storage,
-            settings_storage=settings_storage,
+            **services,
             runtime=hybrid.semantic,
             terminal_cols=args.cols,
             terminal_rows=args.rows,

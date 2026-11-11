@@ -925,13 +925,14 @@ and a file abstraction provides cursor-based I/O over contiguous sector ranges.
 
 ### 7.1 BIOS Disk Words
 
-Seventeen BIOS words expose the system disk's storage controller (at MMIO
+Seventeen BIOS words expose the boot disk's storage controller (at MMIO
 offset 0x0200), and eight more, `DISK-UNITS` and the `UNIT-DISK-*` words,
-address either of the machine's two controllers by unit: 0 the system disk,
-1 the settings disk at 0x0280, whose medium is write-protected (see the
-[BIOS reference](docs/bios-forth.md)).  KDOS production paths use the
-checked operations; raw setup/command words are retained for controller
-diagnostics and do not wait for completion.
+address any of the machine's four controllers by unit: 0 the boot disk, 1
+the settings disk at 0x0280, 2 the system disk at 0x0D00 and 3 the user disk
+at 0x0D80.  The settings disk's and the system disk's media are
+write-protected (see the [BIOS reference](docs/bios-forth.md)).  KDOS
+production paths use the checked operations; raw setup/command words are
+retained for controller diagnostics and do not wait for completion.
 
 | Word | Stack | Description |
 |---|---|---|
@@ -969,11 +970,14 @@ controller's atomic guarded-command path, so a replacement between validation
 and command acceptance fails stale before DMA or media effects.
 
 A block device addresses one storage unit: `BD-OPEN-UNIT ( bd unit -- ior )`
-opens it on unit 0 (`SYSTEM-UNIT`), the system disk, or unit 1
-(`SETTINGS-UNIT`), the settings disk, whose write-protected medium opens
-read-only; `BD-OPEN` is unit 0, and `BD.UNIT` reads a device's unit.
-`SETTINGS-OPEN` binds the settings disk's raw volume in `SETTINGS-VOLUME`
-(over `SETTINGS-BD`), leaving `FS-VOLUME` as it was.
+opens it on unit 0 (`BOOT-UNIT`), the boot disk; unit 1 (`SETTINGS-UNIT`),
+the settings disk; unit 2 (`SYSTEM-UNIT`), the system disk; or unit 3
+(`USER-UNIT`), the user disk.  The settings disk's and the system disk's
+write-protected media open read-only.  `BD-OPEN` is unit 0, and `BD.UNIT`
+reads a device's unit.  `SETTINGS-OPEN` binds the settings disk's raw volume
+in `SETTINGS-VOLUME` (over `SETTINGS-BD`), leaving `FS-VOLUME` as it was.
+KDOS itself binds only the boot disk and the settings disk; a caller opens
+the system and user units with `BD-OPEN-UNIT`.
 
 The public object operations are `BD-OPEN`, `BD-CLOSE`, `BD-VALID?`,
 `BD-STALE?`, `BD-READ`, `BD-WRITE`, `BD-FLUSH`, `VOL-RAW`, `VOL-SLICE`,

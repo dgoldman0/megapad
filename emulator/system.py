@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from nic_backends import NICBackend
 
 from shared import tile_formats
+from shared.storage import STORAGE_UNIT_TABLE
 
 from _mp64_accel import (
     BusFault,
@@ -59,7 +60,6 @@ from .devices import (
     FramebufferDevice, CppFramebufferProxy, CppTimerProxy, CppUartGeomProxy,
     RTC, CppRTCProxy, CppWotsProxy,
     SECTOR_SIZE, UART_BASE, UART_GEOM_BASE, TIMER_BASE, STORAGE_BASE,
-    STORAGE1_BASE,
     SYSINFO_BASE, NIC_BASE, MBOX_BASE, SPINLOCK_BASE,
     NTT_BASE, KEM_BASE, FB_BASE, NIC_MTU, NIC_MAX_FRAME,
     PortBridgeCSR,
@@ -1185,6 +1185,8 @@ class MegapadSystem:
     def __init__(self, ram_size: int = 1 << 20,
                  storage_image: Optional[str] = None,
                  settings_image: Optional[str] = None,
+                 system_image: Optional[str] = None,
+                 user_image: Optional[str] = None,
                  nic_port: Optional[int] = None,
                  nic_peer_port: Optional[int] = None,
                  nic_backend: 'Optional[NICBackend]' = None,
@@ -1299,12 +1301,27 @@ class MegapadSystem:
         self._rich_terminal_host = MegapadRichTerminalHost(self)
         # Timer is now handled natively by C++ accelerator — use proxy
         self.timer = CppTimerProxy(self.cores[0]._cs)
-        self.storage = Storage(storage_image)
-        # The settings disk: the second controller, whose medium the machine
-        # reads and never writes.  Without an image it holds no medium.
-        self.settings_storage = Storage(
-            settings_image, base=STORAGE1_BASE, write_protected=True,
+        # One controller for each storage unit, in unit order.  A unit given
+        # no image holds no medium.  The machine reads and never writes a
+        # write-protected unit's medium, and that image must exist.
+        self._storage_units: tuple[Storage, ...] = tuple(
+            Storage(
+                image,
+                base=unit.mmio_offset,
+                write_protected=unit.write_protected,
+            )
+            for unit, image in zip(
+                STORAGE_UNIT_TABLE,
+                (storage_image, settings_image, system_image, user_image),
+                strict=True,
+            )
         )
+        (
+            self.storage,
+            self.settings_storage,
+            self.system_storage,
+            self.user_storage,
+        ) = self._storage_units
         for controller in self._storage_controllers():
             controller._cycle_mutation_guard = (
                 self._native_system._require_storage_mutation_allowed
@@ -1312,8 +1329,13 @@ class MegapadSystem:
             controller._stall_release_guard = (
                 self._native_system._require_storage_stall_release_allowed
             )
-        # The controller holding the shared disk port's grant (strict cycle).
+        # The controller holding the shared disk port's grant (strict cycle),
+        # and the beat the port offers for it: that controller and the token
+        # it gave the beat.  Each controller numbers its own beats, so the
+        # port numbers the beats it offers, in the order it grants them.
         self._storage_dma_owner: Optional[Storage] = None
+        self._storage_dma_offered: Optional[tuple[Storage, int]] = None
+        self._storage_dma_port_token: int = 0
         self.audio = AudioOutput()
         self.nic = NetworkDevice(
             passthrough_port=nic_port,
@@ -1384,8 +1406,8 @@ class MegapadSystem:
         self.bus.register(self.uart_geom)
         # Timer time is advanced by the authoritative native system clock.
         self.bus.register(self.timer, externally_clocked=True)
-        self.bus.register(self.storage)
-        self.bus.register(self.settings_storage)
+        for controller in self._storage_controllers():
+            self.bus.register(controller)
         self.bus.register(self.audio)
         self.bus.register(self.sysinfo)
         # Retain the Python NIC for backend lifecycle and status. Native
@@ -1416,7 +1438,7 @@ class MegapadSystem:
         self.bus.register(self.wots, externally_clocked=True)
         self.bus.set_tick_driver(self.advance_system_cycles)
 
-        # Wire the ordinary storage controller to one identity-checked system
+        # Wire each ordinary storage controller to one identity-checked system
         # memory capability. Strict-cycle and customized callback paths retain
         # their byte-visible DMA state machine.
         for controller in self._storage_controllers():
@@ -2707,6 +2729,7 @@ class MegapadSystem:
         # device can discard the controller state that would consume it.
         self._native_system._reset_cycle_execution_and_main_bus()
         self._storage_dma_owner = None
+        self._storage_dma_offered = None
         for controller in self._storage_controllers():
             controller.reset()
         self.audio.reset()
@@ -3337,27 +3360,59 @@ class MegapadSystem:
             timing_model="strict_shared_clock",
         )
 
-    def _storage_controllers(self) -> tuple[Storage, Storage]:
-        """The system disk's controller, then the settings disk's."""
-        return self.storage, self.settings_storage
+    def _storage_controllers(self) -> tuple[Storage, ...]:
+        """Every storage unit's controller, in unit order."""
+        return self._storage_units
+
+    def storage_image_arguments(self) -> dict[str, Optional[str]]:
+        """The image arguments that give a new machine this one's disks."""
+        return {
+            unit.image_name: controller.image_path
+            for unit, controller in zip(
+                STORAGE_UNIT_TABLE, self._storage_controllers(), strict=True,
+            )
+        }
+
+    def save_storage_images(self) -> None:
+        """Bring every writable disk's host file up to its image.
+
+        A disk whose save fails does not keep the others from theirs; the
+        first failure is raised once every disk has been tried.
+        """
+        failure: Optional[OSError] = None
+        for controller in self._storage_controllers():
+            try:
+                controller.save_image()
+            except OSError as error:
+                if failure is None:
+                    failure = error
+        if failure is not None:
+            raise failure
 
     def _storage_dma_granted(self) -> Optional[Storage]:
         """The controller the shared disk port serves: the one granted a
         beat that has not completed, or else the first, in controller
         order, with a beat to offer, which the port then grants."""
         owner = self._storage_dma_owner
-        if owner is not None and owner.cycle_dma_view()[1] is not None:
-            return owner
-        self._storage_dma_owner = None
-        for controller in self._storage_controllers():
-            if controller.cycle_dma_view()[1] is not None:
-                self._storage_dma_owner = controller
-                return controller
-        return None
+        if owner is None or owner.cycle_dma_view()[1] is None:
+            owner = None
+            for controller in self._storage_controllers():
+                if controller.cycle_dma_view()[1] is not None:
+                    owner = controller
+                    break
+            self._storage_dma_owner = owner
+        if owner is None:
+            return None
+        # A beat the port has not offered before takes the port's next token.
+        offered = (owner, int(owner.cycle_dma_view()[1].token))
+        if offered != self._storage_dma_offered:
+            self._storage_dma_offered = offered
+            self._storage_dma_port_token += 1
+        return owner
 
     def _inspect_storage_dma(self, _current_cycle: int) -> DmaEndpointView:
-        # Both storage controllers share the disk's one bus port.  The port
-        # is active while either controller is, and offers the beat of the
+        # The storage controllers share the disk's one bus port.  The port
+        # is active while any controller is, and offers the beat of the
         # controller it granted, holding that grant until the beat completes.
         active = any(
             controller.cycle_dma_view()[0]
@@ -3368,7 +3423,7 @@ class MegapadSystem:
         beat = None
         if pending is not None:
             beat = DmaBeat(
-                pending.token,
+                self._storage_dma_port_token,
                 (
                     BusOperation.WRITE
                     if pending.write
@@ -3386,13 +3441,19 @@ class MegapadSystem:
             else int(result.read_value) & 0xFF
         )
         owner = self._storage_dma_owner
-        if owner is None:
+        offered = self._storage_dma_offered
+        if owner is None or offered is None or offered[0] is not owner:
             raise RuntimeError(
                 "storage DMA completion has no granted controller"
             )
+        if int(token) != self._storage_dma_port_token:
+            raise RuntimeError(
+                "storage DMA completion does not match the granted beat"
+            )
         self._storage_dma_owner = None
+        self._storage_dma_offered = None
         accepted = owner.cycle_dma_complete(
-            int(token),
+            offered[1],
             read_value=read_value,
             faulted=result.fault != BusFault.NONE,
             target_effects_committed=bool(
@@ -3408,7 +3469,11 @@ class MegapadSystem:
         """Validate capture of the disk beat retained until completion."""
         owner = self._storage_dma_owner
         pending = None if owner is None else owner.cycle_dma_view()[1]
-        if pending is None or int(pending.token) != int(token):
+        if (
+            pending is None
+            or self._storage_dma_offered != (owner, int(pending.token))
+            or int(token) != self._storage_dma_port_token
+        ):
             raise RuntimeError(
                 "storage DMA acceptance does not match its pending beat"
             )
@@ -3706,13 +3771,16 @@ class MegapadSystem:
                       f"compare={self.timer.compare} "
                       f"ctrl={self.timer.control:#04x} "
                       f"irq={'Y' if self.timer.irq_pending else 'N'}")
-        lines.append(f"  Storage: {'present' if self.storage.status & 0x80 else 'none'} "
-                      f"sectors={self.storage.total_sectors} "
-                      f"image={self.storage.image_path or 'N/A'}")
-        settings = self.settings_storage
-        lines.append(f"  Settings disk: {'present' if settings.status & 0x80 else 'none'} "
-                      f"sectors={settings.total_sectors} "
-                      f"image={settings.image_path or 'N/A'} (write-protected)")
+        for unit, disk in zip(
+            STORAGE_UNIT_TABLE, self._storage_controllers(), strict=True,
+        ):
+            lines.append(
+                f"  Storage unit {unit.number}, the {unit.disk} disk: "
+                f"{'present' if disk.status & 0x80 else 'none'} "
+                f"sectors={disk.total_sectors} "
+                f"image={disk.image_path or 'N/A'}"
+                f"{' (write-protected)' if unit.write_protected else ''}"
+            )
         lines.append(f"  Audio: generation={self.audio.generation} "
                      f"frames={self.audio.last_frames} "
                      f"rate={self.audio.last_rate or self.audio.rate} "

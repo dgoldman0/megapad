@@ -1456,7 +1456,7 @@ pool descriptor. Reused addresses create an ABA hazard in which a stale handle
 can flush or close a new occupant; pool headers, descriptor cells, `OP-SLOT`,
 parser state, cache, and deferred bindings are global and unlocked.
 
-The adjacent current loader fixture is exact `kdos.f` lines 5742–6209: 468 LF
+The adjacent current loader fixture is exact `kdos.f` lines 5745–6212: 468 LF
 records, 17,973 bytes, SHA-256
 `5edc78bd9065d16bfbbb5f55030c36f07b99994de5e45d1d094da3b9f64c7cd5`,
 and Git blob `04a0a4de50c095ea7be27e45b4d07d5d84bdb962`. Its exact 88-definition ledger
@@ -1544,7 +1544,7 @@ separate open matters. Task-resetting `ABORT`/`ABORT"` and host or memory
 faults that do not become guest `THROW` bypass the loader's `CATCH`; cleanup and
 transactionality are not claimed for those exits.
 
-The current Application Loading fixture is exact `kdos.f` lines 6210–6324:
+The current Application Loading fixture is exact `kdos.f` lines 6213–6327:
 115 LF records, 4,240 bytes, SHA-256
 `514fe3ffe462c1571d3e45f75ec274186278a2f0201fb09c1476c142a5244141`,
 and Git blob `e7463dc7365cc67799febd7c676773bb8dd0555c`. It publishes seven application
@@ -2299,14 +2299,14 @@ physical presentation, and all rich-terminal work remain deferred.
 
 ### KDOS §20 Module System
 
-Exact current lines 9649–10141 add the complete Module System: 493 LF records,
+Exact current lines 9652–10144 add the complete Module System: 493 LF records,
 16,157 bytes, SHA-256
 `e3b84f6fbb348c2275c2e4339bdb92f398e621c437dcc975949611d0e367d265`,
 and Git blob `7b616252e40b75bdd9fa82fbc5fc6c0f2c47ae64`. The fixture includes the
-line-10142 §14 separator and has 494 LF records, 16,229 bytes, SHA-256
+line-10145 §14 separator and has 494 LF records, 16,229 bytes, SHA-256
 `cf818fbb9facbe2a06a825a6ba3cd6738b73d97793f423829b4386bc89b03a9d`,
 and Git blob `881609bc61944004c8f8442eb22a527f132ebbd8`. §14 Startup begins at line
-10143 and is not part of this slice.
+10146 and is not part of this slice.
 
 The source publishes 75 definitions: 46 colons, 16 variables, seven ordinary
 constants, four `CREATE` objects, and two deferred words. Its 859 name bytes,
@@ -2385,18 +2385,18 @@ slice completes the contiguous frontier through EOF.
 
 ### KDOS §14 Startup and EOF
 
-Exact current lines 10142–10181, including the section separator, contain 40 LF
+Exact current lines 10145–10184, including the section separator, contain 40 LF
 records and 1,398 bytes, with SHA-256
 `d75984f7fd3d55cb8c573da5b9f494ff1c1e8bba32b3537fa2270669add3ca8a`
 and Git blob `1354db80222545647369729b93526831ff0a21ec`. The executable lines
-10143–10181 contain 39 LF records and 1,326 bytes, with SHA-256
+10146–10184 contain 39 LF records and 1,326 bytes, with SHA-256
 `07df5026ba571e0d6e232d8c908963a0403756d3859390af3c7de3230f446b85`
 and Git blob `c920305479e61c2a5d51719779ec9c9fba0c2b8f`. The complete current
-10,181-line, 357,300-byte `kdos.f` has SHA-256
-`367426cc10080b2dcb6642974ca30d7c75dcceed96ae2298783fd3aa96c71591`
-and Git blob `4b12c959495b0385582a30fc564c6d8046fafd0d`.
-The canonical source-mode CLI filter submits 6,815 non-comment records with
-220,995 payload bytes, or 227,810 UART bytes after one LF delimiter per
+10,184-line, 357,426-byte `kdos.f` has SHA-256
+`b3d5211893432fb9b93acee1d330c84260b4a51c56ae0cecb265f54add3c5ff4`
+and Git blob `7aa48d675c1a1a6d6dd84731c3332a33b128155e`.
+The canonical source-mode CLI filter submits 6,817 non-comment records with
+221,033 payload bytes, or 227,850 UART bytes after one LF delimiter per
 record. These are structural source/transport identities, not a fresh
 wall-clock or complete-load qualification.
 
@@ -2450,7 +2450,7 @@ still free, mounted MP64FS, zero modules, balanced stacks, and no held lock. A
 post-boot checked definition returned 42, followed by allocation/free, CRC32,
 ring FIFO, and module-listing checks. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
-457 core words and expects 1,517 KDOS publications and 1,966 unique
+457 core words and expects 1,519 KDOS publications and 1,968 unique
 bindings.
 
 The contiguous unchanged KDOS core now reaches EOF. The integration branch is

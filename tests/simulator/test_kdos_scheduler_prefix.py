@@ -29,11 +29,11 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-scheduler-prefix-6776-6989.f"
+    / "kdos-scheduler-prefix-6779-6992.f"
 )
 
-FIRST_LINE = 6776
-LAST_LINE = 6989
+FIRST_LINE = 6779
+LAST_LINE = 6992
 SLICE_BYTES = 6_935
 SLICE_SHA256 = (
     "cc28cfab7033390f4efc885cc043feafecc136e913aa34cc6338f7ad1b6a1f4c"

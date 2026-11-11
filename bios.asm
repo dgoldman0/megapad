@@ -9221,29 +9221,43 @@ w_disk_flush_gen_checked:
     str r14, r0               ; replace generation with status
     ret.l
 
-; Storage units.  Unit 0 is the system disk's controller at MMIO +0x0200,
-; unit 1 the settings disk's at +0x0280, the same controller design; the
-; settings disk's medium is write-protected.  A unit the machine does not
-; have reads as an empty slot: no medium, no capacity, no capabilities.
+; Storage units.  Each is a controller of the one design, holding one disk:
+;   unit 0  MMIO +0x0200  the boot disk, which the DISK-* words address
+;   unit 1  MMIO +0x0280  the settings disk, its medium write-protected
+;   unit 2  MMIO +0x0D00  the system disk, its medium write-protected
+;   unit 3  MMIO +0x0D80  the user disk
+; disk_unit_base and DISK-UNITS below are this list in code.  A unit the
+; machine does not have reads as an empty slot: no medium, no capacity, no
+; capabilities.
 
 ; disk_unit_base: R1 = unit.  Returns R13 = its controller's MMIO base, or 0.
 disk_unit_base:
     cmpi r1, 0
-    breq disk_unit_base_system
+    breq disk_unit_base_boot
     cmpi r1, 1
     breq disk_unit_base_settings
+    cmpi r1, 2
+    breq disk_unit_base_system
+    cmpi r1, 3
+    breq disk_unit_base_user
     ldi r13, 0
     ret.l
-disk_unit_base_system:
+disk_unit_base_boot:
     ldi64 r13, 0xFFFF_FF00_0000_0200
     ret.l
 disk_unit_base_settings:
     ldi64 r13, 0xFFFF_FF00_0000_0280
     ret.l
+disk_unit_base_system:
+    ldi64 r13, 0xFFFF_FF00_0000_0D00
+    ret.l
+disk_unit_base_user:
+    ldi64 r13, 0xFFFF_FF00_0000_0D80
+    ret.l
 
 ; DISK-UNITS ( -- n )  storage units this machine has
 w_disk_units:
-    ldi r1, 2
+    ldi r1, 4
     subi r14, 8
     str r14, r1
     ret.l
@@ -9373,7 +9387,7 @@ disk_read_sectors:
     ldi r8, 0                 ; BIOS filesystem reads snapshot generation
     ldi r10, 0
     ldi r0, 0x01
-    ldi64 r13, 0xFFFF_FF00_0000_0200   ; the system disk
+    ldi64 r13, 0xFFFF_FF00_0000_0200   ; the boot disk
     ldi64 r11, disk_transfer_checked
     call.l r11
     ret.l

@@ -28,7 +28,12 @@ from shared.mp64fs import (
     bios_mp64fs_metadata_valid,
     decode_bios_mp64fs_geometry,
 )
-from shared.storage import SECTOR_SIZE, STORAGE_RESULT_OK, STORAGE_STATUS_PRESENT
+from shared.storage import (
+    SECTOR_SIZE,
+    STORAGE_RESULT_OK,
+    STORAGE_STATUS_PRESENT,
+    STORAGE_UNIT_TABLE,
+)
 from simulator.errors import SimulatorError, StepBudgetExceeded
 from simulator.memory import SparseAddressSpace
 from simulator.runtime import CreatedDefinition, DirectiveDefinition, MegaForthRuntime
@@ -140,6 +145,8 @@ def prepare_image_bootstrap(
     memory: SparseAddressSpace,
     storage: HostedStorageService,
     settings_storage: HostedStorageService | None = None,
+    system_storage: HostedStorageService | None = None,
+    user_storage: HostedStorageService | None = None,
     terminal_cols: int = 80,
     terminal_rows: int = 30,
     semantic_step_budget: int | None = None,
@@ -160,8 +167,9 @@ def prepare_image_bootstrap(
     constructed runtime to publish declarations before boot source runs. That
     runtime must own the exact memory and storage supplied here, and its
     executor must already have been selected during construction.
-    SETTINGS_STORAGE is the settings disk on the second storage controller;
-    None leaves that controller without a medium.
+    STORAGE is the boot disk.  SETTINGS_STORAGE, SYSTEM_STORAGE and
+    USER_STORAGE are the disks of the other storage units; None leaves a unit
+    without a medium.
     """
 
     if not isinstance(memory, SparseAddressSpace):
@@ -171,7 +179,11 @@ def prepare_image_bootstrap(
 
     if runtime is None:
         runtime = MegaForthRuntime(
-            memory=memory, storage=storage, settings_storage=settings_storage,
+            memory=memory,
+            storage=storage,
+            settings_storage=settings_storage,
+            system_storage=system_storage,
+            user_storage=user_storage,
             execution_backend=execution_backend,
         )
     else:
@@ -179,8 +191,16 @@ def prepare_image_bootstrap(
             raise TypeError("runtime must be a MegaForthRuntime or None")
         if runtime.memory is not memory or runtime.storage is not storage:
             raise ValueError("prepared runtime must own the supplied memory and storage")
-        if settings_storage is not None and runtime.settings_storage is not settings_storage:
-            raise ValueError("prepared runtime must own the supplied settings storage")
+        for unit, service, owned in zip(
+            STORAGE_UNIT_TABLE,
+            (storage, settings_storage, system_storage, user_storage),
+            runtime.storage_units,
+            strict=True,
+        ):
+            if service is not None and owned is not service:
+                raise ValueError(
+                    f"prepared runtime must own the supplied {unit.label}"
+                )
         if execution_backend is not None:
             raise ValueError("a prepared runtime already owns its executor selection")
     # Establish the caller's baseline before any boot source can query it.

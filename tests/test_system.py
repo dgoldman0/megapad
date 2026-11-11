@@ -79,6 +79,7 @@ from megapad64 import (
 )
 from asm import assemble, AsmError
 from shared import ieee_fp, scalar_fp
+from shared.storage import STORAGE_UNIT_TABLE
 from system import MegapadSystem, MMIO_START, MicroCluster
 from devices import (
     MMIO_BASE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE,
@@ -126,11 +127,32 @@ BIOS_PATH = os.environ.get("MP64_BIOS", os.path.join(PROJECT_ROOT, "bios.asm"))
 
 def make_system(ram_kib: int = 1024, storage_image: str = None,
                 num_cores: int = 1, ext_mem_mib: int = 0,
-                settings_image: str = None) -> MegapadSystem:
+                **unit_images: str) -> MegapadSystem:
+    """UNIT_IMAGES attach the other storage units' images, by
+    MegapadSystem's argument names."""
     return MegapadSystem(ram_size=ram_kib * 1024, storage_image=storage_image,
-                         settings_image=settings_image,
                          num_cores=num_cores,
-                         ext_mem_size=ext_mem_mib * (1 << 20))
+                         ext_mem_size=ext_mem_mib * (1 << 20),
+                         **unit_images)
+
+
+def unit_image_sectors(unit) -> int:
+    """The size of UNIT's test image, unlike any other unit's."""
+    return 2048 if unit.number == 0 else 32 * (unit.number + 1)
+
+
+def write_unit_images(directory) -> dict:
+    """Write a test image for every storage unit into DIRECTORY, each of its
+    own size and marked ``UNITn`` at the start of its second sector.
+    Returns the images' paths by unit."""
+    paths = {}
+    for unit in STORAGE_UNIT_TABLE:
+        image = bytearray(unit_image_sectors(unit) * SECTOR_SIZE)
+        image[SECTOR_SIZE:SECTOR_SIZE + 5] = b"UNIT%d" % unit.number
+        paths[unit] = os.path.join(directory, f"{unit.disk}.img")
+        with open(paths[unit], "wb") as f:
+            f.write(image)
+    return paths
 
 
 def run_until(sys: MegapadSystem, max_steps: int = 500_000):
@@ -1596,17 +1618,17 @@ class TestBIOS(unittest.TestCase):
                     )
 
     def _boot_bios(self, ram_kib=256, storage_image=None, ext_mem_mib=0,
-                   settings_image=None):
+                   **unit_images):
         # Fast path: restore from snapshot (default 256K, no storage)
         if (ram_kib == 256 and storage_image is None
-                and settings_image is None
+                and not unit_images
                 and ext_mem_mib == 0
                 and self.__class__._bios_snapshot is not None):
             return self._boot_bios_fast()
         # Slow path: fresh boot (non-default RAM size or storage)
         sys = make_system(ram_kib=ram_kib, storage_image=storage_image,
                           ext_mem_mib=ext_mem_mib,
-                          settings_image=settings_image)
+                          **unit_images)
         buf = capture_uart(sys)
         sys.load_binary(0, self.bios_code)
         self._register_accel_hooks(sys)
@@ -2447,70 +2469,152 @@ class TestBIOS(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_unit_words_read_the_settings_disk_and_never_write_it(self):
-        """Unit 1 is the settings disk on the second controller: present,
-        write-protected, read through the unit words, and every write to it
-        refused.  Unit 0 is the system disk.  Any other unit reads as an
-        empty slot."""
-        settings = bytearray(64 * SECTOR_SIZE)
-        settings[:5] = b"SAFE!"
+    def _boot_with_every_disk(self, directory):
+        """Boot with a test image on every storage unit.  Returns the
+        machine, its UART buffer and each unit's image path."""
+        paths = write_unit_images(directory)
+        sys, buf = self._boot_bios(**{
+            unit.image_name: path for unit, path in paths.items()
+        })
+        for _ in range(20):
+            if sys.cpu.idle:
+                break
+            sys.run_batch(100_000)
+        return sys, buf, paths
+
+    def test_unit_words_address_each_of_the_four_storage_units(self):
+        """Every unit number reaches its own controller through every unit
+        word.  The boot disk and the user disk read, take a write and flush
+        it to their files.  The settings disk and the system disk read,
+        refuse the write and are never written.  No unit's commands reach
+        another unit's disk."""
+        self.assertEqual(
+            [(unit.number, unit.disk, unit.write_protected)
+             for unit in STORAGE_UNIT_TABLE],
+            [(0, "boot", False), (1, "settings", True),
+             (2, "system", True), (3, "user", False)],
+        )
+        for unit in STORAGE_UNIT_TABLE:
+            with self.subTest(unit=unit.disk), \
+                    tempfile.TemporaryDirectory() as directory:
+                sys, buf, paths = self._boot_with_every_disk(directory)
+                before = {}
+                for other, path in paths.items():
+                    with open(path, "rb") as f:
+                        before[other] = f.read()
+                n = unit.number
+                disk = sys._storage_controllers()[n]
+                gen = disk.media_generation
+                text = self._run_forth(sys, buf, [
+                    'DISK-UNITS ."  UNITS=" .',
+                    f'{n} UNIT-DISK@ 0xA0 AND ."  STATUS=" .',
+                    f'{n} UNIT-DISK-SECTORS ."  SECTORS=" .',
+                    f'{n} UNIT-DISK-CAPS ."  CAPS=" .',
+                    f'{n} UNIT-DISK-MEDIA-GEN ."  GEN=" .',
+                    '0 UNIT-DISK@ DISK@ = ."  SAME0=" .',
+                    'VARIABLE unit-buf 512 ALLOT',
+                    (f'unit-buf 1 1 {gen} {n} UNIT-DISK-READ-GEN-CHECKED '
+                     '."  READ=" . .'),
+                    'unit-buf 4 + C@ ."  BYTE=" .',
+                    (f'unit-buf 2 1 {gen} {n} UNIT-DISK-WRITE-GEN-CHECKED '
+                     '."  WRITE=" . .'),
+                    f'{gen} {n} UNIT-DISK-FLUSH-GEN-CHECKED ."  FLUSH=" .',
+                    (f'unit-buf 1 1 {gen + 1} {n} UNIT-DISK-READ-GEN-CHECKED '
+                     '."  STALE=" . .'),
+                ])
+                self.assertIn("UNITS=4 ", text)
+                self.assertIn(
+                    f"STATUS={160 if unit.write_protected else 128} ", text)
+                self.assertIn(f"SECTORS={unit_image_sectors(unit)} ", text)
+                self.assertIn("CAPS=127 ", text)
+                self.assertIn(f"GEN={gen} ", text)
+                self.assertIn("SAME0=-1 ", text)
+                self.assertIn("READ=0 1 ", text)
+                self.assertIn(f"BYTE={ord('0') + n} ", text)
+                self.assertIn("FLUSH=0 ", text)
+                self.assertIn(f"STALE={STORAGE_RESULT_MEDIA_REMOVED} 0 ", text)
+                expected = bytearray(before[unit])
+                if unit.write_protected:
+                    self.assertIn(
+                        f"WRITE={STORAGE_RESULT_WRITE_PROTECTED} 0 ", text)
+                else:
+                    self.assertIn("WRITE=0 1 ", text)
+                    expected[2 * SECTOR_SIZE:3 * SECTOR_SIZE] = (
+                        expected[SECTOR_SIZE:2 * SECTOR_SIZE]
+                    )
+                self.assertEqual(bytes(disk._image_data), bytes(expected))
+                before[unit] = bytes(expected)
+                for other, path in paths.items():
+                    with open(path, "rb") as f:
+                        self.assertEqual(f.read(), before[other], other.disk)
+
+    def test_a_unit_past_the_last_reads_as_an_empty_slot(self):
+        """A unit the machine does not have shows no medium, no capacity and
+        no capabilities, and its transfers return NO_MEDIA, whatever disks
+        the machine holds."""
+        for n in (len(STORAGE_UNIT_TABLE), len(STORAGE_UNIT_TABLE) + 1, -1):
+            with self.subTest(unit=n), \
+                    tempfile.TemporaryDirectory() as directory:
+                sys, buf, paths = self._boot_with_every_disk(directory)
+                completions = [
+                    controller.completion
+                    for controller in sys._storage_controllers()
+                ]
+                text = self._run_forth(sys, buf, [
+                    f'{n} UNIT-DISK@ ."  STATUS=" .',
+                    f'{n} UNIT-DISK-SECTORS ."  SECTORS=" .',
+                    f'{n} UNIT-DISK-CAPS ."  CAPS=" .',
+                    f'{n} UNIT-DISK-MEDIA-GEN ."  GEN=" .',
+                    'VARIABLE unit-buf 512 ALLOT',
+                    (f'unit-buf 1 1 1 {n} UNIT-DISK-READ-GEN-CHECKED '
+                     '."  READ=" . .'),
+                    (f'unit-buf 1 1 1 {n} UNIT-DISK-WRITE-GEN-CHECKED '
+                     '."  WRITE=" . .'),
+                    f'1 {n} UNIT-DISK-FLUSH-GEN-CHECKED ."  FLUSH=" .',
+                    'DEPTH ."  DEPTH=" .',
+                ])
+                self.assertIn("STATUS=0 ", text)
+                self.assertIn("SECTORS=0 ", text)
+                self.assertIn("CAPS=0 ", text)
+                self.assertIn("GEN=0 ", text)
+                self.assertIn(f"READ={STORAGE_RESULT_NO_MEDIA} 0 ", text)
+                self.assertIn(f"WRITE={STORAGE_RESULT_NO_MEDIA} 0 ", text)
+                self.assertIn(f"FLUSH={STORAGE_RESULT_NO_MEDIA} ", text)
+                self.assertIn("DEPTH=0 ", text)
+                # No controller ran a command for it.
+                self.assertEqual(
+                    [controller.completion
+                     for controller in sys._storage_controllers()],
+                    completions,
+                )
+
+    def test_units_given_no_image_are_empty_slots(self):
+        """With only a boot disk, every other unit shows no medium and its
+        transfers return NO_MEDIA."""
         with tempfile.TemporaryDirectory() as directory:
-            system_path = os.path.join(directory, "system.img")
-            settings_path = os.path.join(directory, "settings.img")
-            with open(system_path, "wb") as f:
-                f.write(b"\x00" * (2048 * SECTOR_SIZE))
-            with open(settings_path, "wb") as f:
-                f.write(settings)
-            sys, buf = self._boot_bios(storage_image=system_path,
-                                       settings_image=settings_path)
+            path = os.path.join(directory, "boot.img")
+            with open(path, "wb") as f:
+                f.write(bytes(2048 * SECTOR_SIZE))
+            sys, buf = self._boot_bios(storage_image=path)
             for _ in range(20):
                 if sys.cpu.idle:
                     break
                 sys.run_batch(100_000)
-            settings_gen = sys.settings_storage.media_generation
-            system_gen = sys.storage.media_generation
-            text = self._run_forth(sys, buf, [
-                'DISK-UNITS ."  UNITS=" .',
-                '1 UNIT-DISK@ 0xA0 AND ."  STATUS1=" .',
-                '1 UNIT-DISK-SECTORS ."  SECTORS1=" .',
-                '1 UNIT-DISK-CAPS ."  CAPS1=" .',
-                '1 UNIT-DISK-MEDIA-GEN ."  GEN1=" .',
-                '0 UNIT-DISK@ DISK@ = ."  SAME0=" .',
-                '0 UNIT-DISK-SECTORS ."  SECTORS0=" .',
-                '2 UNIT-DISK@ ."  STATUS2=" .',
-                '2 UNIT-DISK-SECTORS ."  SECTORS2=" .',
-                'VARIABLE unit-buf 512 ALLOT',
-                (f'unit-buf 0 1 {settings_gen} 1 UNIT-DISK-READ-GEN-CHECKED '
-                 '."  READ1=" . .'),
-                'unit-buf C@ ."  BYTE1=" .',
-                (f'unit-buf 0 1 {settings_gen} 1 UNIT-DISK-WRITE-GEN-CHECKED '
-                 '."  WRITE1=" . .'),
-                f'{settings_gen} 1 UNIT-DISK-FLUSH-GEN-CHECKED ."  FLUSH1=" .',
-                (f'unit-buf 0 1 {settings_gen} 2 UNIT-DISK-READ-GEN-CHECKED '
-                 '."  READ2=" . .'),
-                f'{settings_gen} 2 UNIT-DISK-FLUSH-GEN-CHECKED ."  FLUSH2=" .',
-                (f'unit-buf 9 1 {system_gen} 0 UNIT-DISK-WRITE-GEN-CHECKED '
-                 '."  WRITE0=" . .'),
-            ])
-            self.assertIn("UNITS=2 ", text)
-            self.assertIn("STATUS1=160 ", text)
-            self.assertIn("SECTORS1=64 ", text)
-            self.assertIn("CAPS1=127 ", text)
-            self.assertIn(f"GEN1={settings_gen} ", text)
-            self.assertIn("SAME0=-1 ", text)
-            self.assertIn("SECTORS0=2048 ", text)
-            self.assertIn("STATUS2=0 ", text)
-            self.assertIn("SECTORS2=0 ", text)
-            self.assertIn("READ1=0 1 ", text)
-            self.assertIn(f"BYTE1={ord('S')} ", text)
-            self.assertIn(f"WRITE1={STORAGE_RESULT_WRITE_PROTECTED} 0 ", text)
-            self.assertIn("FLUSH1=0 ", text)
-            self.assertIn(f"READ2={STORAGE_RESULT_NO_MEDIA} 0 ", text)
-            self.assertIn(f"FLUSH2={STORAGE_RESULT_NO_MEDIA} ", text)
-            self.assertIn("WRITE0=0 1 ", text)
-            self.assertEqual(sys.storage._image_data[9 * SECTOR_SIZE], ord("S"))
-            with open(settings_path, "rb") as f:
-                self.assertEqual(f.read(), bytes(settings))
+            lines = ['VARIABLE unit-buf 512 ALLOT']
+            for unit in STORAGE_UNIT_TABLE[1:]:
+                n = unit.number
+                lines += [
+                    f'{n} UNIT-DISK@ ."  STATUS{n}=" .',
+                    f'{n} UNIT-DISK-SECTORS ."  SECTORS{n}=" .',
+                    (f'unit-buf 0 1 0 {n} UNIT-DISK-READ-GEN-CHECKED '
+                     f'."  READ{n}=" . .'),
+                ]
+            text = self._run_forth(sys, buf, lines)
+            for unit in STORAGE_UNIT_TABLE[1:]:
+                n = unit.number
+                self.assertIn(f"STATUS{n}=0 ", text)
+                self.assertIn(f"SECTORS{n}=0 ", text)
+                self.assertIn(f"READ{n}={STORAGE_RESULT_NO_MEDIA} 0 ", text)
 
     def test_disk_generation_bound_flush_checks_identity(self):
         """A stale bound flush has no host effect; the current one persists."""
@@ -7699,8 +7803,12 @@ class _KDOSTestBase(unittest.TestCase):
                   storage_faults=None,
                   nic_frames=None,
                   nic_tx_callback=None,
-                  ext_mem_mib=KDOS_TEST_EXT_MEM_MIB) -> str:
-        """Load KDOS then execute extra_lines, return UART output."""
+                  ext_mem_mib=KDOS_TEST_EXT_MEM_MIB,
+                  unit_images=None) -> str:
+        """Load KDOS then execute extra_lines, return UART output.
+
+        UNIT_IMAGES attaches the other storage units' images, by
+        MegapadSystem's argument names."""
         # Use the fast snapshot path whenever the snapshot exists.
         # The fast path now supports storage_image and nic_frames.
         if (ext_mem_mib == KDOS_TEST_EXT_MEM_MIB
@@ -7710,11 +7818,13 @@ class _KDOSTestBase(unittest.TestCase):
                                       nic_frames=nic_frames,
                                       storage_image=storage_image,
                                       storage_faults=storage_faults,
-                                      nic_tx_callback=nic_tx_callback)
+                                      nic_tx_callback=nic_tx_callback,
+                                      unit_images=unit_images)
 
         sys, buf = self._boot_bios(
             storage_image=storage_image,
             ext_mem_mib=ext_mem_mib,
+            **(unit_images or {}),
         )
         if storage_faults:
             for fault in storage_faults:
@@ -7756,6 +7866,7 @@ class _KDOSTestBase(unittest.TestCase):
                        storage_image=None,
                        storage_faults=None,
                        nic_tx_callback=None,
+                       unit_images=None,
                        _snapshot=None) -> str:
         """Fast path: restore KDOS from snapshot, run only extra_lines."""
         snapshot = self._snapshot_data() if _snapshot is None else _snapshot
@@ -7765,6 +7876,7 @@ class _KDOSTestBase(unittest.TestCase):
             ram_kib=1024,
             storage_image=storage_image,
             ext_mem_mib=KDOS_TEST_EXT_MEM_MIB,
+            **(unit_images or {}),
         )
         buf = capture_uart(sys)
 
@@ -8624,6 +8736,76 @@ class TestKDOS(_KDOSTestBase):
         finally:
             if os.path.exists(path):
                 os.unlink(path)
+
+    def test_block_devices_open_on_the_system_and_user_units(self):
+        """BD-OPEN-UNIT opens the system disk read-only and the user disk
+        writable.  Each device reads its own medium.  The system device
+        refuses a write and its file stays as it was; the user device takes
+        one, and a flush brings its file up to it."""
+        with tempfile.TemporaryDirectory() as directory:
+            paths = write_unit_images(directory)
+            before = {}
+            for unit, path in paths.items():
+                with open(path, "rb") as f:
+                    before[unit] = f.read()
+            boot, _settings, system, user = STORAGE_UNIT_TABLE
+            lines = [
+                'BOOT-UNIT . SETTINGS-UNIT . SYSTEM-UNIT . USER-UNIT . ." =UNITS"',
+                'CREATE T-BD /BLOCK-DEVICE ALLOT',
+                'CREATE T-BUF 512 ALLOT',
+            ]
+            for name in ("SYSTEM", "USER"):
+                lines += [
+                    f'T-BD {name}-UNIT BD-OPEN-UNIT ."  {name}-OPEN=" .',
+                    f'T-BD BD.UNIT ."  {name}-BD-UNIT=" .',
+                    (f'T-BD BD.FLAGS VOL-F-READONLY AND 0<> '
+                     f'."  {name}-READONLY=" .'),
+                    f'T-BD BD.SECTORS ."  {name}-SECTORS=" .',
+                    f'T-BUF 1 1 T-BD BD-READ ."  {name}-READ=" . .',
+                    f'T-BUF 4 + C@ ."  {name}-BYTE=" .',
+                    (f'T-BUF 2 1 T-BD BD-WRITE BD-E-READONLY = '
+                     f'."  {name}-REFUSED=" . ."  {name}-WRITTEN=" .'),
+                    f'T-BD BD-FLUSH ."  {name}-FLUSH=" .',
+                    f'T-BD BD-CLOSE ."  {name}-CLOSE=" .',
+                ]
+            text = self._run_kdos(
+                lines,
+                storage_image=paths[boot],
+                unit_images={
+                    unit.image_name: paths[unit]
+                    for unit in STORAGE_UNIT_TABLE if unit is not boot
+                },
+            )
+            self.assertIn("0 1 2 3 =UNITS", text)
+            for name, unit in (("SYSTEM", system), ("USER", user)):
+                self.assertIn(f"{name}-OPEN=0 ", text)
+                self.assertIn(f"{name}-BD-UNIT={unit.number} ", text)
+                self.assertIn(
+                    f"{name}-READONLY={-1 if unit.write_protected else 0} ",
+                    text)
+                self.assertIn(
+                    f"{name}-SECTORS={unit_image_sectors(unit)} ", text)
+                self.assertIn(f"{name}-READ=0 1 ", text)
+                self.assertIn(f"{name}-BYTE={ord('0') + unit.number} ", text)
+                self.assertIn(
+                    f"{name}-REFUSED={-1 if unit.write_protected else 0} ",
+                    text)
+                self.assertIn(
+                    f"{name}-WRITTEN={0 if unit.write_protected else 1} ",
+                    text)
+                self.assertIn(f"{name}-FLUSH=0 ", text)
+                self.assertIn(f"{name}-CLOSE=0 ", text)
+            self.assertTrue(system.write_protected)
+            self.assertFalse(user.write_protected)
+            expected = dict(before)
+            written = bytearray(before[user])
+            written[2 * SECTOR_SIZE:3 * SECTOR_SIZE] = (
+                written[SECTOR_SIZE:2 * SECTOR_SIZE]
+            )
+            expected[user] = bytes(written)
+            for unit, path in paths.items():
+                with open(path, "rb") as f:
+                    self.assertEqual(f.read(), expected[unit], unit.disk)
 
     def test_bsave_bload_roundtrip(self):
         """B.SAVE writes buffer to disk, B.LOAD reads it back."""
@@ -15352,7 +15534,8 @@ class TestBIOSWotsCheckpoint3(unittest.TestCase):
 
     _CONTEXT_ADDR = 0x1E000
     _DEST_ADDR = 0x1E100
-    _SCRIPT_WOTS_BASE = 0x0D00
+    # A free MMIO offset for the scripted device, above the storage units.
+    _SCRIPT_WOTS_BASE = 0x0E00
     _MASK64 = (1 << 64) - 1
     _MMIO_LOAD_LABELS = (
         ("_wots_initial_status_address", 0x0A),

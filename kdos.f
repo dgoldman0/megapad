@@ -3854,10 +3854,13 @@ VARIABLE BENCH-T0
 \ DISK? ( -- flag ) true if storage device present
 : DISK?  ( -- flag )  DISK@ 128 AND 0<> ;
 
-\ The machine's storage units: the system disk, and the settings disk, whose
-\ medium is write-protected (the BIOS's UNIT-DISK-* words).
-0 CONSTANT SYSTEM-UNIT
+\ The machine's storage units (the BIOS's UNIT-DISK-* words): the boot
+\ disk, which the BIOS loads KDOS from; the settings disk and the system
+\ disk, whose media are write-protected; and the user disk.
+0 CONSTANT BOOT-UNIT
 1 CONSTANT SETTINGS-UNIT
+2 CONSTANT SYSTEM-UNIT
+3 CONSTANT USER-UNIT
 
 \ UNIT-DISK? ( unit -- flag ) true if storage unit UNIT holds a medium
 : UNIT-DISK?  ( unit -- flag )  UNIT-DISK@ 128 AND 0<> ;
@@ -4008,7 +4011,7 @@ VARIABLE STORAGE-COOKIE
 
 \ BD-OPEN-UNIT ( bd unit -- ior )  Open BD on storage unit UNIT.  A medium
 \ the controller cannot write, or a write-protected one such as the settings
-\ disk's, opens read-only.
+\ disk's or the system disk's, opens read-only.
 : BD-OPEN-UNIT  ( bd unit -- ior )
     >R
     DUP BD-VALID? IF
@@ -4041,8 +4044,8 @@ VARIABLE STORAGE-COOKIE
     BLOCK-DEVICE-MAGIC SWAP !
     0 ;
 
-\ BD-OPEN ( bd -- ior )  Open BD on the system disk.
-: BD-OPEN  ( bd -- ior )  SYSTEM-UNIT BD-OPEN-UNIT ;
+\ BD-OPEN ( bd -- ior )  Open BD on the boot disk.
+: BD-OPEN  ( bd -- ior )  BOOT-UNIT BD-OPEN-UNIT ;
 
 : BD-CLOSE  ( bd -- ior )
     DUP BD-VALID? 0= IF DROP 0 EXIT THEN

@@ -581,13 +581,13 @@ primitives.
 | `DISK-READ-GEN-CHECKED` | `( dma lba count generation -- completed status )` | Generation-bound production read. A stale generation returns zero completed sectors and `MEDIA_REMOVED`. |
 | `DISK-WRITE-GEN-CHECKED` | `( dma lba count generation -- completed status )` | Generation-bound production write. A stale generation is rejected before DMA or media mutation. |
 | `DISK-FLUSH-GEN-CHECKED` | `( generation -- status )` | Generation-bound ordering and durability barrier. A stale generation is rejected before any flush effect. |
-| `DISK-UNITS` | `( -- n )` | The storage units this machine has: 2.  Unit 0 is the system disk's controller at MMIO +0x0200, which the `DISK-*` words address; unit 1 the settings disk's at +0x0280, whose medium is write-protected. |
+| `DISK-UNITS` | `( -- n )` | The storage units this machine has: 4.  Unit 0 is the boot disk's controller at MMIO +0x0200, which the `DISK-*` words address; unit 1 the settings disk's at +0x0280; unit 2 the system disk's at +0x0D00; unit 3 the user disk's at +0x0D80.  The settings disk's and the system disk's media are write-protected. |
 | `UNIT-DISK@` | `( unit -- status )` | `DISK@` for UNIT; 0 for a unit the machine does not have. |
 | `UNIT-DISK-SECTORS` | `( unit -- count )` | `DISK-SECTORS` for UNIT. |
 | `UNIT-DISK-MEDIA-GEN` | `( unit -- generation )` | `DISK-MEDIA-GEN` for UNIT. |
 | `UNIT-DISK-CAPS` | `( unit -- caps )` | `DISK-CAPS` for UNIT. |
 | `UNIT-DISK-READ-GEN-CHECKED` | `( dma lba count generation unit -- completed status )` | `DISK-READ-GEN-CHECKED` on UNIT; `NO_MEDIA` for a unit the machine does not have. |
-| `UNIT-DISK-WRITE-GEN-CHECKED` | `( dma lba count generation unit -- completed status )` | `DISK-WRITE-GEN-CHECKED` on UNIT; the settings disk ends every write `WRITE_PROTECTED`. |
+| `UNIT-DISK-WRITE-GEN-CHECKED` | `( dma lba count generation unit -- completed status )` | `DISK-WRITE-GEN-CHECKED` on UNIT; the settings disk and the system disk end every write `WRITE_PROTECTED`. |
 | `UNIT-DISK-FLUSH-GEN-CHECKED` | `( generation unit -- status )` | `DISK-FLUSH-GEN-CHECKED` on UNIT. |
 | `DISK-SEC!` | `( sector -- )` | Diagnostic: set the raw sector register. |
 | `DISK-DMA!` | `( addr -- )` | Diagnostic: set the raw 64-bit DMA address. |

@@ -16,16 +16,25 @@ durability boundary for all earlier successful writes.
 
 ## Controllers
 
-Every machine has two controllers of this design, each decoding its own
-128-byte window.  Controller 0, at MMIO `+0x0200`, holds the system disk.
-Controller 1, at `+0x0280`, holds the settings disk, whose medium is
-write-protected: while a medium is present `STATUS` shows `WRITE_PROTECTED`
+Every machine has four controllers of this design, one for each storage
+unit, each decoding its own 128-byte window.  The BIOS's `UNIT-DISK-*` words
+address a controller by its unit number.
+
+| Unit | MMIO window | Disk | Medium |
+|---|---|---|---|
+| 0 | `+0x0200`–`+0x027F` | The boot disk, which the BIOS loads KDOS from and the `DISK-*` words address | Writable |
+| 1 | `+0x0280`–`+0x02FF` | The settings disk | Write-protected |
+| 2 | `+0x0D00`–`+0x0D7F` | The system disk, for the system volume | Write-protected |
+| 3 | `+0x0D80`–`+0x0DFF` | The user disk, for the user volume | Writable |
+
+While a write-protected unit holds a medium, `STATUS` shows `WRITE_PROTECTED`
 and every `WRITE` completes with that result, changing nothing.  A host
-attaches the settings disk's image read-only and never creates or writes it.
-The two controllers reach memory through the disk's one DMA bus port, which
+attaches that unit's image read-only and never creates or writes it.  A unit
+without a medium shows no protection.
+
+The controllers reach memory through the disk's one DMA bus port, which
 serves one beat at a time and holds its grant until the beat it granted
-completes.  The BIOS's `UNIT-DISK-*` words address either controller by its
-unit number, 0 or 1.
+completes.
 
 ## Register map
 

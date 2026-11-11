@@ -23,6 +23,7 @@ from shared.crypto_caps import (
     CRYPTO_CAP_KECCAK_F1600,
     CRYPTO_CAP_SHA3_STREAM,
 )
+from shared.storage import STORAGE_UNIT_TABLE
 from simulator.crc import GuestIdentity, HostedCRCService
 from simulator.diagnostics import HostedDiagnosticsService
 from simulator.dictionary import Dictionary, DictionaryCheckpoint, Word
@@ -720,6 +721,8 @@ class MegaForthRuntime:
         timer: HostedTimerService | None = None,
         storage: HostedStorageService | None = None,
         settings_storage: HostedStorageService | None = None,
+        system_storage: HostedStorageService | None = None,
+        user_storage: HostedStorageService | None = None,
         install_core_words: bool = True,
         execution_backend: str | None = None,
     ) -> None:
@@ -741,14 +744,15 @@ class MegaForthRuntime:
             )
         if timer is not None and not isinstance(timer, HostedTimerService):
             raise TypeError("timer must be a HostedTimerService or None")
-        if storage is not None and not isinstance(storage, HostedStorageService):
-            raise TypeError("storage must be a HostedStorageService or None")
-        if settings_storage is not None and not isinstance(
-            settings_storage, HostedStorageService
-        ):
-            raise TypeError(
-                "settings_storage must be a HostedStorageService or None"
-            )
+        # Each storage unit's disk, in unit order.
+        unit_services = (storage, settings_storage, system_storage, user_storage)
+        for unit, service in zip(STORAGE_UNIT_TABLE, unit_services, strict=True):
+            if service is not None and not isinstance(
+                service, HostedStorageService
+            ):
+                raise TypeError(
+                    f"{unit.host_name} must be a HostedStorageService or None"
+                )
         if memory is None:
             from simulator.platform import create_one_core_address_space
 
@@ -805,14 +809,19 @@ class MegaForthRuntime:
             if timer is None
             else timer.clone()
         )
-        self.storage = HostedStorageService() if storage is None else storage
-        # The second storage controller's disk, the settings disk, whose
-        # medium is write-protected.  Without one the controller holds none.
-        self.settings_storage = (
-            HostedStorageService()
-            if settings_storage is None
-            else settings_storage
+        # The storage units' disks, in unit order.  A unit given no service
+        # holds no medium.  The host attaches a write-protected unit's medium
+        # write-protected.
+        self.storage_units: tuple[HostedStorageService, ...] = tuple(
+            HostedStorageService() if service is None else service
+            for service in unit_services
         )
+        (
+            self.storage,
+            self.settings_storage,
+            self.system_storage,
+            self.user_storage,
+        ) = self.storage_units
         self.tile = HostedTileService(
             self.memory,
             self.field,
@@ -979,8 +988,8 @@ class MegaForthRuntime:
                         self._native_execution.extension.tile_execute_values,
                         guard_factory=self._native_execution.extension.TileIdentityGuard,
                     )
-        self.storage.claim()
-        self.settings_storage.claim()
+        for service in self.storage_units:
+            service.claim()
 
     @property
     def execution_backend(self) -> str:

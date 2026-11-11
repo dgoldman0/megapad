@@ -10,11 +10,14 @@ We carve out the first slice for our emulated peripherals:
 
   MMIO_BASE + 0x0000 .. 0x00FF  : UART  (serial console)
   MMIO_BASE + 0x0100 .. 0x01FF  : Timer
-  MMIO_BASE + 0x0200 .. 0x027F  : Storage controller 0 (the system disk)
+  MMIO_BASE + 0x0200 .. 0x027F  : Storage controller 0 (the boot disk)
   MMIO_BASE + 0x0280 .. 0x02FF  : Storage controller 1 (the settings disk,
                                   whose medium is write-protected)
   MMIO_BASE + 0x0300 .. 0x03FF  : System info / board-level
   MMIO_BASE + 0x0C00 .. 0x0C1F  : One-shot PCM audio output
+  MMIO_BASE + 0x0D00 .. 0x0D7F  : Storage controller 2 (the system disk,
+                                  whose medium is write-protected)
+  MMIO_BASE + 0x0D80 .. 0x0DFF  : Storage controller 3 (the user disk)
 
 All registers are 8-bit accessed; the CPU's mem_read8/mem_write8 hits
 these through the MMIO dispatch layer in emulator/system.py.
@@ -59,6 +62,7 @@ from shared.mlkem import (
     mlkem512_keygen,
 )
 from shared.storage import (
+    BOOT_UNIT,
     SECTOR_SIZE,
     HostImageFile,
     STORAGE_CAPS,
@@ -111,10 +115,9 @@ MMIO_BASE  = 0xFFFF_FF00_0000_0000
 UART_BASE    = 0x0000
 UART_GEOM_BASE = 0x0010  # UART geometry (terminal dimensions) — within UART block
 TIMER_BASE   = 0x0100
-STORAGE_BASE = 0x0200
-# The second storage controller, the same design as the first.  It holds the
-# settings disk, whose medium the machine reads and never writes.
-STORAGE1_BASE = 0x0280
+# The boot disk's storage controller.  shared.storage's unit table places
+# every unit's controller, all of this one design.
+STORAGE_BASE = BOOT_UNIT.mmio_offset
 SYSINFO_BASE = 0x0300
 NIC_BASE     = 0x0400
 MBOX_BASE    = 0x0500
@@ -535,7 +538,7 @@ class Timer(Device):
 # ---------------------------------------------------------------------------
 # Emulates a simple sector-based storage device backed by a host file.
 #
-# Register map (offsets from STORAGE_BASE):
+# Register map (offsets from a controller's base):
 #   0x00  CMD       (W)  — 01=READ, 02=WRITE, 03=STATUS, 04=RESET, FF=FLUSH
 #   0x01  STATUS  (R/W1C) — busy/error/rejected/result/media/write-protect/present
 #   0x02  SECTOR_0  (RW) — sector number byte 0 (LSB)

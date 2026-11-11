@@ -21,13 +21,16 @@ cells unless a field is explicitly described as bytes.
 | `PART-WORKSPACE-MIN` | 5120 | Minimum caller-owned partition workspace |
 
 `BD-OPEN-UNIT` creates one block-device reference to the medium currently
-attached to a storage unit: unit 0 (`SYSTEM-UNIT`), the system disk, or unit
-1 (`SETTINGS-UNIT`), the settings disk.  `BD-OPEN` is unit 0.  A device's
-reads, writes, flushes and staleness all address its own unit.  The settings
-disk's medium is write-protected, so its device carries `VOL-F-READONLY`.  `VOL-RAW`, `VOL-SLICE`, and successful partition discovery create
-volume references and increment the parent block device's reference count.
-`VOL-CLOSE` clears one volume and releases that reference.  `BD-CLOSE` refuses
-to clear a block device while any volume still refers to it.
+attached to a storage unit: unit 0 (`BOOT-UNIT`), the boot disk; unit 1
+(`SETTINGS-UNIT`), the settings disk; unit 2 (`SYSTEM-UNIT`), the system
+disk; or unit 3 (`USER-UNIT`), the user disk.  `BD-OPEN` is unit 0.  A
+device's reads, writes, flushes and staleness all address its own unit.  The
+settings disk's and the system disk's media are write-protected, so their
+devices carry `VOL-F-READONLY`.  `VOL-RAW`, `VOL-SLICE`, and successful
+partition discovery create volume references and increment the parent block
+device's reference count.  `VOL-CLOSE` clears one volume and releases that
+reference.  `BD-CLOSE` refuses to clear a block device while any volume still
+refers to it.
 
 Close operations are idempotent for already-invalid objects.  A caller must
 not copy a live descriptor byte-for-byte: cookies and reference ownership
@@ -93,7 +96,7 @@ The public block-device words are:
 | Word | Stack effect | Contract |
 | --- | --- | --- |
 | `BD-OPEN-UNIT` | `( bd unit -- ior )` | Clear and bind a descriptor to the unit's current attachment |
-| `BD-OPEN` | `( bd -- ior )` | `BD-OPEN-UNIT` on the system disk, unit 0 |
+| `BD-OPEN` | `( bd -- ior )` | `BD-OPEN-UNIT` on the boot disk, unit 0 |
 | `BD.UNIT` | `( bd -- unit )` | The storage unit a descriptor addresses |
 | `UNIT-DISK?` | `( unit -- flag )` | Whether the unit holds a medium |
 | `BD-CLOSE` | `( bd -- ior )` | Clear an unreferenced descriptor; return busy while volumes exist |
@@ -161,10 +164,10 @@ turn an out-of-range request into an accepted one.
 ## Singleton compatibility binding
 
 `SYSTEM-BD` and `SYSTEM-RAW-VOLUME` are KDOS-global, runtime-local raw recovery
-singletons. `FS-VOLUME` points either to that raw volume or to a
-caller-selected validated volume. This is a compatibility binding for ordinary
-KDOS file paths; it does not replace independently owned volumes used by
-Akashic VFS instances.
+singletons on the boot disk, unit 0. `FS-VOLUME` points either to that raw
+volume or to a caller-selected validated volume. This is a compatibility
+binding for ordinary KDOS file paths; it does not replace independently owned
+volumes used by Akashic VFS instances.
 
 `STORAGE-OPEN` attempts `VOL-CLOSE`, then `BD-CLOSE`, discards both close
 results, and only then attempts `BD-OPEN`. Replacement is destructive and is

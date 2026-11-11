@@ -98,6 +98,8 @@ class MachineSession(TerminalSession):
         *,
         storage_image: str | os.PathLike | None = None,
         settings_image: str | os.PathLike | None = None,
+        system_image: str | os.PathLike | None = None,
+        user_image: str | os.PathLike | None = None,
         ram_size: int = 1 << 20,
         ext_mem_size: int = 128 << 20,
         vram_size: int = 4 << 20,
@@ -114,9 +116,10 @@ class MachineSession(TerminalSession):
     ) -> "MachineSession":
         """A session on a new machine running the BIOS at BIOS_PATH.
 
-        The machine's clock starts at RTC_EPOCH_MS, milliseconds since the
-        Unix epoch, when one is given; otherwise at the host's time for a
-        real-time clock, or at zero.
+        Each image argument attaches that file to its storage unit; a unit
+        given none holds no medium.  The machine's clock starts at
+        RTC_EPOCH_MS, milliseconds since the Unix epoch, when one is given;
+        otherwise at the host's time for a real-time clock, or at zero.
         """
 
         from emulator.system import MegapadSystem
@@ -124,8 +127,15 @@ class MachineSession(TerminalSession):
         code, labels = _load_bios(Path(bios_path))
         system = MegapadSystem(
             ram_size=ram_size,
-            storage_image=str(storage_image) if storage_image else None,
-            settings_image=str(settings_image) if settings_image else None,
+            **{
+                name: str(image) if image else None
+                for name, image in (
+                    ("storage_image", storage_image),
+                    ("settings_image", settings_image),
+                    ("system_image", system_image),
+                    ("user_image", user_image),
+                )
+            },
             ext_mem_size=ext_mem_size,
             vram_size=vram_size,
             num_cores=num_cores,
@@ -183,7 +193,7 @@ class MachineSession(TerminalSession):
             return
         try:
             self._close_terminal_frontend()
-            self.system.storage.save_image()
+            self.system.save_storage_images()
         finally:
             self.system.uart.on_tx = self._old_on_tx
             self.system.uart.on_tx_batch = self._old_on_tx_batch

@@ -2203,7 +2203,7 @@ the new occupant (an ABA hazard), while a double close can race logical reuse.
 Pool headers, fdesc payloads, `OP-SLOT`, parser state, directory cache, and the
 deferred vectors are global and unlocked.
 
-Exact current lines 5742 through 6209 contain 468 LF records and 17,973 bytes,
+Exact current lines 5745 through 6212 contain 468 LF records and 17,973 bytes,
 with SHA-256
 `5edc78bd9065d16bfbbb5f55030c36f07b99994de5e45d1d094da3b9f64c7cd5`
 and Git blob `04a0a4de50c095ea7be27e45b4d07d5d84bdb962`. Their exact 88-definition
@@ -2309,7 +2309,7 @@ This is a KDOS lifecycle repair shared by emulator and simulator, not a direct
 host-filesystem substitute. File-type/flag policy and the runtime-global,
 unlocked loader scratch remain separate open matters.
 
-Exact current lines 6210 through 6324 contain 115 LF records and 4,240 bytes,
+Exact current lines 6213 through 6327 contain 115 LF records and 4,240 bytes,
 with SHA-256
 `514fe3ffe462c1571d3e45f75ec274186278a2f0201fb09c1476c142a5244141`
 and Git blob `e7463dc7365cc67799febd7c676773bb8dd0555c`. The 13-definition ledger
@@ -3412,13 +3412,13 @@ deferred.
 
 ### KDOS §20 module-system contract
 
-Exact current lines 9649 through 10141 contain 493 LF records and 16,157
+Exact current lines 9652 through 10144 contain 493 LF records and 16,157
 bytes, with SHA-256
 `e3b84f6fbb348c2275c2e4339bdb92f398e621c437dcc975949611d0e367d265`
 and Git blob `7b616252e40b75bdd9fa82fbc5fc6c0f2c47ae64`. The checked fixture adds the
-line-10142 §14 Startup separator: 494 LF records, 16,229 bytes, SHA-256
+line-10145 §14 Startup separator: 494 LF records, 16,229 bytes, SHA-256
 `cf818fbb9facbe2a06a825a6ba3cd6738b73d97793f423829b4386bc89b03a9d`,
-and Git blob `881609bc61944004c8f8442eb22a527f132ebbd8`. Line 10143 begins Startup and is
+and Git blob `881609bc61944004c8f8442eb22a527f132ebbd8`. Line 10146 begins Startup and is
 not admitted by that sentinel.
 
 The slice publishes 75 words: 46 colons, 16 zero-initialized variables, seven
@@ -3520,16 +3520,16 @@ and no reentry or pre-held shared lock. §20 ends at line 9917; the following
 
 ### Current KDOS §14 startup and EOF contract
 
-Exact current lines 10142 through 10181, including the section separator,
+Exact current lines 10145 through 10184, including the section separator,
 contain 40 LF records and 1,398 bytes, with SHA-256
 `d75984f7fd3d55cb8c573da5b9f494ff1c1e8bba32b3537fa2270669add3ca8a`
 and Git blob `1354db80222545647369729b93526831ff0a21ec`. The executable section from
-line 10143 through EOF contains 39 LF records and 1,326 bytes, with SHA-256
+line 10146 through EOF contains 39 LF records and 1,326 bytes, with SHA-256
 `07df5026ba571e0d6e232d8c908963a0403756d3859390af3c7de3230f446b85`
 and Git blob `c920305479e61c2a5d51719779ec9c9fba0c2b8f`. The complete current file has
-10,181 LF records and 357,300 bytes, with SHA-256
-`367426cc10080b2dcb6642974ca30d7c75dcceed96ae2298783fd3aa96c71591`
-and Git blob `4b12c959495b0385582a30fc564c6d8046fafd0d`. At the historical qualification
+10,184 LF records and 357,426 bytes, with SHA-256
+`b3d5211893432fb9b93acee1d330c84260b4a51c56ae0cecb265f54add3c5ff4`
+and Git blob `7aa48d675c1a1a6d6dd84731c3332a33b128155e`. At the historical qualification
 revision, the complete `kdos.f` had 9,894 LF records and 341,355 bytes, with
 SHA-256
 `99e71114ed141c14522d687a3bef3110ead94de7b0a055ae693c135a94772fb8`
@@ -3576,8 +3576,8 @@ mounted media, zero modules, balanced stacks, and released locks, followed by
 a checked post-boot definition, allocation/free, CRC32, ring FIFO, and module
 listing. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
-457 core words and expects 1,517 KDOS publications and 1,966 unique
-bindings; it submits 6,815 lines (220,995 payload bytes, 227,810 CLI UART bytes).
+457 core words and expects 1,519 KDOS publications and 1,968 unique
+bindings; it submits 6,817 lines (221,033 payload bytes, 227,850 CLI UART bytes).
 
 The startup filesystem path is literal. `DISK?` false skips `FS-LOAD` and does
 not clear a stale true `FS-OK`. A successful load stores the exact lowercase
@@ -3693,12 +3693,14 @@ ordering remain observable.
 
 The admitted hosted service is pseudo-BIOS-only. It implements `DISK@`, the
 three media queries, the six ordinary/generation-bound checked operations, and
-`MP64FS-VALID?` against one exact sector image, the system disk. A second
-service is the settings disk, unit 1, whose image is attached write-protected
-(`--settings-storage`) or absent; `DISK-UNITS`, the four `UNIT-DISK-*` queries
-and the three `UNIT-DISK-*-GEN-CHECKED` operations address either unit, under
-the same lock 2, and a unit the machine does not have reads as an empty
-slot. It does not implement the raw
+`MP64FS-VALID?` against one exact sector image, the boot disk. Three more
+services are the disks of the other storage units, each attached from its
+image or absent: the settings disk, unit 1 (`--settings-storage`), and the
+system disk, unit 2 (`--system-storage`), both attached write-protected, and
+the user disk, unit 3 (`--user-storage`), attached writable. `DISK-UNITS`,
+the four `UNIT-DISK-*` queries and the three `UNIT-DISK-*-GEN-CHECKED`
+operations address any unit, under the same lock 2, and a unit the machine
+does not have reads as an empty slot. It does not implement the raw
 setup/command words or storage MMIO, BUSY/rejection visibility, RESET, DMA
 cadence, controller timeouts, fault injection, or device interrupts. One mutable
 service instance may be claimed by exactly one runtime. Host attachment,

@@ -10,8 +10,13 @@ import textwrap
 
 import pytest
 
+from shared.storage import (
+    SECTOR_SIZE,
+    STORAGE_RESULT_WRITE_PROTECTED,
+    STORAGE_UNIT_TABLE,
+)
 from simulator.image_bootstrap import ImageBootstrapError
-from simulator.memory import AddressClass
+from simulator.memory import EXTERNAL_BASE, AddressClass
 from simulator.session import SEMANTIC_QUANTUM_ENVIRONMENT
 from simulator.server import build_argument_parser, prepare_server
 from tests.simulator.test_image_bootstrap import _boot_image
@@ -125,6 +130,100 @@ def test_server_cli_rejects_emulator_only_arguments_and_missing_images(
     )
     with pytest.raises(ValueError, match="storage image does not exist"):
         prepare_server(args)
+
+
+def test_server_cli_attaches_each_storage_unit_to_its_own_image(tmp_path) -> None:
+    """Each storage option attaches its image to its unit.  The settings
+    disk and the system disk are attached write-protected: they refuse a
+    write and their files stay as they were.  The user disk takes a write,
+    and a flush brings its file up to it."""
+    parser = build_argument_parser()
+    paths = {}
+    arguments = []
+    for unit in STORAGE_UNIT_TABLE:
+        paths[unit] = tmp_path / f"{unit.disk}.img"
+        paths[unit].write_bytes(
+            _boot_image()
+            if unit.number == 0
+            else bytes((0x30 + unit.number,)) * ((unit.number + 1) * SECTOR_SIZE)
+        )
+        arguments += [unit.option, str(paths[unit])]
+    assert [unit.option for unit in STORAGE_UNIT_TABLE] == [
+        "--storage", "--settings-storage", "--system-storage", "--user-storage",
+    ]
+    args = parser.parse_args(
+        [*arguments, "--socket", str(tmp_path / "simulator.sock"), "--paused"]
+    )
+    before = {unit: path.read_bytes() for unit, path in paths.items()}
+
+    prepared = prepare_server(args)
+    try:
+        runtime = prepared.preparation.runtime
+        source = EXTERNAL_BASE + (64 << 20)
+        payload = b"\xA7" * SECTOR_SIZE
+        runtime.memory.write_bytes(source, payload)
+        for unit in STORAGE_UNIT_TABLE:
+            service = runtime.storage_units[unit.number]
+            assert service is getattr(runtime, unit.host_name)
+            assert service.present
+            assert service.write_protected is unit.write_protected
+            assert service.image_path == paths[unit].resolve()
+            if unit.number == 0:
+                continue
+            assert service.image_bytes == before[unit]
+            generation = service.media_generation
+            written = service.write_checked(
+                runtime.memory, source, 0, 1, generation=generation,
+            )
+            assert service.flush_checked(generation=generation) == 0
+            if unit.write_protected:
+                assert written == (0, STORAGE_RESULT_WRITE_PROTECTED)
+                assert paths[unit].read_bytes() == before[unit]
+            else:
+                assert written == (1, 0)
+                assert paths[unit].read_bytes() == (
+                    payload + before[unit][SECTOR_SIZE:]
+                )
+    finally:
+        prepared.machine.stop()
+
+
+def test_server_cli_leaves_a_unit_without_an_option_empty(tmp_path) -> None:
+    image = tmp_path / "boot.img"
+    image.write_bytes(_boot_image())
+    args = build_argument_parser().parse_args(
+        ["--storage", str(image), "--socket", str(tmp_path / "simulator.sock"),
+         "--paused"]
+    )
+    prepared = prepare_server(args)
+    try:
+        runtime = prepared.preparation.runtime
+        assert [service.present for service in runtime.storage_units] == [
+            unit.number == 0 for unit in STORAGE_UNIT_TABLE
+        ]
+    finally:
+        prepared.machine.stop()
+
+
+def test_server_cli_requires_every_given_storage_image_to_exist(tmp_path) -> None:
+    """A missing image is an error for every unit, and the server creates
+    none: a write-protected medium can never come to hold an image, and a
+    session does not start on a disk nobody made."""
+    image = tmp_path / "boot.img"
+    image.write_bytes(_boot_image())
+    missing = tmp_path / "missing.img"
+    parser = build_argument_parser()
+    for unit in STORAGE_UNIT_TABLE:
+        arguments = [unit.option, str(missing)]
+        if unit.number != 0:
+            arguments += ["--storage", str(image)]
+        with pytest.raises(
+            ValueError, match=f"^{unit.label} image does not exist"
+        ):
+            prepare_server(parser.parse_args(arguments))
+        assert not missing.exists()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--system-storage", str(image)])
 
 
 def test_server_cli_rejects_invalid_quanta_before_preparing_the_image(

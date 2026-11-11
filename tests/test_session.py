@@ -36,6 +36,7 @@ from rich_terminal.retained_model import RetainedFeature, RetainedPolicy
 from emulator.session import (
     MachineSession,
 )
+from shared.storage import STORAGE_UNIT_TABLE
 from shared.session import (
     RichTerminalSessionConfig,
     RichTerminalSessionPolicy,
@@ -1270,6 +1271,133 @@ def test_machine_session_close_persists_attached_storage(tmp_path):
     assert image.read_bytes()[:512] == b"A" * 512
 
 
+def _session_unit_images(tmp_path) -> dict:
+    """A two-sector image for every storage unit: its path by the image
+    argument that attaches it."""
+    images = {}
+    for unit in STORAGE_UNIT_TABLE:
+        path = tmp_path / f"{unit.disk}.img"
+        path.write_bytes(bytes(1024))
+        images[unit.image_name] = path
+    return images
+
+
+def test_machine_session_attaches_each_unit_and_close_saves_the_writable(
+    tmp_path, monkeypatch,
+):
+    """A session's image arguments reach their storage units.  Closing it
+    saves every writable disk, also when another disk's save fails, and
+    writes no write-protected disk's file."""
+    images = _session_unit_images(tmp_path)
+    assert list(images) == [
+        "storage_image", "settings_image", "system_image", "user_image",
+    ]
+    session = MachineSession.from_bios(BIOS, **images)
+    system = session.system
+    assert [
+        controller.image_path for controller in system._storage_controllers()
+    ] == [str(path) for path in images.values()]
+    assert (
+        system.storage, system.settings_storage,
+        system.system_storage, system.user_storage,
+    ) == system._storage_controllers()
+    for controller in system._storage_controllers():
+        controller.write_sectors(0, 1, b"A" * 512)
+    boot_save = system.storage.save_image
+
+    def fail_save():
+        boot_save()
+        raise OSError("boot disk unavailable")
+
+    monkeypatch.setattr(system.storage, "save_image", fail_save)
+    with pytest.raises(OSError, match="boot disk unavailable"):
+        session.close()
+
+    assert session._closed
+    for unit, path in zip(STORAGE_UNIT_TABLE, images.values()):
+        assert path.read_bytes()[:512] == (
+            bytes(512) if unit.write_protected else b"A" * 512
+        ), unit.disk
+
+
+def test_machine_session_refuses_a_missing_write_protected_image(tmp_path):
+    for unit in STORAGE_UNIT_TABLE:
+        if not unit.write_protected:
+            continue
+        missing = tmp_path / f"missing-{unit.disk}.img"
+        with pytest.raises(FileNotFoundError):
+            MachineSession.from_bios(BIOS, **{unit.image_name: missing})
+        assert not missing.exists()
+
+
+def test_cli_and_session_server_attach_each_storage_option(tmp_path, monkeypatch):
+    """--storage, --settings-storage, --system-storage and --user-storage
+    reach the machine as the images of units 0 to 3."""
+    images = _session_unit_images(tmp_path)
+    options = []
+    for unit, path in zip(STORAGE_UNIT_TABLE, images.values()):
+        options += [unit.option, str(path)]
+    assert options[::2] == [
+        "--storage", "--settings-storage", "--system-storage", "--user-storage",
+    ]
+
+    monkeypatch.setattr("sys.argv", ["cli.py", *options])
+    with (
+        patch("cli.MegapadSystem", wraps=MegapadSystem) as system_factory,
+        patch.object(MegapadCLI, "cmdloop", return_value=None),
+    ):
+        cli_main()
+    assert {
+        name: system_factory.call_args.kwargs[name] for name in images
+    } == {name: str(path) for name, path in images.items()}
+
+    monkeypatch.setattr("sys.argv", ["megapad.py", *options])
+    with (
+        patch("emulator.server.MachineSession.from_bios") as from_bios,
+        patch("emulator.server.SharedMachine"),
+        patch("emulator.server.SessionServer"),
+        patch("emulator.server.signal.signal"),
+    ):
+        assert session_server_main() == 0
+    assert {name: from_bios.call_args.kwargs[name] for name in images} == images
+
+    monkeypatch.setattr("sys.argv", ["megapad.py"])
+    with (
+        patch("emulator.server.MachineSession.from_bios") as from_bios,
+        patch("emulator.server.SharedMachine"),
+        patch("emulator.server.SessionServer"),
+        patch("emulator.server.signal.signal"),
+    ):
+        assert session_server_main() == 0
+    assert {name: from_bios.call_args.kwargs[name] for name in images} == (
+        dict.fromkeys(images)
+    )
+
+
+def test_cli_ramsize_keeps_every_disk_and_saves_the_writable(tmp_path, capsys):
+    images = _session_unit_images(tmp_path)
+    system = MegapadSystem(
+        ram_size=64 * 1024,
+        **{name: str(path) for name, path in images.items()},
+    )
+    cli = MegapadCLI(system)
+    for controller in system._storage_controllers():
+        controller.write_sectors(1, 1, b"R" * 512)
+
+    cli.do_ramsize("128")
+
+    assert cli.sys is not system
+    assert cli.sys.storage_image_arguments() == {
+        name: str(path) for name, path in images.items()
+    }
+    for unit, path in zip(STORAGE_UNIT_TABLE, images.values()):
+        assert path.read_bytes()[512:] == (
+            bytes(512) if unit.write_protected else b"R" * 512
+        ), unit.disk
+    assert "RAM resized to 128 KiB" in capsys.readouterr().out
+    cli.sys.nic.stop()
+
+
 def test_machine_session_close_releases_devices_when_save_fails(monkeypatch):
     backend = LoopbackBackend()
     session = MachineSession.from_bios(BIOS, nic_backend=backend)
@@ -1668,6 +1796,52 @@ def test_machine_session_warm_reset_discards_interrupted_uart_batch():
         assert reboot.reason == "idle"
         assert "Megapad-64 Forth BIOS" in session.raw_text()
         assert int.from_bytes(session.system.cpu.mem[ring:ring + 8], "little") == 0
+
+
+def test_json_scenario_attaches_each_storage_unit(tmp_path):
+    """machine.storage, machine.settings_storage, machine.system_storage and
+    machine.user_storage attach an image to units 0 to 3, each path taken
+    from the scenario's directory, and the guest finds every disk."""
+    images = _session_unit_images(tmp_path)
+    scenario = tmp_path / "units.json"
+    scenario.write_text(json.dumps({
+        "name": "pytest-storage-units",
+        "machine": {
+            "bios": str(BIOS),
+            **{
+                unit.host_name: path.name
+                for unit, path in zip(STORAGE_UNIT_TABLE, images.values())
+            },
+        },
+        "actions": [
+            {"type": "wait_idle", "max_steps": 2_000_000},
+            {
+                "type": "send_text",
+                "text": (
+                    "DISK-UNITS . 0 UNIT-DISK@ 0xA0 AND . "
+                    "1 UNIT-DISK@ 0xA0 AND . 2 UNIT-DISK@ 0xA0 AND . "
+                    "3 UNIT-DISK@ 0xA0 AND .\n"
+                ),
+            },
+            {
+                "type": "wait_text",
+                "text": "4 128 160 160 128 ",
+                "scope": "raw",
+                "max_steps": 2_000_000,
+            },
+        ],
+    }), encoding="utf-8")
+
+    with patch(
+        "dev_session.MachineSession.from_bios",
+        wraps=MachineSession.from_bios,
+    ) as from_bios:
+        summary = run_scenario(scenario)
+
+    assert summary["success"]
+    assert {name: from_bios.call_args.kwargs[name] for name in images} == {
+        name: path.resolve() for name, path in images.items()
+    }
 
 
 def test_json_scenario_runner(tmp_path):

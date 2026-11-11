@@ -47,6 +47,7 @@ from runtime_paths import (
     headless_status_path,
     read_headless_status,
 )
+from shared.session_options import add_storage_options, storage_image_arguments
 
 # ---------------------------------------------------------------------------
 #  Disassembler (basic — enough for debugging)
@@ -821,8 +822,6 @@ class MegapadCLI(cmd.Cmd):
         kib = self._parse_int(arg)
         new_size = kib * 1024
         old_sys = self.sys
-        storage_image = old_sys.storage.image_path
-        settings_image = old_sys.settings_storage.image_path
         nic_backend = old_sys._nic_backend
         nic_port = old_sys.nic._passthrough_port
         nic_peer_port = old_sys.nic._passthrough_peer_port
@@ -830,12 +829,11 @@ class MegapadCLI(cmd.Cmd):
         # A RAM resize resets machine state, but it must not silently change
         # the configured machine.  Flush attached storage and hand the NIC
         # transport cleanly from the old instance to the replacement.
-        old_sys.storage.save_image()
+        old_sys.save_storage_images()
         old_sys.nic.stop()
         self.sys = MegapadSystem(
             ram_size=new_size,
-            storage_image=storage_image,
-            settings_image=settings_image,
+            **old_sys.storage_image_arguments(),
             nic_port=nic_port,
             nic_peer_port=nic_peer_port,
             nic_backend=nic_backend,
@@ -1541,11 +1539,7 @@ def main():
     )
     parser.add_argument("--ram", type=int, default=1024,
                         help="RAM size in KiB (default: 1024)")
-    parser.add_argument("--storage", type=str, default=None,
-                        help="Disk image file to attach")
-    parser.add_argument("--settings-storage", type=str, default=None,
-                        help="Settings disk image to attach, write-protected, "
-                             "to the second storage controller")
+    add_storage_options(parser, path_type=str)
     parser.add_argument("--load", type=str, action="append", default=[],
                         help="Load binary: FILE[@ADDR] (can repeat)")
     parser.add_argument("--bios", type=str, default=None,
@@ -1647,8 +1641,7 @@ def main():
     # Create system
     sys_emu = MegapadSystem(
         ram_size=args.ram * 1024,
-        storage_image=args.storage,
-        settings_image=args.settings_storage,
+        **storage_image_arguments(args),
         nic_port=args.nic,
         nic_peer_port=args.nic_peer_port,
         nic_backend=nic_backend,

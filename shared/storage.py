@@ -4,14 +4,60 @@ host file that holds a storage device's media."""
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 
 SECTOR_SIZE = 512
 
-# Storage controllers on every machine: unit 0 holds the system disk, unit 1
-# the settings disk, whose medium is write-protected.
-STORAGE_UNITS = 2
+
+@dataclass(frozen=True)
+class StorageUnit:
+    """One of the machine's storage controllers and the disk it holds.
+
+    NUMBER is the unit the BIOS's ``UNIT-DISK-*`` words take, and
+    MMIO_OFFSET the controller's window in the MMIO aperture.  A
+    write-protected unit's medium refuses every write; its host file must
+    exist and is never written.  HOST_NAME names the unit's disk on the
+    host: the emulator's controller, the simulator's service, a session
+    scenario's key and, with dashes for underscores, the option that
+    attaches an image.  IMAGE_NAME is the emulator argument that takes the
+    image's path.
+    """
+
+    number: int
+    disk: str
+    host_name: str
+    image_name: str
+    mmio_offset: int
+    write_protected: bool
+
+    @property
+    def option(self) -> str:
+        """The command-line option that attaches an image to this unit."""
+        return "--" + self.host_name.replace("_", "-")
+
+    @property
+    def label(self) -> str:
+        """HOST_NAME as words, for messages."""
+        return self.host_name.replace("_", " ")
+
+
+# The machine's storage units, in unit order: controllers of one design,
+# each holding one disk.  The BIOS loads KDOS from the boot disk.  The
+# settings disk and the system disk, which holds the system volume, are
+# write-protected.  The user disk holds the user volume.
+STORAGE_UNIT_TABLE = tuple(
+    StorageUnit(number, *row)
+    for number, row in enumerate((
+        ("boot", "storage", "storage_image", 0x0200, False),
+        ("settings", "settings_storage", "settings_image", 0x0280, True),
+        ("system", "system_storage", "system_image", 0x0D00, True),
+        ("user", "user_storage", "user_image", 0x0D80, False),
+    ))
+)
+BOOT_UNIT, SETTINGS_UNIT, SYSTEM_UNIT, USER_UNIT = STORAGE_UNIT_TABLE
+STORAGE_UNITS = len(STORAGE_UNIT_TABLE)
 
 STORAGE_CMD_READ = 0x01
 STORAGE_CMD_WRITE = 0x02
@@ -153,8 +199,10 @@ def _write_at(stream, offset: int, data: memoryview) -> None:
 
 
 __all__ = [
+    "BOOT_UNIT",
     "HostImageFile",
     "SECTOR_SIZE",
+    "SETTINGS_UNIT",
     "STORAGE_CAPS",
     "STORAGE_CAP_COMPLETION",
     "STORAGE_CAP_FLUSH",
@@ -191,4 +239,9 @@ __all__ = [
     "STORAGE_STATUS_REJECTED",
     "STORAGE_STATUS_RESULT_VALID",
     "STORAGE_STATUS_WRITE_PROTECTED",
+    "STORAGE_UNITS",
+    "STORAGE_UNIT_TABLE",
+    "SYSTEM_UNIT",
+    "StorageUnit",
+    "USER_UNIT",
 ]

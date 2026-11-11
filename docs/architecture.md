@@ -65,6 +65,8 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
     │   0x0A00     │  Framebuffer         │ │
     │   0x0B00     │  RTC / System Clock  │ │
     │   0x0C00     │  PCM Audio Output    │ │
+    │   0x0D00     │  Storage Controller 2│ │
+    │   0x0D80     │  Storage Controller 3│ │
     │              └──────────────────────┘ │
     └───────────────────────────────────────┘
 ```
@@ -143,7 +145,7 @@ device occupies a small range:
 | **UART** | `+0x0000` | 16 bytes | Serial I/O (keyboard/terminal) |
 | **UART Geometry** | `+0x0010` | 16 bytes | Terminal dimensions, resize status/request |
 | **Timer** | `+0x0100` | 16 bytes | 32-bit timer with compare-match |
-| **Storage** | `+0x0200` | 37 bytes | Checked sector controller with completion, precise result, media identity, and capacity registers: the system disk |
+| **Storage** | `+0x0200` | 37 bytes | Checked sector controller with completion, precise result, media identity, and capacity registers: the boot disk |
 | **Storage 1** | `+0x0280` | 37 bytes | The same controller: the settings disk, its medium write-protected |
 | **System Info** | `+0x0300` | 112 bytes | Board ID, topology, memory layout, crypto capabilities, requester count |
 | **NIC** | `+0x0400` | 128 bytes | Network interface controller |
@@ -160,6 +162,8 @@ device occupies a small range:
 | **Framebuffer** | `+0x0A00` | 80 bytes | Tile-based framebuffer controller |
 | **RTC / System Clock** | `+0x0B00` | 32 bytes | 64-bit ms uptime + ms epoch + calendar (sec/min/hour/day/mon/year/dow) + alarm IRQ |
 | **PCM Audio Output** | `+0x0C00` | 32 bytes | One-shot PCM16 DMA contract; emulator capture/playback implemented, physical DMA/I2S bridge pending |
+| **Storage 2** | `+0x0D00` | 37 bytes | The same controller: the system disk, its medium write-protected |
+| **Storage 3** | `+0x0D80` | 37 bytes | The same controller: the user disk |
 
 The crypto register, ownership, and capability assignments are normative in
 [`crypto-interface-contract.md`](crypto-interface-contract.md). System Info
@@ -384,8 +388,11 @@ controller's u32 capacity encoding.
 
 The normative command, completion, failure, ordering, and durability behavior
 is defined in [Storage controller and checked block-I/O contract](storage-controller-contract.md).
-A second controller of the same design, at `+0x0280`, holds the settings
-disk, whose medium is write-protected; both share the disk's DMA bus port.
+The machine has four controllers of this design, one for each storage unit.
+The first, at `+0x0200`, holds the boot disk, which the BIOS loads KDOS from.
+The others hold the settings disk at `+0x0280`, the system disk at `+0x0D00`
+and the user disk at `+0x0D80`; the settings disk's and the system disk's
+media are write-protected.  All four share the disk's DMA bus port.
 
 FPGA builds expose the logical media window through the synthesizable
 `DISK_TOTAL_SECTORS` parameter.  The portable top and SoC default it to the

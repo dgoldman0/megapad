@@ -48,9 +48,9 @@ from devices import (
     STORAGE_STATUS_REJECTED,
     STORAGE_STATUS_RESULT_VALID,
     STORAGE_STATUS_WRITE_PROTECTED,
-    STORAGE1_BASE,
     Storage,
 )
+from shared.storage import STORAGE_UNIT_TABLE
 from system import (
     EXT_MEM_BASE,
     HBW_BASE,
@@ -803,7 +803,7 @@ sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes()[:512])
 
 
 def test_system_storage_dma_uses_real_physical_window_boundaries(tmp_path):
-    path = tmp_path / "system.img"
+    path = tmp_path / "boot.img"
     path.write_bytes(b"\x7B" * SECTOR_SIZE)
     system = MegapadSystem(
         ram_size=4096,
@@ -929,25 +929,56 @@ def test_flush_writes_only_the_sectors_the_guest_changed(tmp_path):
     )
 
 
-def test_a_write_protected_medium_must_exist_and_is_never_written(tmp_path):
-    """The settings disk's medium is write-protected: a missing image is an
-    error rather than a new empty one, and nothing writes its file."""
+def _unit_id(unit) -> str:
+    return unit.disk
+
+
+PROTECTED_UNITS = tuple(unit for unit in STORAGE_UNIT_TABLE if unit.write_protected)
+WRITABLE_UNITS = tuple(
+    unit for unit in STORAGE_UNIT_TABLE if not unit.write_protected
+)
+
+
+def test_the_machine_has_four_storage_units_at_their_own_windows():
+    """The boot disk, the settings disk, the system disk and the user disk,
+    in unit order: where each controller answers, and whose medium is
+    write-protected."""
+    assert tuple(
+        (unit.number, unit.disk, unit.mmio_offset, unit.write_protected)
+        for unit in STORAGE_UNIT_TABLE
+    ) == (
+        (0, "boot", 0x0200, False),
+        (1, "settings", 0x0280, True),
+        (2, "system", 0x0D00, True),
+        (3, "user", 0x0D80, False),
+    )
+    assert STORAGE_UNIT_TABLE[0].mmio_offset == STORAGE_BASE
+
+
+@pytest.mark.parametrize("unit", PROTECTED_UNITS, ids=_unit_id)
+def test_a_write_protected_medium_must_exist_and_is_never_written(tmp_path, unit):
+    """The settings disk's and the system disk's media are write-protected:
+    a missing image is an error rather than a new empty one, and nothing
+    writes its file."""
     missing = tmp_path / "missing.img"
     with pytest.raises(FileNotFoundError):
-        Storage(str(missing), base=STORAGE1_BASE, write_protected=True)
+        Storage(str(missing), base=unit.mmio_offset, write_protected=True)
+    assert not missing.exists()
+    with pytest.raises(FileNotFoundError):
+        MegapadSystem(ram_size=4096, **{unit.image_name: str(missing)})
     assert not missing.exists()
 
-    path = tmp_path / "settings.img"
+    path = tmp_path / "protected.img"
     payload = bytes(range(256)) * 4
     path.write_bytes(payload)
-    device = Storage(str(path), base=STORAGE1_BASE, write_protected=True)
+    device = Storage(str(path), base=unit.mmio_offset, write_protected=True)
     memory = bytearray(SECTOR_SIZE)
     device._mem_read = lambda address: memory[address]
     device._mem_write = lambda address, value: memory.__setitem__(address, value)
     device._mem_span_valid = lambda address, count: (
         0 <= address and 0 < count <= len(memory) - address
     )
-    assert device.base == STORAGE1_BASE
+    assert device.base == unit.mmio_offset
     assert device.read8(0x01) & STORAGE_STATUS_WRITE_PROTECTED
     assert _read_le(device, 0x11, 4) == 2
     _guarded_command(device, STORAGE_CMD_WRITE, device.media_generation)
@@ -957,17 +988,21 @@ def test_a_write_protected_medium_must_exist_and_is_never_written(tmp_path):
     assert path.read_bytes() == payload
 
 
-def _two_disk_system(tmp_path, *, settings=True):
-    system_path = tmp_path / "system.img"
-    system_path.write_bytes(b"\x11" * (4 * SECTOR_SIZE))
-    settings_path = tmp_path / "settings.img"
-    settings_path.write_bytes(
-        b"\x5A" * SECTOR_SIZE + b"\x00" * (3 * SECTOR_SIZE)
-    )
+def _unit_sector(unit) -> bytes:
+    """The first sector of UNIT's test image, unlike any other unit's."""
+    return bytes((0x11 * (unit.number + 1),)) * SECTOR_SIZE
+
+
+def _machine_with_disks(tmp_path, *, attached=STORAGE_UNIT_TABLE):
+    """A machine with a four-sector image on each ATTACHED unit, and the
+    images' paths by unit."""
+    paths = {}
+    for unit in attached:
+        paths[unit] = tmp_path / f"{unit.disk}.img"
+        paths[unit].write_bytes(_unit_sector(unit) + bytes(3 * SECTOR_SIZE))
     system = MegapadSystem(
         ram_size=4096,
-        storage_image=str(system_path),
-        settings_image=str(settings_path) if settings else None,
+        **{unit.image_name: str(path) for unit, path in paths.items()},
         num_cores=1,
         num_clusters=0,
         hbw_size=0,
@@ -977,47 +1012,110 @@ def _two_disk_system(tmp_path, *, settings=True):
     )
     system.load_binary(0, assemble("st.b r1, r2\nhalt"))
     system.boot(entry=0)
-    return system, settings_path
+    return system, paths
 
 
-def test_the_settings_disk_is_the_second_controller_and_refuses_writes(tmp_path):
-    """The second controller answers at +0x0280 with its own medium; the
-    system disk's controller at +0x0200 sees none of its commands.  A guest
-    read there fills memory, and a guest write is refused and changes
-    nothing."""
-    system, settings_path = _two_disk_system(tmp_path)
-    disk, settings = system.storage, system.settings_storage
-    assert settings.base == STORAGE1_BASE and disk.base == STORAGE_BASE
-    assert system.bus.find_device(STORAGE1_BASE + 0x01) == (settings, 0x01)
-    assert system.bus.find_device(STORAGE_BASE + 0x24) == (disk, 0x24)
-    status = settings.read8(0x01)
-    assert status & STORAGE_STATUS_PRESENT
-    assert status & STORAGE_STATUS_WRITE_PROTECTED
-    assert not disk.read8(0x01) & STORAGE_STATUS_WRITE_PROTECTED
-
-    _program(settings, sector=0, dma=256, count=1)
-    _write_le(settings, 0x20, settings.media_generation, 4)
-    system.cpu.regs[1] = MMIO_BASE + STORAGE1_BASE + 0x24
-    system.cpu.regs[2] = STORAGE_CMD_READ
-    system.run_batch_stats(1)
-    assert settings.result == STORAGE_RESULT_OK
-    assert system._shared_mem[256:256 + SECTOR_SIZE] == b"\x5A" * SECTOR_SIZE
-    assert disk.completion == 0
-
+def _guest_command(system, unit, command: int) -> None:
+    """Have the guest give UNIT's controller COMMAND, bound to its medium."""
+    disk = system._storage_controllers()[unit.number]
+    _write_le(disk, 0x20, disk.media_generation, 4)
     system.cpu.pc = 0
-    system.cpu.regs[2] = STORAGE_CMD_WRITE
+    system.cpu.regs[1] = MMIO_BASE + unit.mmio_offset + 0x24
+    system.cpu.regs[2] = command
     system.run_batch_stats(1)
-    assert settings.result == STORAGE_RESULT_WRITE_PROTECTED
-    assert settings._image_data[:SECTOR_SIZE] == b"\x5A" * SECTOR_SIZE
-    system.settings_storage.save_image()
-    assert settings_path.read_bytes()[:SECTOR_SIZE] == b"\x5A" * SECTOR_SIZE
-    assert disk.completion == 0
 
 
-def test_without_a_settings_image_the_second_controller_holds_no_medium(tmp_path):
-    system, _settings_path = _two_disk_system(tmp_path, settings=False)
-    settings = system.settings_storage
-    assert settings.read8(0x01) == 0
-    assert _read_le(settings, 0x11, 4) == 0
-    _guarded_command(settings, STORAGE_CMD_READ, settings.media_generation)
-    assert settings.result == STORAGE_RESULT_NO_MEDIA
+@pytest.mark.parametrize("unit", STORAGE_UNIT_TABLE, ids=_unit_id)
+def test_each_unit_is_its_own_controller_on_the_bus(tmp_path, unit):
+    """Each storage unit's controller answers at its own window with its own
+    medium, and no other controller sees its commands.  A guest read fills
+    memory.  A guest write to a write-protected unit is refused and changes
+    nothing; a writable unit takes it, and a flush brings its file up to
+    its image."""
+    system, paths = _machine_with_disks(tmp_path)
+    controllers = system._storage_controllers()
+    assert controllers == (
+        system.storage,
+        system.settings_storage,
+        system.system_storage,
+        system.user_storage,
+    )
+    disk = controllers[unit.number]
+    others = tuple(other for other in controllers if other is not disk)
+    assert disk.base == unit.mmio_offset
+    assert disk.write_protected is unit.write_protected
+    assert system.bus.find_device(unit.mmio_offset + 0x01) == (disk, 0x01)
+    assert system.bus.find_device(unit.mmio_offset + 0x24) == (disk, 0x24)
+    status = disk.read8(0x01)
+    assert status & STORAGE_STATUS_PRESENT
+    assert bool(status & STORAGE_STATUS_WRITE_PROTECTED) is unit.write_protected
+
+    _program(disk, sector=0, dma=256, count=1)
+    _guest_command(system, unit, STORAGE_CMD_READ)
+    assert disk.result == STORAGE_RESULT_OK
+    assert system._shared_mem[256:256 + SECTOR_SIZE] == _unit_sector(unit)
+
+    _program(disk, sector=1, dma=256, count=1)
+    _guest_command(system, unit, STORAGE_CMD_WRITE)
+    assert disk.result == (
+        STORAGE_RESULT_WRITE_PROTECTED
+        if unit.write_protected
+        else STORAGE_RESULT_OK
+    )
+    _guest_command(system, unit, STORAGE_CMD_FLUSH)
+    assert disk.result == STORAGE_RESULT_OK
+    assert disk.completion == 3
+    written = bytes(SECTOR_SIZE) if unit.write_protected else _unit_sector(unit)
+    assert disk._image_data[SECTOR_SIZE:2 * SECTOR_SIZE] == written
+    assert paths[unit].read_bytes() == (
+        _unit_sector(unit) + written + bytes(2 * SECTOR_SIZE)
+    )
+
+    assert all(other.completion == 0 for other in others)
+    for other, path in paths.items():
+        if other is not unit:
+            assert path.read_bytes() == _unit_sector(other) + bytes(3 * SECTOR_SIZE)
+
+
+@pytest.mark.parametrize("unit", STORAGE_UNIT_TABLE, ids=_unit_id)
+def test_a_unit_given_no_image_holds_no_medium(tmp_path, unit):
+    """An empty slot shows no medium, no capacity and no write protection,
+    and its commands end NO_MEDIA, while every other unit holds its disk."""
+    attached = tuple(other for other in STORAGE_UNIT_TABLE if other is not unit)
+    system, _paths = _machine_with_disks(tmp_path, attached=attached)
+    controllers = system._storage_controllers()
+    disk = controllers[unit.number]
+    assert disk.read8(0x01) == 0
+    assert _read_le(disk, 0x11, 4) == 0
+    for command in (STORAGE_CMD_READ, STORAGE_CMD_WRITE, STORAGE_CMD_FLUSH):
+        _guarded_command(disk, command, disk.media_generation)
+        assert disk.result == STORAGE_RESULT_NO_MEDIA
+    for other in attached:
+        assert controllers[other.number].read8(0x01) & STORAGE_STATUS_PRESENT
+
+
+def test_a_machine_names_its_images_and_saves_only_its_writable_disks(tmp_path):
+    """A machine reports the image arguments that rebuild it, and saving its
+    disks writes the writable units' files and no write-protected unit's."""
+    system, paths = _machine_with_disks(tmp_path)
+    assert system.storage_image_arguments() == {
+        "storage_image": str(paths[STORAGE_UNIT_TABLE[0]]),
+        "settings_image": str(paths[STORAGE_UNIT_TABLE[1]]),
+        "system_image": str(paths[STORAGE_UNIT_TABLE[2]]),
+        "user_image": str(paths[STORAGE_UNIT_TABLE[3]]),
+    }
+    rebuilt = MegapadSystem(ram_size=4096, **system.storage_image_arguments())
+    assert [
+        controller.image_path for controller in rebuilt._storage_controllers()
+    ] == [str(paths[unit]) for unit in STORAGE_UNIT_TABLE]
+
+    changed = b"\x9D" * SECTOR_SIZE
+    for controller in system._storage_controllers():
+        controller.write_sectors(2, 1, changed)
+    system.save_storage_images()
+    for unit in STORAGE_UNIT_TABLE:
+        third_sector = paths[unit].read_bytes()[2 * SECTOR_SIZE:3 * SECTOR_SIZE]
+        assert third_sector == (
+            bytes(SECTOR_SIZE) if unit.write_protected else changed
+        )
+    assert WRITABLE_UNITS and PROTECTED_UNITS

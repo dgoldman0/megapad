@@ -7,13 +7,14 @@ import struct
 import pytest
 
 from shared.mp64fs import MP64FS_ENTRY_SIZE
-from shared.storage import SECTOR_SIZE
+from shared.storage import SECTOR_SIZE, STORAGE_UNIT_TABLE
 from simulator.image_bootstrap import (
     ImageBootstrapError,
     blank_terminal_autoexec_invocation,
     prepare_image_bootstrap,
 )
 from simulator.platform import create_one_core_address_space
+from simulator.runtime import MegaForthRuntime
 from simulator.storage import HostedStorageService
 
 
@@ -310,6 +311,40 @@ def test_image_bootstrap_does_not_rerun_a_later_autoexec_binding() -> None:
     prepared.runtime.execute(prepared.root_xt)
     assert _stored_cell(prepared.runtime, b"AUTO-RUNS") == 1
     assert _stored_cell(prepared.runtime, b"SESSION-RUNS") == 1
+
+
+def test_image_bootstrap_gives_each_storage_unit_its_disk() -> None:
+    """The runtime the bootstrap builds holds each unit's disk, and a
+    prepared runtime must already own every disk supplied with it."""
+    for unit in STORAGE_UNIT_TABLE:
+        if unit.number == 0:
+            continue
+        disk = HostedStorageService(
+            bytes(SECTOR_SIZE), write_protected=unit.write_protected,
+        )
+        prepared = prepare_image_bootstrap(
+            memory=create_one_core_address_space(),
+            storage=HostedStorageService(_boot_image()),
+            **{unit.host_name: disk},
+        )
+        assert prepared.runtime.storage_units[unit.number] is disk
+        assert getattr(prepared.runtime, unit.host_name) is disk
+        assert [
+            service.present for service in prepared.runtime.storage_units
+        ].count(True) == 2
+
+        memory = create_one_core_address_space()
+        storage = HostedStorageService(_boot_image())
+        runtime = MegaForthRuntime(memory=memory, storage=storage)
+        with pytest.raises(
+            ValueError, match=f"must own the supplied {unit.label}$"
+        ):
+            prepare_image_bootstrap(
+                memory=memory,
+                storage=storage,
+                runtime=runtime,
+                **{unit.host_name: HostedStorageService(bytes(SECTOR_SIZE))},
+            )
 
 
 def test_image_bootstrap_applies_the_configured_autoexec_budget() -> None:

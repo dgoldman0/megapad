@@ -198,8 +198,10 @@ python3 megapad/megapad.py --mode simulator --executor native \
   --storage path/to/image.img --ext-mem-mib 128
 ```
 
-It takes `--storage` (required), `--socket`, the memory sizes (`--ram-kib`,
-`--ext-mem-mib`, `--vram-mib`), and the geometry (`--cols`, `--rows`). It also
+It takes `--storage` (required), which attaches the boot disk, and
+`--settings-storage`, `--system-storage` and `--user-storage`, which attach
+the other storage units' disks; `--socket`; the memory sizes (`--ram-kib`,
+`--ext-mem-mib`, `--vram-mib`); and the geometry (`--cols`, `--rows`). It also
 takes `--semantic-step-budget`, `--semantic-quantum-steps`, `--paused`, and
 the complete caller-owned `--rich-terminal-policy` and
 `--retained-terminal-policy` JSON. For testing,

@@ -16,7 +16,6 @@ from devices import (
     NIC_BASE,
     SECTOR_SIZE,
     STORAGE_BASE,
-    STORAGE1_BASE,
     STORAGE_CMD_READ,
     STORAGE_CMD_RESET,
     STORAGE_CMD_WRITE,
@@ -25,6 +24,7 @@ from devices import (
     STORAGE_RESULT_OK,
     STORAGE_RESULT_PARTIAL,
     STORAGE_RESULT_RESET_ABORTED,
+    STORAGE_RESULT_WRITE_PROTECTED,
     STORAGE_STATUS_BUSY,
     STORAGE_STATUS_PRESENT,
     STORAGE_STATUS_RESULT_VALID,
@@ -34,6 +34,7 @@ from devices import (
     WOTS_BUS_BEAT_SLOT_CYCLES,
     WOTS_KECCAK_SERVICE_CYCLES,
 )
+from shared.storage import STORAGE_UNIT_TABLE
 from system import MegapadSystem
 
 
@@ -73,9 +74,11 @@ def _system(
     worker_count: int | None = None,
     realtime_clock: bool = False,
     storage_image: str | None = None,
-    settings_image: str | None = None,
     cold_instruction_cache: bool = False,
+    **unit_images: str,
 ) -> MegapadSystem:
+    """UNIT_IMAGES attach the other storage units' images, by
+    MegapadSystem's argument names."""
     system = MegapadSystem(
         ram_size=4096,
         num_cores=cores,
@@ -86,7 +89,7 @@ def _system(
         worker_count=worker_count,
         realtime_clock=realtime_clock,
         storage_image=storage_image,
-        settings_image=settings_image,
+        **unit_images,
     )
     system.load_binary(0, code)
     system.boot(entry=0)
@@ -2743,29 +2746,61 @@ def test_storage_read_is_strict_byte_dma_and_publishes_terminal_state(
     ) == SECTOR_SIZE
 
 
-def test_the_settings_disk_shares_the_disk_port_under_strict_cycles(tmp_path):
-    """The settings disk's controller reaches memory through the disk's
-    one bus port: its read is byte DMA on the disk requester's port, while
-    the system disk's controller stays idle."""
-    payload = bytes((index * 7 + 3) & 0xFF for index in range(SECTOR_SIZE))
-    path = tmp_path / "strict-cycle-settings.img"
-    path.write_bytes(payload)
-    system = _system(
-        assemble("st.b r1, r2\nhalt"),
-        settings_image=str(path),
+def _unit_id(unit) -> str:
+    return unit.disk
+
+
+def _unit_payload(unit) -> bytes:
+    """One sector unlike any other unit's."""
+    return bytes(
+        (index * (2 * unit.number + 3) + unit.number) & 0xFF
+        for index in range(SECTOR_SIZE)
     )
-    settings = system.settings_storage
+
+
+def _strict_unit_system(tmp_path, units, code):
+    """A machine with a one-sector disk on each of UNITS, and the images'
+    paths by unit."""
+    paths = {}
+    for unit in units:
+        paths[unit] = tmp_path / f"strict-cycle-{unit.disk}.img"
+        paths[unit].write_bytes(_unit_payload(unit))
+    system = _system(
+        assemble(code),
+        **{unit.image_name: str(path) for unit, path in paths.items()},
+    )
+    return system, paths
+
+
+def _program_strict_unit(system, unit, dma_address):
+    """Set UNIT's controller up to transfer its one sector at DMA_ADDRESS."""
+    controller = system._storage_controllers()[unit.number]
+    _write_storage_register(controller, 0x02, 0, 4)
+    _write_storage_register(controller, 0x06, dma_address, 8)
+    controller.write8(0x0E, 1)
+    return controller
+
+
+@pytest.mark.parametrize("unit", STORAGE_UNIT_TABLE, ids=_unit_id)
+def test_each_storage_unit_shares_the_disk_port_under_strict_cycles(
+    tmp_path, unit,
+):
+    """Every storage unit's controller reaches memory through the disk's
+    one bus port: its read is byte DMA on the disk requester's port, while
+    the other controllers stay idle."""
+    payload = _unit_payload(unit)
+    system, _paths = _strict_unit_system(
+        tmp_path, (unit,), "st.b r1, r2\nhalt",
+    )
     target = 0x400
-    _write_storage_register(settings, 0x02, 0, 4)
-    _write_storage_register(settings, 0x06, target, 8)
-    settings.write8(0x0E, 1)
-    system.cpu.regs[1] = MMIO_BASE + STORAGE1_BASE
+    controller = _program_strict_unit(system, unit, target)
+    system.cpu.regs[1] = MMIO_BASE + unit.mmio_offset
     system.cpu.regs[2] = STORAGE_CMD_READ
 
     system.run_cycle_batch(2, max_instructions=100)
-    assert settings.read8(0x01) & STORAGE_STATUS_BUSY
+    assert controller.read8(0x01) & STORAGE_STATUS_BUSY
     assert len(_pending_storage_requests(system)) == 1
-    beats, final = _drain_strict_storage(system, lambda: not settings.busy)
+    beats, final = _drain_strict_storage(system, lambda: not controller.busy)
 
     assert beats == [
         (_mp64_accel.BusOperation.WRITE, target + index, value)
@@ -2773,9 +2808,141 @@ def test_the_settings_disk_shares_the_disk_port_under_strict_cycles(tmp_path):
     ]
     assert final.system_stop_reason == "all_halted"
     assert bytes(system.cpu.mem[target:target + SECTOR_SIZE]) == payload
-    assert settings.result == STORAGE_RESULT_OK
-    assert settings.completion == 1
-    assert system.storage.completion == 0
+    assert controller.result == STORAGE_RESULT_OK
+    assert controller.completion == 1
+    assert all(
+        other.completion == 0
+        for other in system._storage_controllers()
+        if other is not controller
+    )
+    assert system._storage_dma_owner is None
+
+
+@pytest.mark.parametrize("unit", STORAGE_UNIT_TABLE, ids=_unit_id)
+def test_a_strict_cycle_write_reaches_only_a_writable_units_medium(
+    tmp_path, unit,
+):
+    """A writable unit's WRITE reads its sector from memory as byte DMA on
+    the disk port and commits it, and saving brings its file up to it.  A
+    write-protected unit's WRITE emits no beat, ends WRITE_PROTECTED and
+    leaves its medium and its file as they were."""
+    system, paths = _strict_unit_system(
+        tmp_path, (unit,), "st.b r1, r2\nhalt",
+    )
+    source = 0x400
+    payload = bytes((index * 11 + 7) & 0xFF for index in range(SECTOR_SIZE))
+    system.cpu.mem[source:source + SECTOR_SIZE] = payload
+    controller = _program_strict_unit(system, unit, source)
+    system.cpu.regs[1] = MMIO_BASE + unit.mmio_offset
+    system.cpu.regs[2] = STORAGE_CMD_WRITE
+
+    # Two cycles take the command; a writable unit's first beat then waits
+    # on the port, where the drain sees it.
+    system.run_cycle_batch(2, max_instructions=100)
+    beats, _slice = _drain_strict_storage(
+        system, lambda: controller.completion == 1,
+        max_slices=SECTOR_SIZE + 64,
+    )
+    final = system.run_cycle_batch(16, max_instructions=100)
+    assert final.system_stop_reason == "all_halted"
+
+    disk_port = system._native_system.main_bus_port_for_requester(
+        system._native_system.DISK_DMA_REQUESTER_ID
+    )
+    issued = (
+        system._native_system._main_bus_snapshot()
+        .last_issue_sequences[disk_port]
+    )
+    assert controller.completion == 1
+    system.save_storage_images()
+    if unit.write_protected:
+        assert controller.result == STORAGE_RESULT_WRITE_PROTECTED
+        assert controller.transferred == 0
+        assert issued == 0
+        assert beats == []
+        assert bytes(controller._image_data) == _unit_payload(unit)
+        assert paths[unit].read_bytes() == _unit_payload(unit)
+    else:
+        assert controller.result == STORAGE_RESULT_OK
+        assert controller.transferred == 1
+        assert issued == SECTOR_SIZE
+        assert beats == [
+            (_mp64_accel.BusOperation.READ, source + index, 0)
+            for index in range(SECTOR_SIZE)
+        ]
+        assert bytes(controller._image_data) == payload
+        assert paths[unit].read_bytes() == payload
+    assert system._storage_dma_owner is None
+
+
+def test_the_disk_port_arbitrates_among_every_storage_unit(tmp_path):
+    """With every controller reading at once, the disk's one bus port
+    carries one beat at a time, each from the controller it granted.  A
+    free port goes to the first controller, in unit order, with a beat to
+    offer: a later unit's transfer waits while an earlier unit's runs.
+    Every sector lands whole where its own controller asked."""
+    units = STORAGE_UNIT_TABLE
+    # Register 4 + n holds unit n's command register, and the register after
+    # them the command; register 3 is the program counter.  The guest starts
+    # the reads last unit first.
+    base = 4
+    command = base + len(units)
+    system, _paths = _strict_unit_system(
+        tmp_path,
+        units,
+        "".join(
+            f"st.b r{base + unit.number}, r{command}\n"
+            for unit in reversed(units)
+        ) + "halt",
+    )
+    targets = {unit: 0x400 + unit.number * SECTOR_SIZE for unit in units}
+    controllers = {
+        unit: _program_strict_unit(system, unit, targets[unit])
+        for unit in units
+    }
+    for unit in units:
+        system.cpu.regs[base + unit.number] = MMIO_BASE + unit.mmio_offset
+    system.cpu.regs[command] = STORAGE_CMD_READ
+
+    # Two cycles take the first command; its first beat then waits on the
+    # port, where the drain sees it.
+    system.run_cycle_batch(2, max_instructions=100)
+    beats, _slice = _drain_strict_storage(
+        system,
+        lambda: all(
+            controller.completion == 1 for controller in controllers.values()
+        ),
+        max_slices=len(units) * (SECTOR_SIZE + 64),
+    )
+    final = system.run_cycle_batch(16, max_instructions=100)
+
+    assert final.system_stop_reason == "all_halted"
+    owners = []
+    for operation, address, value in beats:
+        assert operation == _mp64_accel.BusOperation.WRITE
+        owner = next(
+            unit for unit in units
+            if targets[unit] <= address < targets[unit] + SECTOR_SIZE
+        )
+        owners.append(owner.number)
+        assert value == _unit_payload(owner)[address - targets[owner]]
+    for unit in units:
+        assert [
+            address for _operation, address, _value in beats
+            if targets[unit] <= address < targets[unit] + SECTOR_SIZE
+        ] == list(range(targets[unit], targets[unit] + SECTOR_SIZE))
+        assert bytes(
+            system.cpu.mem[targets[unit]:targets[unit] + SECTOR_SIZE]
+        ) == _unit_payload(unit)
+        assert controllers[unit].result == STORAGE_RESULT_OK
+        assert controllers[unit].transferred == 1
+        # While this unit's transfer runs, no later unit gets a beat.
+        first = owners.index(unit.number)
+        last = len(owners) - 1 - owners[::-1].index(unit.number)
+        assert max(owners[first:last + 1]) == unit.number
+    # So the last unit, which the guest started first, finished last.
+    assert owners[-1] == units[-1].number
+    assert len(owners) == len(units) * SECTOR_SIZE
     assert system._storage_dma_owner is None
 
 

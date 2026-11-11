@@ -80,7 +80,10 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 | `--bios FILE` | — | Boot from `.asm` (assembled on the fly) or binary |
 | `--assemble SRC OUT` | — | Assemble `SRC.asm` → `OUT.rom` and exit |
 | `--ram KiB` | 1024 | RAM size in KiB |
-| `--storage IMAGE` | — | Attach a block-device image file |
+| `--storage IMAGE` | — | Attach the boot disk's image to storage unit 0 |
+| `--settings-storage IMAGE` | — | Attach the settings disk's image, write-protected, to unit 1 |
+| `--system-storage IMAGE` | — | Attach the system disk's image, write-protected, to unit 2 |
+| `--user-storage IMAGE` | — | Attach the user disk's image to unit 3 |
 | `--forth FILE` | — | Inject Forth source via UART after BIOS boot |
 | `--load FILE[@ADDR]` | — | Load raw binary into RAM (repeatable) |
 | `--run` | off | Auto-boot and run immediately |
@@ -177,7 +180,7 @@ All MMIO registers live at base `0xFFFF_FF00_0000_0000`:
 |---|---|---|
 | `+0x0000` | 16 B | UART (serial console) |
 | `+0x0100` | 16 B | Timer |
-| `+0x0200` | 37 B | Storage controller 0: the system disk |
+| `+0x0200` | 37 B | Storage controller 0: the boot disk |
 | `+0x0280` | 37 B | Storage controller 1: the settings disk, its medium write-protected |
 | `+0x0300` | 112 B | System Info (board ID, topology, VRAM, crypto capabilities, bus ports) |
 | `+0x0400` | 128 B | NIC (Network Interface) |
@@ -195,6 +198,8 @@ All MMIO registers live at base `0xFFFF_FF00_0000_0000`:
 | `+0x0A00` | 80 B | Framebuffer controller |
 | `+0x0B00` | 32 B | RTC / System Clock |
 | `+0x0C00` | 32 B | PCM Audio Output (one-shot DMA + deterministic capture) |
+| `+0x0D00` | 37 B | Storage controller 2: the system disk, its medium write-protected |
+| `+0x0D80` | 37 B | Storage controller 3: the user disk |
 
 > **Crypto ISA (no CRC/SHA-2 MMIO):** CRC and SHA-2 use EXT.CRYPTO (`FB`).
 > Full cores keep state privately; each micro-core cluster shares CRC and
@@ -279,14 +284,18 @@ restore it.
 ### Storage Controller
 
 Sector-based block device backed by a host file.  Sector size is 512 bytes.
-The machine has two controllers of this design.  Controller 0, at `+0x0200`,
-holds the system disk.  Controller 1, at `+0x0280`, holds the settings disk
-(`--settings-storage IMAGE`), whose medium is write-protected: STATUS shows
-bit 5 while a medium is present, every WRITE ends `WRITE_PROTECTED`, and
-its host file is never written, nor created when absent.  Without an image
-controller 1 holds no medium.  The two controllers share the disk's one bus
-port for DMA, which serves one beat at a time.  The table below is the
-original subset; [`docs/storage-controller-contract.md`](docs/storage-controller-contract.md)
+The machine has four controllers of this design, one for each storage unit.
+Controller 0, at `+0x0200`, holds the boot disk (`--storage IMAGE`), which
+the BIOS loads KDOS from.  Controller 1, at `+0x0280`, holds the settings
+disk (`--settings-storage IMAGE`), and controller 2, at `+0x0D00`, the system
+disk (`--system-storage IMAGE`).  Their media are write-protected: STATUS
+shows bit 5 while a medium is present, every WRITE ends `WRITE_PROTECTED`,
+and the host file is never written, nor created when absent.  Controller 3,
+at `+0x0D80`, holds the user disk (`--user-storage IMAGE`), which takes
+writes as the boot disk does.  A controller given no image holds no medium.
+The controllers share the disk's one bus port for DMA, which serves one beat
+at a time.  The table below is the original subset;
+[`docs/storage-controller-contract.md`](docs/storage-controller-contract.md)
 gives the complete register map.
 
 | Offset | Name | R/W | Description |

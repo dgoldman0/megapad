@@ -29,6 +29,7 @@ from shared.storage import (
     STORAGE_STATUS_PRESENT,
     STORAGE_STATUS_RESULT_VALID,
     STORAGE_STATUS_WRITE_PROTECTED,
+    STORAGE_UNIT_TABLE,
 )
 from simulator.memory import (
     EXTERNAL_BASE,
@@ -520,62 +521,156 @@ def test_flush_failure_reports_a_conservative_partial_result(
     assert storage.transferred == 0
 
 
-def test_unit_words_address_the_system_and_settings_disks() -> None:
-    """Unit 0 is the system disk and unit 1 the settings disk, whose medium
-    is write-protected.  A unit the machine does not have reads as an empty
-    slot and transfers nothing."""
-    system = HostedStorageService(bytes(4 * SECTOR_SIZE))
-    image = b"SAFE!" + bytes(2 * SECTOR_SIZE - 5)
-    settings = HostedStorageService(image, write_protected=True)
-    runtime = MegaForthRuntime(storage=system, settings_storage=settings)
-    assert runtime.settings_storage is settings
-
-    assert _execute(runtime, "DISK-UNITS") == (2,)
-    status, = _execute(runtime, "UNIT-DISK@", 1)
-    assert status & STORAGE_STATUS_PRESENT
-    assert status & STORAGE_STATUS_WRITE_PROTECTED
-    assert _execute(runtime, "UNIT-DISK-SECTORS", 1) == (2,)
-    assert _execute(runtime, "UNIT-DISK-CAPS", 1) == (STORAGE_CAPS,)
-    assert _execute(runtime, "UNIT-DISK-MEDIA-GEN", 1) == (
-        settings.media_generation,
+def _unit_images() -> tuple[bytes, ...]:
+    """One image for each storage unit, each of its own size and content."""
+    return tuple(
+        b"UNIT%d" % unit.number + bytes((unit.number + 2) * SECTOR_SIZE - 5)
+        for unit in STORAGE_UNIT_TABLE
     )
+
+
+def _runtime_with_every_disk(images: tuple[bytes, ...]) -> MegaForthRuntime:
+    """A runtime holding IMAGES, each write-protected where its unit's
+    medium is."""
+    return MegaForthRuntime(**{
+        unit.host_name: HostedStorageService(
+            image, write_protected=unit.write_protected,
+        )
+        for unit, image in zip(STORAGE_UNIT_TABLE, images, strict=True)
+    })
+
+
+def test_unit_words_address_each_of_the_machines_disks() -> None:
+    """Every storage unit answers the unit words with its own disk: the boot
+    disk, the settings disk, the system disk and the user disk.  The
+    settings disk's and the system disk's media are write-protected: they
+    read, refuse every write and stay as they were.  The boot disk and the
+    user disk take writes.  A unit past the last reads as an empty slot and
+    transfers nothing."""
+    images = _unit_images()
+    runtime = _runtime_with_every_disk(images)
+    assert tuple(
+        (unit.number, unit.host_name, unit.write_protected)
+        for unit in STORAGE_UNIT_TABLE
+    ) == (
+        (0, "storage", False),
+        (1, "settings_storage", True),
+        (2, "system_storage", True),
+        (3, "user_storage", False),
+    )
+    assert runtime.storage_units == (
+        runtime.storage,
+        runtime.settings_storage,
+        runtime.system_storage,
+        runtime.user_storage,
+    )
+    assert _execute(runtime, "DISK-UNITS") == (4,)
     assert _execute(runtime, "UNIT-DISK@", 0) == _execute(runtime, "DISK@")
-    assert _execute(runtime, "UNIT-DISK-SECTORS", 0) == (4,)
-    for name in ("UNIT-DISK@", "UNIT-DISK-SECTORS", "UNIT-DISK-MEDIA-GEN",
-                 "UNIT-DISK-CAPS"):
-        assert _execute(runtime, name, 2) == (0,)
-        assert _execute(runtime, name, MASK64) == (0,)
 
-    generation = settings.media_generation
-    assert _execute(
-        runtime, "UNIT-DISK-READ-GEN-CHECKED", 1, 0, 1, generation, 1,
-    ) == (1, 0)
-    assert runtime.memory.read_bytes(1, 5) == b"SAFE!"
-    assert _execute(
-        runtime, "UNIT-DISK-WRITE-GEN-CHECKED", 1, 0, 1, generation, 1,
-    ) == (0, STORAGE_RESULT_WRITE_PROTECTED)
-    assert settings.image_bytes == image
-    assert _execute(runtime, "UNIT-DISK-FLUSH-GEN-CHECKED", generation, 1) == (0,)
-    assert _execute(
-        runtime, "UNIT-DISK-READ-GEN-CHECKED", 1, 0, 1, generation, 2,
-    ) == (0, STORAGE_RESULT_NO_MEDIA)
-    assert _execute(runtime, "UNIT-DISK-FLUSH-GEN-CHECKED", generation, 2) == (
-        STORAGE_RESULT_NO_MEDIA,
-    )
-    assert _execute(
-        runtime, "UNIT-DISK-WRITE-GEN-CHECKED", 1, 3, 1,
-        system.media_generation, 0,
-    ) == (1, 0)
-    assert system.image_bytes[3 * SECTOR_SIZE:3 * SECTOR_SIZE + 5] == b"SAFE!"
+    for unit, image in zip(STORAGE_UNIT_TABLE, images):
+        number = unit.number
+        service = runtime.storage_units[number]
+        generation = service.media_generation
+        status, = _execute(runtime, "UNIT-DISK@", number)
+        assert status & STORAGE_STATUS_PRESENT
+        assert bool(status & STORAGE_STATUS_WRITE_PROTECTED) is unit.write_protected
+        assert _execute(runtime, "UNIT-DISK-SECTORS", number) == (number + 2,)
+        assert _execute(runtime, "UNIT-DISK-CAPS", number) == (STORAGE_CAPS,)
+        assert _execute(runtime, "UNIT-DISK-MEDIA-GEN", number) == (generation,)
+
+        assert _execute(
+            runtime, "UNIT-DISK-READ-GEN-CHECKED", 1, 0, 1, generation, number,
+        ) == (1, 0)
+        assert runtime.memory.read_bytes(1, 5) == b"UNIT%d" % number
+        written = _execute(
+            runtime, "UNIT-DISK-WRITE-GEN-CHECKED", 1, 1, 1, generation, number,
+        )
+        if unit.write_protected:
+            assert written == (0, STORAGE_RESULT_WRITE_PROTECTED)
+            assert service.image_bytes == image
+        else:
+            assert written == (1, 0)
+            assert service.image_bytes == (
+                image[:SECTOR_SIZE]
+                + image[:SECTOR_SIZE]
+                + image[2 * SECTOR_SIZE:]
+            )
+        assert _execute(
+            runtime, "UNIT-DISK-FLUSH-GEN-CHECKED", generation, number,
+        ) == (0,)
+        # A stale generation reaches no unit's medium.
+        assert _execute(
+            runtime, "UNIT-DISK-READ-GEN-CHECKED", 1, 0, 1, generation + 1,
+            number,
+        ) == (0, STORAGE_RESULT_MEDIA_REMOVED)
+
+    for absent in (len(STORAGE_UNIT_TABLE), len(STORAGE_UNIT_TABLE) + 1, MASK64):
+        for name in ("UNIT-DISK@", "UNIT-DISK-SECTORS", "UNIT-DISK-MEDIA-GEN",
+                     "UNIT-DISK-CAPS"):
+            assert _execute(runtime, name, absent) == (0,)
+        for name in ("UNIT-DISK-READ-GEN-CHECKED", "UNIT-DISK-WRITE-GEN-CHECKED"):
+            assert _execute(runtime, name, 1, 0, 1, 1, absent) == (
+                0, STORAGE_RESULT_NO_MEDIA,
+            )
+        assert _execute(runtime, "UNIT-DISK-FLUSH-GEN-CHECKED", 1, absent) == (
+            STORAGE_RESULT_NO_MEDIA,
+        )
 
 
-def test_without_a_settings_disk_unit_one_holds_no_medium() -> None:
+def test_each_unit_reaches_only_its_own_disk() -> None:
+    """A write through one unit changes that unit's disk and no other."""
+    images = _unit_images()
+    for unit in STORAGE_UNIT_TABLE:
+        if unit.write_protected:
+            continue
+        runtime = _runtime_with_every_disk(images)
+        runtime.memory.write_bytes(1, b"\xC3" * SECTOR_SIZE)
+        assert _execute(
+            runtime, "UNIT-DISK-WRITE-GEN-CHECKED", 1, 0, 1,
+            runtime.storage_units[unit.number].media_generation, unit.number,
+        ) == (1, 0)
+        for other, image in zip(STORAGE_UNIT_TABLE, images):
+            assert (
+                runtime.storage_units[other.number].image_bytes != image
+            ) is (other is unit)
+
+
+def test_a_unit_without_a_disk_holds_no_medium() -> None:
     runtime = MegaForthRuntime()
-    assert _execute(runtime, "UNIT-DISK@", 1) == (0,)
-    assert _execute(runtime, "UNIT-DISK-SECTORS", 1) == (0,)
-    assert _execute(runtime, "UNIT-DISK-READ-GEN-CHECKED", 0, 0, 1, 0, 1) == (
-        0, STORAGE_RESULT_NO_MEDIA,
-    )
+    for unit in STORAGE_UNIT_TABLE:
+        number = unit.number
+        assert _execute(runtime, "UNIT-DISK@", number) == (0,)
+        assert _execute(runtime, "UNIT-DISK-SECTORS", number) == (0,)
+        assert _execute(runtime, "UNIT-DISK-MEDIA-GEN", number) == (0,)
+        assert _execute(runtime, "UNIT-DISK-CAPS", number) == (STORAGE_CAPS,)
+        for name in ("UNIT-DISK-READ-GEN-CHECKED", "UNIT-DISK-WRITE-GEN-CHECKED"):
+            assert _execute(runtime, name, 0, 0, 1, 0, number) == (
+                0, STORAGE_RESULT_NO_MEDIA,
+            )
+        assert _execute(runtime, "UNIT-DISK-FLUSH-GEN-CHECKED", 0, number) == (
+            STORAGE_RESULT_NO_MEDIA,
+        )
+
+
+def test_a_runtime_takes_each_units_disk_by_name_and_claims_it() -> None:
+    """Each unit's argument takes that unit's disk, and nothing else may
+    take it: one service cannot be two units' disk, nor another runtime's."""
+    for unit in STORAGE_UNIT_TABLE:
+        service = HostedStorageService(bytes(SECTOR_SIZE))
+        runtime = MegaForthRuntime(**{unit.host_name: service})
+        assert runtime.storage_units[unit.number] is service
+        assert getattr(runtime, unit.host_name) is service
+        assert [
+            other.status & STORAGE_STATUS_PRESENT
+            for other in runtime.storage_units
+        ].count(STORAGE_STATUS_PRESENT) == 1
+        with pytest.raises(ValueError, match="already owned"):
+            MegaForthRuntime(**{unit.host_name: service})
+        with pytest.raises(TypeError, match=f"{unit.host_name} must be"):
+            MegaForthRuntime(**{unit.host_name: object()})
+    shared = HostedStorageService(bytes(SECTOR_SIZE))
+    with pytest.raises(ValueError, match="already owned"):
+        MegaForthRuntime(system_storage=shared, user_storage=shared)
 
 
 def test_unit_words_change_nothing_on_too_short_a_stack() -> None:

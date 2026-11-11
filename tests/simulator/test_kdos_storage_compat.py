@@ -34,11 +34,11 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-storage-compat-4772-4922.f"
+    / "kdos-storage-compat-4775-4925.f"
 )
 
-FIRST_LINE = 4772
-LAST_LINE = 4922
+FIRST_LINE = 4775
+LAST_LINE = 4925
 SLICE_SHA256 = (
     "e1b7e0e3a9fbb419578e6d03680c07b771d16c24747e961d453f5e41ad0b23be"
 )
@@ -518,9 +518,9 @@ def test_disk_info_reports_the_current_attachment_without_opening_it() -> None:
     assert present.memory.read_bytes(present_volume, 144) == bytes(144)
 
 
-def test_settings_open_binds_the_settings_disk_read_only_and_leaves_the_system_volume() -> None:
+def test_settings_open_binds_the_settings_disk_read_only_and_leaves_the_filesystem_volume() -> None:
     """SETTINGS-OPEN opens the settings disk's raw volume, read-only, beside
-    the system disk's, which stays the filesystem volume."""
+    the boot disk's, which stays the filesystem volume."""
     settings_image = _patterned_image(3)
     runtime = MegaForthRuntime(
         storage=HostedStorageService(_patterned_image(4)),

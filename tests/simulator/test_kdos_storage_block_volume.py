@@ -14,6 +14,7 @@ from shared.storage import (
     STORAGE_CAP_GEN_GUARD,
     STORAGE_CMD_WRITE,
     STORAGE_RESULT_MEDIA_REMOVED,
+    STORAGE_UNIT_TABLE,
 )
 from simulator.memory import MMIO_BASE
 from simulator.runtime import MegaForthRuntime
@@ -31,20 +32,22 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-storage-block-volume-3839-4201.f"
+    / "kdos-storage-block-volume-3839-4204.f"
 )
 
 FIRST_LINE = 3839
-LAST_LINE = 4201
+LAST_LINE = 4204
 SLICE_SHA256 = (
-    "df615cfef9b429f84f51fab140bbfa1ec4ca8f366deaabb6c41299a5779a998f"
+    "e10e2bb7a5d52a381721304a4f90af311d11458fe6a0f06c625ae41a8c5153b9"
 )
-SLICE_GIT_BLOB = "91f7141d6f36469e9b05e8233cf91d81891a538e"
+SLICE_GIT_BLOB = "d272668cd75724a29ec1f0536d16d4e2b2f5834a"
 DEFINITIONS = (
     b"SECTOR",
     b"DISK?",
-    b"SYSTEM-UNIT",
+    b"BOOT-UNIT",
     b"SETTINGS-UNIT",
+    b"SYSTEM-UNIT",
+    b"USER-UNIT",
     b"UNIT-DISK?",
     b"BLOCK-DEVICE-MAGIC",
     b"VOLUME-MAGIC",
@@ -160,7 +163,7 @@ ZERO_VARIABLES = (
 
 def _verified_slice() -> bytes:
     source = FIXTURE.read_bytes()
-    assert len(source) == 12_399
+    assert len(source) == 12_525
     assert source.count(b"\n") == LAST_LINE - FIRST_LINE + 1
     assert hashlib.sha256(source).hexdigest() == SLICE_SHA256
     assert _git_blob_id(source) == SLICE_GIT_BLOB
@@ -244,7 +247,7 @@ def test_storage_slice_is_exact_and_loads_without_touching_media(
     loaded_storage: MegaForthRuntime,
 ) -> None:
     runtime = loaded_storage
-    assert len(DEFINITIONS) == 102
+    assert len(DEFINITIONS) == 104
     assert all(runtime.find(name) is not None for name in DEFINITIONS)
     assert all(_variable(runtime, name) == 0 for name in ZERO_VARIABLES)
     assert _constant(runtime, "SECTOR") == SECTOR_SIZE
@@ -537,59 +540,98 @@ def test_volume_reslice_is_transactional_and_io_is_relative_to_its_base() -> Non
     assert runtime.memory.read64(block + 88) == 0
 
 
-def test_a_block_device_opens_on_either_unit_and_the_settings_disk_reads_only() -> None:
-    """BD-OPEN-UNIT opens a block device on unit 0, the system disk, or on
-    unit 1, the settings disk, whose write-protected medium opens it
-    read-only.  Each device reads and goes stale with its own unit; BD-OPEN
-    is unit 0, and a unit with no medium does not open."""
-    system_image = bytes((0x11,)) * (2 * SECTOR_SIZE)
-    settings_image = bytes((0x5A,)) * SECTOR_SIZE + bytes((0x6B,)) * SECTOR_SIZE
-    runtime = _load_storage(MegaForthRuntime(
-        storage=HostedStorageService(system_image),
-        settings_storage=HostedStorageService(settings_image, write_protected=True),
-    ))
-    system_bd = _define_extent(runtime, "SYSTEM-UNIT-BD", 128)
-    settings_bd = _define_extent(runtime, "SETTINGS-UNIT-BD", 128)
-    other_bd = _define_extent(runtime, "OTHER-UNIT-BD", 128)
+def test_a_block_device_opens_on_each_unit_and_a_protected_disk_reads_only() -> None:
+    """BD-OPEN-UNIT opens a block device on each storage unit.  The settings
+    disk's and the system disk's write-protected media open it read-only; the
+    boot disk's and the user disk's open it writable.  Each device reads,
+    writes, flushes and goes stale with its own unit.  BD-OPEN is the boot
+    unit, and a unit with no medium, or one the machine does not have, does
+    not open."""
+    images = tuple(
+        bytes((0x11 * (unit.number + 1),)) * SECTOR_SIZE
+        + bytes((0x60 + unit.number,)) * ((unit.number + 1) * SECTOR_SIZE)
+        for unit in STORAGE_UNIT_TABLE
+    )
+    runtime = _load_storage(MegaForthRuntime(**{
+        unit.host_name: HostedStorageService(
+            image, write_protected=unit.write_protected,
+        )
+        for unit, image in zip(STORAGE_UNIT_TABLE, images)
+    }))
+    assert tuple(
+        _constant(runtime, name)
+        for name in ("BOOT-UNIT", "SETTINGS-UNIT", "SYSTEM-UNIT", "USER-UNIT")
+    ) == (0, 1, 2, 3)
+    assert tuple(
+        unit.write_protected for unit in STORAGE_UNIT_TABLE
+    ) == (False, True, True, False)
+    readonly = _constant(runtime, "VOL-F-READONLY")
     dma = _define_extent(runtime, "UNIT-DMA", SECTOR_SIZE)
-    assert _constant(runtime, "SYSTEM-UNIT") == 0
-    assert _constant(runtime, "SETTINGS-UNIT") == 1
+    devices = tuple(
+        _define_extent(runtime, f"UNIT{unit.number}-BD", 128)
+        for unit in STORAGE_UNIT_TABLE
+    )
 
-    assert _execute(runtime, "BD-OPEN", system_bd) == (0,)
-    assert _execute(runtime, "BD.UNIT", system_bd) == (0,)
-    assert _execute(runtime, "BD.FLAGS", system_bd) == (0,)
-    assert _execute(runtime, "BD-OPEN-UNIT", settings_bd, 1) == (0,)
-    assert _execute(runtime, "BD.UNIT", settings_bd) == (1,)
-    assert _execute(runtime, "BD.FLAGS", settings_bd) == (
-        _constant(runtime, "VOL-F-READONLY"),
-    )
-    assert _execute(runtime, "BD.SECTORS", settings_bd) == (2,)
+    boot_bd = _define_extent(runtime, "BOOT-BD", 128)
+    assert _execute(runtime, "BD-OPEN", boot_bd) == (0,)
+    assert _execute(runtime, "BD.UNIT", boot_bd) == (0,)
+    assert _execute(runtime, "BD-CLOSE", boot_bd) == (0,)
 
-    assert _execute(runtime, "BD-READ", dma, 1, 1, settings_bd) == (1, 0)
-    assert runtime.memory.read_bytes(dma, SECTOR_SIZE) == bytes((0x6B,)) * SECTOR_SIZE
-    assert _execute(runtime, "BD-WRITE", dma, 0, 1, settings_bd) == (
-        0,
-        _constant(runtime, "BD-E-READONLY"),
-    )
-    assert runtime.settings_storage.image_bytes == settings_image
-    assert _execute(runtime, "BD-READ", dma, 0, 1, system_bd) == (1, 0)
-    assert runtime.memory.read_bytes(dma, SECTOR_SIZE) == bytes((0x11,)) * SECTOR_SIZE
-    assert _execute(runtime, "BD-FLUSH", settings_bd) == (0,)
+    for unit, image, device in zip(STORAGE_UNIT_TABLE, images, devices):
+        service = runtime.storage_units[unit.number]
+        assert _execute(runtime, "BD-OPEN-UNIT", device, unit.number) == (0,)
+        assert _execute(runtime, "BD.UNIT", device) == (unit.number,)
+        assert _execute(runtime, "BD.FLAGS", device) == (
+            readonly if unit.write_protected else 0,
+        )
+        assert _execute(runtime, "BD.SECTORS", device) == (unit.number + 2,)
 
-    # A new settings medium makes only the settings disk's device stale.
-    runtime.settings_storage.attach(settings_image, write_protected=True)
-    assert _execute(runtime, "BD-STALE?", settings_bd) == (TRUE,)
-    assert _execute(runtime, "BD-STALE?", system_bd) == (0,)
-    assert _execute(runtime, "BD-READ", dma, 0, 1, settings_bd) == (
-        0,
-        _constant(runtime, "BD-E-STALE"),
-    )
-    assert _execute(runtime, "BD-READ", dma, 0, 1, system_bd) == (1, 0)
+        assert _execute(runtime, "BD-READ", dma, 1, 1, device) == (1, 0)
+        assert runtime.memory.read_bytes(dma, SECTOR_SIZE) == (
+            bytes((0x60 + unit.number,)) * SECTOR_SIZE
+        )
+        if unit.write_protected:
+            assert _execute(runtime, "BD-WRITE", dma, 0, 1, device) == (
+                0,
+                _constant(runtime, "BD-E-READONLY"),
+            )
+            assert service.image_bytes == image
+        else:
+            assert _execute(runtime, "BD-WRITE", dma, 0, 1, device) == (1, 0)
+            assert service.image_bytes == (
+                bytes((0x60 + unit.number,)) * SECTOR_SIZE
+                + image[SECTOR_SIZE:]
+            )
+        assert _execute(runtime, "BD-FLUSH", device) == (0,)
 
-    assert _execute(runtime, "BD-OPEN-UNIT", other_bd, 2) == (
-        _constant(runtime, "BD-E-NO-MEDIA"),
-    )
-    runtime.settings_storage.detach()
-    assert _execute(runtime, "BD-OPEN-UNIT", other_bd, 1) == (
-        _constant(runtime, "BD-E-NO-MEDIA"),
-    )
+    # No unit's commands reached another unit's disk.
+    assert tuple(
+        service.image_bytes[SECTOR_SIZE:] for service in runtime.storage_units
+    ) == tuple(image[SECTOR_SIZE:] for image in images)
+
+    # A new medium makes only its own unit's device stale.
+    for unit, image, device in zip(STORAGE_UNIT_TABLE, images, devices):
+        runtime.storage_units[unit.number].attach(
+            image, write_protected=unit.write_protected,
+        )
+        assert tuple(
+            _execute(runtime, "BD-STALE?", other)[0] for other in devices
+        ) == tuple(
+            TRUE if other_unit.number <= unit.number else 0
+            for other_unit in STORAGE_UNIT_TABLE
+        )
+        assert _execute(runtime, "BD-READ", dma, 0, 1, device) == (
+            0,
+            _constant(runtime, "BD-E-STALE"),
+        )
+
+    other_bd = _define_extent(runtime, "OTHER-UNIT-BD", 128)
+    for absent in (len(STORAGE_UNIT_TABLE), MASK64):
+        assert _execute(runtime, "BD-OPEN-UNIT", other_bd, absent) == (
+            _constant(runtime, "BD-E-NO-MEDIA"),
+        )
+    for unit in STORAGE_UNIT_TABLE:
+        runtime.storage_units[unit.number].detach()
+        assert _execute(runtime, "BD-OPEN-UNIT", other_bd, unit.number) == (
+            _constant(runtime, "BD-E-NO-MEDIA"),
+        )

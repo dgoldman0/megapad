@@ -9,7 +9,6 @@ from shared.cells import CELL_BYTES, MASK64, forth_flag, s64, u64
 from shared.storage import (
     STORAGE_RESULT_NO_MEDIA,
     STORAGE_RESULT_TIMEOUT,
-    STORAGE_UNITS,
 )
 from simulator.aes import (
     AES_AAD_LENGTH,
@@ -1366,7 +1365,7 @@ def _disk_transfer_value(
     storage=None,
 ) -> tuple[int, int]:
     """Run one value-based checked transfer through native lock two, on
-    STORAGE's controller, the system disk's by default."""
+    STORAGE's controller, the boot disk's by default."""
 
     storage = runtime.storage if storage is None else storage
     core_id, _task_id = runtime.guest_identity(context)
@@ -1408,14 +1407,11 @@ def _mp64fs_valid(
 
 
 def _storage_unit(runtime: MegaForthRuntime, unit: int):
-    """The disk of storage controller UNIT: 0 the system disk, 1 the
-    settings disk; None for a unit the machine does not have."""
+    """The disk of storage unit UNIT, a cell; None for a unit the machine
+    does not have."""
 
-    if unit == 0:
-        return runtime.storage
-    if unit == 1:
-        return runtime.settings_storage
-    return None
+    units = runtime.storage_units
+    return units[unit] if 0 <= unit < len(units) else None
 
 
 def _unit_disk_value(
@@ -3153,11 +3149,11 @@ def install_core(runtime: MegaForthRuntime) -> None:
     # 2ROT follows: the checked SHA-2 one-shots of three spans use it.
     runtime.define_primitive(b"2ROT", _two_rot)
 
-    # The storage unit words follow: unit 0 the system disk, unit 1 the
-    # settings disk.
+    # The storage unit words follow.  They address each of the machine's
+    # storage units by number; the DISK-* words address the boot disk.
     runtime.define_primitive(
         b"DISK-UNITS",
-        lambda context: context.data.push(STORAGE_UNITS),
+        lambda context: context.data.push(len(runtime.storage_units)),
     )
     for name, register in (
         (b"UNIT-DISK@", "status"),

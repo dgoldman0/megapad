@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from emulator.session import MachineSession, RunReport
+from shared.storage import STORAGE_UNIT_TABLE
 
 
 class ScenarioFailure(RuntimeError):
@@ -49,8 +50,12 @@ def run_scenario(path: Path) -> dict:
     bios = resolve_path(base, machine.get("bios"))
     if bios is None:
         raise ScenarioFailure("scenario machine.bios is required")
-    storage = resolve_path(base, machine.get("storage"))
-    settings = resolve_path(base, machine.get("settings_storage"))
+    # machine.storage, machine.settings_storage, machine.system_storage and
+    # machine.user_storage each attach an image to that storage unit.
+    images = {
+        unit.image_name: resolve_path(base, machine.get(unit.host_name))
+        for unit in STORAGE_UNIT_TABLE
+    }
 
     started = time.perf_counter()
     action_reports: list[dict] = []
@@ -58,8 +63,7 @@ def run_scenario(path: Path) -> dict:
 
     with MachineSession.from_bios(
         bios,
-        storage_image=storage,
-        settings_image=settings,
+        **images,
         ram_size=int(machine.get("ram_kib", 1024)) << 10,
         ext_mem_size=int(machine.get("ext_mem_mib", 128)) << 20,
         vram_size=int(machine.get("vram_mib", 4)) << 20,
