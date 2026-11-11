@@ -10,7 +10,8 @@
  * hardware bridge does, so a module is held to the same bounds as a chip.
  *
  * Calling rules:
- *   - The bridge calls the module on one thread, never re-entrantly.
+ *   - The bridge makes one call into the module at a time, never
+ *     re-entrantly. Successive calls may come from different threads.
  *   - A module calls the host's services only from inside its `step`, and
  *     starts no thread and reads no clock of its own: its results then
  *     depend on the machine's state, its own state and the order of steps.

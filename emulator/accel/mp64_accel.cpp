@@ -517,6 +517,236 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+//  Chiplet ports
+// ---------------------------------------------------------------------------
+
+// The machine's chiplet ports: the register window at MMIO offset 0xE00 over
+// the model in shared/accel/chiplet_port.h, with this machine's external
+// memory and mailbox behind it. Like the crypto devices it has no Python
+// device on the bus: native cores decode it in the sys_read/sys_write
+// functions and Python-run cores reach it through a binding.
+//
+// A core reaches the registers during a round, possibly from a worker
+// thread, and the ports' chiplets step between rounds on the scheduler
+// thread, so one lock serializes every entry. A chiplet touches memory only
+// from its step, when no core runs. Its writes leave the cores' instruction
+// caches as they are, as the hardware does for every requester but the core
+// itself and as the disk's and the network device's DMA do here.
+class ChipletDevice {
+public:
+    static constexpr uint32_t BASE = 0x0E00;
+    static constexpr uint32_t SIZE = megapad::chiplet::ChipletWindow::SIZE;
+    static constexpr int RANGES = 8;
+    // Steps given to working chiplets in one visit while every core sleeps.
+    static constexpr int IDLE_STEP_LIMIT = 4096;
+
+    void configure(
+            int port_count,
+            int first_port_id,
+            MemoryMappings* memory,
+            InterruptRouter* router) {
+        memory_.mappings = memory;
+        mailbox_.router = router;
+        if (port_count > 0) {
+            window_ = std::make_unique<megapad::chiplet::ChipletWindow>(
+                port_count, first_port_id, RANGES, &memory_, &mailbox_);
+        }
+    }
+
+    int port_count() const noexcept {
+        return window_ ? window_->port_count() : 0;
+    }
+
+    // What System Info repeats of PORT_COUNT; zero on a machine built
+    // without ports, whose window answers nothing.
+    uint64_t port_count_word() const noexcept {
+        return window_ ? window_->port_count_word() : 0;
+    }
+
+    bool handles(uint32_t mmio_off) const noexcept {
+        return window_ != nullptr && mmio_off >= BASE &&
+            mmio_off - BASE < SIZE;
+    }
+
+    // Every register is 64 bits wide and reached by an aligned 64-bit
+    // access; any other shape is a bus fault.
+    static bool shape_valid(uint32_t mmio_off, uint32_t width) noexcept {
+        return width == 8 && (mmio_off & 7) == 0;
+    }
+
+    uint64_t read64(uint32_t mmio_off) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        return window_->read64(mmio_off - BASE);
+    }
+
+    void write64(uint32_t mmio_off, uint64_t value) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        window_->write64(mmio_off - BASE, value);
+        note_work_unlocked();
+    }
+
+    // The port takes ownership of the module when it accepts it.
+    bool attach(int port, const mp64_chiplet_module& module) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        megapad::chiplet::ChipletPort* found =
+            window_ ? window_->port(port) : nullptr;
+        if (found == nullptr || !found->attach(module))
+            return false;
+        refresh_attached_unlocked();
+        note_work_unlocked();
+        return true;
+    }
+
+    bool detach(int port) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        megapad::chiplet::ChipletPort* found =
+            window_ ? window_->port(port) : nullptr;
+        if (found == nullptr)
+            return false;
+        found->detach();
+        refresh_attached_unlocked();
+        note_work_unlocked();
+        return true;
+    }
+
+    bool set_budget(int port, uint32_t budget) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!window_ || window_->port(port) == nullptr)
+            return false;
+        window_->set_budget(port, budget);
+        return true;
+    }
+
+    // Whether any port has a chiplet. Read at every round boundary, so a
+    // machine without a chiplet pays one load there.
+    bool any_attached() const noexcept {
+        return any_attached_.load(std::memory_order_acquire);
+    }
+
+    // Whether a chiplet has work that a step would advance.
+    bool work_waits() const noexcept {
+        return any_attached() &&
+            work_waits_.load(std::memory_order_acquire);
+    }
+
+    // Step every port's chiplet once, in port order. When every core sleeps
+    // or is halted nothing else will run the chiplets, and a chiplet's
+    // doorbell is what wakes a sleeping core, so the chiplets then step
+    // until they rest, until one has rung a core, or until the visit's
+    // limit. Returns whether work still waits.
+    bool service(bool cores_all_asleep) {
+        if (!any_attached())
+            return false;
+        std::lock_guard<std::mutex> guard(mutex_);
+        bool more = window_->step();
+        if (cores_all_asleep) {
+            for (int steps = 1;
+                 more && steps < IDLE_STEP_LIMIT &&
+                     !mailbox_.rang_a_core;
+                 steps++) {
+                more = window_->step();
+            }
+        }
+        mailbox_.rang_a_core = false;
+        more = more || window_->work_waits();
+        work_waits_.store(more, std::memory_order_release);
+        return more;
+    }
+
+    std::vector<uint8_t> save() {
+        std::lock_guard<std::mutex> guard(mutex_);
+        return window_ ? window_->save() : std::vector<uint8_t>{};
+    }
+
+    bool restore(const std::vector<uint8_t>& state) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!window_)
+            return state.empty();
+        const bool restored = window_->restore(state);
+        note_work_unlocked();
+        return restored;
+    }
+
+private:
+    struct Memory final : megapad::chiplet::ExternalMemory {
+        MemoryMappings* mappings = nullptr;
+
+        std::uint64_t base() const noexcept override {
+            return mappings->ext_mem ? mappings->ext_mem_base : 0;
+        }
+        std::uint64_t limit() const noexcept override {
+            return mappings->ext_mem
+                ? mappings->ext_mem_base + mappings->ext_mem_size
+                : 0;
+        }
+        bool read(std::uint64_t addr, std::uint8_t* out,
+                  std::size_t bytes) noexcept override {
+            if (!inside(addr, bytes))
+                return false;
+            std::memcpy(
+                out, mappings->ext_mem + (addr - mappings->ext_mem_base),
+                bytes);
+            return true;
+        }
+        bool write(std::uint64_t addr, const std::uint8_t* in,
+                   std::size_t bytes) noexcept override {
+            if (!inside(addr, bytes))
+                return false;
+            std::memcpy(
+                mappings->ext_mem + (addr - mappings->ext_mem_base), in,
+                bytes);
+            return true;
+        }
+        bool inside(std::uint64_t addr, std::size_t bytes) const noexcept {
+            return mappings->ext_mem != nullptr &&
+                addr >= mappings->ext_mem_base &&
+                addr - mappings->ext_mem_base <= mappings->ext_mem_size &&
+                bytes <= mappings->ext_mem_size -
+                    (addr - mappings->ext_mem_base);
+        }
+    };
+
+    struct Mailbox final : megapad::chiplet::PortMailbox {
+        InterruptRouter* router = nullptr;
+        bool rang_a_core = false;
+
+        int doorbell(int port) noexcept override {
+            return router->port_doorbell(port);
+        }
+        bool take(int port, int source_id) noexcept override {
+            return router->port_take(port, source_id);
+        }
+        bool send(int port, int target_id) noexcept override {
+            const bool sent = router->port_send(port, target_id);
+            if (sent && target_id < router->first_port_id())
+                rang_a_core = true;
+            return sent;
+        }
+    };
+
+    void refresh_attached_unlocked() {
+        bool attached = false;
+        for (int port = 0; window_ && port < window_->port_count(); port++)
+            attached = attached || window_->port(port)->attached();
+        any_attached_.store(attached, std::memory_order_release);
+    }
+
+    // A register write can give a chiplet work: a release, a stop request,
+    // a detach. The next boundary's step settles what really waits.
+    void note_work_unlocked() {
+        work_waits_.store(
+            window_ && window_->work_waits(), std::memory_order_release);
+    }
+
+    std::mutex mutex_;
+    Memory memory_;
+    Mailbox mailbox_;
+    std::unique_ptr<megapad::chiplet::ChipletWindow> window_;
+    std::atomic<bool> any_attached_{false};
+    std::atomic<bool> work_waits_{false};
+};
+
+// ---------------------------------------------------------------------------
 //  Timestamped external ingress
 // ---------------------------------------------------------------------------
 
@@ -1975,6 +2205,8 @@ struct CPUState {
     NICDevice* nic = nullptr;
     std::unique_ptr<TRNGDevice> private_trng;
     TRNGDevice* trng = nullptr;
+    // The machine's chiplet ports; a standalone core has none.
+    ChipletDevice* chiplet = nullptr;
     std::unique_ptr<UARTDevice> private_uart;
     UARTDevice* uart = nullptr;
 
@@ -5277,6 +5509,11 @@ struct SystemState {
             main_bus_port_count,
             main_bus_port_count - 1);
         shared_interrupts.configure(all_core_count, chiplet_port_count);
+        shared_chiplet.configure(
+            chiplet_port_count,
+            shared_interrupts.first_port_id(),
+            &shared_memory,
+            &shared_interrupts);
         shared_crypto.init();
         shared_crypto.configure_wots(
             shared_memory.mem_size,
@@ -5316,6 +5553,7 @@ struct SystemState {
                 &cycle_execution_pending);
             core->core_id = static_cast<uint8_t>(index);
             core->num_cores = static_cast<uint8_t>(all_core_count);
+            core->chiplet = &shared_chiplet;
             cores.push_back(std::move(core));
         }
         if (all_core_count == 1) {
@@ -5342,6 +5580,7 @@ struct SystemState {
             core->core_id = static_cast<uint8_t>(
                 full_core_count + index);
             core->num_cores = static_cast<uint8_t>(all_core_count);
+            core->chiplet = &shared_chiplet;
             micro_cores.push_back(std::move(core));
         }
         execution_cores.reserve(static_cast<std::size_t>(all_core_count));
@@ -5708,6 +5947,8 @@ struct SystemState {
     FramebufferDevice shared_fb{};
     RTCDevice shared_rtc{};
     InterruptRouter shared_interrupts{};
+    // After the memory and the router it uses, so its chiplets go first.
+    ChipletDevice shared_chiplet{};
     SystemClock shared_clock{};
     ExternalEventInbox external_events{};
     MainBusArbiter main_bus{};
@@ -9969,6 +10210,14 @@ static inline void preflight_resumable_bus_access(
     throw std::runtime_error("TRAP:BUS_FAULT");
 }
 
+// The chiplet window answers aligned 64-bit accesses alone. The hardware
+// leaves any other shape unanswered and the bus ends it as a fault.
+[[noreturn]] static void reject_chiplet_access(
+        CPUState& state, uint64_t address) {
+    state.trap_addr = address;
+    throw std::runtime_error("TRAP:BUS_FAULT");
+}
+
 // Memory access with MMIO and HBW intercept
 static inline uint8_t sys_read8(
         CPUState& s,
@@ -9987,6 +10236,8 @@ static inline uint8_t sys_read8(
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         // Try C++ devices first (no Python callback needed)
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        if (s.chiplet != nullptr && s.chiplet->handles(mmio_off))
+            reject_chiplet_access(s, addr);
         if (s.nic->handles(mmio_off))
             return s.nic->read8(mmio_off);
         if (s.uart->handles(mmio_off))
@@ -10057,6 +10308,8 @@ static inline void sys_write8(
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         // Try C++ devices first
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        if (s.chiplet != nullptr && s.chiplet->handles(mmio_off))
+            reject_chiplet_access(s, addr);
         if (write_native_nic_bytes(
                 s, cb, mmio_off, val, 1)) {
             icache_invalidate_span(s, addr, 1);
@@ -10155,6 +10408,11 @@ static inline uint64_t sys_read64(
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         preflight_sysinfo_fallback_span(s, cb, addr, 8);
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        if (s.chiplet != nullptr && s.chiplet->handles(mmio_off)) {
+            if (!ChipletDevice::shape_valid(mmio_off, 8))
+                reject_chiplet_access(s, addr);
+            return s.chiplet->read64(mmio_off);
+        }
         if (s.nic->handles(mmio_off)) {
             uint64_t v = 0;
             for (int i = 0; i < 8; i++)
@@ -10236,6 +10494,13 @@ static inline void sys_write64(
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         preflight_sysinfo_fallback_span(s, cb, addr, 8);
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        if (s.chiplet != nullptr && s.chiplet->handles(mmio_off)) {
+            if (!ChipletDevice::shape_valid(mmio_off, 8))
+                reject_chiplet_access(s, addr);
+            s.chiplet->write64(mmio_off, val);
+            icache_invalidate_span(s, addr, 8);
+            return;
+        }
         if (write_native_nic_bytes(
                 s, cb, mmio_off, val, 8)) {
             icache_invalidate_span(s, addr, 8);
@@ -10314,6 +10579,8 @@ static inline uint16_t sys_read16(
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         preflight_sysinfo_fallback_span(s, cb, addr, 2);
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        if (s.chiplet != nullptr && s.chiplet->handles(mmio_off))
+            reject_chiplet_access(s, addr);
         if (s.trng->handles(mmio_off)) {
             if (!s.trng->handles_span(mmio_off, 2))
                 throw std::runtime_error("TRAP:BUS_FAULT");
@@ -10369,6 +10636,8 @@ static inline void sys_write16(
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         preflight_sysinfo_fallback_span(s, cb, addr, 2);
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        if (s.chiplet != nullptr && s.chiplet->handles(mmio_off))
+            reject_chiplet_access(s, addr);
         if (write_native_nic_bytes(
                 s, cb, mmio_off, val, 2)) {
             icache_invalidate_span(s, addr, 2);
@@ -10446,6 +10715,8 @@ static inline uint32_t sys_read32(
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         preflight_sysinfo_fallback_span(s, cb, addr, 4);
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        if (s.chiplet != nullptr && s.chiplet->handles(mmio_off))
+            reject_chiplet_access(s, addr);
         if (s.trng->handles(mmio_off)) {
             if (!s.trng->handles_span(mmio_off, 4))
                 throw std::runtime_error("TRAP:BUS_FAULT");
@@ -10521,6 +10792,8 @@ static inline void sys_write32(
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         preflight_sysinfo_fallback_span(s, cb, addr, 4);
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        if (s.chiplet != nullptr && s.chiplet->handles(mmio_off))
+            reject_chiplet_access(s, addr);
         if (write_native_nic_bytes(
                 s, cb, mmio_off, val, 4)) {
             icache_invalidate_span(s, addr, 4);
@@ -16194,6 +16467,13 @@ static SystemBatchResult run_native_system_batch(
     service_unbounded_native_dma(
         system,
         profiled_dma_settlement);
+    // The chiplet ports step where device time settles: at entry and after
+    // each round. A chiplet's doorbell can wake a core that sleeps here.
+    if (system.shared_chiplet.any_attached()) {
+        system.shared_chiplet.service(
+            system_all_idle_or_halted(system));
+        wake_idle_cores(system);
+    }
 
     const bool any_active = std::any_of(
         system.execution_cores.begin(),
@@ -16396,6 +16676,10 @@ static SystemBatchResult run_native_system_batch(
         service_unbounded_native_dma(
             system,
             profiled_dma_settlement);
+        if (system.shared_chiplet.any_attached()) {
+            system.shared_chiplet.service(
+                system_all_idle_or_halted(system));
+        }
         result.rounds++;
 
         if (outcome.steps != 0)
@@ -19878,6 +20162,14 @@ static SystemBatchResult run_full_core_cycle_batch(
     discard_stale_cycle_tacc_transfers(
         system,
         clock_start);
+    // The chiplet ports step at each scheduling frontier, this first one
+    // included. A chiplet has no clock in the model: its step does a fixed
+    // budget of work, and what it does lands at the frontier.
+    if (system.shared_chiplet.any_attached()) {
+        system.shared_chiplet.service(
+            cycle_system_all_idle_or_halted(system));
+        wake_cycle_idle_cores(system, clock_start);
+    }
 
     const std::optional<uint64_t> initial_timer_cycle =
         next_cycle_timer_irq(system);
@@ -20132,6 +20424,10 @@ static SystemBatchResult run_full_core_cycle_batch(
                 system,
                 dma_callbacks,
                 scheduler_cycle);
+        }
+        if (system.shared_chiplet.any_attached()) {
+            system.shared_chiplet.service(
+                cycle_system_all_idle_or_halted(system));
         }
         // Every round re-applies the IDL wake rule: a peer's IPI or a timer
         // line can wake a core that sleeps with I clear.
@@ -32510,6 +32806,10 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 }
                 return device->handles(mmio_off + width - 1) ? 1 : 0;
             };
+            if (s.chiplet != nullptr && s.chiplet->handles(mmio_off)) {
+                return ChipletDevice::shape_valid(mmio_off, width)
+                    ? 1 : 0;
+            }
             int status = check_span(s.nic);
             if (status >= 0)
                 return status;
@@ -32523,6 +32823,27 @@ PYBIND11_MODULE(_mp64_accel, m) {
         py::arg("mmio_off"),
         py::arg("width"),
         py::arg("write") = false)
+        // One aligned 64-bit access to the chiplet window, for a core that
+        // Python runs. None when the window does not hold the offset.
+        .def("_native_chiplet_access64",
+             [](CPUState& s, uint32_t mmio_off, bool write,
+                uint64_t value) -> py::object {
+                PublicCPUMutationScope mutation_scope(s);
+            if (s.chiplet == nullptr || !s.chiplet->handles(mmio_off))
+                return py::none();
+            if (!ChipletDevice::shape_valid(mmio_off, 8))
+                throw py::value_error(
+                    "the chiplet window takes aligned 64-bit accesses");
+            auto memory_guard = acquire_shared_memory_use(s);
+            if (write) {
+                s.chiplet->write64(mmio_off, value);
+                return py::int_(0);
+            }
+            return py::int_(s.chiplet->read64(mmio_off));
+        },
+        py::arg("mmio_off"),
+        py::arg("write") = false,
+        py::arg("value") = 0)
         .def("_native_singleton_write8",
              [](CPUState& s, uint32_t mmio_off, uint8_t value) -> bool {
                 PublicCPUMutationScope mutation_scope(s);
@@ -33847,6 +34168,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
                         : static_cast<double>(core->wake_ms - now) / 1000.0);
                 }
                 if (system.shared_timer.irq_pending)
+                    consider(0.0);
+                // A chiplet with work in hand keeps the machine awake.
+                if (system.shared_chiplet.work_waits())
                     consider(0.0);
                 if (const std::optional<uint64_t> cycles =
                         system.shared_timer.next_irq_assertion_delta()) {
@@ -36992,6 +37316,106 @@ PYBIND11_MODULE(_mp64_accel, m) {
             },
             py::arg("port"),
             py::arg("source_id"))
+        .def_property_readonly(
+            "chiplet_port_count_word",
+            [](const SystemState& system) {
+                return system.shared_chiplet.port_count_word();
+            })
+        .def_property_readonly(
+            "chiplet_work_waits",
+            [](const SystemState& system) {
+                return system.shared_chiplet.work_waits();
+            })
+        .def(
+            "attach_test_chiplet",
+            [](SystemState& system, int port) {
+                mp64_chiplet_module made{};
+                if (megapad::chiplet::create_test_chiplet(
+                        nullptr, &made) != 0)
+                    throw std::runtime_error("no test chiplet was made");
+                if (!system.shared_chiplet.attach(port, made)) {
+                    made.destroy(made.self);
+                    throw py::index_error("the machine has no such port");
+                }
+            },
+            py::arg("port"))
+        .def(
+            "attach_manual_chiplet",
+            [](SystemState& system, int port,
+               const std::shared_ptr<
+                   megapad::chiplet::ManualChipletState>& chiplet) {
+                if (chiplet->attached)
+                    throw py::value_error(
+                        "the manual chiplet is attached already");
+                const mp64_chiplet_module made =
+                    megapad::chiplet::make_manual_module(chiplet);
+                if (!system.shared_chiplet.attach(port, made)) {
+                    made.destroy(made.self);
+                    throw py::index_error("the machine has no such port");
+                }
+            },
+            py::arg("port"),
+            py::arg("chiplet"))
+        .def(
+            "load_chiplet_module",
+            [](SystemState& system, int port, const std::string& path,
+               py::object config) {
+                const std::string text = config.is_none()
+                    ? std::string() : config.cast<std::string>();
+                mp64_chiplet_module made{};
+                std::string error;
+                if (!megapad::chiplet::load_module(
+                        path.c_str(),
+                        config.is_none() ? nullptr : text.c_str(),
+                        &made, &error))
+                    throw std::runtime_error(error);
+                if (!system.shared_chiplet.attach(port, made)) {
+                    made.destroy(made.self);
+                    throw py::index_error("the machine has no such port");
+                }
+            },
+            py::arg("port"),
+            py::arg("path"),
+            py::arg("config") = py::none())
+        .def(
+            "detach_chiplet",
+            [](SystemState& system, int port) {
+                if (!system.shared_chiplet.detach(port))
+                    throw py::index_error("the machine has no such port");
+            },
+            py::arg("port"))
+        .def(
+            "set_chiplet_budget",
+            [](SystemState& system, int port, uint32_t budget) {
+                if (!system.shared_chiplet.set_budget(port, budget))
+                    throw py::index_error("the machine has no such port");
+            },
+            py::arg("port"),
+            py::arg("budget"))
+        .def(
+            "_service_chiplet_ports",
+            [](SystemState& system, bool cores_all_asleep) {
+                return system.shared_chiplet.service(cores_all_asleep);
+            },
+            py::arg("cores_all_asleep") = false,
+            "Step every port's chiplet once, as a round boundary does.")
+        .def(
+            "chiplet_save",
+            [](SystemState& system) {
+                const std::vector<uint8_t> state =
+                    system.shared_chiplet.save();
+                return py::bytes(
+                    reinterpret_cast<const char*>(state.data()),
+                    state.size());
+            })
+        .def(
+            "chiplet_restore",
+            [](SystemState& system, const py::bytes& state) {
+                const std::string text = state;
+                return system.shared_chiplet.restore(
+                    std::vector<uint8_t>(text.begin(), text.end()));
+            },
+            py::arg("state"))
         .def_property_readonly(
             "mappings_sealed",
             [](const SystemState& system) {

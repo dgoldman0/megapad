@@ -2437,8 +2437,22 @@ class MegapadSystem:
             for i in range(4):
                 patched_write8(u64(addr + i), (val >> (8 * i)) & 0xFF)
 
+        def chiplet_access64(addr: int, write: bool, val: int = 0):
+            """One whole access to the chiplet window, or None elsewhere.
+
+            Its registers are 64 bits wide and take no byte access, so a
+            preflighted access goes to the native window in one piece.
+            """
+            if native_state is None or not MMIO_START <= addr < MMIO_END:
+                return None
+            return native_state._native_chiplet_access64(
+                addr - MMIO_START, write, val & 0xFFFF_FFFF_FFFF_FFFF)
+
         def patched_read64(addr: int) -> int:
             addr = preflight_wide_mmio(addr, 8, write=False)
+            value = chiplet_access64(addr, False)
+            if value is not None:
+                return value
             v = 0
             for i in range(8):
                 v |= patched_read8(u64(addr + i)) << (8 * i)
@@ -2446,6 +2460,9 @@ class MegapadSystem:
 
         def patched_write64(addr: int, val: int):
             addr = preflight_wide_mmio(addr, 8, write=True)
+            if chiplet_access64(addr, True, val) is not None:
+                native_state.icache_invalidate_span(addr, 8)
+                return
             for i in range(8):
                 patched_write8(u64(addr + i), (val >> (8 * i)) & 0xFF)
 
@@ -3002,6 +3019,49 @@ class MegapadSystem:
         """
         return self._native_system.idle_wake_delay_s()
 
+    # -----------------------------------------------------------------
+    #  Chiplets
+    # -----------------------------------------------------------------
+
+    def attach_chiplet(
+        self,
+        port: int,
+        module_path: str,
+        config: Optional[str] = None,
+        *,
+        budget: Optional[int] = None,
+    ) -> None:
+        """Attach a chiplet's model, loaded from a module library, to a port.
+
+        The library implements ``shared/accel/chiplet_module.h``. The guest
+        then finds the chiplet present, reads its identity, lends it memory
+        and releases it through the port's registers at MMIO ``0xE00``
+        (``docs/chiplet-link.md``). The chiplet works between scheduler
+        rounds, ``budget`` units of its own measure at a time.
+        """
+        with self._scheduler_lock:
+            self._reject_native_batch_reentry()
+            self._native_system.load_chiplet_module(
+                port, os.fspath(module_path), config)
+            if budget is not None:
+                self._native_system.set_chiplet_budget(port, budget)
+
+    def attach_test_chiplet(
+        self, port: int = 0, *, budget: Optional[int] = None
+    ) -> None:
+        """Attach the built-in test chiplet to a port."""
+        with self._scheduler_lock:
+            self._reject_native_batch_reentry()
+            self._native_system.attach_test_chiplet(port)
+            if budget is not None:
+                self._native_system.set_chiplet_budget(port, budget)
+
+    def detach_chiplet(self, port: int) -> None:
+        """Remove the chiplet from a port, which then reports none present."""
+        with self._scheduler_lock:
+            self._reject_native_batch_reentry()
+            self._native_system.detach_chiplet(port)
+
     def advance_idle_time(self, seconds: float) -> None:
         """Advance every device by ``seconds`` of the 100 MHz system clock
         while all cores sleep, then apply the IDL wake rule."""
@@ -3535,6 +3595,9 @@ class MegapadSystem:
             )
             if active_cores == 0:
                 dma_cycles = self._service_unbounded_native_dma_locked()
+                # With every core asleep the chiplets still step: a
+                # chiplet's doorbell is what wakes a sleeping core.
+                self._native_system._service_chiplet_ports(True)
                 if dma_cycles == 0:
                     self.bus.tick(1)
                 return max(dma_cycles, 1)
@@ -3586,6 +3649,9 @@ class MegapadSystem:
         # native WOTS/NIC beat.  Service it through the same weighted fabric
         # used by ordinary native batches before the next guest instruction.
         dma_cycles += self._service_unbounded_native_dma_locked()
+        # The chiplet ports step at this round boundary, as they do after
+        # each round of a native batch.
+        self._native_system._service_chiplet_ports(self.all_idle_or_halted)
 
         return max(total_cycles + dma_cycles, 1)
 
