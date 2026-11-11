@@ -77,7 +77,9 @@ def _native_extension():
 class HostedChipletPorts:
     """The hosted profile's chiplet ports, their window and their chiplets."""
 
-    __slots__ = ("_port_count", "_link", "_latch", "_latch_base")
+    __slots__ = (
+        "_port_count", "_link", "_latch", "_latch_base", "_mailbox_service",
+    )
 
     def __init__(self, port_count: int = 1) -> None:
         if isinstance(port_count, bool) or not isinstance(port_count, int):
@@ -91,6 +93,13 @@ class HostedChipletPorts:
         self._link = None
         self._latch = bytearray(8)
         self._latch_base: int | None = None
+        self._mailbox_service = HostedChipletMailbox(self)
+
+    @property
+    def mailbox_service(self) -> "HostedChipletMailbox":
+        """The MMIO service of the mailbox that serves these ports."""
+
+        return self._mailbox_service
 
     @property
     def port_count(self) -> int:

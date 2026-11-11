@@ -285,10 +285,9 @@ class OneCoreSysInfo:
 class OneCorePlatformMMIO:
     """Route each admitted one-core MMIO window to its sole service state."""
 
-    __slots__ = (
-        "aes", "audio", "chiplet", "entropy", "mailbox", "rtc", "sha3",
-        "sysinfo",
-    )
+    # Each slot is one of the constructor's arguments, so a platform can be
+    # rebuilt from its slots.
+    __slots__ = ("aes", "audio", "chiplet", "entropy", "rtc", "sha3", "sysinfo")
 
     def __init__(
         self,
@@ -324,9 +323,6 @@ class OneCorePlatformMMIO:
         # A profile without chiplet ports has neither their window nor the
         # mailbox that serves them.
         self.chiplet = chiplet
-        self.mailbox = (
-            None if chiplet is None else HostedChipletMailbox(chiplet)
-        )
 
     def preflight(self, offset: int, width: int, *, write: bool) -> None:
         self._service(offset, width, write=write).preflight(
@@ -375,7 +371,7 @@ class OneCorePlatformMMIO:
                 if CHIPLET_OFFSET <= offset < CHIPLET_LIMIT:
                     return self.chiplet
                 if MAILBOX_OFFSET <= offset < MAILBOX_LIMIT:
-                    return self.mailbox
+                    return self.chiplet.mailbox_service
         raise PlatformMMIOAccessError(
             "access is outside every admitted platform MMIO window",
             offset=offset,
