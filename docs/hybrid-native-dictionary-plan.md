@@ -61,6 +61,33 @@ to a later module profile requires its exact already-qualified callback ABI;
 callback availability alone never admits compiler words, arbitrary `EXECUTE`,
 source evaluation, or dictionary mutation from a machine frame.
 
+## Compiled modules: hybrid mode loads both forms
+
+Planned on 2026-11-11. Nothing in this section is built.
+
+A compiled build of the system's modules takes a token form: Forth whose
+names are already resolved and whose text is already split, which each
+backend compiles in its own way. The simulator, the emulator and a device
+load the same file through the same loader. Hybrid mode runs Forth
+semantically, so it loads the token form as the simulator does and needs no
+stage of this plan for it.
+
+Machine-code dictionary images are the second form. Akashic's
+`utils/binimg.f` defines one, used by its application builder and loader:
+the bytes the BIOS compiler emitted, with relocations, imports and exports.
+Such an image runs only where MP64 instructions execute, which today means
+the emulator and a device.
+
+Hybrid mode is to load either form. For a machine-code image that is stage
+D5. The image holds the BIOS call sequences and CREATE trampolines described
+under "Source facts", and its code works directly on the architectural data
+and return stacks. The routine runner behind D2 fixes the selectors and
+reaches memory only through a routine's declared buffers, so it cannot run
+such code, and D3 and D4 compile semantic definitions rather than load BIOS
+code. D5 therefore needs its own design before any of it is built: the
+native-authority ABI, and the mapping between an image's words and the
+semantic dictionary.
+
 ## Execution mapping and introspection
 
 Keep three identities distinct:
