@@ -340,6 +340,12 @@ def install_kdos_source_accelerators(
         )
         installed.append(spec.name)
 
+    if runtime.token_recorder is not None:
+        # A build is recording the token form of each source file.  The
+        # recorder takes the two walks back, so every line reaches the
+        # reference evaluator, where the record is made.
+        runtime.token_recorder.bind_walks()
+
     return SourceAccelerationReport(tuple(installed), tuple(skipped))
 
 
