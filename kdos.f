@@ -4773,12 +4773,12 @@ VARIABLE _PS-PROTECTIVE
 : PART-SCAN  ( bd volumes max workspace bytes -- count ior )
     _PART-LOCK ['] _PART-SCAN CATCH _PART-UNLOCK ?DUP IF THROW THEN ;
 
-\ The KDOS singleton is a raw compatibility/recovery binding.  Akashic VFS
-\ instances may bind other validated volume descriptors independently.
-CREATE SYSTEM-BD  /BLOCK-DEVICE ALLOT
-CREATE SYSTEM-RAW-VOLUME  /VOLUME ALLOT
+\ The KDOS singleton is a raw compatibility/recovery binding of the boot
+\ disk.  Akashic VFS instances bind other validated volumes independently.
+CREATE BOOT-BD  /BLOCK-DEVICE ALLOT
+CREATE BOOT-RAW-VOLUME  /VOLUME ALLOT
 VARIABLE FS-VOLUME
-SYSTEM-RAW-VOLUME FS-VOLUME !
+BOOT-RAW-VOLUME FS-VOLUME !
 
 \ Declared here so any stale storage completion can fail a loaded MP64FS
 \ closed.  The caches and the rest of MP64FS are declared below.
@@ -4786,14 +4786,14 @@ VARIABLE FS-OK
 0 FS-OK !
 
 : STORAGE-OPEN  ( -- ior )
-    SYSTEM-RAW-VOLUME VOL-CLOSE DROP
-    SYSTEM-BD BD-CLOSE DROP
-    SYSTEM-BD BD-OPEN ?DUP IF EXIT THEN
-    SYSTEM-BD SYSTEM-RAW-VOLUME VOL-RAW ?DUP IF
-        SYSTEM-BD BD-CLOSE DROP
+    BOOT-RAW-VOLUME VOL-CLOSE DROP
+    BOOT-BD BD-CLOSE DROP
+    BOOT-BD BD-OPEN ?DUP IF EXIT THEN
+    BOOT-BD BOOT-RAW-VOLUME VOL-RAW ?DUP IF
+        BOOT-BD BD-CLOSE DROP
         EXIT
     THEN
-    SYSTEM-RAW-VOLUME FS-VOLUME !
+    BOOT-RAW-VOLUME FS-VOLUME !
     0 ;
 
 : FS-VOLUME!  ( vol -- ior )

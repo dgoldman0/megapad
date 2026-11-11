@@ -40,13 +40,13 @@ FIXTURE = (
 FIRST_LINE = 4775
 LAST_LINE = 4925
 SLICE_SHA256 = (
-    "e1b7e0e3a9fbb419578e6d03680c07b771d16c24747e961d453f5e41ad0b23be"
+    "f0efe7f8d6e1d47dad2d0fd164b9697a7a93587a221cb5970755117e613f7487"
 )
-SLICE_GIT_BLOB = "255fc00752d77f039eb9038a89d4a1fbb548ffa1"
+SLICE_GIT_BLOB = "2afe01bc0fcd073a8d3e6aa8714d2b4e7ad70076"
 
 DEFINITIONS = (
-    b"SYSTEM-BD",
-    b"SYSTEM-RAW-VOLUME",
+    b"BOOT-BD",
+    b"BOOT-RAW-VOLUME",
     b"FS-VOLUME",
     b"FS-OK",
     b"STORAGE-OPEN",
@@ -77,7 +77,7 @@ DEFINITIONS = (
 
 def _verified_slice() -> bytes:
     source = FIXTURE.read_bytes()
-    assert len(source) == 4_726
+    assert len(source) == 4_708
     assert source.count(b"\n") == LAST_LINE - FIRST_LINE + 1
     assert hashlib.sha256(source).hexdigest() == SLICE_SHA256
     assert _git_blob_id(source) == SLICE_GIT_BLOB
@@ -126,8 +126,8 @@ def _patterned_image(sectors: int) -> bytes:
 
 def _system_objects(runtime: MegaForthRuntime) -> tuple[int, int]:
     return (
-        _execute(runtime, "SYSTEM-BD")[0],
-        _execute(runtime, "SYSTEM-RAW-VOLUME")[0],
+        _execute(runtime, "BOOT-BD")[0],
+        _execute(runtime, "BOOT-RAW-VOLUME")[0],
     )
 
 

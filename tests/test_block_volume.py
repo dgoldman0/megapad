@@ -338,7 +338,7 @@ class TestKDOSBlockVolume(_KDOSTestBase):
         text = self._run_kdos([
             ('77 STORAGE-OPEN ." [[STORAGE-OPEN-IOR]]" . '
              '." [[STORAGE-OPEN-SENTINEL]]" .'),
-            'SYSTEM-RAW-VOLUME VOL-CLOSE DROP SYSTEM-BD BD-CLOSE DROP',
+            'BOOT-RAW-VOLUME VOL-CLOSE DROP BOOT-BD BD-CLOSE DROP',
         ], storage_image=path)
         self.assertEqual(_marked_int(text, "[[STORAGE-OPEN-IOR]]"), 0)
         self.assertEqual(_marked_int(text, "[[STORAGE-OPEN-SENTINEL]]"), 77)

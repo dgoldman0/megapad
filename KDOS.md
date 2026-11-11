@@ -990,7 +990,7 @@ common stack effect `( bd volumes max workspace bytes -- count ior )` and
 require at least `PART-WORKSPACE-MIN` bytes of caller-owned scratch space.
 
 The singleton KDOS boot/recovery path deliberately rebinds `FS-VOLUME` to
-`SYSTEM-RAW-VOLUME` when `FS-LOAD` or `FORMAT` starts; buffer persistence and
+`BOOT-RAW-VOLUME` when `FS-LOAD` or `FORMAT` starts; buffer persistence and
 the file layer then route through that bounded raw object.  Akashic filesystem
 instances instead receive any validated raw, MBR, or GPT volume explicitly.
 The complete descriptor layouts, structured error fields, lifetime rules,

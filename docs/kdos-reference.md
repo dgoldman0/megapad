@@ -1193,7 +1193,7 @@ and 4,127 bytes, with SHA-256
 Load allocates the singleton bodies without explicitly clearing their extents;
 virgin hosted memory supplies the zeros required by their first-construction
 contract. It also creates zero-initialized diagnostic variables, points
-`FS-VOLUME` at the still-invalid `SYSTEM-RAW-VOLUME`, and explicitly clears
+`FS-VOLUME` at the still-invalid `BOOT-RAW-VOLUME`, and explicitly clears
 `FS-OK`, all without touching storage. Exact current lines 4868 through 5067 then add
 all 38 file-abstraction definitions through `FILES` in 200 lines and 6,799
 bytes, with SHA-256
@@ -1675,7 +1675,7 @@ selected volume:
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `STORAGE-OPEN` | `( -- ior )` | Destructively replace `SYSTEM-BD` and `SYSTEM-RAW-VOLUME` with a raw view of the current attachment. |
+| `STORAGE-OPEN` | `( -- ior )` | Destructively replace `BOOT-BD` and `BOOT-RAW-VOLUME` with a raw view of the current attachment. |
 | `FS-VOLUME!` | `( vol -- ior )` | Select a valid, current caller-owned volume without acquiring a reference; success clears `FS-OK`. |
 | `STORAGE-ENSURE` | `( -- ior )` | Validate the selected volume, opening the singleton only for an invalid selection whose cache marker is already clear. |
 | `_RAW-DISK-READ?` / `_RAW-DISK-WRITE?` | `( dma lba count -- flag )` | Checked raw-controller compatibility I/O with global result diagnostics. |

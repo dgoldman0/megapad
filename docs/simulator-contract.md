@@ -1779,7 +1779,7 @@ compatibility diagnostics, checked and aborting I/O wrappers, and the legacy
 Buffer sector helpers. Loading allocates singleton bodies without explicitly
 clearing their extents; virgin hosted memory supplies the descriptor-contract
 zeros in the qualified cold runtime. It creates zero-initialized diagnostic
-variables, points `FS-VOLUME` at still-invalid `SYSTEM-RAW-VOLUME`, and
+variables, points `FS-VOLUME` at still-invalid `BOOT-RAW-VOLUME`, and
 explicitly clears `FS-OK`, without opening media, transferring sectors,
 flushing, or printing.
 
@@ -3577,7 +3577,7 @@ a checked post-boot definition, allocation/free, CRC32, ring FIFO, and module
 listing. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
 457 core words and expects 1,519 KDOS publications and 1,968 unique
-bindings; it submits 6,817 lines (221,033 payload bytes, 227,850 CLI UART bytes).
+bindings; it submits 6,817 lines (221,013 payload bytes, 227,830 CLI UART bytes).
 
 The startup filesystem path is literal. `DISK?` false skips `FS-LOAD` and does
 not clear a stale true `FS-OK`. A successful load stores the exact lowercase

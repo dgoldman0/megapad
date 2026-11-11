@@ -163,7 +163,7 @@ turn an out-of-range request into an accepted one.
 
 ## Singleton compatibility binding
 
-`SYSTEM-BD` and `SYSTEM-RAW-VOLUME` are KDOS-global, runtime-local raw recovery
+`BOOT-BD` and `BOOT-RAW-VOLUME` are KDOS-global, runtime-local raw recovery
 singletons on the boot disk, unit 0. `FS-VOLUME` points either to that raw
 volume or to a caller-selected validated volume. This is a compatibility
 binding for ordinary KDOS file paths; it does not replace independently owned
