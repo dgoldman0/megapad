@@ -120,17 +120,19 @@ with a CSR write alone (`rtl/periph/mp64_mailbox.v`, `rtl/soc/mp64_soc.v`).
 
 A core's pending mask is indexed by ID and is 64 bits wide through that
 path, which covers the 16 cores and 48 ports. The 8-bit `MBOX_STATUS`
-register shows IDs 0 to 7. The microcores' bits are reserved in the mask for
-the day their launch comes to use the mailbox
+register shows IDs 0 to 7. The microcores are participants as the full
+cores are: a signal to one sets its bit and raises its IPI line, and a
+chiplet's signal raises its flag input too. A microcore reaches the mailbox
+through its registers, since the register path by CSR serves the full cores
 ([microcore-kernels-plan.md](microcore-kernels-plan.md)).
 
 A pending doorbell from a chiplet also drives the core's external-flag
 input, so a core waiting for an answer tests it with the external-flag
 branch, a test made inside the core, free of bus cycles and interrupt
-frames. The four flag inputs are tied to zero today and the branch tests
-them as one ([isa-reference.md](isa-reference.md)), so they take a single
-meaning: a chiplet has signalled this core. Microcores keep that branch
-(`rtl/core/mp64_cpu_micro.v`).
+frames. The branch tests the four flag inputs as one
+([isa-reference.md](isa-reference.md)), and the mailbox drives the first, so
+the flag has a single meaning: a chiplet has signalled this core. Microcores
+keep that branch (`rtl/core/mp64_cpu_micro.v`) and have the flag as well.
 
 Each chip hands work to the other as descriptors in queues in lent memory,
 each queue index written by one side only. Each direction has its queues, so
@@ -221,8 +223,9 @@ limit at the controller bound what a chiplet takes from Desk.
 
 - **MegaPad RTL:** the external-memory controller (chiplet ports as clients,
   their weights and limits, the address width), the mailbox (ports as
-  participants, the register path, a pending mask indexed by ID), the
-  external-flag wiring, System Info, and the new port bridge.
+  participants, the microcores beside them, the register path, a pending
+  mask indexed by ID), the external-flag wiring, System Info, and the new
+  port bridge.
 - **BIOS:** bringing the link up, and the doorbell interrupt.
 - **KDOS:** the system module for chiplets, and an allocator for lendable
   memory.
