@@ -1,4 +1,4 @@
-// Native source line walker for the KDOS loader overlays.
+// Native line walker for the KDOS loader overlays and for TOKEN-REPLAY.
 //
 // See docs/simulator-native-evaluator.md. The walker runs the loop of the
 // SOURCE-EVALUATE-CHECKED or _LD-WALK overlay. A line that the checked-line
@@ -7,6 +7,14 @@
 // handed back to Python whole, measured but not evaluated. Each line is
 // first evaluated as a dry run on a virtual data stack and an undo log of the
 // open definition, so a rejected line leaves no trace.
+//
+// What the interpreter does with a token it has found is stated once, in
+// dispose_word and dispose_number, and two token sources feed it: the text
+// of a source line (dry_run) and the records of a token stream
+// (dry_run_records). A record line is the records that follow a LINE or
+// LINES record; it is dry-run and committed or handed back whole in the same
+// way. The record source decodes only to find what it can take: it never
+// ends a replay or reports a stream, which stays with runtime.py's loop.
 #include "dictionary.h"
 
 #include <pybind11/stl.h>
@@ -33,7 +41,19 @@ constexpr Cell MAX_EVALUATE_DEPTH = 16;
 // reserves that much data-stack growth before a defining word.
 constexpr Cell CHECKED_LINE_STACK_RESERVE = 128 * 8;
 
-enum Protocol : int { PROTOCOL_SOURCE = 0, PROTOCOL_LOADER = 1 };
+enum Protocol : int { PROTOCOL_SOURCE = 0, PROTOCOL_LOADER = 1, PROTOCOL_RECORDS = 2 };
+
+// Token records, as bios.asm (w_token_replay) and shared/token_form.py
+// define them. A first byte below OP_IMPORT begins a two-byte slot number.
+constexpr uint8_t OP_IMPORT = 0xF0;
+constexpr uint8_t OP_NUM1 = 0xF1;
+constexpr uint8_t OP_NUM8 = 0xF4;
+constexpr uint8_t OP_TEXT = 0xF5;
+constexpr uint8_t OP_LINE = 0xF6;
+constexpr uint8_t OP_LINES = 0xF7;
+constexpr uint8_t OP_SKIPPED = 0xF8;
+constexpr uint8_t OP_DEFINED = 0xF9;
+constexpr uint8_t OP_END = 0xFF;
 
 enum Directive : uint8_t {
     D_NONE, D_COLON, D_SEMICOLON, D_IF, D_ELSE, D_THEN, D_BEGIN, D_UNTIL, D_AGAIN,
@@ -124,9 +144,13 @@ int64_t s64(Cell value) { return static_cast<int64_t>(value); }
 class VirtualStack {
 public:
     VirtualStack(NativeDictionary& dictionary, Cell floor, Cell empty, Cell pointer)
-        : dictionary_(dictionary), floor_(floor), empty_(empty), pointer_(pointer) {}
+        : dictionary_(dictionary), floor_(floor), empty_(empty), pointer_(pointer),
+          low_(pointer) {}
 
     Cell pointer() const { return pointer_; }
+    // The lowest the pointer has been: every cell the line has read or
+    // written lies from there up to the empty pointer.
+    Cell low() const { return low_; }
     Cell depth() const { return (empty_ - pointer_) / 8; }
     Cell capacity() const { return (empty_ - floor_) / 8; }
     Cell floor() const { return floor_; }
@@ -135,6 +159,7 @@ public:
     bool push(Cell value) {
         if (pointer_ <= floor_) return false;
         pointer_ -= 8;
+        if (pointer_ < low_) low_ = pointer_;
         set(pointer_, value);
         return true;
     }
@@ -186,6 +211,7 @@ private:
     Cell floor_;
     Cell empty_;
     Cell pointer_;
+    Cell low_;
     std::vector<std::pair<Cell, Cell>> writes_;
 };
 
@@ -351,6 +377,47 @@ struct Pending {
     std::shared_ptr<ColonBody> colon;
 };
 
+// The word one slot of a token stream is bound to.
+struct Slot {
+    uint32_t index;  // the word's record in the dictionary
+    uint64_t uid;    // and its identity
+    Cell xt;
+};
+
+// One TOKEN-REPLAY: its records, and the words its slots are bound to. The
+// slots are held here and nowhere else: Python's replay loop reads and binds
+// them through this object for the lines it runs itself.
+struct NativeTokenStream {
+    NativeTokenStream(const py::bytes& stream, Cell table_address, Cell table_slots)
+        : table(table_address), capacity(table_slots) {
+        char* data = nullptr;
+        Py_ssize_t size = 0;
+        if (PyBytes_AsStringAndSize(stream.ptr(), &data, &size) != 0)
+            throw py::error_already_set();
+        records.assign(reinterpret_cast<const uint8_t*>(data),
+                       reinterpret_cast<const uint8_t*>(data) + size);
+    }
+    size_t slot_count() const { return slots.size(); }
+    Cell slot_xt(size_t slot) const {
+        if (slot >= slots.size()) throw py::index_error("the slot is not bound");
+        return slots[slot].xt;
+    }
+
+    std::vector<uint8_t> records;
+    std::vector<Slot> slots;
+    Cell table;
+    Cell capacity;
+};
+
+// A slot that a record line binds, held back until the line commits.
+struct Binding {
+    long index;         // the word's record, unless the word is
+    bool defined_here;  // the definition this line publishes
+};
+
+// The input of a word that no TEXT record precedes.
+const uint8_t NO_TEXT[1] = {0};
+
 class NativeLineWalker {
 public:
     NativeLineWalker(py::object dictionary, const py::dict& directive_values,
@@ -366,7 +433,8 @@ public:
           bootstrap_base_(bootstrap_base),
           bank0_base_(bank0_base),
           bank0_limit_(bank0_limit) {
-        if (protocol != PROTOCOL_SOURCE && protocol != PROTOCOL_LOADER)
+        if (protocol != PROTOCOL_SOURCE && protocol != PROTOCOL_LOADER &&
+            protocol != PROTOCOL_RECORDS)
             throw py::value_error("unknown line walker protocol");
         const auto& names = directive_names();
         for (auto item : directive_values) {
@@ -406,6 +474,8 @@ public:
                    Cell frames_depth, const py::object& compiler, bool blocked,
                    int64_t allowance, Cell dictionary_base, Cell dictionary_limit,
                    const py::object& base_address) {
+        if (protocol_ == PROTOCOL_RECORDS)
+            throw py::value_error("a record walker has no line loop");
         has_base_cell_ = !base_address.is_none();
         base_cell_ = has_base_cell_ ? base_address.cast<Cell>() : 0;
         data_ = {data_state[0], data_state[1], data_state[2]};
@@ -453,8 +523,62 @@ public:
         return result();
     }
 
+    // Run a token stream's record lines until one needs Python. INDEX is a
+    // record's place in the stream and LINE the source line that the records
+    // before it reached; both come back advanced past the lines evaluated
+    // here. The record at the returned index is Python's to take: a line this
+    // walker rejects, END, or anything it cannot decode.
+    py::tuple replay(NativeTokenStream& stream, Cell index, Cell line,
+                     const std::array<Cell, 3>& data_state, const py::object& compiler,
+                     int64_t allowance, Cell dictionary_base, Cell dictionary_limit) {
+        if (protocol_ != PROTOCOL_RECORDS)
+            throw py::value_error("this walker reads source lines, not records");
+        has_base_cell_ = false;
+        base_cell_ = 0;
+        data_ = {data_state[0], data_state[1], data_state[2]};
+        blocked_ = false;
+        allowance_ = allowance;
+        dictionary_base_ = dictionary_base;
+        dictionary_limit_ = dictionary_limit;
+        steps_ = 0;
+        cleared_token_ = false;
+        import_compiler(compiler);
+        auto result = [&]() {
+            return py::make_tuple(index, line, data_.pointer, steps_, export_compiler());
+        };
+        try {
+            while (replay_line(stream, index, line)) {
+            }
+        } catch (...) {
+            // As for walk: the lines already committed stay committed.
+            error_state_ = result();
+            throw;
+        }
+        return result();
+    }
+
+    // Python bound a word to the stream's next slot in a line it ran itself.
+    void bind_slot(NativeTokenStream& stream, Cell xt) {
+        const long index = dictionary_.index_of_xt(xt);
+        if (index < 0) throw py::value_error("a token stream's slot needs a live word");
+        stream.slots.push_back(
+            Slot{static_cast<uint32_t>(index), dictionary_.record(index).uid, xt});
+    }
+
     // Lines evaluated natively and lines handed to Python, since creation.
     py::tuple stats() const { return py::make_tuple(native_lines_, python_lines_); }
+
+    // The same for record lines, and, while they are collected, why each
+    // rejected line was rejected.
+    py::tuple record_stats() const {
+        py::dict reasons;
+        for (const auto& [reason, count] : reasons_) reasons[py::str(reason)] = count;
+        return py::make_tuple(native_record_lines_, python_record_lines_, reasons);
+    }
+    void collect_reasons(bool collect) {
+        collect_ = collect;
+        if (!collect) reasons_.clear();
+    }
 
     py::object take_error_state() {
         py::object state = error_state_;
@@ -862,6 +986,60 @@ private:
 
     bool compiling() const { return compiler_.open && compiler_.compile_mode; }
 
+    // ---- What the interpreter does with a token it has found ---------------
+    //
+    // runtime._evaluate_found_word and _evaluate_found_number, and the
+    // BIOS's interp_found_word and interp_found_number. Both token sources
+    // come here, and neither is told apart.
+
+    // Look a name up as the interpreter would at this point of the line.
+    // False when the line's own definition, which is published only when the
+    // line commits, would be the word found.
+    bool find(const uint8_t* token, size_t length, const Pending& pending, long& index) const {
+        if (pending.active && same_name(pending.name, token, length)) return false;
+        index = lookup(token, length);
+        return true;
+    }
+
+    // A found word: a directive is applied, a word met while compiling is
+    // appended as a call unless it is immediate, and any other word runs.
+    // RAN says that it ran, which spends the input it was given.
+    bool dispose_word(const Record& word, Cursor& cursor, VirtualStack& stack,
+                      Pending& pending, Cell& steps, bool& ran) {
+        ran = true;
+        if (word.kind == KIND_DIRECTIVE) {
+            if (compiling() && !word.immediate) return false;
+            const Directive kind = directive_of(word);
+            // The line's definition is published when the line commits, so
+            // nothing that could find it, run it or define another may
+            // follow it: only comments do.
+            if (pending.active && kind != D_PAREN_COMMENT && kind != D_BACKSLASH_COMMENT)
+                return false;
+            return apply_directive(kind, cursor, stack, pending);
+        }
+        if (pending.active) return false;
+        if (compiling() && !word.immediate) {
+            append(IR_CALL, word.xt);
+            ran = false;
+            return true;
+        }
+        if (!execute(word, cursor, stack, pending)) return false;
+        ++steps;
+        return true;
+    }
+
+    // A number: a literal while compiling, and otherwise pushed.
+    bool dispose_number(Cell number, VirtualStack& stack, const Pending& pending) {
+        if (pending.active) return false;
+        if (compiling()) {
+            append(IR_LITERAL, number);
+            return true;
+        }
+        return stack.push(number);
+    }
+
+    // ---- Token source: the text of a source line ---------------------------
+
     bool dry_run(const uint8_t* line, size_t size, VirtualStack& stack, Pending& pending,
                  Cell& steps) {
         Cursor cursor{line, size};
@@ -872,34 +1050,266 @@ private:
                 cursor.skip_backslash_comment();
                 break;
             }
-            if (pending.active && same_name(pending.name, token, length)) {
-                // The fast path looks this token up after publication, so it
-                // would find the new definition instead of a comment word.
-                return false;
-            }
-            const long index = lookup(token, length);
+            // The fast path looks a token up after the line's definition is
+            // published, so it would find that definition, not a comment word.
+            long index = -1;
+            if (!find(token, length, pending, index)) return false;
             if (index >= 0) {
-                const Record& word = dictionary_.record(index);
-                if (word.kind == KIND_DIRECTIVE) {
-                    if (compiling() && !word.immediate) return false;
-                    if (!apply_directive(directive_of(word), start, cursor, stack, pending))
-                        return false;
-                    continue;
-                }
-                if (compiling() && !word.immediate) {
-                    append(IR_CALL, word.xt);
-                    continue;
-                }
-                if (!execute(word, cursor, stack, pending)) return false;
-                ++steps;
+                bool ran = false;
+                if (!dispose_word(dictionary_.record(index), cursor, stack, pending, steps, ran))
+                    return false;
                 continue;
             }
             Cell number = 0;
             if (!parse_number(token, length, numeric_base(), number)) return false;
-            if (compiling()) append(IR_LITERAL, number);
-            else if (!stack.push(number)) return false;
+            if (!dispose_number(number, stack, pending)) return false;
         }
         return true;
+    }
+
+    // ---- Token source: the records of a token stream -----------------------
+
+    // One record line: an optional LINE or LINES record and the records that
+    // follow it, up to the next LINE, LINES or END. False hands the record
+    // at INDEX to Python with nothing written.
+    bool replay_line(NativeTokenStream& stream, Cell& index, Cell& line) {
+        const std::vector<uint8_t>& records = stream.records;
+        const size_t size = records.size();
+        if (index >= size) return false;
+        size_t position = static_cast<size_t>(index);
+        Cell next_line = line;
+        bool marked = true;
+        if (records[position] == OP_LINE) {
+            next_line = line + 1;
+            position += 1;
+        } else if (records[position] == OP_LINES) {
+            if (position + 3 > size) return false;
+            next_line = line + (Cell{records[position + 1]} | (Cell{records[position + 2]} << 8));
+            position += 3;
+        } else if (records[position] == OP_END) {
+            return false;
+        } else {
+            // Records that no line record precedes: a stream may begin so.
+            marked = false;
+        }
+
+        VirtualStack stack(dictionary_, data_.floor, data_.empty, data_.pointer);
+        Snapshot snapshot = take_snapshot();
+        Pending pending;
+        Cell line_steps = 0;
+        size_t end = position;
+        bindings_.clear();
+        table_first_ = 0;
+        const bool taken =
+            dry_run_records(stream, position, end, stack, pending, line_steps) &&
+            record_line_commits(pending, stack, marked) &&
+            (allowance_ < 0 || static_cast<int64_t>(steps_ + line_steps) <= allowance_ ||
+             reject("the step budget"));
+        if (!taken) {
+            restore(snapshot);
+            bindings_.clear();
+            ++python_record_lines_;
+            if (collect_) ++reasons_[reason_];
+            return false;
+        }
+
+        // Commit. The reference writes EVAL-LINE first; the table cells, the
+        // stack cells and the definition do not overlap one another.
+        if (marked) dictionary_.write64(cells_[5], next_line);
+        stack.commit();
+        data_.pointer = stack.pointer();
+        if (pending.active) publish(pending);
+        if (pending.active && pending.kind == KIND_COLON) compiler_ = Compiler();
+        for (const Binding& binding : bindings_) {
+            const size_t record = binding.defined_here ? dictionary_.size() - 1
+                                                       : static_cast<size_t>(binding.index);
+            const Record& word = dictionary_.record(record);
+            dictionary_.write64(stream.table + stream.slots.size() * 8, word.header_address);
+            stream.slots.push_back(Slot{static_cast<uint32_t>(record), word.uid, word.xt});
+        }
+        bindings_.clear();
+        steps_ += line_steps;
+        index = end;
+        line = next_line;
+        ++native_record_lines_;
+        return true;
+    }
+
+    // Decode and dispose of one line's records. Whatever this cannot decode,
+    // bind or take is not judged here: the line goes to Python, whose loop
+    // decodes it again and alone reports a stream.
+    bool dry_run_records(NativeTokenStream& stream, size_t position, size_t& end,
+                         VirtualStack& stack, Pending& pending, Cell& steps) {
+        const uint8_t* records = stream.records.data();
+        const size_t size = stream.records.size();
+        Cursor text{NO_TEXT, 0};
+        bool unread = false;
+        while (true) {
+            if (position >= size) return reject("the stream ends with no END record");
+            const uint8_t opcode = records[position];
+            long index = -1;
+            if (opcode < OP_IMPORT) {
+                if (position + 2 > size) return reject("a record is cut short");
+                const size_t slot = (static_cast<size_t>(opcode) << 8) | records[position + 1];
+                position += 2;
+                if (!bound(stream, slot, index))
+                    return reject("a slot that is not bound, or is bound in its own line");
+            } else if (opcode == OP_IMPORT) {
+                if (position + 2 > size) return reject("a record is cut short");
+                const size_t count = records[position + 1];
+                const size_t limit = position + 2 + count;
+                if (count == 0 || limit > size) return reject("a record is cut short");
+                const uint8_t* name = records + position + 2;
+                position = limit;
+                if (!find(name, count, pending, index))
+                    return reject("follows a definition in its line");
+                if (index < 0) return reject("IMPORT of a name that is not defined");
+                if (!bind(stream, index, false)) return false;
+            } else if (opcode >= OP_NUM1 && opcode <= OP_NUM8) {
+                const size_t count = size_t{1} << (opcode - OP_NUM1);
+                if (position + 1 + count > size) return reject("a record is cut short");
+                Cell value = 0;
+                for (size_t i = 0; i < count; ++i)
+                    value |= Cell{records[position + 1 + i]} << (8 * i);
+                if (count < 8 && ((value >> (8 * count - 1)) & 1) != 0)
+                    value |= MASK << (8 * count);
+                position += 1 + count;
+                if (!dispose_number(value, stack, pending))
+                    return reject(pending.active ? "follows a definition in its line"
+                                                 : "a number the data stack has no room for");
+                continue;
+            } else if (opcode == OP_TEXT) {
+                if (position + 2 > size) return reject("a record is cut short");
+                const size_t limit = position + 2 + records[position + 1];
+                if (limit > size) return reject("a record is cut short");
+                text = Cursor{records + position + 2, limit - (position + 2)};
+                unread = true;
+                position = limit;
+                continue;
+            } else if (opcode == OP_LINE || opcode == OP_LINES || opcode == OP_END) {
+                // The input a TEXT record gives stays until a word runs, and
+                // only Python can carry it into the next line.
+                if (unread) return reject("a TEXT record that no word of its line read");
+                end = position;
+                return true;
+            } else if (opcode == OP_DEFINED) {
+                position += 1;
+                if (!pending.active && dictionary_.size() == 0)
+                    return reject("DEFINED with an empty dictionary");
+                if (!bind(stream, static_cast<long>(dictionary_.size()) - 1, pending.active))
+                    return false;
+                continue;
+            } else {
+                return reject(opcode == OP_SKIPPED ? "a SKIPPED record"
+                                                   : "an unknown opcode");
+            }
+            const Record& word = dictionary_.record(static_cast<size_t>(index));
+            const bool followed = pending.active;
+            bool ran = false;
+            if (!dispose_word(word, text, stack, pending, steps, ran))
+                return reject_word(word, followed);
+            if (ran) {
+                text = Cursor{NO_TEXT, 0};
+                unread = false;
+            }
+        }
+    }
+
+    // The word a slot is bound to, by an earlier line or earlier in this one.
+    bool bound(const NativeTokenStream& stream, size_t slot, long& index) const {
+        if (slot < stream.slots.size()) {
+            const Slot& entry = stream.slots[slot];
+            if (entry.index >= dictionary_.size() ||
+                dictionary_.record(entry.index).uid != entry.uid)
+                return false;
+            index = entry.index;
+            return true;
+        }
+        slot -= stream.slots.size();
+        // The line's own definition is not in the dictionary yet.
+        if (slot >= bindings_.size() || bindings_[slot].defined_here) return false;
+        index = bindings_[slot].index;
+        return true;
+    }
+
+    // Bind the stream's next slot for the line under dry run.
+    bool bind(const NativeTokenStream& stream, long index, bool defined_here) {
+        const Cell slot = stream.slots.size() + bindings_.size();
+        if (slot >= stream.capacity) return reject("a binding past the end of the table");
+        const Cell cell = stream.table + slot * 8;
+        if (!dictionary_.guest().contains(cell, 8))
+            return reject("a table cell outside ordinary memory");
+        if (bindings_.empty()) table_first_ = cell;
+        bindings_.push_back(Binding{index, defined_here});
+        return true;
+    }
+
+    // Whether a guest read would see a write that a record line still holds
+    // back: EVAL-LINE or a table cell, both of which the reference wrote
+    // before the word that reads.
+    bool deferred(Cell address, Cell length) const {
+        if (protocol_ != PROTOCOL_RECORDS) return false;
+        if (address < cells_[5] + 8 && cells_[5] < address + length) return true;
+        return !bindings_.empty() && address < table_first_ + bindings_.size() * 8 &&
+               table_first_ < address + length;
+    }
+
+    // Whether the line's writes may be made in this walker's order. The
+    // reference wrote EVAL-LINE before the line's words ran and each table
+    // cell as it was bound; here both are written when the line commits, the
+    // table cells last. That is the same unless one of them lies among the
+    // stack cells the line used or in the definition it publishes.
+    bool record_line_commits(const Pending& pending, const VirtualStack& stack, bool marked) {
+        const Cell low = stack.low();
+        const Cell empty = stack.empty();
+        if (marked && cells_[5] < empty && low < cells_[5] + 8)
+            return reject("EVAL-LINE in the data stack");
+        if (bindings_.empty()) return true;
+        const Cell table_end = table_first_ + bindings_.size() * 8;
+        if (table_first_ < empty && low < table_end)
+            return reject("a table cell in the data stack");
+        if (!pending.active) return true;
+        const Cell width = definition_size(pending.name.size(), pending.initial_body.size());
+        const Cell here = dictionary_.here();
+        if (here < table_end && table_first_ < here + width)
+            return reject("a table cell in the definition its line publishes");
+        return true;
+    }
+
+    bool reject(const char* why) {
+        if (collect_) reason_ = why;
+        return false;
+    }
+
+    // Why the disposal did not take WORD.
+    bool reject_word(const Record& word, bool followed) {
+        if (!collect_) return false;
+        const char* why = "cannot take";
+        if (followed) {
+            reason_ = "follows a definition in its line";
+            return false;
+        }
+        if (word.kind == KIND_DIRECTIVE) {
+            why = "the directive";
+        } else {
+            switch (word.kind) {
+            case KIND_COLON: why = "runs the colon word"; break;
+            case KIND_CREATED: why = "runs the DOES> word"; break;
+            case KIND_PRIMITIVE:
+                why = admitted(word) == P_NONE ? "runs the primitive"
+                                               : "a failed preflight of";
+                break;
+            case KIND_CONSTANT:
+            case KIND_VALUE:
+                why = "a failed preflight of";
+                break;
+            default: why = "runs the word"; break;
+            }
+        }
+        reason_ = why;
+        reason_ += ' ';
+        reason_ += word.name;
+        return false;
     }
 
     // An interpreted word: only kinds the checked-line rule admits.
@@ -911,7 +1321,7 @@ private:
         case KIND_VALUE: {
             const Cell body = word.body_address();
             // The fast path reads after its earlier pushes reached memory.
-            if (stack.holds(body, 8)) return false;
+            if (stack.holds(body, 8) || deferred(body, 8)) return false;
             if (!dictionary_.guest().contains(body, 8)) return false;
             return stack.push(dictionary_.read64(body));
         }
@@ -982,8 +1392,8 @@ private:
         return true;
     }
 
-    bool apply_directive(Directive kind, size_t token_start, Cursor& cursor,
-                         VirtualStack& stack, Pending& pending) {
+    bool apply_directive(Directive kind, Cursor& cursor, VirtualStack& stack,
+                         Pending& pending) {
         size_t start = 0, length = 0;
         switch (kind) {
         case D_PAREN_COMMENT:
@@ -1063,7 +1473,6 @@ private:
         default:
             break;
         }
-        (void)token_start;
         if (!compiling() || compiler_.temporary) return false;
         Frame* frame = nullptr;
         switch (kind) {
@@ -1424,6 +1833,15 @@ private:
     py::object error_state_ = py::none();
     uint64_t native_lines_ = 0;
     uint64_t python_lines_ = 0;
+
+    // Per record line: the slots it binds, and the first of their table cells.
+    std::vector<Binding> bindings_;
+    Cell table_first_ = 0;
+    uint64_t native_record_lines_ = 0;
+    uint64_t python_record_lines_ = 0;
+    bool collect_ = false;
+    std::string reason_;
+    std::unordered_map<std::string, uint64_t> reasons_;
 };
 
 }  // namespace
@@ -1441,10 +1859,22 @@ void register_bindings(py::module_& module) {
              py::arg("frames_depth"), py::arg("compiler"), py::arg("blocked"),
              py::arg("allowance"), py::arg("dictionary_base"), py::arg("dictionary_limit"),
              py::arg("base_address"))
+        .def("replay", &NativeLineWalker::replay, py::arg("stream"), py::arg("index"),
+             py::arg("line"), py::arg("data_state"), py::arg("compiler"),
+             py::arg("allowance"), py::arg("dictionary_base"), py::arg("dictionary_limit"))
+        .def("bind_slot", &NativeLineWalker::bind_slot, py::arg("stream"), py::arg("xt"))
         .def("take_error_state", &NativeLineWalker::take_error_state)
-        .def("stats", &NativeLineWalker::stats);
+        .def("stats", &NativeLineWalker::stats)
+        .def("record_stats", &NativeLineWalker::record_stats)
+        .def("collect_reasons", &NativeLineWalker::collect_reasons, py::arg("collect"));
+    py::class_<NativeTokenStream>(module, "NativeTokenStream")
+        .def(py::init<const py::bytes&, Cell, Cell>(), py::arg("records"), py::arg("table"),
+             py::arg("slots"))
+        .def("slot_count", &NativeTokenStream::slot_count)
+        .def("slot_xt", &NativeTokenStream::slot_xt, py::arg("slot"));
     module.attr("WALK_SOURCE") = py::int_(static_cast<int>(PROTOCOL_SOURCE));
     module.attr("WALK_LOADER") = py::int_(static_cast<int>(PROTOCOL_LOADER));
+    module.attr("WALK_RECORDS") = py::int_(static_cast<int>(PROTOCOL_RECORDS));
 }
 
 }  // namespace megapad::walker

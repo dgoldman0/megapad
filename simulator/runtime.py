@@ -15,7 +15,7 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Callable, Iterator, NoReturn, TypeAlias, get_args
+from typing import Any, Callable, Iterator, NoReturn, TypeAlias, get_args
 
 from shared.cells import CELL_BYTES, MASK64, s64, u64
 from shared.crypto_caps import (
@@ -524,6 +524,23 @@ class _BiosEvaluationFrame:
 
 
 @dataclass(slots=True)
+class _TokenStream:
+    """One TOKEN-REPLAY: its records and the replay's place in them."""
+
+    records: bytes
+    table: int
+    slots: int
+    # The dictionary's unlink count when the replay began.
+    unlinks: int
+    # The words bound to the stream's slots, in slot order: a list, or the
+    # native stream's view of them (simulator/native_walker.py).
+    words: Any
+    # The next record, and the source line the records before it reached.
+    index: int = 0
+    line: int = 0
+
+
+@dataclass(slots=True)
 class _BiosEvaluatorState:
     """Runtime-owned state behind the mutable semantic BIOS evaluator ABI."""
 
@@ -946,6 +963,10 @@ class MegaForthRuntime:
         # A build may record what the interpreter does with each source
         # file, to write the file's token form (simulator/token_recorder.py).
         self.token_recorder = None
+        # The native line walker's binding to TOKEN-REPLAY, made at the first
+        # replay when the dictionary is the native one.
+        self._native_token_walker: Any = None
+        self._native_token_walker_sought = False
         # How often DICT-ROLLBACK and LATEST! have taken words out of the
         # dictionary.  A token replay ends when this moves under it.
         self._dictionary_unlinks = 0
@@ -1801,146 +1822,211 @@ class MegaForthRuntime:
         table: int,
         slots: int,
     ) -> None:
-        """Run the records of one stream; returns when it ends or fails."""
+        """Run the records of one stream; returns when it ends or fails.
 
-        def fail(status: int, message: bytes) -> None:
-            evaluator.status_cell.write(status)
-            evaluator.column_cell.write(0)
-            evaluator.token_length = 0
-            self.write_uart_bytes(message)
-
-        def malformed() -> None:
-            fail(6, b"token stream is malformed\n")
-
-        def mismatch() -> None:
-            fail(7, b"token stream does not match this system\n")
+        ``_run_token_records`` is the replay.  Under the native backend the
+        line walker evaluates the record lines it can take, and every other
+        line, the stream's end and every failure stay with that loop
+        (docs/simulator-native-evaluator.md).
+        """
 
         if u64(address + length) < address:
-            malformed()
+            self._fail_token_stream(evaluator, 6)
             return
-        stream = self.memory.read_bytes(address, length)
-        size = len(stream)
-        words: list[Word] = []
-        unlinks = self._dictionary_unlinks
-        line = 0
-        index = 0
+        records = bytes(self.memory.read_bytes(address, length))
+        walker = self._token_walker()
+        stream = _TokenStream(
+            records,
+            table,
+            slots,
+            self._dictionary_unlinks,
+            [] if walker is None else walker.open(records, table, slots),
+        )
+        if walker is None:
+            self._run_token_records(evaluator, state, empty, stream)
+            return
         while True:
-            if index >= size:
-                malformed()
-                return
-            opcode = stream[index]
-            if opcode < 0xF0:
-                if index + 2 > size:
-                    malformed()
-                    return
-                slot = (opcode << 8) | stream[index + 1]
-                index += 2
-                if slot >= len(words):
-                    malformed()
-                    return
-                word = words[slot]
-            elif opcode == 0xF0:
-                if index + 2 > size:
-                    malformed()
-                    return
-                count = stream[index + 1]
-                limit = index + 2 + count
-                if count == 0 or limit > size:
-                    malformed()
-                    return
-                name = stream[index + 2 : limit]
-                index = limit
-                if len(words) >= slots:
-                    malformed()
-                    return
-                try:
-                    found = self.dictionary.find(name)
-                except ValueError:
-                    found = None
-                if found is None:
-                    raise _UndefinedWord(name, state.cursor.location)
-                self.memory.write64(
-                    u64(table + len(words) * CELL_BYTES),
-                    found.header_address,
-                )
-                words.append(found)
-                word = found
-            elif opcode in _TOKEN_NUMBER_BYTES:
-                count = _TOKEN_NUMBER_BYTES[opcode]
-                limit = index + 1 + count
-                if limit > size:
-                    malformed()
-                    return
-                value = int.from_bytes(
-                    stream[index + 1 : limit], "little", signed=True
-                )
-                index = limit
-                self._evaluate_found_number(u64(value), state)
-                continue
-            elif opcode == 0xF5:
-                if index + 2 > size:
-                    malformed()
-                    return
-                limit = index + 2 + stream[index + 1]
-                if limit > size:
-                    malformed()
-                    return
-                state.cursor = SourceCursor(
-                    stream[index + 2 : limit],
-                    source_name="<TOKEN-REPLAY>",
-                )
-                index = limit
-                continue
-            elif opcode == 0xF6:
-                index += 1
-                line += 1
-                evaluator.line_cell.write(line)
-                continue
-            elif opcode == 0xF7:
-                if index + 3 > size:
-                    malformed()
-                    return
-                line += int.from_bytes(stream[index + 1 : index + 3], "little")
-                index += 3
-                evaluator.line_cell.write(line)
-                continue
-            elif opcode == 0xF9:
-                index += 1
-                defined = self.dictionary.latest_word
-                if len(words) >= slots or defined is None:
-                    malformed()
-                    return
-                self.memory.write64(
-                    u64(table + len(words) * CELL_BYTES),
-                    defined.header_address,
-                )
-                words.append(defined)
-                continue
-            elif opcode == 0xFF:
-                return
-            elif opcode == 0xF8:
-                mismatch()
-                return
-            else:
-                malformed()
+            walker.replay(stream, state, empty)
+            if not self._run_token_records(
+                evaluator, state, empty, stream, one_line=True
+            ):
                 return
 
-            if not self._evaluate_found_word(word, state):
-                continue
-            # The word ran.  Whatever input it was given is spent.
-            state.cursor = empty
-            if evaluator.status_cell.read() != 0:
-                return
-            if self._dictionary_unlinks != unlinks:
-                mismatch()
-                return
-            if state.conditional_skip is not None:
-                if index < size and stream[index] == 0xF8:
+    def _token_walker(self) -> Any:
+        """The native line walker's binding to TOKEN-REPLAY, or None."""
+
+        if not self._native_token_walker_sought:
+            self._native_token_walker_sought = True
+            from simulator.native_dictionary import NativeDictionary
+
+            if isinstance(self.dictionary, NativeDictionary):
+                from simulator.native_walker import NativeTokenWalker
+
+                self._native_token_walker = NativeTokenWalker(self)
+        return self._native_token_walker
+
+    def _fail_token_stream(
+        self,
+        evaluator: _BiosEvaluatorState,
+        status: int,
+    ) -> None:
+        """End a replay: the stream is malformed (6) or was recorded on
+        another system (7)."""
+
+        evaluator.status_cell.write(status)
+        evaluator.column_cell.write(0)
+        evaluator.token_length = 0
+        self.write_uart_bytes(
+            b"token stream is malformed\n"
+            if status == 6
+            else b"token stream does not match this system\n"
+        )
+
+    def _run_token_records(
+        self,
+        evaluator: _BiosEvaluatorState,
+        state: _EvaluationState,
+        empty: SourceCursor,
+        stream: _TokenStream,
+        *,
+        one_line: bool = False,
+    ) -> bool:
+        """Replay STREAM's records from its place: to the stream's end, or
+        with ONE_LINE to the next line record.  True when records remain.
+
+        This loop alone judges a stream.  It ends a replay at END, with
+        status 1 for a name that is not defined, 6 for a malformed stream and
+        7 for one that does not match this system, and it alone checks the
+        slot bounds, the skips against the record and the dictionary's unlink
+        count.
+        """
+
+        def malformed() -> bool:
+            self._fail_token_stream(evaluator, 6)
+            return False
+
+        def mismatch() -> bool:
+            self._fail_token_stream(evaluator, 7)
+            return False
+
+        records = stream.records
+        size = len(records)
+        words = stream.words
+        table = stream.table
+        slots = stream.slots
+        unlinks = stream.unlinks
+        index = stream.index
+        line = stream.line
+        first = True
+        try:
+            while True:
+                if index >= size:
+                    return malformed()
+                opcode = records[index]
+                if one_line and not first and (opcode == 0xF6 or opcode == 0xF7):
+                    return True
+                first = False
+                if opcode < 0xF0:
+                    if index + 2 > size:
+                        return malformed()
+                    slot = (opcode << 8) | records[index + 1]
+                    index += 2
+                    if slot >= len(words):
+                        return malformed()
+                    word = words[slot]
+                elif opcode == 0xF0:
+                    if index + 2 > size:
+                        return malformed()
+                    count = records[index + 1]
+                    limit = index + 2 + count
+                    if count == 0 or limit > size:
+                        return malformed()
+                    name = records[index + 2 : limit]
+                    index = limit
+                    if len(words) >= slots:
+                        return malformed()
+                    try:
+                        found = self.dictionary.find(name)
+                    except ValueError:
+                        found = None
+                    if found is None:
+                        raise _UndefinedWord(name, state.cursor.location)
+                    self.memory.write64(
+                        u64(table + len(words) * CELL_BYTES),
+                        found.header_address,
+                    )
+                    words.append(found)
+                    word = found
+                elif opcode in _TOKEN_NUMBER_BYTES:
+                    count = _TOKEN_NUMBER_BYTES[opcode]
+                    limit = index + 1 + count
+                    if limit > size:
+                        return malformed()
+                    value = int.from_bytes(
+                        records[index + 1 : limit], "little", signed=True
+                    )
+                    index = limit
+                    self._evaluate_found_number(u64(value), state)
+                    continue
+                elif opcode == 0xF5:
+                    if index + 2 > size:
+                        return malformed()
+                    limit = index + 2 + records[index + 1]
+                    if limit > size:
+                        return malformed()
+                    state.cursor = SourceCursor(
+                        records[index + 2 : limit],
+                        source_name="<TOKEN-REPLAY>",
+                    )
+                    index = limit
+                    continue
+                elif opcode == 0xF6:
                     index += 1
-                    state.conditional_skip = None
+                    line += 1
+                    evaluator.line_cell.write(line)
+                    continue
+                elif opcode == 0xF7:
+                    if index + 3 > size:
+                        return malformed()
+                    line += int.from_bytes(records[index + 1 : index + 3], "little")
+                    index += 3
+                    evaluator.line_cell.write(line)
+                    continue
+                elif opcode == 0xF9:
+                    index += 1
+                    defined = self.dictionary.latest_word
+                    if len(words) >= slots or defined is None:
+                        return malformed()
+                    self.memory.write64(
+                        u64(table + len(words) * CELL_BYTES),
+                        defined.header_address,
+                    )
+                    words.append(defined)
+                    continue
+                elif opcode == 0xFF:
+                    return False
+                elif opcode == 0xF8:
+                    return mismatch()
                 else:
-                    mismatch()
-                    return
+                    return malformed()
+
+                if not self._evaluate_found_word(word, state):
+                    continue
+                # The word ran.  Whatever input it was given is spent.
+                state.cursor = empty
+                if evaluator.status_cell.read() != 0:
+                    return False
+                if self._dictionary_unlinks != unlinks:
+                    return mismatch()
+                if state.conditional_skip is not None:
+                    if index < size and records[index] == 0xF8:
+                        index += 1
+                        state.conditional_skip = None
+                    else:
+                        return mismatch()
+        finally:
+            stream.index = index
+            stream.line = line
 
     def _capture_bios_undefined(
         self,

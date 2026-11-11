@@ -347,6 +347,24 @@ for the lines already committed. `compiler` crosses the boundary as
 comes back with the name token's column after the location. `stats()` gives
 the lines evaluated natively and handed back.
 
+A walker made with `WALK_RECORDS` has no line loop. It takes the record
+lines of token streams for `TOKEN-REPLAY`: `cells[5]` is the address of
+`EVAL-LINE`, and the other cells and the two XTs are unused.
+`NativeTokenStream(records, table, slots)` holds one stream's records and the
+words its slots are bound to, and holds them alone: `slot_count()` and
+`slot_xt(slot)` read the bindings, and the walker's `bind_slot(stream, xt)`
+adds one that Python's replay loop made. `replay(stream, index, line,
+data_state, compiler, allowance, dictionary_base, dictionary_limit)`
+evaluates record lines from the record at `index` until one needs Python and
+returns `(index, line, data_pointer, steps, compiler)`. The record at the
+returned index is the loop's to take, whether a line the walker rejected,
+END, or a record it cannot decode, and nothing of it has been written. The
+caller settles the data-stack pointer and the steps and takes back the open
+definition as after `walk`; `take_error_state()` gives the same tuple after
+an exception. `record_stats()` gives the record lines evaluated natively,
+the record lines handed back and, once `collect_reasons(True)` has been
+called, how many lines were handed back for each reason.
+
 ## Tile words
 
 `run` takes an optional `tile_state = (mode, source0, source1, destination)`

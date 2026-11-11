@@ -1,10 +1,14 @@
-"""Drive a KDOS loader overlay's line loop through the native line walker.
+"""Drive a KDOS loader overlay's line loop, and ``TOKEN-REPLAY``'s record
+lines, through the native line walker.
 
 ``_megaforth_native.NativeLineWalker`` runs the loop of the
 ``SOURCE-EVALUATE-CHECKED`` or ``_LD-WALK`` overlay.  It evaluates each line
 the checked-line rule admits, with every guest-visible effect of the Python
 fast path, and stops at a line it does not admit so the overlay can evaluate
-that line on its ordinary path.  See ``docs/simulator-native-evaluator.md``.
+that line on its ordinary path.  For ``TOKEN-REPLAY`` it evaluates the record
+lines of a token stream in the same way and stops at one it cannot take, so
+that the runtime's replay loop runs that line.  See
+``docs/simulator-native-evaluator.md``.
 
 The open definition crosses this boundary in both directions: the walker
 takes the evaluator's compiler when it starts and gives back the one it holds
@@ -150,7 +154,6 @@ class NativeSourceWalker:
         """Whether native lines can reproduce the fast path at all now."""
 
         runtime = self._runtime
-        compiler = compiler_state.compiler
         overlays = runtime._colon_accelerators
         checked = overlays.get(self._evaluate_checked.xt)
         if checked is None or checked.word is not self._evaluate_checked:
@@ -159,24 +162,7 @@ class NativeSourceWalker:
             translator = overlays.get(self._status_throw.xt)
             if translator is None or translator.word is not self._status_throw:
                 return False
-        return (
-            compiler_state.conditional_skip is None
-            and (
-                compiler is None
-                or not (compiler.temporary or compiler.anonymous)
-            )
-            and runtime._suspended_execution is None
-            and type(context.data) is DataStack
-            and type(context.returns) is ReturnStack
-            and context.data._memory is runtime.memory
-            and context.returns._memory is runtime.memory
-            and type(runtime.diagnostics) is HostedDiagnosticsService
-            and type(runtime.timer) is HostedTimerService
-            and type(meter) is _StepMeter
-            and getattr(meter._on_tick, "__self__", None) is runtime
-            and getattr(meter._on_tick, "__func__", None)
-            is MegaForthRuntime._account_semantic_step
-        )
+        return _state_admits(runtime, context, meter, compiler_state)
 
     def _settle(self, result, context, meter, blocked: bool) -> Any:
         (
@@ -200,6 +186,187 @@ class NativeSourceWalker:
         if outcome == 2:
             return WALK_ITERATION
         return current, evaluated
+
+
+def _state_admits(runtime, context, meter, compiler_state) -> bool:
+    """Whether the walker can take lines in the evaluator's present state:
+    the stacks, clocks and meter are the ones its settlement assumes, and no
+    definition or skip is open that it does not hold."""
+
+    compiler = compiler_state.compiler
+    return (
+        compiler_state.conditional_skip is None
+        and (
+            compiler is None
+            or not (compiler.temporary or compiler.anonymous)
+        )
+        and runtime._suspended_execution is None
+        and type(context.data) is DataStack
+        and type(context.returns) is ReturnStack
+        and context.data._memory is runtime.memory
+        and context.returns._memory is runtime.memory
+        and type(runtime.diagnostics) is HostedDiagnosticsService
+        and type(runtime.timer) is HostedTimerService
+        and type(meter) is _StepMeter
+        and getattr(meter._on_tick, "__self__", None) is runtime
+        and getattr(meter._on_tick, "__func__", None)
+        is MegaForthRuntime._account_semantic_step
+    )
+
+
+class _NativeSlots:
+    """The words a native token stream's slots are bound to, as the list the
+    runtime's replay loop keeps.
+
+    The native stream holds the bindings.  A word Python bound is also kept
+    here as it was found.  A word the walker bound is looked up by its XT
+    when Python first uses its slot: it is still the live definition then,
+    because the walker binds no slot while a temporary definition is open,
+    and every other removal from the dictionary ends the replay.
+    """
+
+    __slots__ = ("native", "_walker", "_dictionary", "_words")
+
+    def __init__(self, walker, native, dictionary) -> None:
+        self.native = native
+        self._walker = walker
+        self._dictionary = dictionary
+        self._words: dict[int, Word] = {}
+
+    def __len__(self) -> int:
+        return self.native.slot_count()
+
+    def __getitem__(self, slot: int) -> Word:
+        word = self._words.get(slot)
+        if word is None:
+            word = self._dictionary.live_word(self.native.slot_xt(slot))
+            if word is None:
+                raise AssertionError("a token stream's slot lost its word")
+            self._words[slot] = word
+        return word
+
+    def append(self, word: Word) -> None:
+        self._words[self.native.slot_count()] = word
+        self._walker.bind_slot(self.native, word.xt)
+
+
+class NativeTokenWalker:
+    """A runtime's binding of ``TOKEN-REPLAY`` to the native line walker."""
+
+    def __init__(self, runtime: MegaForthRuntime) -> None:
+        from simulator.source_acceleration import _checked_line_primitives
+
+        dictionary = runtime.dictionary
+        if not isinstance(dictionary, NativeDictionary):
+            raise TypeError("the native line walker needs the native dictionary")
+        import _megaforth_native as extension
+
+        evaluator = runtime._require_bios_evaluator()
+        bank0 = runtime._bank0
+        interpret_primitives, defining_primitives = _checked_line_primitives(runtime)
+        self._runtime = runtime
+        self._evaluator = evaluator
+        self._extension = extension
+        # Record lines Python ran because the evaluator's state barred the
+        # walker, which never saw them.
+        self.barred = 0
+        self._native = extension.NativeLineWalker(
+            dictionary.native,
+            {
+                kind.name: kind.value
+                for kind in DirectiveKind
+                if kind is not DirectiveKind.NONAME
+            },
+            [
+                (word.xt, word.name.decode("ascii"))
+                for word in (*interpret_primitives, *defining_primitives)
+            ],
+            extension.WALK_RECORDS,
+            # A record line writes one walker cell: EVAL-LINE.
+            (0, 0, 0, 0, 0, evaluator.line_address),
+            (
+                evaluator.status_address,
+                evaluator.column_address,
+                evaluator.depth_address,
+                evaluator.throw_address,
+            ),
+            0,
+            0,
+            runtime._bootstrap_numeric_base,
+            bank0.base,
+            bank0.limit,
+        )
+
+    def open(self, records: bytes, table: int, slots: int) -> _NativeSlots:
+        """Begin one stream: the words its slots will be bound to."""
+
+        return _NativeSlots(
+            self._native,
+            self._extension.NativeTokenStream(records, table, slots),
+            self._runtime.dictionary,
+        )
+
+    def replay(self, stream, state, empty) -> None:
+        """Evaluate STREAM's record lines natively until one needs Python.
+
+        Afterwards the record at ``stream.index`` is the replay loop's to
+        take: a line the walker rejects, END, or a record it cannot decode.
+        """
+
+        runtime = self._runtime
+        context = state.context
+        meter = state.meter
+        compiler_state = self._evaluator.compiler_state
+        if state.cursor is not empty or not _state_admits(
+            runtime, context, meter, compiler_state
+        ):
+            self.barred += 1
+            return
+        compiler = compiler_state.compiler
+        data = context.data
+        allowance = -1 if meter.budget is None else meter.budget - meter.steps
+        try:
+            result = self._native.replay(
+                stream.words.native,
+                stream.index,
+                stream.line,
+                (data._floor, data._empty_pointer, data._pointer),
+                None if compiler is None else _export_compiler(compiler),
+                allowance,
+                runtime._dictionary_base,
+                runtime._dictionary_limit,
+            )
+        except BaseException:
+            settled = self._native.take_error_state()
+            if settled is not None:
+                self._settle(settled, stream, context, meter)
+            raise
+        self._settle(result, stream, context, meter)
+
+    def stats(self) -> tuple[int, int, int, dict[str, int]]:
+        """Record lines evaluated natively, record lines the walker handed
+        to Python, lines it was barred from, and, while reasons are
+        collected, why each line was handed back."""
+
+        native, python, reasons = self._native.record_stats()
+        return native, python, self.barred, dict(reasons)
+
+    def collect_reasons(self, collect: bool = True) -> None:
+        self._native.collect_reasons(collect)
+
+    def _settle(self, result, stream, context, meter) -> None:
+        index, line, data_pointer, steps, compiler = result
+        stream.index = index
+        stream.line = line
+        context.data._pointer = data_pointer
+        if steps:
+            # Batched exactly as after a native execution interval.
+            meter.steps += steps
+            self._runtime.diagnostics.account_work_many(steps)
+            self._runtime.timer.advance_by(steps)
+        self._evaluator.compiler_state.compiler = _import_compiler(
+            compiler, "<TOKEN-REPLAY>"
+        )
 
 
 def _export_compiler(compiler: _Compiler) -> tuple:
@@ -238,7 +405,10 @@ def _export_compiler(compiler: _Compiler) -> tuple:
     )
 
 
-def _import_compiler(state: tuple | None) -> _Compiler | None:
+def _import_compiler(
+    state: tuple | None,
+    source_name: str = "<EVALUATE>",
+) -> _Compiler | None:
     if state is None:
         return None
     name, location, column, compile_mode, temporary, operations, controls, pool = state
@@ -246,8 +416,9 @@ def _import_compiler(state: tuple | None) -> _Compiler | None:
         raise AssertionError("the native walker never holds a temporary compiler")
     if location is None:
         # A definition the walker opened: its name token's place in the
-        # BIOS EVALUATE input, which is always one-line "<EVALUATE>" source.
-        location = SourceLocation("<EVALUATE>", column, 1, column)
+        # input, which is always one line, the BIOS EVALUATE input
+        # ("<EVALUATE>") or a TEXT record ("<TOKEN-REPLAY>").
+        location = SourceLocation(source_name, column, 1, column)
     frames: list = []
     for kind, a, b, flag, question, items, case_ref in controls:
         if kind == _FRAME_IF:
@@ -272,4 +443,4 @@ def _import_compiler(state: tuple | None) -> _Compiler | None:
     )
 
 
-__all__ = ["NativeSourceWalker"]
+__all__ = ["NativeSourceWalker", "NativeTokenWalker"]
