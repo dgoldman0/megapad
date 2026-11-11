@@ -78,15 +78,18 @@ the bytes the BIOS compiler emitted, with relocations, imports and exports.
 Such an image runs only where MP64 instructions execute, which today means
 the emulator and a device.
 
-Hybrid mode is to load either form. For a machine-code image that is stage
-D5. The image holds the BIOS call sequences and CREATE trampolines described
-under "Source facts", and its code works directly on the architectural data
-and return stacks. The routine runner behind D2 fixes the selectors and
-reaches memory only through a routine's declared buffers, so it cannot run
-such code, and D3 and D4 compile semantic definitions rather than load BIOS
-code. D5 therefore needs its own design before any of it is built: the
-native-authority ABI, and the mapping between an image's words and the
-semantic dictionary.
+Hybrid mode is to load either form. No stage of this plan loads a
+machine-code image into a session whose dictionary is semantic. The image
+holds the BIOS call sequences and CREATE trampolines described under "Source
+facts", and its code works directly on the architectural data and return
+stacks. The routine runner behind D2 fixes the selectors and reaches memory
+only through a routine's declared buffers and its own return-stack frames,
+so it cannot run such code, and D3 and D4 compile semantic definitions rather
+than load BIOS code. D5 runs such an image by making a native image the
+authority for the whole session. It needs its own design before any of it is
+built: the native-authority ABI, and the mapping between the native image's
+state and the semantic engine's. Whether a single image should instead run
+inside a semantic session, beside semantic words, is undecided.
 
 ## Execution mapping and introspection
 
