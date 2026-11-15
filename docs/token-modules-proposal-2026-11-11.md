@@ -138,8 +138,10 @@ the builder gains no reader of Forth of its own. A file is the buffer one
 walk of KDOS's loader or of its checked source evaluator covers. The
 recorder learns where a walk begins from a hook on `_LD-WALK` and
 `SOURCE-EVALUATE-CHECKED`, and that it ended cleanly from
-`EVALUATE-FINISH`. While it records, every line goes through
-the simulator's reference evaluator and the native line walker stands aside.
+`EVALUATE-FINISH`. While it records, the simulator's native line walker
+still evaluates the lines it admits and reports what it did with their
+tokens, and the reference evaluator records the lines it runs itself
+([simulator-native-evaluator.md](simulator-native-evaluator.md#the-recorders-tap)).
 
 The one boot gives every file's token form, keyed by the SHA-256 of its
 text. The builder then writes the image with each file in that form, built
