@@ -147,8 +147,8 @@ The one boot gives every file's token form, keyed by the SHA-256 of its
 text. The builder then writes the image with each file in that form, built
 for the system the image boots
 ([When a token file is used](#when-a-token-file-is-used)). A linked Desktop
-built with `--token-modules` takes about 35 seconds and one with
-the system volume about 64, where the source builds take two
+built with `--token-modules` takes about 10 seconds and one with
+the system volume about 23, where the source builds take two
 seconds.
 
 **A machine must also build them.** The System Practice, the developer one
@@ -579,8 +579,9 @@ takes 8.9 to 9.9 seconds from token files, where source takes 11.6 to 13.2.
 The guest does less work from token forms, 56.9 million semantic steps
 against 69.4 million with the system volume.
 [The simulator's host time](#the-simulators-host-time) has the rounds. A
-token build is not faster yet; the recorder's tap is among
-[what remains](#what-remains).
+token build keeps the walker too, through the recorder's tap, and takes
+about 10 seconds linked and 23 with the system volume
+([The build](#the-build)).
 
 ### Section 9 of the simulator contract
 
@@ -838,11 +839,16 @@ loads, came to 59,431 slots, 475 KB in all and about 9 KB for a chunk.
 
 ### The build
 
-A linked Desktop with `--token-modules` built in 35 seconds and
-one with the system volume in 64, or in 60 with the source kept,
-against two seconds for the source builds. Nearly all of it is the
-recording boot, which evaluates every line on the simulator's reference
-path.
+A linked Desktop with `--token-modules` builds in 9 to 10 seconds and
+one with the system volume in 21 to 24, against two seconds for the
+source builds. The recording boot is most of a build: about 4 seconds
+linked and 17 to 19 with the system volume, where the same images boot
+with no recorder in 3 seconds and in 10 to 12
+([simulator-native-evaluator.md](simulator-native-evaluator.md#exactness-of-a-native-recording)
+has the runs, and what of the difference is not yet explained). Before
+the recorder's tap the recording boot evaluated every line on the
+simulator's reference path, and the same builds took 28 to 31 and 54 to
+60 seconds.
 
 ### The simulator's host time
 
@@ -913,14 +919,17 @@ Practice's build.
 
 **Committed later steps.**
 
-- The host speed of the token path, decided on 2026-11-11, in two stages
-  ([simulator-native-evaluator.md](simulator-native-evaluator.md#token-records)).
-  Stage 1 is built: the simulator's native line walker replays record
-  lines, where the replay ran in Python. Stage 2 gives that walker a tap for
-  the recorder, so that a token build no longer records a whole boot on the
-  reference path. The default Desktop build stays linked source until a
-  token build and a token boot cost the tests no more host time than
-  source does.
+- The host cost of a token build. The host speed of the token path,
+  decided on 2026-11-11, came in two stages
+  ([simulator-native-evaluator.md](simulator-native-evaluator.md#token-records)),
+  and both are built: the simulator's native line walker replays record
+  lines, where the replay ran in Python, and a recording boot keeps that
+  walker through the recorder's tap, where it recorded the whole boot on
+  the reference path. A token boot now takes less host time than a source
+  boot of the same layout, and a token build still takes more: about 10
+  seconds linked and 23 with the system volume against two. The default
+  Desktop build stays linked source until a token build and a token boot
+  cost the tests no more host time than source does.
 - The recorder on the machine, for the System Practice (decision 1).
 - The System Practice's build, which is what uses `--keep-module-source`.
   Its design takes up the three things that the rule's section

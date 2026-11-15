@@ -221,14 +221,16 @@ and `TOKEN-REPLAY` runs the records through the interpreter's two steps.
 Two things made the form slow on the host. The replay ran in Python, where
 source has the walker, so a Desktop boot from token forms took more host
 time than a boot from source although the guest does less work. And a token
-build records a whole boot with every source line on the reference path,
-which takes most of a minute where a source build takes two seconds. The
-default Desktop build stays linked source until both are gone.
+build recorded a whole boot with every source line on the reference path,
+which took most of a minute where a source build takes two seconds.
 
-This slice removes them in two stages. Stage 1, built, gives the walker a
-second token source, so that it replays records. Stage 2 gives the walker a
-tap, so that a recording boot keeps the walker;
-[The recorder's tap](#the-recorders-tap) holds its design.
+Two stages removed them. Stage 1 gives the walker a second token source, so
+that it replays records. Stage 2 gives the walker a tap, so that a
+recording boot keeps the walker; [The recorder's tap](#the-recorders-tap)
+holds its design. A token build now takes about 10 seconds linked and 23
+with the system volume, and the default Desktop build stays linked source
+until a token build and a token boot cost the tests no more host time than
+source does.
 
 ### One disposal, two token sources
 
@@ -602,8 +604,27 @@ Each slice keeps both backends green and is committed on its own.
    seconds against 10.2 to 11.2; the steps are the figures that do not
    move with the host. The physical Desktop journey passed from token
    forms linked, from the system volume and in hybrid mode. A token build
-   is not faster yet: its recording boot still runs every line on the
-   reference path, which the recorder's tap is to change.
+   was no faster at this slice: its recording boot still ran every line on
+   the reference path.
+5. **Token records, the recorder's tap.** Done. A recording boot keeps the
+   walker, which reports what it did with each token to the recorder.
+   `tests/simulator/test_native_token_record.py` records each of its
+   sources with the tap, on the reference path and on the Python backend,
+   and with the token, replay and walker tests it passes on each executor,
+   210 cases. The `desktop-apt1` Desktop was then built on MegaPad
+   `29b5510b` with Akashic `e554385c`, linked and from a system volume,
+   three ways: with the tap, with the reference recording, and by the
+   recorder MegaPad had before the tap (`5dd6fe1e`), whose hooks sent
+   every walk to KDOS's own loop. All three gave the same token files,
+   byte for byte: 56 files of 3,433,700 bytes linked and 316 files of
+   3,922,495 bytes with the system volume. Each recording boot left the
+   same guest as a boot of its own image with no recorder, and the walker
+   evaluated the same lines with a recorder as without, 201,435 linked
+   and 258,217 with the system volume. A linked token build took 10.1
+   seconds where the reference recording took 30.9, and one with the
+   system volume 23.7 against 60.2; a source build takes two. The
+   physical Desktop journey passed from token forms linked, from the
+   system volume and in hybrid mode, and from source.
 Each slice's boot compile was measured with alternating runs as in step 1a.
 `make test-simulator` and `make test-simulator-native` ran after every slice,
 and the physical Desktop journey passed after slices 2 and 3.
