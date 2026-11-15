@@ -5,7 +5,9 @@ done on 2026-10-13 in three slices: the native dictionary, the native line
 walker, and plans that survive publication. A fourth slice, decided on
 2026-11-11, gives the walker a second token source, the records of a
 module's token form, and a tap for the token recorder. Its first stage, the
-replay, is built; [Token records](#token-records) holds the design of both.
+replay, is built, and [Token records](#token-records) holds its design. Its
+second, the tap, is drafted in [The recorder's tap](#the-recorders-tap) and
+has not yet passed its gates.
 
 The hosted simulator compiles about 210,000 lines of KDOS and Akashic source
 at every boot. After step 1a this takes about 27 s, and almost all of it is
@@ -224,9 +226,9 @@ which takes most of a minute where a source build takes two seconds. The
 default Desktop build stays linked source until both are gone.
 
 This slice removes them in two stages. Stage 1, built, gives the walker a
-second token source, so that it replays records. Stage 2, designed below
-and not built, gives the walker a tap, so that a recording boot keeps the
-walker.
+second token source, so that it replays records. Stage 2 gives the walker a
+tap, so that a recording boot keeps the walker;
+[The recorder's tap](#the-recorders-tap) holds its design.
 
 ### One disposal, two token sources
 
@@ -369,45 +371,140 @@ pointers, the cookie counter, semantic steps, `HERE`, `LATEST`, every
 definition with its IR, the side index, the evaluator cells and UART
 output. Host-only state may differ, as before.
 
-### What the recorder will be told (stage 2)
+## The recorder's tap
 
-A recording boot puts every source line on the reference path today,
-because the recorder's taps are in `_evaluate_token` and its hooks take the
-place of the two overlays that call the walker. Stage 2 gives the walker
-the same taps.
+Stage 2 of the slice above. A token build boots the image once from source
+with a token recorder attached (`simulator/token_recorder.py`), and the
+recorder writes each loaded file's token form from what the interpreter did
+with the file's tokens. Before this stage only the reference evaluator could
+tell it. The recorder's taps were in `_evaluate_token`, and its hooks took
+the place of the two overlays that call the walker, so a recording boot
+evaluated every source line in Python. The walker now has the same taps, and
+a recording boot keeps the walker for the lines it admits.
 
-The recorder (`simulator/token_recorder.py`) learns six things from the
-reference path. The walker will report five of them for each source line it
-evaluates, when the line commits:
+### What the recorder is told
 
-1. **The line**: its address, length and number, by which the recorder
-   finds the file the line belongs to and writes the line records.
+The recorder learns six things. The reference evaluator tells it all six
+for the lines it runs. The walker tells it five for each source line it
+evaluates:
+
+1. **The line**: its address, its length and the number `EVAL-LINE` holds,
+   by which the recorder finds the file the line belongs to and marks the
+   line.
 2. **A word found**, by its XT, with the token it was written as. The XT
    is how the record writer tells one binding of a name from another: the
    first record of an XT becomes an IMPORT and the later ones its slot.
-3. **The text a word took** when it ran, which is the bytes the cursor
-   moved over, unless the word is a comment.
+3. **The input a word took** when it ran, which is the bytes its cursor
+   moved over. A word compiled as a call ran nothing and took none.
 4. **A number converted**, by its value.
 5. **A definition completed**: the XT of the word the line publishes,
-   which becomes a DEFINED record if the file uses the word later.
+   reported after the word that completed it.
 
 The sixth, where a conditional skip ended, stays with Python, since skips
 begin and end only in lines the walker hands back.
 
-The taps sit where the disposal is stated. `dry_run` has the token and the
-cursor before and after it, `dispose_word` says whether the word ran, and
-`dispose_number` has the value. A line's reports are among the things its
-dry run holds back, so a rejected line reports nothing and Python records
-that line on the reference path, as it records every line today. The walker
-gives a walk's reports to the recorder in line order with the walk's
-result. `RecordedUnit` stays the one recorder, and `shared/token_form.py`
-the one writer of the format.
+### One recorder, two tellers
 
-Stage 2 also lets the recorder's hooks on `_LD-WALK` and
-`SOURCE-EVALUATE-CHECKED`, which mark where a file begins, stand beside the
-walker's overlays instead of replacing them. Its test is that a Desktop
-recorded through the walker gives the token files, byte for byte, that a
-recording on the reference path gives.
+A report states what the disposal did with a token and judges nothing. What
+becomes of a report is decided where it was decided before, once:
+
+| | Stated in |
+| --- | --- |
+| What the interpreter does with a token | the disposal: `dispose_word` and `dispose_number` in the walker, `_evaluate_found_word` and `_evaluate_found_number` in `runtime.py` |
+| What happened to a token, as a report | a tap around each disposal: in the walker's `dry_run`, and in `RecordedUnit.found_word` and `found_number` |
+| A file's items: the line marks, a word with its input, a comment's input dropped | `RecordedUnit`, through the same methods for both tellers |
+| Which definitions take a slot, and the module's name | `RecordedUnit.token_file` |
+| The records and the file | `shared/token_form.py` |
+
+The tap exists twice as the token source does: each evaluator reads its own
+cursor before and after its own disposal. What the two read goes into one
+record. The walker says of `(` that the word is the comment directive and
+which bytes its cursor passed, and the recorder leaves those bytes out, as
+it does when the reference evaluator reports the same word. `RecordedUnit`
+stays the one recorder and `shared/token_form.py` the one writer of the
+format, and a file's lines may come from either teller in any order.
+
+### Reports are held back with the line
+
+The tap sits in `dry_run`, which has the token, the cursor before and
+after the disposal, `dispose_word`'s answer on whether the word ran, and
+the pending definition. A line's reports are among the things its dry run
+holds back. The snapshot marks where they begin and `restore` drops them,
+so a rejected line reports nothing, and the reference evaluator records
+that line as it runs it. The commit adds the line, with the number it reads
+from `EVAL-LINE`, and fills in the XT of the line's definition, which the
+word has only once the commit has published it.
+
+A walk returns its reports with its result, one entry for each line it
+evaluated, in order. A walk that ends in an exception leaves them in its
+error state, so the lines committed before the fault are reported as they
+are settled. `native_walker.py` gives a walk's reports to the recorder
+before the overlay evaluates the line handed back. No guest code runs
+inside a walk, so nothing reaches the recorder between a native line's
+commit and that hand-over, and the recorder hears the lines of a file in
+the file's order whichever teller reports them. It places a line as before,
+by its address and the evaluator's depth, so a file that another file loads
+gets its own lines from its own walk.
+
+### The walk hooks stand before the overlays
+
+The recorder learns where a file begins from hooks on `_LD-WALK` and
+`SOURCE-EVALUATE-CHECKED`. They used to replace the overlays of those two
+words, which sent every walk to KDOS's own loop. `bind_walks` now puts each
+hook in front of the overlay's `applicable` test: the hook notes the
+buffer, and the test then decides as it does with no recorder. A word
+whose overlay was not installed, because KDOS's definition has changed,
+gets the hook alone and runs as KDOS defines it.
+
+### What recording changes
+
+Nothing the guest can see. A recording boot and a plain boot run the same
+overlays, and the walker evaluates the same lines in both, with two
+exceptions that reach only the host's counters:
+
+- The reference evaluator reads a line's number from `EVAL-LINE` as
+  `EVALUATE` begins, after the overlay has pushed the line's address and
+  length. The walker reads it when the line commits, while those pushes are
+  still held back. A line whose two pushes would land on `EVAL-LINE` is
+  handed back while the tap is on.
+- The tap reads the `EVAL-LINE` that the overlay writes. If that cell is
+  not the evaluator's line cell, the walker hands back every line of a
+  recorded runtime.
+
+A hand-back changes nothing for the guest, by the walker's first rule:
+every line it hands back, the Python fast path evaluates to the same guest
+state.
+
+### The reference recording
+
+`TokenRecorder.native_tap` is on unless a test or a comparison turns it
+off. Off, the walker hands every line of a recorded runtime back, and the
+reference evaluator records the whole load, under the same overlays and
+with the same guest. That recording is the measure of the tap. The same
+load recorded both ways must give the same items and the same token files,
+byte for byte.
+
+### Exactness of a native recording
+
+`tests/simulator/test_native_token_record.py` loads each of its sources on
+four runtimes: three on the native backend, with no recorder, with the
+reference recording and with the tap, and one on the Python backend with a
+recorder. The three recordings must agree on every file's items and on its
+token file or the reason it has none. The three native runs must agree on
+all the guest state a native and a reference boot agree on, and on UART
+output. Each case also fixes how many lines the walker evaluated and how
+many it handed back, with a recorder and without, so that no case passes
+with the walker standing aside. The cases cover a word named by its slot
+after its IMPORT, DEFINED, numbers of each of the four sizes compiled and
+interpreted, the TEXT of every parsing word the walker takes, LINE and
+LINES across blank, comment and continued lines, SKIPPED in lines Python
+runs between native lines, lines that run guest words between native
+lines, a file that requires another through `_LD-WALK`, and loads that
+fail.
+
+At the Desktop's scale the test is the same: the Desktop built with
+`--token-modules`, linked and from a system volume, with its recording boot
+on the reference path and with the tap, must give the same token files.
 
 ## Plans that survive publication
 
