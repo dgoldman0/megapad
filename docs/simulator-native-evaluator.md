@@ -502,9 +502,47 @@ runs between native lines, lines that run guest words between native
 lines, a file that requires another through `_LD-WALK`, and loads that
 fail.
 
-At the Desktop's scale the test is the same: the Desktop built with
-`--token-modules`, linked and from a system volume, with its recording boot
-on the reference path and with the tap, must give the same token files.
+At the Desktop's scale the test is the same. On 2026-11-15 the
+`desktop-apt1` Desktop was built with `--token-modules` in four runs,
+linked and from a system volume, each time once with its recording boot on
+the reference path and once with the tap (MegaPad `a73c6beb`, Akashic
+`86d817ea`, one build at a time on a shared host). Every run gave the same
+result:
+
+| | Linked | System volume |
+| --- | --- | --- |
+| Source files recorded, each with a token file | 56 | 313 |
+| Token files with the tap against the reference path | the same, byte for byte, 3,415,378 bytes | the same, byte for byte, 3,906,152 bytes |
+| Lines the walker evaluated and lines it handed to Python, with a recorder and with none | 200,536 and 9,209 | 256,914 and 10,606 |
+| A recording boot against a boot of its own image with no recorder | the same guest, 7.13 million steps | the same guest, 69.4 million steps |
+
+The last row is from three of the runs and holds for the recording on the
+reference path as for the one with the tap. It covers all guest memory,
+every definition with its IR, the side index, both stack pointers, the
+cookie counter, semantic steps, the timer and UART output. Two builds do
+not make the same image, because a volume states when it was made, so
+guests are compared within one build and token files across the two.
+
+Host time over the four runs:
+
+| | Linked | System volume |
+| --- | --- | --- |
+| Boot with no recorder | 2.8 to 3.0 s | 10.4 to 12.0 s |
+| Recording boot on the reference path | 23.4 to 25.6 s | 50.9 to 56.5 s |
+| Recording boot with the tap | 3.5 to 3.9 s | 16.7 to 19.1 s |
+| Whole build, reference path | 28.1 to 30.7 s | 54.0 to 59.7 s |
+| Whole build, tap | 9.1 to 10.1 s | 20.8 to 23.4 s |
+
+With the system volume a build's recording boot still takes about six
+seconds more than a boot with no recorder, where the linked one takes
+under a second more. The walker's share of that is small. Timed inside
+one such boot, its walks took 1.9 seconds with the tap, the hand-over to
+the recorder included, against 0.7 without, and the 313 token files were
+then written in 0.4 seconds. The same recording boot made outside a build
+took 11.8 seconds against 10.9 with no recorder. Where the rest of the
+difference inside a build comes from has not been found. A run each
+ruled out the cycle collector, a boot made earlier in the same process,
+and the image file as the builder leaves it.
 
 ## Plans that survive publication
 
