@@ -568,14 +568,16 @@ The source-acceleration overlays and their pins are untouched, because no
 word they bind changed. They serve source loads as before, and a token load
 does not pass through them.
 
-Host time is not device time. In the simulator the linked Desktop
-reached Desk's entry in 2.8 and 2.6 seconds from source and in 4.1 and 3.7
-from token forms; with the system volume it took 11.2 and 10.9 seconds from
-source and 13.9 and 14.4 from token files alone. The guest does less work
-from token forms, 56.8 million semantic steps against 69.4 million with the
-system volume, but the replay is Python where the source path has a native
-line walker, and that costs more host time than the smaller load saves.
-A native replay is among
+Host time is not device time. The simulator's native line walker replays
+record lines as it evaluates source lines, and hands the lines it cannot
+take to the replay in Python. The linked Desktop then reaches Desk's entry
+in 1.7 to 2.0 host seconds from token forms, where source takes 2.6 to 3.1
+and the replay in Python alone took 3.9 to 4.0. With the system volume it
+takes 8.9 to 9.9 seconds from token files, where source takes 11.6 to 13.2.
+The guest does less work from token forms, 56.9 million semantic steps
+against 69.4 million with the system volume.
+[The simulator's host time](#the-simulators-host-time) has the rounds. A
+token build is not faster yet; the recorder's tap is among
 [what remains](#what-remains).
 
 ### Section 9 of the simulator contract
@@ -843,16 +845,26 @@ path.
 ### The simulator's host time
 
 Host seconds from the start of `kdos.f` to the line that says the guest is
-entering Desk, two runs each, native executor. These say nothing about a
-device.
+entering Desk, three runs each, one boot at a time, native executor, on
+MegaPad aceb7a16 with Akashic 86d817ea. These say nothing about a device.
 
-| | Source | Token forms | With source beside |
-|---|---:|---:|---:|
-| Linked chunks | 2.8, 2.6 | 4.1, 3.7 | |
-| System volume | 11.2, 10.9 | 13.9, 14.4 | 26.4, 26.6 |
+| | Source | Token forms | Token forms, replay in Python | With source beside |
+|---|---:|---:|---:|---:|
+| Linked chunks | 2.6, 2.8, 3.1 | 1.7, 1.7, 2.0 | 3.9, 4.0, 4.0 | |
+| System volume | 11.6, 11.8, 13.2 | 8.9, 9.0, 9.9 | 11.7, 12.3, 12.0 | 17.5, 18.0, 18.8 |
+
+The second column is the token boot as it now runs, with the native line
+walker replaying 200,410 record lines of the linked boot and 225,808 with
+the system volume, and Python taking the 5,836 and 7,172 the walker hands
+back. The third is the same boot with every record line left to Python,
+which is how a token boot ran before. The host was shared with other work.
+An earlier round on the same change, before it was brought onto the
+chiplet work in main, agreed for the linked boot (1.6 to 1.7 seconds
+against 2.8 to 2.9 from source) and put the system-volume boot from token
+files level with source, at 10.4 to 10.7 seconds against 10.2 to 11.2.
 
 The simulator's semantic steps for the system-volume boot are 69.4 million
-from source, 56.8 million from token files alone and 132.5 million with the
+from source, 56.9 million from token files alone and 132.6 million with the
 source beside them, and its reads of the system volume 11,988, 8,878 and
 22,456.
 

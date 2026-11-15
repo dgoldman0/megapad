@@ -446,6 +446,29 @@ Each slice keeps both backends green and is committed on its own.
    unchanged and the boot ends with 659 plans instead of 116. Four
    alternating boot compiles gave medians of 6.0 s against 6.6 s for slice
    2, on a busier host than slice 2's own measurement.
+4. **Token records, the replay.** Done. The walker evaluates a record line
+   through the disposal it gives a source line.
+   `tests/simulator/test_native_token_replay.py` compares native record
+   lines with the replay loop, and with the token and walker tests it
+   passes on each executor. The `desktop-apt1` token boots were run with
+   the replay in the walker and with it left to Python, and everything the
+   two boots built was compared: they built the same system, in the same
+   semantic steps, 5,593,450 linked and 56,926,335 with the system volume.
+   The walker evaluates 200,410 record lines of the linked boot and
+   225,808 with the system volume, hands 5,836 and 7,172 to Python, and
+   bars none. Three boots each, one at a time on a shared host, took 1.7,
+   1.7 and 2.0 seconds linked from token forms, against 3.9, 4.0 and 4.0
+   with the replay in Python and 2.6, 2.8 and 3.1 from source. With the
+   system volume they took 8.9, 9.0 and 9.9 seconds, against 11.7, 12.3
+   and 12.0 with the replay in Python and 11.6, 11.8 and 13.2 from source.
+   An earlier round, on the same change before it was brought onto the
+   chiplet work in main, agreed for the linked boot and put the
+   system-volume boot from token files level with source, at 10.4 to 10.7
+   seconds against 10.2 to 11.2; the steps are the figures that do not
+   move with the host. The physical Desktop journey passed from token
+   forms linked, from the system volume and in hybrid mode. A token build
+   is not faster yet: its recording boot still runs every line on the
+   reference path, which the recorder's tap is to change.
 Each slice's boot compile was measured with alternating runs as in step 1a.
 `make test-simulator` and `make test-simulator-native` ran after every slice,
 and the physical Desktop journey passed after slices 2 and 3.
