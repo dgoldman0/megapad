@@ -13,8 +13,15 @@ its checked source evaluator covers: ``_LD-WALK`` (``LOAD``, ``REQUIRE``) and
 ``SOURCE-EVALUATE-CHECKED``.  The recorder learns where a walk begins from a
 hook on those two words and that it ended cleanly from ``EVALUATE-FINISH``;
 the lines between are the BIOS evaluator's lines that lie in the walk's
-buffer.  While a recorder is attached, every source line is evaluated by the
-runtime's reference path.
+buffer.
+
+A line reaches its file's record from one of two places, and a file's lines
+may come from both in any order.  The runtime's reference evaluator calls
+the taps below as it takes each token.  The native line walker evaluates the
+lines it admits without the reference evaluator, and reports what it did
+with each of their tokens when its walk returns
+(docs/simulator-native-evaluator.md).  Both feed the same items, from which
+``shared.token_form`` writes the file.
 """
 
 from __future__ import annotations
@@ -52,35 +59,56 @@ class RecordedUnit:
 
         cursor = state.cursor
         start = cursor.column
-        self._mark_line()
-        item = ["word", word, token, None]
-        self.items.append(item)
+        item = self._found(word.xt, token)
         latest = runtime.dictionary.latest
         ran = runtime._evaluate_found_word(word, state)
         if ran and runtime.dictionary.latest != latest:
-            # The record completed a definition.  If the file uses that
-            # word later, it takes its slot here, from LATEST.
             defined = runtime.dictionary.latest_word
             if defined is not None:
-                self.items.append(("defined", defined))
-        if ran:
+                self.defined(defined.xt)
+        if ran and state.cursor is cursor:
             implementation = word.implementation
-            comment = (
+            self._took(
+                item,
+                cursor.data[start : cursor.column],
                 isinstance(implementation, DirectiveDefinition)
-                and implementation.kind is DirectiveKind.PAREN_COMMENT
+                and implementation.kind is DirectiveKind.PAREN_COMMENT,
             )
-            # A comment's text does nothing when replayed; the word stays,
-            # because running an immediate word resets what the BIOS
-            # compiler may fuse with the code before it.
-            if not comment and state.cursor is cursor:
-                text = cursor.data[start : cursor.column]
-                if text:
-                    item[3] = text
         return ran
 
     def found_number(self, value: int) -> None:
         self._mark_line()
         self.items.append(("number", value))
+
+    def word(self, xt: int, token: bytes, taken: bytes | None, comment: bool) -> None:
+        """A word the native line walker found and disposed of: TAKEN is
+        the input its cursor moved over while the word ran, or None when
+        the word was compiled as a call."""
+
+        item = self._found(xt, token)
+        if taken is not None:
+            self._took(item, taken, comment)
+
+    def defined(self, xt: int) -> None:
+        """The word before this completed a definition, which is LATEST and
+        has the execution token XT.  If the file uses that word later, it
+        takes its slot here."""
+
+        self.items.append(("defined", xt))
+
+    def _found(self, xt: int, token: bytes) -> list:
+        self._mark_line()
+        item = ["word", xt, token, None]
+        self.items.append(item)
+        return item
+
+    @staticmethod
+    def _took(item: list, text: bytes, comment: bool) -> None:
+        # A comment's text does nothing when replayed; the word stays,
+        # because running an immediate word resets what the BIOS compiler
+        # may fuse with the code before it.
+        if text and not comment:
+            item[3] = text
 
     def skip_ended(self) -> None:
         self.items.append(("skipped",))
@@ -120,14 +148,14 @@ class RecordedUnit:
         writer = TokenWriter()
         # One slot for each definition a name was bound to: a name defined
         # again later in the load is another word, at another address.
-        used = {item[1].xt for item in self.items if item[0] == "word"}
+        used = {item[1] for item in self.items if item[0] == "word"}
         for item in self.items:
             kind = item[0]
             if kind == "word":
-                _kind, word, token, text = item
-                writer.word(word.xt, token, text)
+                _kind, xt, token, text = item
+                writer.word(xt, token, text)
             elif kind == "defined":
-                key = item[1].xt
+                key = item[1]
                 if key in used and not writer.has_slot(key):
                     writer.defined(key)
             elif kind == "number":
@@ -151,6 +179,12 @@ class RecordedUnit:
 class TokenRecorder:
     """Records every source file a runtime loads while it is attached."""
 
+    # Whether the native line walker evaluates the lines it admits and
+    # reports them.  Without it the walker hands every line of a recorded
+    # runtime to the reference evaluator: the recording against which the
+    # walker's reports are checked, byte for byte.
+    native_tap = True
+
     def __init__(self) -> None:
         self.units: list[RecordedUnit] = []
         self._open: list[RecordedUnit] = []
@@ -166,7 +200,11 @@ class TokenRecorder:
         self._runtime = runtime
 
     def bind_walks(self) -> None:
-        """Hook the two KDOS words whose walk is one file."""
+        """Hook the two KDOS words whose walk is one file.
+
+        A hook notes where a walk begins and changes nothing else: it
+        stands before the word's overlay, when the word has one, and the
+        overlay then decides and runs as it does with no recorder."""
 
         runtime = self._runtime
         evaluator = runtime._require_bios_evaluator()
@@ -181,16 +219,15 @@ class TokenRecorder:
         buffer_cell = cell(b"LD-BUF")
         size_cell = cell(b"LD-SZ")
 
-        def loader_walk(_context) -> bool:
+        def loader_walk(_context) -> None:
             self._begin(
                 "loader",
                 len(evaluator.frames),
                 memory.read64(buffer_cell),
                 memory.read64(size_cell),
             )
-            return False
 
-        def source_walk(context) -> bool:
+        def source_walk(context) -> None:
             if context.data.depth() >= 2:
                 self._begin(
                     "source",
@@ -198,7 +235,13 @@ class TokenRecorder:
                     context.data.peek(1),
                     context.data.peek(),
                 )
-            return False
+
+        def hooked(hook, overlay):
+            def applicable(context) -> bool:
+                hook(context)
+                return overlay is not None and overlay.applicable(context)
+
+            return applicable
 
         def never(_context) -> None:
             raise AssertionError("a recording hook is not an accelerator")
@@ -210,7 +253,14 @@ class TokenRecorder:
             word = runtime.find(name)
             if word is None:
                 raise RuntimeError(f"KDOS has no {name.decode()}")
-            runtime.install_colon_accelerator(word, applicable=hook, callback=never)
+            overlay = runtime._colon_accelerators.get(word.xt)
+            if overlay is not None and overlay.word is not word:
+                overlay = None
+            runtime.install_colon_accelerator(
+                word,
+                applicable=hooked(hook, overlay),
+                callback=never if overlay is None else overlay.callback,
+            )
 
     # -- events ---------------------------------------------------------------
 

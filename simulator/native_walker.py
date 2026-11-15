@@ -7,7 +7,9 @@ the checked-line rule admits, with every guest-visible effect of the Python
 fast path, and stops at a line it does not admit so the overlay can evaluate
 that line on its ordinary path.  For ``TOKEN-REPLAY`` it evaluates the record
 lines of a token stream in the same way and stops at one it cannot take, so
-that the runtime's replay loop runs that line.  See
+that the runtime's replay loop runs that line.  While a token recorder is
+attached the walker also reports what it did with the tokens of each source
+line it evaluated, and those reports are passed to the recorder here.  See
 ``docs/simulator-native-evaluator.md``.
 
 The open definition crosses this boundary in both directions: the walker
@@ -74,6 +76,10 @@ class NativeSourceWalker:
         self._evaluator = evaluator
         self._evaluate_checked = evaluate_checked
         self._status_throw = status_throw
+        self._extension = extension
+        # The recorder numbers a line by the evaluator's line cell, which
+        # the tap reads as the EVAL-LINE this overlay writes.
+        self._tappable = cells[5] == evaluator.line_address
         self._native = extension.NativeLineWalker(
             native,
             # The walker compiles named definitions only.  It is not told of
@@ -117,6 +123,14 @@ class NativeSourceWalker:
         compiler = compiler_state.compiler
         meter = runtime._active_dispatches[-1].meter
         blocked = not self._admits(context, meter, compiler_state)
+        recorder = runtime.token_recorder
+        tap = False
+        if recorder is not None and not blocked:
+            # A recording boot.  The walker reports the lines it evaluates;
+            # where it may not, every line goes to the reference path, whose
+            # own taps record it.
+            tap = recorder.native_tap and self._tappable
+            blocked = not tap
         data = context.data
         returns = context.returns
         exported = None if blocked or compiler is None else _export_compiler(compiler)
@@ -137,6 +151,7 @@ class NativeSourceWalker:
                 runtime._dictionary_base,
                 runtime._dictionary_limit,
                 runtime._numeric_base_address,
+                tap,
             )
         except BaseException:
             state = self._native.take_error_state()
@@ -167,7 +182,7 @@ class NativeSourceWalker:
     def _settle(self, result, context, meter, blocked: bool) -> Any:
         (
             outcome, current, evaluated, data_pointer, return_pointer, cookie,
-            steps, compiler, cleared_token,
+            steps, compiler, cleared_token, tapped,
         ) = result
         context.data._pointer = data_pointer
         context.returns._pointer = return_pointer
@@ -181,11 +196,36 @@ class NativeSourceWalker:
             self._evaluator.token_length = 0
         if not blocked:
             self._evaluator.compiler_state.compiler = _import_compiler(compiler)
+        if tapped:
+            # Before Python runs the line handed back, so that the recorder
+            # hears of every line in the order the file has them.
+            self._report(tapped)
         if outcome == 0:
             return WALK_DONE
         if outcome == 2:
             return WALK_ITERATION
         return current, evaluated
+
+    def _report(self, lines: list) -> None:
+        """Give the token recorder the lines a walk evaluated, in order."""
+
+        extension = self._extension
+        tap_word = extension.TAP_WORD
+        tap_number = extension.TAP_NUMBER
+        recorder = self._runtime.token_recorder
+        depth = len(self._evaluator.frames)
+        for address, length, number, events in lines:
+            unit = recorder.line(address, length, depth, number)
+            if unit is None:
+                continue
+            for event in events:
+                kind = event[0]
+                if kind == tap_word:
+                    unit.word(event[1], event[2], event[3], event[4])
+                elif kind == tap_number:
+                    unit.found_number(event[1])
+                else:
+                    unit.defined(event[1])
 
 
 def _state_admits(runtime, context, meter, compiler_state) -> bool:

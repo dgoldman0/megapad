@@ -418,6 +418,38 @@ struct Binding {
 // The input of a word that no TEXT record precedes.
 const uint8_t NO_TEXT[1] = {0};
 
+// ---- The tap ------------------------------------------------------------
+//
+// A recording boot's token recorder (simulator/token_recorder.py) is told
+// what the interpreter did with each token of a source line. For a line this
+// walker evaluates, the disposal reports it here: the word found, the number
+// converted, the definition completed. A report states what happened and
+// judges nothing; what becomes of it in a token file is the recorder's.
+enum TapKind : uint8_t { TAP_WORD = 0, TAP_NUMBER = 1, TAP_DEFINED = 2 };
+
+struct TapEvent {
+    uint8_t kind;
+    bool ran;               // WORD: it ran, and was not compiled as a call
+    bool comment;           // WORD: it is the ( comment directive
+    Cell value;             // WORD and DEFINED: the XT. NUMBER: the cell
+    uint32_t token;         // WORD: the token's place in its line,
+    uint32_t token_length;
+    uint32_t taken;         // and the input the cursor moved over as it ran
+    uint32_t taken_length;
+};
+
+// One evaluated line: where it lies, the number EVAL-LINE gave it, its first
+// event and its bytes, in which its events' tokens and input lie.
+struct TapLine {
+    Cell address;
+    Cell length;
+    Cell number;
+    size_t events;
+    size_t bytes;
+};
+
+const size_t NO_EVENT = static_cast<size_t>(-1);
+
 class NativeLineWalker {
 public:
     NativeLineWalker(py::object dictionary, const py::dict& directive_values,
@@ -473,9 +505,13 @@ public:
     py::tuple walk(const std::array<Cell, 3>& data_state, const py::tuple& return_state,
                    Cell frames_depth, const py::object& compiler, bool blocked,
                    int64_t allowance, Cell dictionary_base, Cell dictionary_limit,
-                   const py::object& base_address) {
+                   const py::object& base_address, bool tap) {
         if (protocol_ == PROTOCOL_RECORDS)
             throw py::value_error("a record walker has no line loop");
+        tap_ = tap;
+        tap_events_.clear();
+        tap_lines_.clear();
+        tap_bytes_.clear();
         has_base_cell_ = !base_address.is_none();
         base_cell_ = has_base_cell_ ? base_address.cast<Cell>() : 0;
         data_ = {data_state[0], data_state[1], data_state[2]};
@@ -506,7 +542,7 @@ public:
             return py::make_tuple(outcome, handback_current, handback_evaluated,
                                   data_.pointer, return_pointer_,
                                   cookie_fits ? py::object(py::int_(cookie_)) : cookie_object,
-                                  steps_, export_compiler(), cleared_token_);
+                                  steps_, export_compiler(), cleared_token_, tap_report());
         };
         try {
             outcome = protocol_ == PROTOCOL_SOURCE
@@ -535,6 +571,7 @@ public:
             throw py::value_error("this walker reads source lines, not records");
         has_base_cell_ = false;
         base_cell_ = 0;
+        tap_ = false;
         data_ = {data_state[0], data_state[1], data_state[2]};
         blocked_ = false;
         allowance_ = allowance;
@@ -721,6 +758,9 @@ private:
         stack.push(current);
         stack.push(evaluated);
         if (!checked_line_admits(line, size, stack.pointer())) return false;
+        // The reference reads the line's number from EVAL-LINE when EVALUATE
+        // begins, after those two pushes reached memory.
+        if (tap_ && stack.holds(cells_[5], 8)) return false;
         stack.pop(discard);
         stack.pop(discard);
 
@@ -767,6 +807,7 @@ private:
         if (pending.active && pending.kind == KIND_COLON) {
             compiler_ = Compiler();
         }
+        if (tap_) tap_line(current, evaluated, line, snapshot.tap_events);
         dictionary_.write64(depth_cell_, depth);
         // One root continuation for EVALUATE-CHECKED, and under _LD-WALK one
         // for _LD-STATUS-THROW, each written to the same released slot.
@@ -946,6 +987,7 @@ private:
         size_t payloads;
         size_t pool;
         std::vector<Frame> controls;
+        size_t tap_events;
     };
 
     Snapshot take_snapshot() {
@@ -953,7 +995,7 @@ private:
         return Snapshot{compiler_.open, compiler_.name, compiler_.location, compiler_.column,
                         compiler_.compile_mode, compiler_.temporary,
                         compiler_.body.ops.size(), compiler_.body.payloads.size(),
-                        compiler_.pool.size(), compiler_.controls};
+                        compiler_.pool.size(), compiler_.controls, tap_events_.size()};
     }
 
     void restore(Snapshot& snapshot) {
@@ -970,6 +1012,8 @@ private:
         compiler_.column = snapshot.column;
         compiler_.compile_mode = snapshot.compile_mode;
         compiler_.temporary = snapshot.temporary;
+        // A rejected line reports nothing: Python records it as it runs it.
+        tap_events_.resize(snapshot.tap_events);
     }
 
     void append(uint8_t kind, Cell a = 0, Cell b = 0) {
@@ -1044,6 +1088,7 @@ private:
                  Cell& steps) {
         Cursor cursor{line, size};
         size_t start = 0, length = 0;
+        tap_defined_ = NO_EVENT;
         while (cursor.parse_word(start, length)) {
             const uint8_t* token = line + start;
             if (token[0] == '\\') {
@@ -1055,16 +1100,90 @@ private:
             long index = -1;
             if (!find(token, length, pending, index)) return false;
             if (index >= 0) {
+                const Record& word = dictionary_.record(index);
+                const size_t input = cursor.column;
+                const bool defining = pending.active;
                 bool ran = false;
-                if (!dispose_word(dictionary_.record(index), cursor, stack, pending, steps, ran))
-                    return false;
+                if (!dispose_word(word, cursor, stack, pending, steps, ran)) return false;
+                if (tap_) {
+                    tap_word(word, start, length, ran, input, cursor.column);
+                    // The word completed the line's definition, whose XT
+                    // the commit fills in.
+                    if (pending.active && !defining) tap_definition();
+                }
                 continue;
             }
             Cell number = 0;
             if (!parse_number(token, length, numeric_base(), number)) return false;
             if (!dispose_number(number, stack, pending)) return false;
+            if (tap_) tap_events_.push_back(TapEvent{TAP_NUMBER, false, false, number, 0, 0, 0, 0});
         }
         return true;
+    }
+
+    // ---- The tap: what the disposal did with a source line's tokens --------
+    //
+    // The reports of a line are among the things its dry run holds back:
+    // restore() drops them with the rest, and the commit adds the line.
+
+    // A word found: its XT, the token it was written as, whether it ran and
+    // the input the cursor moved over while it did.
+    void tap_word(const Record& word, size_t token, size_t token_length, bool ran,
+                  size_t input, size_t column) {
+        const bool comment =
+            word.kind == KIND_DIRECTIVE && directive_of(word) == D_PAREN_COMMENT;
+        tap_events_.push_back(TapEvent{
+            TAP_WORD, ran, comment, word.xt, static_cast<uint32_t>(token),
+            static_cast<uint32_t>(token_length), static_cast<uint32_t>(input),
+            static_cast<uint32_t>(ran ? column - input : 0)});
+    }
+
+    void tap_definition() {
+        tap_defined_ = tap_events_.size();
+        tap_events_.push_back(TapEvent{TAP_DEFINED, false, false, 0, 0, 0, 0, 0});
+    }
+
+    // The line committed: its definition, if it has one, is LATEST now.
+    void tap_line(Cell address, Cell length, const uint8_t* line, size_t first) {
+        if (tap_defined_ != NO_EVENT)
+            tap_events_[tap_defined_].value = dictionary_.record(dictionary_.size() - 1).xt;
+        tap_lines_.push_back(TapLine{address, length, dictionary_.read64(cells_[5]), first,
+                                     tap_bytes_.size()});
+        tap_bytes_.append(reinterpret_cast<const char*>(line), static_cast<size_t>(length));
+    }
+
+    // The lines this walk evaluated, in order, for the recorder: each as
+    // (address, length, number, events), an event as (TAP_WORD, xt, token,
+    // input or None, comment), (TAP_NUMBER, value) or (TAP_DEFINED, xt).
+    py::object tap_report() {
+        if (!tap_) return py::none();
+        py::list lines;
+        for (size_t i = 0; i < tap_lines_.size(); ++i) {
+            const TapLine& line = tap_lines_[i];
+            const size_t end =
+                i + 1 < tap_lines_.size() ? tap_lines_[i + 1].events : tap_events_.size();
+            const char* bytes = tap_bytes_.data() + line.bytes;
+            py::list events;
+            for (size_t at = line.events; at < end; ++at) {
+                const TapEvent& event = tap_events_[at];
+                if (event.kind == TAP_WORD) {
+                    events.append(py::make_tuple(
+                        static_cast<int>(TAP_WORD), event.value,
+                        py::bytes(bytes + event.token, event.token_length),
+                        event.ran ? py::object(py::bytes(bytes + event.taken,
+                                                         event.taken_length))
+                                  : py::object(py::none()),
+                        event.comment));
+                } else {
+                    events.append(py::make_tuple(static_cast<int>(event.kind), event.value));
+                }
+            }
+            lines.append(py::make_tuple(line.address, line.length, line.number, events));
+        }
+        tap_events_.clear();
+        tap_lines_.clear();
+        tap_bytes_.clear();
+        return lines;
     }
 
     // ---- Token source: the records of a token stream -----------------------
@@ -1834,6 +1953,14 @@ private:
     uint64_t native_lines_ = 0;
     uint64_t python_lines_ = 0;
 
+    // The tap, per walk: the reports of the lines evaluated so far, and the
+    // place of the DEFINED event of the line under dry run.
+    bool tap_ = false;
+    std::vector<TapEvent> tap_events_;
+    std::vector<TapLine> tap_lines_;
+    std::string tap_bytes_;
+    size_t tap_defined_ = NO_EVENT;
+
     // Per record line: the slots it binds, and the first of their table cells.
     std::vector<Binding> bindings_;
     Cell table_first_ = 0;
@@ -1858,7 +1985,7 @@ void register_bindings(py::module_& module) {
         .def("walk", &NativeLineWalker::walk, py::arg("data_state"), py::arg("return_state"),
              py::arg("frames_depth"), py::arg("compiler"), py::arg("blocked"),
              py::arg("allowance"), py::arg("dictionary_base"), py::arg("dictionary_limit"),
-             py::arg("base_address"))
+             py::arg("base_address"), py::arg("tap") = false)
         .def("replay", &NativeLineWalker::replay, py::arg("stream"), py::arg("index"),
              py::arg("line"), py::arg("data_state"), py::arg("compiler"),
              py::arg("allowance"), py::arg("dictionary_base"), py::arg("dictionary_limit"))
@@ -1875,6 +2002,9 @@ void register_bindings(py::module_& module) {
     module.attr("WALK_SOURCE") = py::int_(static_cast<int>(PROTOCOL_SOURCE));
     module.attr("WALK_LOADER") = py::int_(static_cast<int>(PROTOCOL_LOADER));
     module.attr("WALK_RECORDS") = py::int_(static_cast<int>(PROTOCOL_RECORDS));
+    module.attr("TAP_WORD") = py::int_(static_cast<int>(TAP_WORD));
+    module.attr("TAP_NUMBER") = py::int_(static_cast<int>(TAP_NUMBER));
+    module.attr("TAP_DEFINED") = py::int_(static_cast<int>(TAP_DEFINED));
 }
 
 }  // namespace megapad::walker

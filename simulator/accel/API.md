@@ -335,9 +335,9 @@ interpret-time and defining primitives by XT, and the walker captures each
 record's identity at construction.
 
 `walk(data_state, return_state, frames_depth, compiler, blocked, allowance,
-dictionary_base, dictionary_limit, base_address)` returns `(outcome, current,
-evaluated, data_pointer, return_pointer, cookie, steps, compiler,
-cleared_token)`. Outcome 0 ends the overlay's loop, 1 hands back one measured
+dictionary_base, dictionary_limit, base_address, tap=False)` returns
+`(outcome, current, evaluated, data_pointer, return_pointer, cookie, steps,
+compiler, cleared_token, tap)`. Outcome 0 ends the overlay's loop, 1 hands back one measured
 line still to be evaluated, and 2 asks Python to run the next whole
 iteration. The caller settles the stack pointers, cookie counter and steps,
 and takes back the open definition, exactly as after a native execution
@@ -346,6 +346,17 @@ for the lines already committed. `compiler` crosses the boundary as
 `(name, location, compile_mode, temporary, operations, controls, pool)` and
 comes back with the name token's column after the location. `stats()` gives
 the lines evaluated natively and handed back.
+
+With `tap` the walk also reports, for the token recorder, what the disposal
+did with the tokens of each line it evaluated. The last element of the
+result is then a list with one `(address, length, number, events)` for each
+such line in order, `number` being the line's `EVAL-LINE`, and otherwise
+`None`. An event is `(TAP_WORD, xt, token, input, comment)` for a word found,
+where `input` is the bytes the cursor moved over while the word ran, or
+`None` when the word was compiled as a call, and `comment` says that the word
+is the `(` directive; `(TAP_NUMBER, value)` for a number converted; or
+`(TAP_DEFINED, xt)` after the word that completed the line's definition. A
+line handed back reports nothing.
 
 A walker made with `WALK_RECORDS` has no line loop. It takes the record
 lines of token streams for `TOKEN-REPLAY`: `cells[5]` is the address of
