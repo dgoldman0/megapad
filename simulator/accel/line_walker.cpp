@@ -512,6 +512,7 @@ public:
         tap_events_.clear();
         tap_lines_.clear();
         tap_bytes_.clear();
+        tap_committed_ = 0;
         has_base_cell_ = !base_address.is_none();
         base_cell_ = has_base_cell_ ? base_address.cast<Cell>() : 0;
         data_ = {data_state[0], data_state[1], data_state[2]};
@@ -1150,6 +1151,7 @@ private:
         tap_lines_.push_back(TapLine{address, length, dictionary_.read64(cells_[5]), first,
                                      tap_bytes_.size()});
         tap_bytes_.append(reinterpret_cast<const char*>(line), static_cast<size_t>(length));
+        tap_committed_ = tap_events_.size();
     }
 
     // The lines this walk evaluated, in order, for the recorder: each as
@@ -1160,8 +1162,10 @@ private:
         py::list lines;
         for (size_t i = 0; i < tap_lines_.size(); ++i) {
             const TapLine& line = tap_lines_[i];
+            // A line whose commit raised is not among the lines evaluated,
+            // and what its dry run noted is left out.
             const size_t end =
-                i + 1 < tap_lines_.size() ? tap_lines_[i + 1].events : tap_events_.size();
+                i + 1 < tap_lines_.size() ? tap_lines_[i + 1].events : tap_committed_;
             const char* bytes = tap_bytes_.data() + line.bytes;
             py::list events;
             for (size_t at = line.events; at < end; ++at) {
@@ -1953,12 +1957,14 @@ private:
     uint64_t native_lines_ = 0;
     uint64_t python_lines_ = 0;
 
-    // The tap, per walk: the reports of the lines evaluated so far, and the
-    // place of the DEFINED event of the line under dry run.
+    // The tap, per walk: the reports of the lines evaluated so far, where
+    // the last of them ends, and the place of the DEFINED event of the line
+    // under dry run.
     bool tap_ = false;
     std::vector<TapEvent> tap_events_;
     std::vector<TapLine> tap_lines_;
     std::string tap_bytes_;
+    size_t tap_committed_ = 0;
     size_t tap_defined_ = NO_EVENT;
 
     // Per record line: the slots it binds, and the first of their table cells.
