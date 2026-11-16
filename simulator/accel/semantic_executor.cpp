@@ -7,6 +7,7 @@
 #include "../../shared/accel/chiplet_bindings.h"
 #include "../../shared/accel/storage_faults_bindings.h"
 #include "crc_service_bindings.h"
+#include "storage_service_bindings.h"
 #include "../../shared/accel/routine_call.h"
 #include "collected.h"
 #include "guest_memory.h"
@@ -70,11 +71,28 @@ enum Opcode : uint32_t {
     // travel with each run.
     OP_CRC_MODE_STORE, OP_CRC_RESET, OP_CRC_INIT_STORE, OP_CRC_FEED,
     OP_CRC_FEED_BYTE, OP_CRC_FETCH, OP_CRC_RAW_FINAL_FETCH, OP_CRC_FINAL_FETCH,
+    // The disk words. OP_DISK_VALUE pushes register b of a unit's storage
+    // service; OP_DISK_TRANSFER runs a checked READ or WRITE and
+    // OP_DISK_FLUSH a checked FLUSH. Operand a is a DISK_* shape. The
+    // services travel with the program.
+    OP_DISK_VALUE, OP_DISK_TRANSFER, OP_DISK_FLUSH,
     // One past the last operation; not one itself.
     OPCODE_LIMIT,
 };
 
 
+
+// The disk words' shapes, in OP_DISK_VALUE's and OP_DISK_TRANSFER's operand
+// a: a UNIT word takes its unit from the top of the stack, the others name the
+// boot disk; GENERATION binds a transfer to the caller's media generation;
+// WRITE makes it a WRITE.
+enum DiskShape : uint32_t { DISK_UNIT = 1, DISK_GENERATION = 2, DISK_WRITE = 4 };
+// OP_DISK_VALUE's register, in operand b.
+enum DiskRegister : uint32_t {
+    DISK_STATUS, DISK_SECTORS, DISK_MEDIA_GENERATION, DISK_CAPABILITIES,
+};
+// The BIOS's filesystem lock, which the checked disk words take and release.
+constexpr Py_ssize_t FILESYSTEM_LOCK = 2;
 
 // TADD, TSUB and TMUL, in OP_TILE_BINARY's operand a.
 enum TileBinary : uint32_t { TILE_ADD, TILE_SUBTRACT, TILE_MULTIPLY };
@@ -392,6 +410,25 @@ public:
         return false;
     }
 
+    // Whether LENGTH bytes at ADDRESS reach the return stack, or wrap.
+    bool reaches_return_stack(Cell address, Cell length) const noexcept {
+        if (length == 0) return false;
+        if (address > MASK - (length - 1)) return true;
+        return address < return_empty_ && address + (length - 1) >= return_floor_;
+    }
+
+    // Forget the pages this run found absent, as when a native service has
+    // written guest memory and may have created them. A page that exists
+    // keeps its bytes where they are, so what the run knows of it holds.
+    void forget_absent_pages() noexcept {
+        for (auto& cache : caches_) {
+            for (auto entry = cache.begin(); entry != cache.end();)
+                entry = entry->second == nullptr ? cache.erase(entry) : std::next(entry);
+        }
+        for (HotPage* hot : {&data_page_, &return_page_, &ordinary_page_})
+            if (hot->bytes == nullptr) *hot = HotPage{};
+    }
+
 private:
     struct HotPage {
         Cell base = 0;
@@ -568,6 +605,9 @@ struct RunState {
     // Whether this run admits the CRC words: the runtime still keeps the
     // CRC service the program was bound to.
     bool crc = false;
+    // Whether this run admits the disk words: the runtime still keeps the
+    // storage services, memory and spinlock bank the program was bound to.
+    bool disk = false;
     Cell pointer_captures = 0;
     // The step allowance, and the cost of the operation being executed, for
     // callbacks that run inline within one operation.
@@ -780,7 +820,8 @@ public:
 
     // inputs() and the operation initialize every consumed/produced cell.
     // Avoid clearing scratch and six scatter descriptors at every operation.
-    std::array<Cell, 4> values;
+    // The widest input, five cells, is a unit's checked transfer.
+    std::array<Cell, 5> values;
     std::array<Cell, 6> result;
 
 private:
@@ -968,6 +1009,9 @@ public:
         Py_VISIT(continuation_type_.ptr());
         Py_VISIT(tile_guard_.ptr());
         Py_VISIT(crc_owner_.ptr());
+        for (const py::object& owner : disk_owners_) Py_VISIT(owner.ptr());
+        Py_VISIT(disk_memory_.ptr());
+        Py_VISIT(lock_owners_.ptr());
         Py_VISIT(routine_entry_.ptr());
         return megapad::guest::traverse_regions(regions_, visit, arg);
     }
@@ -980,6 +1024,10 @@ public:
         py::object guard = std::move(tile_guard_);
         crc_ = nullptr;
         py::object crc = std::move(crc_owner_);
+        disks_.clear();
+        std::vector<py::object> disk_owners = std::move(disk_owners_);
+        py::object disk_memory = std::move(disk_memory_);
+        py::object lock_owners = std::move(lock_owners_);
         py::object continuation_type = std::move(continuation_type_);
         megapad::guest::release_regions(regions_);
     }
@@ -1000,6 +1048,28 @@ public:
     // The owner's check that the tile service still computes with this
     // extension's kernel, called at most once per run, at its first tile word.
     void bind_tile_guard(py::object guard) { tile_guard_ = std::move(guard); }
+
+    // The storage services of the machine's units in unit order, the memory
+    // of the runtime they move data through, and the live owner list of its
+    // spinlock bank, for the disk words. A run admits them only when its
+    // owner says the runtime still keeps all three.
+    void bind_storage(const py::iterable& services, py::object memory, py::list lock_owners) {
+        if (PyList_GET_SIZE(lock_owners.ptr()) <= FILESYSTEM_LOCK)
+            throw py::value_error("the spinlock owners must include the filesystem lock");
+        std::vector<megapad::storage_service::Service*> bound;
+        std::vector<py::object> owners;
+        for (py::handle service : services) {
+            bound.push_back(&service.cast<megapad::storage_service::Service&>());
+            owners.push_back(py::reinterpret_borrow<py::object>(service));
+        }
+        disks_ = std::move(bound);
+        std::vector<py::object> previous = std::move(disk_owners_);
+        disk_owners_ = std::move(owners);
+        py::object previous_memory = std::move(disk_memory_);
+        disk_memory_ = std::move(memory);
+        py::object previous_locks = std::move(lock_owners_);
+        lock_owners_ = std::move(lock_owners);
+    }
 
     // The CRC service the runtime's CRC words use, or None to leave the
     // words to Python. A run admits them only when its owner says the
@@ -1132,7 +1202,7 @@ public:
     py::tuple run(Cell xt, Cell ip, const std::array<Cell, 3>& data_state,
                   const py::tuple& return_state, const py::dict& continuations,
                   Cell remaining_steps, Cell fpcsr, Cell machine_allowance,
-                  const py::object& tile_state, bool crc) {
+                  const py::object& tile_state, bool crc, bool disk) {
         if (return_state.size() != 4)
             throw py::value_error("return state must contain four cells");
         RunState state{xt, ip, 0,
@@ -1159,6 +1229,7 @@ public:
             state.tile_destination = tile[3];
         }
         state.crc = crc && crc_ != nullptr;
+        state.disk = disk && !disks_.empty();
         if (!state.data.valid() || !state.returns.valid() ||
             !(state.data.empty <= state.returns.floor ||
               state.returns.empty <= state.data.floor))
@@ -2299,9 +2370,95 @@ private:
         case OP_CRC_FEED: case OP_CRC_FEED_BYTE: case OP_CRC_FETCH:
         case OP_CRC_RAW_FINAL_FETCH: case OP_CRC_FINAL_FETCH:
             return s.crc && execute_crc(opcode, s, stack);
+        case OP_DISK_VALUE: case OP_DISK_TRANSFER: case OP_DISK_FLUSH:
+            return s.disk && execute_disk(operation, path.memory, s, stack);
         default:
             return false;
         }
+    }
+
+    // The disk words, each a call of the storage service the Python words
+    // call too. A unit the machine does not have reads as an empty slot. A
+    // transfer or flush declines before any effect, leaving the word to
+    // Python, when its service calls back into Python at admission or when
+    // an owner holds the filesystem lock that the Python word takes and
+    // releases. A transfer also declines when its service moves data through
+    // other memory or its span reaches the return stack, whose cells only
+    // checked pushes and pops change during a run. A transfer may create
+    // guest pages, so the run forgets the pages it found absent.
+    bool execute_disk(const Instruction& operation, MemoryRun& memory, RunState& s,
+                      StackOperation& stack) {
+        namespace disk = megapad::storage_service;
+        const auto shape = static_cast<uint32_t>(operation.a);
+        const bool unit_word = (shape & DISK_UNIT) != 0;
+        if (operation.opcode == OP_DISK_VALUE) {
+            if (!stack.inputs(unit_word ? 1 : 0) || !stack.outputs(1)) return false;
+            const Cell unit = unit_word ? stack.values[0] : 0;
+            const disk::Service* service = unit < disks_.size() ? disks_[unit] : nullptr;
+            Cell value = 0;
+            if (service != nullptr) {
+                switch (operation.b) {
+                case DISK_STATUS: value = service->status(); break;
+                case DISK_SECTORS: value = service->total_sectors(); break;
+                case DISK_MEDIA_GENERATION: value = service->media_generation(); break;
+                case DISK_CAPABILITIES: value = service->capabilities(); break;
+                default: return false;
+                }
+            }
+            stack.result[0] = value;
+            stack.commit();
+            ++s.ip;
+            return true;
+        }
+        const bool bound = (shape & DISK_GENERATION) != 0;
+        if (operation.opcode == OP_DISK_FLUSH) {
+            if (!stack.inputs((bound ? 1 : 0) + (unit_word ? 1 : 0)) || !stack.outputs(1))
+                return false;
+            // The inputs, top first: [unit] [generation].
+            const Cell unit = unit_word ? stack.values[0] : 0;
+            std::optional<Cell> generation;
+            if (bound) generation = stack.values[unit_word ? 1 : 0];
+            disk::Service* service = unit < disks_.size() ? disks_[unit] : nullptr;
+            Cell status = disk::result_no_media;
+            if (service != nullptr) {
+                if (service->hooked() ||
+                    PyList_GET_ITEM(lock_owners_.ptr(), FILESYSTEM_LOCK) != Py_None)
+                    return false;
+                status = service->flush(generation);
+            }
+            stack.result[0] = status;
+            stack.commit();
+            ++s.ip;
+            return true;
+        }
+        const unsigned inputs = 3 + (bound ? 1 : 0) + (unit_word ? 1 : 0);
+        if (!stack.inputs(inputs) || !stack.outputs(2)) return false;
+        // The inputs, top first: [unit] [generation] count lba dma.
+        unsigned next = 0;
+        const Cell unit = unit_word ? stack.values[next++] : 0;
+        std::optional<Cell> generation;
+        if (bound) generation = stack.values[next++];
+        const Cell count = stack.values[next++];
+        const Cell lba = stack.values[next++];
+        const Cell dma = stack.values[next++];
+        disk::Service* service = unit < disks_.size() ? disks_[unit] : nullptr;
+        disk::Outcome outcome{0, disk::result_no_media};
+        if (service != nullptr) {
+            // A count past the medium's u32 capacity fails before any memory.
+            if (service->hooked() || !service->memory_owner().is(disk_memory_) ||
+                PyList_GET_ITEM(lock_owners_.ptr(), FILESYSTEM_LOCK) != Py_None ||
+                (count <= disk::max_media_sectors &&
+                 memory.reaches_return_stack(dma, count * disk::sector_size)))
+                return false;
+            outcome = service->transfer(service->memory(), (shape & DISK_WRITE) != 0, dma,
+                                        lba, count, generation);
+            memory.forget_absent_pages();
+        }
+        stack.result[0] = outcome.completed;
+        stack.result[1] = outcome.status;
+        stack.commit();
+        ++s.ip;
+        return true;
     }
 
     // The CRC words, each a call of the service the Python words call too.
@@ -2441,6 +2598,12 @@ private:
     // The bound CRC service and the Python object that owns it.
     megapad::crc_service::Service* crc_ = nullptr;
     py::object crc_owner_;
+    // The bound storage services by unit and their Python objects, the
+    // memory they move data through and the spinlock bank's owner list.
+    std::vector<megapad::storage_service::Service*> disks_;
+    std::vector<py::object> disk_owners_;
+    py::object disk_memory_;
+    py::object lock_owners_;
     const megapad::hybrid::RoutineCall* routine_call_ = nullptr;
     py::object routine_entry_;
     std::vector<NativeRoutine> routines_;
@@ -2455,9 +2618,10 @@ PYBIND11_MODULE(_megaforth_native, module) {
     megapad::chiplet::register_bindings(module);
     megapad::storage::register_bindings(module);
     megapad::crc_service::register_bindings(module);
+    megapad::storage_service::register_bindings(module);
     megapad::dictionary::register_bindings(module);
     megapad::walker::register_bindings(module);
-    module.attr("SEMANTIC_API_VERSION") = 12;
+    module.attr("SEMANTIC_API_VERSION") = 13;
     module.attr("MACHINE_STOPPED_CALL") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_CALL));
     module.attr("MACHINE_STOPPED_RESUME") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_RESUME));
     module.attr("MACHINE_CALLBACK") = py::int_(static_cast<uint32_t>(MACHINE_CALLBACK));
@@ -2475,13 +2639,16 @@ PYBIND11_MODULE(_megaforth_native, module) {
         .def_property_readonly("direct_steps", &NativeProgram::direct_steps)
         .def("bind_tile_guard", &NativeProgram::bind_tile_guard, py::arg("guard"))
         .def("bind_crc", &NativeProgram::bind_crc, py::arg("service"))
+        .def("bind_storage", &NativeProgram::bind_storage, py::arg("services"),
+             py::arg("memory"), py::arg("lock_owners"))
         .def("snapshot_stack", &NativeProgram::snapshot_stack,
              py::arg("bounds"), py::arg("continuations") = py::none())
         .def("run", &NativeProgram::run, py::arg("xt"), py::arg("ip"),
              py::arg("data_state"), py::arg("return_state"),
              py::arg("continuations"), py::arg("remaining_steps"),
              py::arg("fpcsr") = 0, py::arg("machine_allowance") = 0,
-             py::arg("tile_state") = py::none(), py::arg("crc") = false)
+             py::arg("tile_state") = py::none(), py::arg("crc") = false,
+             py::arg("disk") = false)
         .def("bind_routines", &NativeProgram::bind_routines, py::arg("entry"))
         .def("set_routine", &NativeProgram::set_routine, py::arg("index"), py::arg("image"),
              py::arg("inputs"), py::arg("outputs"), py::arg("rules"), py::arg("sites"))
@@ -2506,6 +2673,16 @@ PYBIND11_MODULE(_megaforth_native, module) {
     EXPORT_OPCODE(OP_CRC_INIT_STORE); EXPORT_OPCODE(OP_CRC_FEED);
     EXPORT_OPCODE(OP_CRC_FEED_BYTE); EXPORT_OPCODE(OP_CRC_FETCH);
     EXPORT_OPCODE(OP_CRC_RAW_FINAL_FETCH); EXPORT_OPCODE(OP_CRC_FINAL_FETCH);
+    EXPORT_OPCODE(OP_DISK_VALUE); EXPORT_OPCODE(OP_DISK_TRANSFER);
+    EXPORT_OPCODE(OP_DISK_FLUSH);
+    module.attr("DISK_UNIT") = py::int_(static_cast<uint32_t>(DISK_UNIT));
+    module.attr("DISK_GENERATION") = py::int_(static_cast<uint32_t>(DISK_GENERATION));
+    module.attr("DISK_WRITE") = py::int_(static_cast<uint32_t>(DISK_WRITE));
+    module.attr("DISK_STATUS") = py::int_(static_cast<uint32_t>(DISK_STATUS));
+    module.attr("DISK_SECTORS") = py::int_(static_cast<uint32_t>(DISK_SECTORS));
+    module.attr("DISK_MEDIA_GENERATION") =
+        py::int_(static_cast<uint32_t>(DISK_MEDIA_GENERATION));
+    module.attr("DISK_CAPABILITIES") = py::int_(static_cast<uint32_t>(DISK_CAPABILITIES));
     module.attr("TILE_ADD") = py::int_(static_cast<uint32_t>(TILE_ADD));
     module.attr("TILE_SUBTRACT") = py::int_(static_cast<uint32_t>(TILE_SUBTRACT));
     module.attr("TILE_MULTIPLY") = py::int_(static_cast<uint32_t>(TILE_MULTIPLY));

@@ -17,6 +17,7 @@ not monopolize an already-exposed shared-session socket.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from shared.mp64fs import (
     MP64FS_BITMAP_START,
@@ -38,7 +39,11 @@ from simulator.errors import SimulatorError, StepBudgetExceeded
 from simulator.memory import SparseAddressSpace
 from simulator.runtime import CreatedDefinition, DirectiveDefinition, MegaForthRuntime
 from simulator.source_acceleration import install_kdos_source_accelerators
-from simulator.storage import HostedStorageService
+from simulator import storage as storage_service
+
+if TYPE_CHECKING:
+    # The class loads with the simulator's extension on first use.
+    from simulator.storage import HostedStorageService
 
 
 _FORTH_FILE_TYPE = 3
@@ -174,7 +179,7 @@ def prepare_image_bootstrap(
 
     if not isinstance(memory, SparseAddressSpace):
         raise TypeError("memory must be a SparseAddressSpace")
-    if not isinstance(storage, HostedStorageService):
+    if not isinstance(storage, storage_service.HostedStorageService):
         raise TypeError("storage must be a HostedStorageService")
 
     if runtime is None:

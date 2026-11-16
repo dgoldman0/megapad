@@ -43,6 +43,8 @@ setup(
         depends=["simulator/accel/collected.h", "simulator/accel/guest_memory.h",
                  "simulator/accel/dictionary.h", "simulator/accel/crc_service.h",
                  "simulator/accel/crc_service_bindings.h",
+                 "simulator/accel/storage_service.h",
+                 "simulator/accel/storage_service_bindings.h",
                  "shared/accel/scalar_fp.h", "shared/accel/scalar_fp_bindings.h",
                  "shared/accel/keccak.h", "shared/accel/keccak_bindings.h",
                  "shared/accel/tile_values.h", "shared/accel/tile_values_bindings.h",

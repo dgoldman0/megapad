@@ -7,7 +7,8 @@ also need to see what the device was asked to do, in order, and to plant a
 fault in the third write or the second read after it. Both of MegaPad's
 storage controllers provide this machinery: the emulator's byte-serial
 controller (`emulator/devices.py`, `Storage`) and the simulator's checked
-service (`simulator/storage.py`, `HostedStorageService`). The faults, the
+service (`simulator/accel/storage_service.h`, which `simulator/storage.py`
+exports as `HostedStorageService`). The faults, the
 rule that decides which fault acts and what it leaves, and the observer are
 defined once, in `shared/accel/storage_faults.h` and `storage_faults.cpp`,
 and both native extensions compile them (`_mp64_accel` and
@@ -77,10 +78,10 @@ nothing can hold a request that completes when it is made, so the service
 refuses one, and tests of stalls and controller resets stay with the
 emulator.
 
-The faults reach the simulator's service from the native extension, which
-the runtime binds to each storage unit when it loads the extension. A
-service without it, under the Python reference executor with no extension
-built, refuses to plant a fault or attach an observer.
+The simulator's service is itself native code, so the faults and the
+observer are part of it. The Python disk words call it, and so do the
+engine's own disk words without returning to Python, except while an
+observer has a HOOK, which is Python.
 
 ## The request observer
 
@@ -108,16 +109,17 @@ The observer reports `requests`, the counts `reads`, `writes` and
 
 ## Why the definition is native
 
-The rule and the observer are C++ so that a storage path that runs in
-native code, such as the simulator engine's own disk words, applies them
-without returning to Python. The controllers that call them today keep
-their Python glue: with no fault queued the emulator controller's check is
-one length test, and the simulator service's is one per controller command
-and one for the observer. On the simulator, a block read through KDOS's
-`BD-READ` cost 76 to 82 microseconds on 2026-11-16 (MegaPad 977ef95e),
-almost all of it the engine's returns to Python for `UNIT-DISK@`,
-`UNIT-DISK-MEDIA-GEN` and the transfer word, so the glue is not where the
-time goes; moving those words into the engine is.
+The rule and the observer are C++ so that the simulator engine's disk
+words, which run the whole storage service in native code, apply them
+without returning to Python. The emulator's controller is Python and calls
+them through its accelerator; with no fault queued its check is one flag
+test, so its byte-serial path costs what it did. On the simulator, a block
+read through KDOS's `BD-READ` cost 76 to 82 microseconds on 2026-11-16
+while the disk words ran in Python (MegaPad 977ef95e), almost all of it the
+engine's returns to Python for `UNIT-DISK@`, `UNIT-DISK-MEDIA-GEN` and the
+transfer word. With the words in the engine, on the same machine, a
+two-sector `BD-READ` costs 0.90 microseconds and a `BD-WRITE` 1.51,
+with no return to Python.
 
 ## Tests
 

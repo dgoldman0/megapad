@@ -76,6 +76,21 @@ class MMIOPort(Protocol):
         """Write one byte at an offset from :data:`MMIO_BASE`."""
 
 
+def native_region_descriptors(memory: "SparseAddressSpace") -> tuple[list, list]:
+    """MEMORY's regions as native code takes them: sparse ``(base, size,
+    pages)`` descriptors, or dense ``(base, size, buffer)`` ones."""
+
+    if memory.dense_backing is None:
+        return [
+            (region.spec.base, region.spec.size, region.pages)
+            for region in memory._regions
+        ], []
+    return [], [
+        (spec.base, spec.size, memory.dense_backing.buffer_at(spec.base))
+        for spec in memory.regions
+    ]
+
+
 class MemoryAccessError(ExecutionError):
     """Base class for one rejected guest-memory operation."""
 

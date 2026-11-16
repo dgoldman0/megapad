@@ -43,6 +43,14 @@ class HostedSpinlockBank:
 
         return tuple(self._owners)
 
+    @property
+    def owner_list(self) -> list[int | None]:
+        """The bank's own list of owners, by lock.  The simulator's engine
+        reads it to see that a lock is free without a call into Python; it
+        is never changed through this list."""
+
+        return self._owners
+
     def owner(self, lock_id: int) -> int | None:
         """Return one current owner, or ``None`` while the lock is free."""
 

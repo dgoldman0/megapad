@@ -32,7 +32,7 @@ from simulator.dictionary import (
 )
 from simulator import ir
 from simulator.dictionary_index import DictionaryIndexState
-from simulator.memory import AddressClass, SparseAddressSpace
+from simulator.memory import native_region_descriptors, AddressClass, SparseAddressSpace
 from simulator.runtime import (
     ColonDefinition,
     ConstantDefinition,
@@ -236,18 +236,6 @@ def _extension() -> Any:
     return _EXTENSION
 
 
-def _regions(memory: SparseAddressSpace) -> tuple[list, list]:
-    if memory.dense_backing is None:
-        return [
-            (region.spec.base, region.spec.size, region.pages)
-            for region in memory._regions
-        ], []
-    return [], [
-        (spec.base, spec.size, memory.dense_backing.buffer_at(spec.base))
-        for spec in memory.regions
-    ]
-
-
 class NativeDictionary:
     """The ``Dictionary`` interface over ``_megaforth_native.NativeDictionary``."""
 
@@ -288,7 +276,7 @@ class NativeDictionary:
                     "dictionary start address must lie in mapped ordinary memory"
                 )
             active_limit = containing_region.limit
-            regions, dense = _regions(memory)
+            regions, dense = native_region_descriptors(memory)
             external = next(
                 (
                     region

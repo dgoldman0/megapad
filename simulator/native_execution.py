@@ -13,8 +13,10 @@ from time import perf_counter_ns
 from shared import scalar_fp
 from simulator import ir
 from simulator import runtime as rt
+from simulator import storage
 from simulator.diagnostics import HostedDiagnosticsService
-from simulator.memory import SparseAddressSpace
+from simulator.memory import SparseAddressSpace, native_region_descriptors
+from simulator.spinlocks import HostedSpinlockBank
 from simulator.stacks import Continuation, DataStack, ReturnStack
 from simulator.timer import HostedTimerService
 
@@ -26,7 +28,7 @@ from simulator.timer import HostedTimerService
 # span a native session's quantum already runs without returning. At 8,192
 # steps the return itself was a fifth to a third of a compute-bound run.
 UNQUANTIZED_NATIVE_INTERVAL_STEPS = 65536
-SEMANTIC_API_VERSION = 12
+SEMANTIC_API_VERSION = 13
 
 
 def load_native_extension(*, required: bool):
@@ -91,14 +93,7 @@ class NativeExecutor:
         self.runtime = runtime
         self.extension = extension
         memory = runtime.memory
-        if memory.dense_backing is None:
-            sparse_regions = [(region.spec.base, region.spec.size, region.pages)
-                              for region in memory._regions]
-            dense_regions = ()
-        else:
-            sparse_regions = ()
-            dense_regions = [(spec.base, spec.size, memory.dense_backing.buffer_at(spec.base))
-                             for spec in memory.regions]
+        sparse_regions, dense_regions = native_region_descriptors(memory)
         self.program = extension.NativeProgram(
             sparse_regions,
             memory.page_size,
@@ -156,6 +151,47 @@ class NativeExecutor:
         # service they were built over; the program calls that service.
         self.crc = runtime.crc
         self.program.bind_crc(self.crc)
+        # The original BIOS disk words, while the runtime keeps the storage
+        # services, memory and spinlock bank they were bound to; the program
+        # calls those services.  A subclass of the service or the bank runs
+        # its own Python, so its words stay in Python.
+        op = extension
+        disk_operations = {
+            b"DISK@": (op.OP_DISK_VALUE, 0, op.DISK_STATUS),
+            b"DISK-SECTORS": (op.OP_DISK_VALUE, 0, op.DISK_SECTORS),
+            b"DISK-MEDIA-GEN": (op.OP_DISK_VALUE, 0, op.DISK_MEDIA_GENERATION),
+            b"DISK-CAPS": (op.OP_DISK_VALUE, 0, op.DISK_CAPABILITIES),
+            b"UNIT-DISK@": (op.OP_DISK_VALUE, op.DISK_UNIT, op.DISK_STATUS),
+            b"UNIT-DISK-SECTORS": (op.OP_DISK_VALUE, op.DISK_UNIT, op.DISK_SECTORS),
+            b"UNIT-DISK-MEDIA-GEN": (
+                op.OP_DISK_VALUE, op.DISK_UNIT, op.DISK_MEDIA_GENERATION),
+            b"UNIT-DISK-CAPS": (op.OP_DISK_VALUE, op.DISK_UNIT, op.DISK_CAPABILITIES),
+            b"DISK-READ-CHECKED": (op.OP_DISK_TRANSFER, 0, 0),
+            b"DISK-WRITE-CHECKED": (op.OP_DISK_TRANSFER, op.DISK_WRITE, 0),
+            b"DISK-READ-GEN-CHECKED": (op.OP_DISK_TRANSFER, op.DISK_GENERATION, 0),
+            b"DISK-WRITE-GEN-CHECKED": (
+                op.OP_DISK_TRANSFER, op.DISK_GENERATION | op.DISK_WRITE, 0),
+            b"UNIT-DISK-READ-GEN-CHECKED": (
+                op.OP_DISK_TRANSFER, op.DISK_UNIT | op.DISK_GENERATION, 0),
+            b"UNIT-DISK-WRITE-GEN-CHECKED": (
+                op.OP_DISK_TRANSFER, op.DISK_UNIT | op.DISK_GENERATION | op.DISK_WRITE, 0),
+            b"DISK-FLUSH-CHECKED": (op.OP_DISK_FLUSH, 0, 0),
+            b"DISK-FLUSH-GEN-CHECKED": (op.OP_DISK_FLUSH, op.DISK_GENERATION, 0),
+            b"UNIT-DISK-FLUSH-GEN-CHECKED": (
+                op.OP_DISK_FLUSH, op.DISK_UNIT | op.DISK_GENERATION, 0),
+        }
+        self.disks = runtime.storage_units
+        self.disk_locks = runtime.spinlocks
+        self.disk_primitives = {}
+        if (all(type(unit) is storage.HostedStorageService for unit in self.disks)
+                and type(self.disk_locks) is HostedSpinlockBank):
+            self.program.bind_storage(self.disks, memory, self.disk_locks.owner_list)
+            self.disk_primitives = {
+                word.xt: (word, disk_operations[word.name])
+                for word in runtime.dictionary.words
+                if admit_core and isinstance(word.implementation, rt.PrimitiveDefinition)
+                and word.name in disk_operations
+            }
         crc_operations = {
             b"CRC-MODE!": extension.OP_CRC_MODE_STORE,
             b"CRC-RESET": extension.OP_CRC_RESET,
@@ -483,6 +519,9 @@ class NativeExecutor:
             crc = self.crc_primitives.get(target.xt)
             if crc is not None and crc[0] is target:
                 return crc[1], None
+            disk = self.disk_primitives.get(target.xt)
+            if disk is not None and disk[0] is target:
+                return disk[1], None
             cell = self.cell_primitives.get(target.xt)
             if cell is not None and cell[0] is target:
                 return cell[1], None
@@ -582,7 +621,13 @@ class NativeExecutor:
         tile = self._tile_state()
         # The CRC words run natively while the runtime keeps the service the
         # program was bound to.
-        crc = bool(self.crc_primitives) and self.runtime.crc is self.crc
+        runtime = self.runtime
+        crc = bool(self.crc_primitives) and runtime.crc is self.crc
+        # So do the disk words while it keeps the storage services, memory
+        # and spinlock bank the program was bound to.
+        disks = self.disks
+        disk = (bool(self.disk_primitives) and runtime.storage_units is disks
+                and runtime.storage is disks[0] and runtime.spinlocks is self.disk_locks)
         started = perf_counter_ns() if self.profile_enabled else 0
         result = self.program.run(
             current.xt, ip,
@@ -595,6 +640,7 @@ class NativeExecutor:
             machine_allowance,
             tile,
             crc,
+            disk,
         )
         (xt, resumed_ip, steps, data_pointer, return_pointer, cookie,
          updates, pointer_captures, fpcsr, machine, tile_result) = result

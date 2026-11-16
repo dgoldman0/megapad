@@ -3,10 +3,12 @@
 The extension and its Python owner are built from the same checkout and use
 one current internal interface. Rebuild the extension after changing this
 boundary with `python setup_simulator_accel.py build_ext --inplace --force`.
-The extension exports `SEMANTIC_API_VERSION = 12`; its Python owner checks this
+The extension exports `SEMANTIC_API_VERSION = 13`; its Python owner checks this
 version before admission. An explicit native request rejects older builds;
 automatic selection keeps the reference executor and the Python dictionary
-when the version mismatches.
+when the version mismatches. The simulator's CRC and storage services are
+classes of this extension, so a runtime needs a matching build whichever
+executor runs Forth, and refuses an older one when it makes those services.
 
 `_megaforth_native.NativeProgram(regions, page_size, continuation_type,
 dense_regions=())` retains sparse ordinary regions as `(base, size, pages)`
@@ -415,6 +417,41 @@ admitted primitive call and calling the same service as the hosted profile's
 one identity, `(0, 0)`. A word declines before any effect when its stack
 does not fit. A replaced service keeps the words in Python.
 
+## Disk words
+
+The storage service, `StorageService` (`storage_service.h`), is native: one
+storage unit's medium, its BIOS-visible controller state, and the checked
+transfer and flush, with the test faults and request observer of
+`shared/accel/storage_faults.h`. `simulator/storage.py` exports it as
+`HostedStorageService`. The runtime binds each of its units to the
+runtime's memory when it claims them (`bind_memory`). Python's disk words
+call the service with that memory; a call with other memory reaches it for
+that call alone. The host file that holds a medium is still
+`shared.storage.HostImageFile`, which the service calls to mark the sectors
+a write changes and to flush them.
+
+`bind_storage(services, memory, lock_owners)` gives the program the
+runtime's units in unit order, the memory they are bound to and the live
+owner list of the runtime's spinlock bank, and `run` takes `disk=True`
+while the runtime still keeps all three. The run then admits
+`OP_DISK_VALUE`, the compiled calls of `DISK@`, `DISK-SECTORS`,
+`DISK-MEDIA-GEN`, `DISK-CAPS` and their `UNIT-DISK-*` forms, with the
+register in operand `b`; `OP_DISK_TRANSFER`, the checked READ and WRITE
+words; and `OP_DISK_FLUSH`, the checked FLUSH words. Operand `a` holds
+`DISK_UNIT`, `DISK_GENERATION` and `DISK_WRITE`. Each costs the two ticks
+of an admitted primitive call and calls the same service. A unit the
+machine does not have reads as an empty slot.
+
+A transfer or flush declines before any effect, leaving the word to
+Python, when its service has an admission hook, which is Python, or when an
+owner holds the filesystem lock, lock two, which the Python word takes and
+releases. A transfer also declines when its service is bound to other
+memory or its span reaches the return stack, whose cells only checked
+pushes and pops change during a run. A transfer may create guest pages, so
+the run then forgets the pages it found absent; a page that exists keeps
+its bytes where they are. A subclass of the service or of the spinlock bank
+runs its own Python, so the executor leaves those words to Python.
+
 ## Ownership and collection
 
 `NativeProgram`, `NativeDictionary` and `NativeLineWalker` take part in
@@ -429,7 +466,8 @@ its memory with it.
 
 | Class | Python references it owns |
 |---|---|
-| `NativeProgram` | the continuation type, the tile guard, the routine capsule, each sparse region's page dictionary, each dense region's lease |
+| `NativeProgram` | the continuation type, the tile guard, the routine capsule, the CRC service, the storage services, the memory they are bound to and the spinlock owner list, each sparse region's page dictionary, each dense region's lease |
+| `StorageService` | the medium, the host file, the observer and its hook, the memory it is bound to, that memory's page dictionaries and dense leases |
 | `NativeDictionary` | `memory`, each record's implementation and cached view, its own reference to each page dictionary and its own dense leases |
 | `NativeLineWalker` | the dictionary, the open definition's location, the state of a failed walk |
 

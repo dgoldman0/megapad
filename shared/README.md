@@ -40,7 +40,8 @@ durability remain backend state and policy.  The controllers' test faults,
 the rule that decides where one acts and what it leaves, and the request
 observer are shared native code in `accel/storage_faults.h`
 ([`docs/storage-faults.md`](../docs/storage-faults.md)); each controller
-applies them to its own media and memory. Field, NTT, ML-KEM, and
+applies them to its own media and memory, the simulator's in its native
+storage service. Field, NTT, ML-KEM, and
 floating-point helpers similarly own pure result values only: mode and prime
 selectors, ACC/TSRC/TDST, retained buffers/registers, previous results,
 guest-memory ordering, status, and fault publication remain simulator/emulator

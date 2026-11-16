@@ -9,6 +9,7 @@ import signal
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from shared.session_options import (
     add_storage_options,
@@ -32,7 +33,11 @@ from simulator.session import (
     SimulatorSharedMachine,
     configured_semantic_quantum_steps,
 )
-from simulator.storage import HostedStorageService
+from simulator import storage as storage_service
+
+if TYPE_CHECKING:
+    # The class loads with the simulator's extension on first use.
+    from simulator.storage import HostedStorageService
 
 
 _CANONICAL_HBW_MIB = 3
@@ -93,7 +98,7 @@ def storage_services(
         unit.host_name: (
             None
             if path is None
-            else HostedStorageService(
+            else storage_service.HostedStorageService(
                 image_path=path, write_protected=unit.write_protected,
             )
         )

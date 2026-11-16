@@ -15,7 +15,15 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Callable, Iterator, NoReturn, TypeAlias, get_args
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Iterator,
+    NoReturn,
+    TypeAlias,
+    get_args,
+)
 
 from shared.cells import CELL_BYTES, MASK64, s64, u64
 from shared.crypto_caps import (
@@ -88,7 +96,7 @@ from simulator.sha2 import HostedSHA2Service
 from simulator.sha3 import HostedSHA3Service
 from simulator.tile import HostedTileService
 from simulator.spinlocks import HostedSpinlockBank
-from simulator.storage import HostedStorageService
+from simulator import storage as storage_service
 from simulator.source import (
     ASCII_SPACE,
     SourceBuffer,
@@ -105,6 +113,10 @@ from simulator.stacks import (
 )
 from simulator.timer import HostedTimerService
 from simulator.terminal_geometry import HostedTerminalGeometryState
+
+if TYPE_CHECKING:
+    # The class loads with the simulator's extension on first use.
+    from simulator.storage import HostedStorageService
 
 
 # A :NONAME definition has no dictionary header.  Diagnostics show it under
@@ -771,7 +783,7 @@ class MegaForthRuntime:
         unit_services = (storage, settings_storage, system_storage, user_storage)
         for unit, service in zip(STORAGE_UNIT_TABLE, unit_services, strict=True):
             if service is not None and not isinstance(
-                service, HostedStorageService
+                service, storage_service.HostedStorageService
             ):
                 raise TypeError(
                     f"{unit.host_name} must be a HostedStorageService or None"
@@ -838,7 +850,7 @@ class MegaForthRuntime:
         # holds no medium.  The host attaches a write-protected unit's medium
         # write-protected.
         self.storage_units: tuple[HostedStorageService, ...] = tuple(
-            HostedStorageService() if service is None else service
+            storage_service.HostedStorageService() if service is None else service
             for service in unit_services
         )
         (
@@ -1030,10 +1042,9 @@ class MegaForthRuntime:
                     )
         for service in self.storage_units:
             service.claim()
-            if native_extension is not None:
-                # Storage faults and the request observer are defined once,
-                # for the emulator's controller and this service alike.
-                service.bind_fault_core(native_extension)
+            # The engine's disk words move data through the memory of the
+            # runtime that owns the service.
+            service.bind_memory(self.memory)
 
     @property
     def execution_backend(self) -> str:
