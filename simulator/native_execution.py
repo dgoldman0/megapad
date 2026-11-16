@@ -48,6 +48,7 @@ def load_native_extension(*, required: bool):
             or not callable(getattr(extension, "tile_execute_values", None))
             or not callable(getattr(extension, "tile_values_supported", None))
             or getattr(extension, "TILE_GUARD_API_VERSION", None) != 1
+            or getattr(extension, "STORAGE_FAULTS_API_VERSION", None) != 1
             or not callable(getattr(extension, "TileIdentityGuard", None))
             or not callable(getattr(extension, "NativeDictionary", None))):
         if required:

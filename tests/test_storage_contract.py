@@ -1119,3 +1119,349 @@ def test_a_machine_names_its_images_and_saves_only_its_writable_disks(tmp_path):
             bytes(SECTOR_SIZE) if unit.write_protected else changed
         )
     assert WRITABLE_UNITS and PROTECTED_UNITS
+
+
+# ---------------------------------------------------------------------------
+#  The guest-visible contract on both machines
+# ---------------------------------------------------------------------------
+#
+# The emulator's controller and the simulator's checked service take their
+# test faults and request observer from one native definition
+# (shared/accel/storage_faults.h).  These tests run the same guest words on
+# an emulator machine running the BIOS and on a simulator runtime, plant the
+# same faults, and require the same results, guest memory, medium, host
+# file and request record from both.  The register-level tests above stay
+# with the emulator, whose controller alone has registers.
+
+import re
+
+from simulator.runtime import MegaForthRuntime
+from simulator.storage import HostedStorageService
+
+_BIOS_CODE: bytes | None = None
+_REPORT = re.compile(r"<([0-9 ]+)>")
+_BUFFER_BYTES = 300 * SECTOR_SIZE
+_WORDS = [
+    f"CREATE BUF {_BUFFER_BYTES} ALLOT",
+    ': REPORT ( completed status -- ) ." <" . . ." >" ;',
+    ": SUM ( a n -- sum ) 0 SWAP 0 ?DO OVER I + C@ + LOOP NIP ;",
+]
+
+
+def _bios_code() -> bytes:
+    global _BIOS_CODE
+    if _BIOS_CODE is None:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "bios.asm"), encoding="utf-8") as source:
+            _BIOS_CODE = assemble(source.read())
+    return _BIOS_CODE
+
+
+class _EmulatorMachine:
+    """An emulator machine running the BIOS, its boot disk held in PATH."""
+
+    def __init__(self, path):
+        self.path = path
+        self.system = MegapadSystem(ram_size=1024 * 1024, storage_image=str(path))
+        self._sent = bytearray()
+        self.system.uart.on_tx = self._sent.append
+        self.system.load_binary(0, _bios_code())
+        self.system.boot()
+        self.storage = self.system.storage
+        self.run([])
+
+    def run(self, lines: list[str]) -> list[list[int]]:
+        """Run LINES and return the reports they print."""
+        data = "".join(line + "\n" for line in lines).encode()
+        start = len(self._sent)
+        position = 0
+        steps = 0
+        while steps < 400_000_000:
+            cpu = self.system.cpu
+            if cpu.halted:
+                break
+            if cpu.idle and not self.system.uart.has_rx_data:
+                if position >= len(data):
+                    break
+                end = data.find(b"\n", position) + 1 or len(data)
+                self.system.uart.inject_input(data[position:end])
+                position = end
+                continue
+            steps += max(self.system.run_batch(100_000), 1)
+        assert position == len(data), "the emulator did not take every line"
+        return _reports(bytes(self._sent[start:]).decode("latin-1"))
+
+    def medium(self) -> bytes:
+        return bytes(self.storage._image_data)
+
+
+class _SimulatorMachine:
+    """A simulator runtime, its boot disk held in PATH."""
+
+    def __init__(self, path):
+        self.path = path
+        self.storage = HostedStorageService(image_path=path)
+        self.runtime = MegaForthRuntime(
+            storage=self.storage, execution_backend="native"
+        )
+
+    def run(self, lines: list[str]) -> list[list[int]]:
+        text = "".join(line + "\n" for line in lines).encode()
+        self.runtime.evaluate(text, source_name="contract",
+                              step_budget=4_000_000_000)
+        return _reports(self.runtime.drain_uart_output().decode("latin-1"))
+
+    def medium(self) -> bytes:
+        return self.storage.image_bytes
+
+
+def _reports(text: str) -> list[list[int]]:
+    return [[int(value) for value in found.split()]
+            for found in _REPORT.findall(text)]
+
+
+_MACHINES = {"emulator": _EmulatorMachine, "simulator": _SimulatorMachine}
+
+
+@pytest.fixture(params=tuple(_MACHINES))
+def machine(request, tmp_path):
+    """A machine of each kind, made from MEDIA, with the test's words."""
+
+    def make(media: bytes):
+        path = tmp_path / f"{request.param}.img"
+        path.write_bytes(media)
+        made = _MACHINES[request.param](path)
+        made.run(_WORDS)
+        return made
+
+    return make
+
+
+_WRITE_FAULTS = {
+    # name: (fault, status, completed sectors, bytes landed on the medium)
+    "media-mid-sector": (
+        dict(stage="media", command=STORAGE_CMD_WRITE, sector_index=1,
+             byte_index=100),
+        STORAGE_RESULT_MEDIA_FAILURE | STORAGE_RESULT_PARTIAL, 1, 612),
+    "media-first-byte": (
+        dict(stage="media", command=STORAGE_CMD_WRITE, sector_index=0,
+             byte_index=0),
+        STORAGE_RESULT_MEDIA_FAILURE, 0, 0),
+    "dma-third-sector": (
+        dict(stage="dma", command=STORAGE_CMD_WRITE, sector_index=2,
+             byte_index=7),
+        STORAGE_RESULT_MEDIA_FAILURE | STORAGE_RESULT_PARTIAL, 2, 1024),
+    "dma-first-byte": (
+        dict(stage="dma", command=STORAGE_CMD_WRITE),
+        STORAGE_RESULT_MEDIA_FAILURE, 0, 0),
+    "write-complete": (
+        dict(stage="write_complete", result=STORAGE_RESULT_TIMEOUT),
+        STORAGE_RESULT_TIMEOUT | STORAGE_RESULT_PARTIAL, 3, 1536),
+    # An OK that confirms fewer sectors than asked: the BIOS reports
+    # INTERNAL.
+    "lost-tail": (
+        dict(stage="media", result=STORAGE_RESULT_OK,
+             command=STORAGE_CMD_WRITE, sector_index=1, byte_index=0),
+        0x0E | STORAGE_RESULT_PARTIAL, 1, 512),
+    "accept": (
+        dict(stage="accept", command=STORAGE_CMD_WRITE),
+        STORAGE_RESULT_MEDIA_FAILURE, 0, 0),
+    "start": (
+        dict(stage="start", result=STORAGE_RESULT_TIMEOUT),
+        STORAGE_RESULT_TIMEOUT, 0, 0),
+    # Planted for a read, so a write passes it by.
+    "other-command": (
+        dict(stage="media", command=STORAGE_CMD_READ),
+        STORAGE_RESULT_OK, 3, 1536),
+}
+
+
+@pytest.mark.parametrize("name", tuple(_WRITE_FAULTS))
+def test_a_faulted_write_lands_what_the_controller_moved(machine, name):
+    fault, status, completed, landed = _WRITE_FAULTS[name]
+    disk = machine(bytes(64 * SECTOR_SIZE))
+    disk.run([f"BUF {_BUFFER_BYTES} 0xA7 FILL"])
+    disk.storage.inject_fault(**fault)
+    assert disk.run(["BUF 20 3 DISK-WRITE-CHECKED REPORT"]) == [
+        [status, completed]
+    ]
+    medium = disk.medium()
+    region = medium[20 * SECTOR_SIZE:23 * SECTOR_SIZE]
+    assert region == b"\xA7" * landed + bytes(len(region) - landed)
+    assert medium[:20 * SECTOR_SIZE] == bytes(20 * SECTOR_SIZE)
+    assert medium[23 * SECTOR_SIZE:] == bytes(41 * SECTOR_SIZE)
+    assert len(disk.storage._faults) == (1 if name == "other-command" else 0)
+
+
+_READ_FAULTS = {
+    # name: (fault, status, completed sectors, bytes landed in memory)
+    "media-third-sector": (
+        dict(stage="media", command=STORAGE_CMD_READ, sector_index=2),
+        STORAGE_RESULT_MEDIA_FAILURE | STORAGE_RESULT_PARTIAL, 2, 1024),
+    "media-first-sector": (
+        dict(stage="media", command=STORAGE_CMD_READ),
+        STORAGE_RESULT_MEDIA_FAILURE, 0, 0),
+    "dma-mid-sector": (
+        dict(stage="dma", command=STORAGE_CMD_READ, sector_index=1,
+             byte_index=300),
+        STORAGE_RESULT_MEDIA_FAILURE | STORAGE_RESULT_PARTIAL, 1, 812),
+    "dma-first-byte": (
+        dict(stage="dma", command=STORAGE_CMD_READ),
+        STORAGE_RESULT_MEDIA_FAILURE, 0, 0),
+    # Five bytes reached memory before the fault, though no sector did.
+    "dma-sixth-byte": (
+        dict(stage="dma", command=STORAGE_CMD_READ, byte_index=5),
+        STORAGE_RESULT_MEDIA_FAILURE | STORAGE_RESULT_PARTIAL, 0, 5),
+    "start": (
+        dict(stage="start", command=STORAGE_CMD_READ),
+        STORAGE_RESULT_MEDIA_FAILURE, 0, 0),
+    # A read takes each sector from the medium whole: a medium fault with
+    # a byte index never meets it.
+    "media-with-byte": (
+        dict(stage="media", command=STORAGE_CMD_READ, byte_index=3),
+        STORAGE_RESULT_OK, 3, 1536),
+}
+
+
+@pytest.mark.parametrize("name", tuple(_READ_FAULTS))
+def test_a_faulted_read_lands_what_the_controller_moved(machine, name):
+    fault, status, completed, landed = _READ_FAULTS[name]
+    media = bytearray(64 * SECTOR_SIZE)
+    media[20 * SECTOR_SIZE:23 * SECTOR_SIZE] = b"\x01" * (3 * SECTOR_SIZE)
+    disk = machine(bytes(media))
+    disk.run([f"BUF {_BUFFER_BYTES} 0 FILL"])
+    disk.storage.inject_fault(**fault)
+    assert disk.run([
+        "BUF 20 3 DISK-READ-CHECKED REPORT",
+        "BUF 1536 SUM 0 REPORT",
+        "BUF 1536 + 1 SUM 0 REPORT",
+    ]) == [[status, completed], [0, landed], [0, 0]]
+    # The landed bytes are a prefix of the buffer.
+    if landed:
+        assert disk.run([f"BUF {landed} SUM 0 REPORT"]) == [[0, landed]]
+    assert len(disk.storage._faults) == (1 if name == "media-with-byte" else 0)
+
+
+@pytest.mark.parametrize(
+    "result",
+    (STORAGE_RESULT_FLUSH_FAILURE, STORAGE_RESULT_OK),
+    ids=("refused", "lost"),
+)
+def test_a_faulted_flush_leaves_the_host_file_as_it_was(machine, result):
+    disk = machine(bytes(8 * SECTOR_SIZE))
+    disk.run(["BUF 512 0x5C FILL", "BUF 2 1 DISK-WRITE-CHECKED REPORT"])
+    disk.storage.inject_fault("flush", result, command=STORAGE_CMD_FLUSH)
+    assert disk.run(["DISK-FLUSH-CHECKED 0 REPORT"]) == [[0, result]]
+    assert disk.path.read_bytes() == bytes(8 * SECTOR_SIZE)
+    assert disk.run(["DISK-FLUSH-CHECKED 0 REPORT"]) == [[0, 0]]
+    stored = disk.path.read_bytes()
+    assert stored[2 * SECTOR_SIZE:3 * SECTOR_SIZE] == b"\x5C" * SECTOR_SIZE
+    assert stored == disk.medium()
+
+
+def test_a_fault_that_detaches_removes_the_medium_midway(machine):
+    disk = machine(bytes(16 * SECTOR_SIZE))
+    disk.run(["BUF 1536 0x33 FILL"])
+    generation = disk.storage.media_generation
+    disk.storage.inject_fault(
+        "media", command=STORAGE_CMD_WRITE, sector_index=1, action="detach"
+    )
+    assert disk.run([
+        "BUF 4 3 DISK-WRITE-CHECKED REPORT",
+        f"0 UNIT-DISK@ {STORAGE_STATUS_PRESENT} AND 0 REPORT",
+    ]) == [
+        [STORAGE_RESULT_MEDIA_REMOVED | STORAGE_RESULT_PARTIAL, 1],
+        [0, 0],
+    ]
+    assert disk.storage.media_generation == generation + 1
+
+
+def test_the_observer_records_every_admitted_request_and_plants_planned_faults(
+    machine,
+):
+    disk = machine(bytes(512 * SECTOR_SIZE))
+    admitted = []
+    observer = disk.storage.observe(
+        lambda command, lba, count: admitted.append((command, lba, count))
+    )
+    # The second read after the first write fails at its first sector, and
+    # the third write command, the second chunk of a 300-sector write,
+    # fails at its eleventh sector.
+    disk.storage.plan_fault(
+        STORAGE_CMD_READ, 2, after_writes=1,
+        stage="media", command=STORAGE_CMD_READ,
+    )
+    disk.storage.plan_fault(
+        STORAGE_CMD_WRITE, 3,
+        stage="media", command=STORAGE_CMD_WRITE, sector_index=10,
+    )
+    assert observer.pending == 2
+    reports = disk.run([
+        "BUF 10 2 DISK-READ-CHECKED REPORT",
+        "BUF 20 2 DISK-WRITE-CHECKED REPORT",
+        "BUF 11 1 DISK-READ-CHECKED REPORT",
+        "BUF 12 1 DISK-READ-CHECKED REPORT",
+        "DISK-FLUSH-CHECKED 0 REPORT",
+        "BUF 100 300 DISK-WRITE-CHECKED REPORT",
+        "DISK-FLUSH-CHECKED 0 REPORT",
+    ])
+    assert reports == [
+        [0, 2], [0, 2], [0, 1],
+        [STORAGE_RESULT_MEDIA_FAILURE, 0],
+        [0, 0],
+        [STORAGE_RESULT_MEDIA_FAILURE | STORAGE_RESULT_PARTIAL, 265],
+        [0, 0],
+    ]
+    requests = (
+        (STORAGE_CMD_READ, 10, 2), (STORAGE_CMD_WRITE, 20, 2),
+        (STORAGE_CMD_READ, 11, 1), (STORAGE_CMD_READ, 12, 1),
+        (STORAGE_CMD_FLUSH, 0, 0),
+        (STORAGE_CMD_WRITE, 100, 255), (STORAGE_CMD_WRITE, 355, 45),
+        (STORAGE_CMD_FLUSH, 0, 0),
+    )
+    assert observer.requests == requests
+    assert tuple(admitted) == requests
+    assert (observer.reads, observer.writes, observer.flushes) == (3, 3, 2)
+    assert observer.pending == 0
+    disk.storage.stop_observing()
+    assert disk.run(["BUF 30 1 DISK-READ-CHECKED REPORT"]) == [[0, 1]]
+    assert observer.requests == requests
+
+
+def test_a_fault_is_planned_only_while_a_request_observer_is_attached(
+    machine,
+):
+    disk = machine(bytes(4 * SECTOR_SIZE))
+    with pytest.raises(RuntimeError, match="observe"):
+        disk.storage.plan_fault(STORAGE_CMD_WRITE, 1, stage="media")
+
+
+def test_both_machines_refuse_the_same_malformed_faults(machine):
+    disk = machine(bytes(4 * SECTOR_SIZE))
+    for fault, message in (
+        (dict(stage="later"), "unknown storage fault stage: later"),
+        (dict(stage="media", action="explode"),
+         "unknown storage fault action: explode"),
+        (dict(stage="media", action="stall"),
+         "storage stalls are only safe at accept/start"),
+        (dict(stage="media", result=0x100),
+         "storage fault result must fit in one byte"),
+        (dict(stage="media", command=-1),
+         "storage fault command must fit in one byte"),
+        (dict(stage="media", sector_index=-1),
+         "storage fault sector index cannot be negative"),
+        (dict(stage="media", byte_index=-1),
+         "storage fault byte index cannot be negative"),
+    ):
+        with pytest.raises(ValueError, match=re.escape(message)):
+            disk.storage.inject_fault(**fault)
+    assert len(disk.storage._faults) == 0
+
+
+def test_the_simulator_cannot_hold_a_request_stalled(tmp_path):
+    path = tmp_path / "boot.img"
+    path.write_bytes(bytes(4 * SECTOR_SIZE))
+    disk = _SimulatorMachine(path)
+    with pytest.raises(ValueError, match="cannot hold one stalled"):
+        disk.storage.inject_fault("start", action="stall")
+    assert len(disk.storage._faults) == 0

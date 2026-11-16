@@ -46,6 +46,7 @@
 #include "../../shared/accel/keccak_bindings.h"
 #include "../../shared/accel/tile_values_bindings.h"
 #include "../../shared/accel/chiplet_bindings.h"
+#include "../../shared/accel/storage_faults_bindings.h"
 #include "../../shared/accel/routine_call.h"
 #include "dbt/executable_arena.h"
 #include "dbt/x86_64/lowering.h"
@@ -31715,6 +31716,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
     megapad::keccak::register_bindings(m);
     megapad::tile_values::register_bindings(m);
     megapad::chiplet::register_bindings(m);
+    megapad::storage::register_bindings(m);
     m.doc() = "C++ accelerated core for Megapad-64 emulator";
 
     py::class_<PythonMemoryUseScope>(m, "_MemoryUseScope")

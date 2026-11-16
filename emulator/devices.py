@@ -32,6 +32,13 @@ from dataclasses import dataclass
 from typing import Callable, ContextManager, Optional, TYPE_CHECKING
 from collections import deque
 
+from _mp64_accel import (
+    StorageFault,
+    StorageFaultQueue,
+    StorageRequestObserver,
+    storage_fault,
+    storage_fault_result,
+)
 from shared.audio_output import (
     AUDIO_OFFSET,
     AUDIO_SIZE,
@@ -579,25 +586,6 @@ class Timer(Device):
 
 
 @dataclass(frozen=True)
-class StorageFault:
-    """One-shot, test-only fault injected at a deterministic command stage.
-
-    ``sector_index`` and ``byte_index`` are zero-based within the accepted
-    request.  A field left as ``None`` matches every value.  Stalls are
-    intentionally restricted to the pre-mutation ``accept`` and ``start``
-    stages so releasing a stalled command cannot replay an already-applied
-    side effect.
-    """
-
-    stage: str
-    result: int = STORAGE_RESULT_MEDIA_FAILURE
-    command: Optional[int] = None
-    sector_index: Optional[int] = None
-    byte_index: Optional[int] = None
-    action: str = "fail"
-
-
-@dataclass(frozen=True)
 class StorageDMABeat:
     """One immutable byte beat exposed on the disk's physical bus port."""
 
@@ -629,11 +617,6 @@ class Storage(Device):
     authoritative completion signal, including for an immediately completed
     command.
     """
-
-    _FAULT_STAGES = frozenset({
-        "accept", "start", "dma", "media", "write_complete", "flush",
-    })
-    _FAULT_ACTIONS = frozenset({"fail", "stall", "detach"})
 
     def __init__(
         self,
@@ -689,7 +672,15 @@ class Storage(Device):
         self._active_effect: bool = False
         self._active_transferred: int = 0
         self._stalled: bool = False
-        self._faults: list[StorageFault] = []
+        # Test faults and the request observer, defined once for both
+        # machines' storage controllers (shared/accel/storage_faults.h).
+        self._faults = StorageFaultQueue()
+        # Whether the queue holds a fault, refreshed after each change this
+        # controller makes to it, so that the byte-serial path does not ask
+        # the native queue at every byte while none is queued.
+        self._faults_queued = False
+        self._observer: Optional[StorageRequestObserver] = None
+        self._admission_hook: Optional[Callable[[int, int, int], None]] = None
         self._strict_cycle_submission: bool = False
         self._dma_async: bool = False
         self._immediate_span_eligible: bool = False
@@ -880,7 +871,7 @@ class Storage(Device):
             not self._immediate_span_eligible
             or self._dma_async
             or self._stalled
-            or self._faults
+            or self._faults_queued
             or binding is None
             or type(self) is not Storage
             or type(self._image_data) is not bytearray
@@ -909,6 +900,7 @@ class Storage(Device):
         self._stalled = False
         self._clear_dma_fsm()
         self._faults.clear()
+        self._faults_queued = False
         self._reset_request_registers()
         self._clear_last_result()
 
@@ -922,36 +914,84 @@ class Storage(Device):
         byte_index: Optional[int] = None,
         action: str = "fail",
     ) -> StorageFault:
-        """Queue one deterministic, one-shot controller fault for tests."""
+        """Queue one deterministic, one-shot controller fault for tests.
+
+        ``sector_index`` and ``byte_index`` are zero-based within the
+        accepted request, and a field left as ``None`` matches every value.
+        Stalls are restricted to the pre-mutation ``accept`` and ``start``
+        stages, so releasing a stalled command cannot replay an applied
+        side effect.
+        """
         self._require_cycle_mutation_allowed()
-        if stage not in self._FAULT_STAGES:
-            raise ValueError(f"unknown storage fault stage: {stage}")
-        if action not in self._FAULT_ACTIONS:
-            raise ValueError(f"unknown storage fault action: {action}")
-        if action == "stall" and stage not in {"accept", "start"}:
-            raise ValueError("storage stalls are only safe at accept/start")
-        if not 0 <= result <= 0xFF:
-            raise ValueError("storage fault result must fit in one byte")
-        if command is not None and not 0 <= command <= 0xFF:
-            raise ValueError("storage fault command must fit in one byte")
-        if sector_index is not None and sector_index < 0:
-            raise ValueError("storage fault sector index cannot be negative")
-        if byte_index is not None and byte_index < 0:
-            raise ValueError("storage fault byte index cannot be negative")
-        fault = StorageFault(
-            stage=stage,
-            result=result,
+        fault = storage_fault(
+            stage,
+            result,
             command=command,
             sector_index=sector_index,
             byte_index=byte_index,
             action=action,
         )
-        self._faults.append(fault)
+        self._faults.push(fault)
+        self._faults_queued = True
         return fault
 
     def clear_faults(self):
         self._require_cycle_mutation_allowed()
         self._faults.clear()
+        self._faults_queued = False
+
+    def observe(
+        self, hook: Optional[Callable[[int, int, int], None]] = None
+    ) -> StorageRequestObserver:
+        """Record every request this controller admits from now on.
+
+        A request is admitted once the controller has accepted and checked
+        it, just before its transfer or flush begins.  The observer records
+        it, plants the faults planned for it, and then HOOK, if given, is
+        called with the request's command, LBA and count; a flush names no
+        sectors.  Faults planted at admission act within that request.
+        """
+        observer = StorageRequestObserver()
+        self._observer = observer
+        self._admission_hook = hook
+        return observer
+
+    def stop_observing(self) -> None:
+        self._observer = None
+        self._admission_hook = None
+
+    def plan_fault(
+        self,
+        request_command: int,
+        ordinal: int,
+        *,
+        after_writes: Optional[int] = None,
+        **fault,
+    ) -> StorageFault:
+        """Plant a fault, described as ``inject_fault`` takes one, when the
+        ORDINAL-th REQUEST_COMMAND is admitted.  With AFTER_WRITES, ORDINAL
+        counts only the requests admitted after exactly that many writes.
+        The request observer plants it, so one must be attached."""
+        observer = self._observer
+        if observer is None:
+            raise RuntimeError("plan a storage fault after observe()")
+        made = storage_fault(**fault)
+        observer.plan(made, request_command, ordinal, after_writes)
+        return made
+
+    def _admit(self, request: tuple[int, int, int, int, int]) -> None:
+        observer = self._observer
+        if observer is None:
+            return
+        command = request[0]
+        lba, count = (0, 0) if command == STORAGE_CMD_FLUSH else (
+            request[1], request[3]
+        )
+        if observer.admit(command, lba, count, self._faults):
+            self._faults_queued = True
+        hook = self._admission_hook
+        if hook is not None:
+            hook(command, lba, count)
 
     @property
     def stalled(self) -> bool:
@@ -1169,7 +1209,7 @@ class Storage(Device):
         # when the command resumes.
         self._immediate_span_eligible = bool(
             not self._dma_async
-            and not self._faults
+            and not self._faults_queued
             and type(self) is Storage
             and type(self._image_data) is bytearray
             and self.on_dma_read is None
@@ -1216,20 +1256,14 @@ class Storage(Device):
         sector_index: Optional[int] = None,
         byte_index: Optional[int] = None,
     ) -> Optional[StorageFault]:
-        command = request[0]
-        for index, fault in enumerate(self._faults):
-            if fault.stage != stage:
-                continue
-            if fault.command is not None and fault.command != command:
-                continue
-            if (fault.sector_index is not None
-                    and fault.sector_index != sector_index):
-                continue
-            if fault.byte_index is not None and fault.byte_index != byte_index:
-                continue
+        if not self._faults_queued:
+            return None
+        faults = self._faults
+        fault = faults.take(stage, request[0], sector_index, byte_index)
+        if fault is not None:
             self._immediate_span_eligible = False
-            return self._faults.pop(index)
-        return None
+            self._faults_queued = bool(faults)
+        return fault
 
     def _apply_fault(
         self,
@@ -1241,13 +1275,9 @@ class Storage(Device):
         if fault.action == "stall":
             self._stalled = True
             return True
-        result = fault.result
         if fault.action == "detach":
             self._force_fault_detach()
-            result = STORAGE_RESULT_MEDIA_REMOVED
-        if effect_applied and result != STORAGE_RESULT_OK:
-            result |= STORAGE_RESULT_PARTIAL
-        self._complete(result, transferred)
+        self._complete(storage_fault_result(fault, effect_applied), transferred)
         return True
 
     def _preflight(
@@ -1319,6 +1349,7 @@ class Storage(Device):
                 self._complete(preflight, 0)
                 return
 
+            self._admit(request)
             if command == STORAGE_CMD_READ:
                 self._start_dma(request, "read")
             elif command == STORAGE_CMD_WRITE:

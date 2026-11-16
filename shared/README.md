@@ -36,7 +36,11 @@ and the executable BIOS's pure bitmap/directory acceptance predicate are also
 shared; scratch placement, checked reads, locking, attachment generation, and
 observable controller effects remain backend adapters. Controller registers,
 image ownership, checked-request execution, DMA, completion publication, and
-durability remain backend state and policy. Field, NTT, ML-KEM, and
+durability remain backend state and policy.  The controllers' test faults,
+the rule that decides where one acts and what it leaves, and the request
+observer are shared native code in `accel/storage_faults.h`
+([`docs/storage-faults.md`](../docs/storage-faults.md)); each controller
+applies them to its own media and memory. Field, NTT, ML-KEM, and
 floating-point helpers similarly own pure result values only: mode and prime
 selectors, ACC/TSRC/TDST, retained buffers/registers, previous results,
 guest-memory ordering, status, and fault publication remain simulator/emulator

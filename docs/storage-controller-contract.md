@@ -229,7 +229,11 @@ paths may not implement their own polling or result translation.
 Deterministic emulator and RTL test facilities may inject rejection, selected
 DMA/media failure, stalled acknowledgement, write completion failure, flush
 failure, timeout, and removal.  These controls are test machinery and are not
-guest policy or production filesystem APIs.
+guest policy or production filesystem APIs.  The emulator's controller and
+the hosted simulator's checked service share one definition of these faults
+and of the request observer that records what a controller admitted;
+[`storage-faults.md`](storage-faults.md) describes both, and what the
+simulator, which completes each request at once, cannot model.
 
 Qualification of generation-bound handles additionally proves that stale
 guarded READ, WRITE, and FLUSH commands complete as `MEDIA_REMOVED` with zero

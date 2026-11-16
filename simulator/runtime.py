@@ -1029,6 +1029,10 @@ class MegaForthRuntime:
                     )
         for service in self.storage_units:
             service.claim()
+            if native_extension is not None:
+                # Storage faults and the request observer are defined once,
+                # for the emulator's controller and this service alike.
+                service.bind_fault_core(native_extension)
 
     @property
     def execution_backend(self) -> str:
