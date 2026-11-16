@@ -4,19 +4,12 @@ The service is native code, simulator/accel/crc_service.h: the BIOS checked
 owner record over the recurrence the emulator's CRC unit uses
 (shared/accel/crc.h).  It is the one definition of the CRC words: the Python
 words call it through this binding and the native engine calls it directly.
-The initial simulator advertises one full guest core and one foreground
-task, so every caller identity is ``(COREID, TASK-ID) = (0, 0)``.
+The class loads with the simulator's extension on first use.  The initial
+simulator advertises one full guest core and one foreground task, so every
+caller identity is ``(COREID, TASK-ID) = (0, 0)``.
 """
 
 from __future__ import annotations
-
-try:
-    from _megaforth_native import CRCService as HostedCRCService
-except ImportError as error:  # pragma: no cover - a build problem
-    raise ImportError(
-        "the simulator's CRC service is native code: build MegaPad's "
-        "simulator extension with make simulator-accel"
-    ) from error
 
 
 CRC_STATUS_OK = 0
@@ -25,6 +18,16 @@ CRC_STATUS_STATE = 2
 CRC_STATUS_RANGE = 3
 
 GuestIdentity = tuple[int, int]
+
+
+def __getattr__(name: str):
+    if name == "HostedCRCService":
+        from simulator.native_execution import native_service
+
+        service = native_service("CRCService", "CRC service")
+        globals()[name] = service
+        return service
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [

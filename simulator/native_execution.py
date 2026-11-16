@@ -60,6 +60,25 @@ def load_native_extension(*, required: bool):
     return extension
 
 
+def native_service(name: str, role: str):
+    """The class NAME of the simulator's native extension, for its ROLE.
+
+    Some of the simulator's services are native code, so the simulator
+    needs a matching build of its extension whichever executor runs Forth.
+    Their modules load the classes here on first use, so that importing the
+    simulator, as the command line's help does, needs no build.
+    """
+
+    extension = load_native_extension(required=False)
+    service = None if extension is None else getattr(extension, name, None)
+    if service is None:
+        raise RuntimeError(
+            f"the simulator's {role} requires _megaforth_native, built to "
+            "match this checkout: run make simulator-accel"
+        )
+    return service
+
+
 class NativeExecutor:
     @classmethod
     def create(cls, runtime, *, required: bool, admit_core: bool):

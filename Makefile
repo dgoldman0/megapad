@@ -80,7 +80,8 @@ serve:
 # This target does not depend on accel: simulator units are seconds-scale
 # semantic checks and must not compile or execute the exact MP64 backend
 # merely to prove backend-independent behavior.  It builds the simulator's
-# own extension, whose native services (CRC, storage) the simulator needs.
+# own extension, whose native services (CRC, storage) the simulator needs
+# whichever executor runs Forth.
 .PHONY: test-simulator
 test-simulator: simulator-accel
 	@set -eu; \
@@ -159,8 +160,10 @@ float-parity: accel
 	$(MAKE) -C rtl/sim fp_exact fma_unit fpu tile_fp tile_ext cpu_fp \
 		tacc_cycles
 
+# The suite runs the simulator too, which needs its own extension, so the
+# emulator's test targets build both extensions.
 .PHONY: test-sequential
-test-sequential: accel
+test-sequential: build
 	@set -eu; \
 	$(RESOLVE_TEST_PATHS) \
 	exec $(TEST_SUPERVISOR) foreground \
@@ -275,7 +278,7 @@ test-quick: accel
 
 # --- Single sequential test (usage: make test-one K=TestFoo) ---
 .PHONY: test-one
-test-one: accel
+test-one: build
 	@set -eu; \
 	$(RESOLVE_TEST_PATHS) \
 	if [ -z "$(K)" ]; then echo "Usage: make test-one K=TestFoo"; exit 1; fi; \
@@ -290,7 +293,7 @@ test-one: accel
 #        make test-bg K=TestFoo (subset)
 # Then:  make test-status  or  make test-watch
 .PHONY: test-bg
-test-bg: accel
+test-bg: build
 	@set -eu; \
 	$(RESOLVE_TEST_PATHS) \
 	echo "Starting tests in background (C++ accel)..."; \

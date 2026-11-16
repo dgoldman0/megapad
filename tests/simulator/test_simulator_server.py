@@ -252,15 +252,16 @@ def test_server_cli_rejects_invalid_quanta_before_preparing_the_image(
         prepare_server(args)
 
 
-@pytest.mark.parametrize("executor", ["python", "auto"])
+@pytest.mark.parametrize(
+    "executor,environment,backend",
+    [("python", "native", "python"), ("auto", "python", "native")],
+)
 def test_explicit_executor_overrides_environment_without_mutating_it(
-    tmp_path, monkeypatch, executor
+    tmp_path, monkeypatch, executor, environment, backend
 ) -> None:
-    monkeypatch.setenv("MEGAFORTH_EXECUTOR", "native")
-    # Explicit Python works without either extension; auto may choose Python
-    # when the semantic extension is unavailable, despite the required-native
-    # environment setting.
-    monkeypatch.setitem(sys.modules, "_megaforth_native", None)
+    # The simulator needs its native extension whichever executor runs
+    # Forth, so the extension is there and auto finds the native executor.
+    monkeypatch.setenv("MEGAFORTH_EXECUTOR", environment)
     image = tmp_path / "executor.img"
     image.write_bytes(_boot_image())
     args = build_argument_parser().parse_args(
@@ -275,12 +276,13 @@ def test_explicit_executor_overrides_environment_without_mutating_it(
     prepared = prepare_server(args)
     try:
         runtime = prepared.preparation.runtime
-        assert runtime.execution_backend == "python"
-        assert runtime.native_execution_stats["semantic_steps"] == 0
+        assert runtime.execution_backend == backend
+        native_steps = runtime.native_execution_stats["semantic_steps"]
+        assert (native_steps > 0) == (backend == "native")
         auto_runs = runtime.find(b"AUTO-RUNS")
         assert auto_runs is not None
         assert runtime.memory.read64(auto_runs.body_address) == 1
-        assert os.environ["MEGAFORTH_EXECUTOR"] == "native"
+        assert os.environ["MEGAFORTH_EXECUTOR"] == environment
     finally:
         prepared.machine.stop()
 

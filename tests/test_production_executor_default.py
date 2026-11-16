@@ -77,22 +77,25 @@ def test_omitted_executor_requires_matching_native_before_source_or_socket(
     assert not Path(args.socket).exists()
 
 
-@pytest.mark.parametrize("explicit,environment", (
-    ("python", "native"), (None, "python"), ("auto", "native"), (None, "auto"),
+@pytest.mark.parametrize("explicit,environment,backend", (
+    ("python", "native", "python"), (None, "python", "python"),
+    ("auto", "python", "native"), (None, "auto", "native"),
 ))
-def test_only_selected_python_or_auto_can_prepare_without_semantic_extension(
-    production_server, monkeypatch, explicit, environment,
+def test_python_and_auto_selections_prepare_their_executor(
+    production_server, monkeypatch, explicit, environment, backend,
 ):
+    # The simulator needs its native extension whichever executor runs
+    # Forth, so the extension is there: a python selection runs the
+    # reference executor and auto finds the native one.
     module, arguments = production_server
     monkeypatch.setenv("MEGAFORTH_EXECUTOR", environment)
-    monkeypatch.setitem(sys.modules, "_megaforth_native", None)
     if explicit is not None:
         arguments += ["--executor", explicit]
     args = module.build_argument_parser().parse_args(arguments)
     prepared = module.prepare_server(args)
     try:
         runtime = prepared.preparation.runtime
-        assert runtime.execution_backend == "python"
+        assert runtime.execution_backend == backend
         auto_runs = runtime.find("AUTO-RUNS")
         assert runtime.memory.read64(auto_runs.body_address) == 1
         assert os.environ["MEGAFORTH_EXECUTOR"] == environment
@@ -112,21 +115,19 @@ def test_omitted_executor_selects_native_for_preparation_and_live_owner(producti
         prepared.machine.stop()
 
 
-def test_embedded_semantic_runtime_retains_python_default(monkeypatch):
+def test_embedded_semantic_runtime_retains_python_default():
     from simulator.runtime import MegaForthRuntime
 
-    monkeypatch.setitem(sys.modules, "_megaforth_native", None)
     runtime = MegaForthRuntime()
     runtime.evaluate(b"2 3 +")
     assert runtime.execution_backend == "python"
     assert runtime.main_context.data.snapshot() == (5,)
 
 
-def test_embedded_hybrid_runtime_retains_python_default(monkeypatch):
+def test_embedded_hybrid_runtime_retains_python_default():
     pytest.importorskip("_mp64_accel")
     from hybrid.runtime import HybridRuntime
 
-    monkeypatch.setitem(sys.modules, "_megaforth_native", None)
     owner = HybridRuntime.create(geometry={"bank0_size": 65536, "external_size": 0})
     try:
         owner.semantic.evaluate(b"2 3 +")

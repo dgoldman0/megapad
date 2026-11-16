@@ -24,7 +24,8 @@ from shared.crypto_caps import (
     CRYPTO_CAP_SHA3_STREAM,
 )
 from shared.storage import STORAGE_UNIT_TABLE
-from simulator.crc import GuestIdentity, HostedCRCService
+from simulator import crc as crc_service
+from simulator.crc import GuestIdentity
 from simulator.diagnostics import HostedDiagnosticsService
 from simulator.dictionary import Dictionary, DictionaryCheckpoint, Word
 from simulator.dictionary_index import (
@@ -809,7 +810,7 @@ class MegaForthRuntime:
             raise ValueError(
                 "SysInfo and hosted SHA capabilities do not agree"
             )
-        self.crc = HostedCRCService(crc_capabilities)
+        self.crc = crc_service.HostedCRCService(crc_capabilities)
         self.aes = platform_mmio.aes
         self.sha3 = platform_mmio.sha3
         if type(self.sha3) is HostedSHA3Service:
