@@ -26,7 +26,7 @@ from simulator.timer import HostedTimerService
 # span a native session's quantum already runs without returning. At 8,192
 # steps the return itself was a fifth to a third of a compute-bound run.
 UNQUANTIZED_NATIVE_INTERVAL_STEPS = 65536
-SEMANTIC_API_VERSION = 11
+SEMANTIC_API_VERSION = 12
 
 
 def load_native_extension(*, required: bool):
@@ -132,6 +132,26 @@ class NativeExecutor:
             for word in runtime.dictionary.words
             if admit_core and isinstance(word.implementation, rt.PrimitiveDefinition)
             and word.name in tile_operations
+        }
+        # The original BIOS CRC words, while the runtime keeps the CRC
+        # service they were built over; the program calls that service.
+        self.crc = runtime.crc
+        self.program.bind_crc(self.crc)
+        crc_operations = {
+            b"CRC-MODE!": extension.OP_CRC_MODE_STORE,
+            b"CRC-RESET": extension.OP_CRC_RESET,
+            b"CRC-INIT!": extension.OP_CRC_INIT_STORE,
+            b"CRC-FEED": extension.OP_CRC_FEED,
+            b"CRC-FEED-BYTE": extension.OP_CRC_FEED_BYTE,
+            b"CRC@": extension.OP_CRC_FETCH,
+            b"CRC-RAW-FINAL@": extension.OP_CRC_RAW_FINAL_FETCH,
+            b"CRC-FINAL@": extension.OP_CRC_FINAL_FETCH,
+        }
+        self.crc_primitives = {
+            word.xt: (word, (crc_operations[word.name], 0, 0))
+            for word in runtime.dictionary.words
+            if admit_core and isinstance(word.implementation, rt.PrimitiveDefinition)
+            and word.name in crc_operations
         }
         # The original BIOS evaluator words push their own fixed body cells,
         # bound before any source runs, so a compiled call is a constant push.
@@ -441,6 +461,9 @@ class NativeExecutor:
             tile = self.tile_primitives.get(target.xt)
             if tile is not None and tile[0] is target:
                 return tile[1], None
+            crc = self.crc_primitives.get(target.xt)
+            if crc is not None and crc[0] is target:
+                return crc[1], None
             cell = self.cell_primitives.get(target.xt)
             if cell is not None and cell[0] is target:
                 return cell[1], None
@@ -538,6 +561,9 @@ class NativeExecutor:
         data = context.data
         returns = context.returns
         tile = self._tile_state()
+        # The CRC words run natively while the runtime keeps the service the
+        # program was bound to.
+        crc = bool(self.crc_primitives) and self.runtime.crc is self.crc
         started = perf_counter_ns() if self.profile_enabled else 0
         result = self.program.run(
             current.xt, ip,
@@ -549,6 +575,7 @@ class NativeExecutor:
             self.scalar_float.fpcsr,
             machine_allowance,
             tile,
+            crc,
         )
         (xt, resumed_ip, steps, data_pointer, return_pointer, cookie,
          updates, pointer_captures, fpcsr, machine, tile_result) = result

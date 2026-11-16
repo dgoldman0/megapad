@@ -58,10 +58,12 @@ took 6.1 to 6.2 s, and a typed character shows in 0.063 to 0.065 s where it
 took 0.082 to 0.087 s.
 
 What the engine still leaves to Python while the Desktop runs is mostly
-device words: the CRC device's, the spinlock words, the disk unit words,
-`KEY?` and the UART read of the guest's idle poll, and `TYPE`. Each has its
-service in Python, so running one in the engine means giving the engine that
-service's state.
+device words: the spinlock words, the disk unit words, `KEY?` and the UART
+read of the guest's idle poll, and `TYPE`. Each has its service in Python,
+so running one in the engine means giving the engine that service's state.
+The CRC words now run in the engine (`simulator/accel/API.md`, "CRC
+words"): their service is native code that the Python words and the engine
+both call, and it feeds through the recurrence the emulator's CRC unit uses.
 
 **Quantum checkpoint — September 26, 2026:** MegaPad `182ee52` makes the
 session's host quantum configurable and lets a native entry run to the

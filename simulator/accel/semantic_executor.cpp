@@ -6,6 +6,7 @@
 #include "../../shared/accel/tile_values_bindings.h"
 #include "../../shared/accel/chiplet_bindings.h"
 #include "../../shared/accel/storage_faults_bindings.h"
+#include "crc_service_bindings.h"
 #include "../../shared/accel/routine_call.h"
 #include "collected.h"
 #include "guest_memory.h"
@@ -24,6 +25,7 @@ void register_bindings(pybind11::module_& module);
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -64,7 +66,15 @@ enum Opcode : uint32_t {
     OP_TILE_SOURCE1_STORE, OP_TILE_DESTINATION_STORE, OP_TILE_BINARY,
     // A call to a CREATE ... DOES> child: operand a is the child's body.
     OP_DOES,
+    // The CRC engine's BIOS words; the engine's mode, accumulator and owner
+    // travel with each run.
+    OP_CRC_MODE_STORE, OP_CRC_RESET, OP_CRC_INIT_STORE, OP_CRC_FEED,
+    OP_CRC_FEED_BYTE, OP_CRC_FETCH, OP_CRC_RAW_FINAL_FETCH, OP_CRC_FINAL_FETCH,
+    // One past the last operation; not one itself.
+    OPCODE_LIMIT,
 };
+
+
 
 // TADD, TSUB and TMUL, in OP_TILE_BINARY's operand a.
 enum TileBinary : uint32_t { TILE_ADD, TILE_SUBTRACT, TILE_MULTIPLY };
@@ -555,6 +565,9 @@ struct RunState {
     Cell tile_source1 = 0;
     Cell tile_destination = 0;
     Cell tile_operations = 0;
+    // Whether this run admits the CRC words: the runtime still keeps the
+    // CRC service the program was bound to.
+    bool crc = false;
     Cell pointer_captures = 0;
     // The step allowance, and the cost of the operation being executed, for
     // callbacks that run inline within one operation.
@@ -905,7 +918,7 @@ public:
             if (operation.size() != 3)
                 throw py::value_error("operation must be (opcode, a, b)");
             const auto opcode = operation[0].cast<uint32_t>();
-            if (opcode > OP_DOES)
+            if (opcode >= OPCODE_LIMIT)
                 throw py::value_error("unknown native semantic opcode");
             plan.push_back(Instruction{opcode, OP_STOP, operation[1].cast<Cell>(),
                                       operation[2].cast<Cell>()});
@@ -954,6 +967,7 @@ public:
     int gc_traverse(visitproc visit, void* arg) const noexcept {
         Py_VISIT(continuation_type_.ptr());
         Py_VISIT(tile_guard_.ptr());
+        Py_VISIT(crc_owner_.ptr());
         Py_VISIT(routine_entry_.ptr());
         return megapad::guest::traverse_regions(regions_, visit, arg);
     }
@@ -964,6 +978,8 @@ public:
         clear();
         bind_routines(py::none());
         py::object guard = std::move(tile_guard_);
+        crc_ = nullptr;
+        py::object crc = std::move(crc_owner_);
         py::object continuation_type = std::move(continuation_type_);
         megapad::guest::release_regions(regions_);
     }
@@ -984,6 +1000,18 @@ public:
     // The owner's check that the tile service still computes with this
     // extension's kernel, called at most once per run, at its first tile word.
     void bind_tile_guard(py::object guard) { tile_guard_ = std::move(guard); }
+
+    // The CRC service the runtime's CRC words use, or None to leave the
+    // words to Python. A run admits them only when its owner says the
+    // runtime still keeps this service.
+    void bind_crc(py::object service) {
+        megapad::crc_service::Service* bound = nullptr;
+        if (!service.is_none())
+            bound = &service.cast<megapad::crc_service::Service&>();
+        crc_ = bound;
+        py::object previous = std::move(crc_owner_);
+        crc_owner_ = std::move(service);
+    }
 
     // Bind the hybrid runner's call capsule, or None to unbind. Routine
     // indexes are installed afterwards with set_routine().
@@ -1104,7 +1132,7 @@ public:
     py::tuple run(Cell xt, Cell ip, const std::array<Cell, 3>& data_state,
                   const py::tuple& return_state, const py::dict& continuations,
                   Cell remaining_steps, Cell fpcsr, Cell machine_allowance,
-                  const py::object& tile_state) {
+                  const py::object& tile_state, bool crc) {
         if (return_state.size() != 4)
             throw py::value_error("return state must contain four cells");
         RunState state{xt, ip, 0,
@@ -1130,6 +1158,7 @@ public:
             state.tile_source1 = tile[2];
             state.tile_destination = tile[3];
         }
+        state.crc = crc && crc_ != nullptr;
         if (!state.data.valid() || !state.returns.valid() ||
             !(state.data.empty <= state.returns.floor ||
               state.returns.empty <= state.data.floor))
@@ -2266,9 +2295,46 @@ private:
             return execute_bulk(opcode, path.memory, s, stack);
         case OP_CALL_ROUTINE:
             return call_routine(operation, path.memory, s, path.continuations, path.plan);
+        case OP_CRC_MODE_STORE: case OP_CRC_RESET: case OP_CRC_INIT_STORE:
+        case OP_CRC_FEED: case OP_CRC_FEED_BYTE: case OP_CRC_FETCH:
+        case OP_CRC_RAW_FINAL_FETCH: case OP_CRC_FINAL_FETCH:
+            return s.crc && execute_crc(opcode, s, stack);
         default:
             return false;
         }
+    }
+
+    // The CRC words, each a call of the service the Python words call too.
+    // The hosted profile has one guest identity, core 0's task 0, as COREID
+    // and TASK-ID say. A word declines before any effect unless its stack
+    // fits.
+    bool execute_crc(uint32_t opcode, RunState& s, StackOperation& stack) {
+        namespace crc = megapad::crc_service;
+        const unsigned consumed = opcode == OP_CRC_MODE_STORE || opcode == OP_CRC_INIT_STORE ||
+            opcode == OP_CRC_FEED || opcode == OP_CRC_FEED_BYTE ? 1 : 0;
+        const unsigned produced = opcode == OP_CRC_FETCH || opcode == OP_CRC_RAW_FINAL_FETCH ? 2 : 1;
+        if (!stack.inputs(consumed) || !stack.outputs(produced)) return false;
+        const Cell input = consumed ? stack.values[0] : 0;
+        const crc::Identity task{0, 0};
+        auto& out = stack.result;
+        switch (opcode) {
+        case OP_CRC_MODE_STORE: out[0] = crc_->select_mode(task, input); break;
+        case OP_CRC_RESET: out[0] = crc_->reset(task); break;
+        case OP_CRC_INIT_STORE: out[0] = crc_->seed(task, input); break;
+        case OP_CRC_FEED: out[0] = crc_->feed_cell(task, input); break;
+        case OP_CRC_FEED_BYTE: out[0] = crc_->feed_byte(task, input); break;
+        case OP_CRC_FETCH:
+            std::tie(out[0], out[1]) = crc_->fetch(task);
+            break;
+        case OP_CRC_RAW_FINAL_FETCH:
+            std::tie(out[0], out[1]) = crc_->raw_final(task);
+            break;
+        case OP_CRC_FINAL_FETCH: out[0] = crc_->final(task); break;
+        default: return false;
+        }
+        stack.commit();
+        ++s.ip;
+        return true;
     }
 
     // A pair the planner fused, done as one when both halves can finish. A
@@ -2372,6 +2438,9 @@ private:
     std::unordered_map<Cell, Plan> plans_;
     std::unordered_set<Cell> overlaid_;
     py::object tile_guard_;
+    // The bound CRC service and the Python object that owns it.
+    megapad::crc_service::Service* crc_ = nullptr;
+    py::object crc_owner_;
     const megapad::hybrid::RoutineCall* routine_call_ = nullptr;
     py::object routine_entry_;
     std::vector<NativeRoutine> routines_;
@@ -2385,9 +2454,10 @@ PYBIND11_MODULE(_megaforth_native, module) {
     megapad::tile_values::register_bindings(module);
     megapad::chiplet::register_bindings(module);
     megapad::storage::register_bindings(module);
+    megapad::crc_service::register_bindings(module);
     megapad::dictionary::register_bindings(module);
     megapad::walker::register_bindings(module);
-    module.attr("SEMANTIC_API_VERSION") = 11;
+    module.attr("SEMANTIC_API_VERSION") = 12;
     module.attr("MACHINE_STOPPED_CALL") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_CALL));
     module.attr("MACHINE_STOPPED_RESUME") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_RESUME));
     module.attr("MACHINE_CALLBACK") = py::int_(static_cast<uint32_t>(MACHINE_CALLBACK));
@@ -2404,13 +2474,14 @@ PYBIND11_MODULE(_megaforth_native, module) {
         .def("does_entry", &NativeProgram::does_entry, py::arg("xt"), py::arg("ip"))
         .def_property_readonly("direct_steps", &NativeProgram::direct_steps)
         .def("bind_tile_guard", &NativeProgram::bind_tile_guard, py::arg("guard"))
+        .def("bind_crc", &NativeProgram::bind_crc, py::arg("service"))
         .def("snapshot_stack", &NativeProgram::snapshot_stack,
              py::arg("bounds"), py::arg("continuations") = py::none())
         .def("run", &NativeProgram::run, py::arg("xt"), py::arg("ip"),
              py::arg("data_state"), py::arg("return_state"),
              py::arg("continuations"), py::arg("remaining_steps"),
              py::arg("fpcsr") = 0, py::arg("machine_allowance") = 0,
-             py::arg("tile_state") = py::none())
+             py::arg("tile_state") = py::none(), py::arg("crc") = false)
         .def("bind_routines", &NativeProgram::bind_routines, py::arg("entry"))
         .def("set_routine", &NativeProgram::set_routine, py::arg("index"), py::arg("image"),
              py::arg("inputs"), py::arg("outputs"), py::arg("rules"), py::arg("sites"))
@@ -2431,6 +2502,10 @@ PYBIND11_MODULE(_megaforth_native, module) {
     EXPORT_OPCODE(OP_TILE_SOURCE0_STORE); EXPORT_OPCODE(OP_TILE_SOURCE1_STORE);
     EXPORT_OPCODE(OP_TILE_DESTINATION_STORE); EXPORT_OPCODE(OP_TILE_BINARY);
     EXPORT_OPCODE(OP_DOES);
+    EXPORT_OPCODE(OP_CRC_MODE_STORE); EXPORT_OPCODE(OP_CRC_RESET);
+    EXPORT_OPCODE(OP_CRC_INIT_STORE); EXPORT_OPCODE(OP_CRC_FEED);
+    EXPORT_OPCODE(OP_CRC_FEED_BYTE); EXPORT_OPCODE(OP_CRC_FETCH);
+    EXPORT_OPCODE(OP_CRC_RAW_FINAL_FETCH); EXPORT_OPCODE(OP_CRC_FINAL_FETCH);
     module.attr("TILE_ADD") = py::int_(static_cast<uint32_t>(TILE_ADD));
     module.attr("TILE_SUBTRACT") = py::int_(static_cast<uint32_t>(TILE_SUBTRACT));
     module.attr("TILE_MULTIPLY") = py::int_(static_cast<uint32_t>(TILE_MULTIPLY));

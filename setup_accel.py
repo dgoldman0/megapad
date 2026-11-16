@@ -92,6 +92,7 @@ ext = Extension(
         "shared/accel/chiplet_module.h",
         "shared/accel/chiplet_port.h",
         "shared/accel/chiplet_bindings.h",
+        "shared/accel/crc.h",
         "shared/accel/storage_faults.h",
         "shared/accel/storage_faults_bindings.h",
         "emulator/accel/cpu/mp64/block_ir.h",

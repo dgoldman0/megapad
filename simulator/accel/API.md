@@ -3,7 +3,7 @@
 The extension and its Python owner are built from the same checkout and use
 one current internal interface. Rebuild the extension after changing this
 boundary with `python setup_simulator_accel.py build_ext --inplace --force`.
-The extension exports `SEMANTIC_API_VERSION = 11`; its Python owner checks this
+The extension exports `SEMANTIC_API_VERSION = 12`; its Python owner checks this
 version before admission. An explicit native request rejects older builds;
 automatic selection keeps the reference executor and the Python dictionary
 when the version mismatches.
@@ -398,6 +398,22 @@ started with, bound to this extension's own `tile_execute_values`. It also
 binds the service's identity guard with `bind_tile_guard(callable)`; the
 program calls it once, at the first tile word of a run, and leaves every tile
 word of that run to Python when it returns false.
+
+## CRC words
+
+The CRC service, `CRCService` (`crc_service.h`), is native: the BIOS
+checked owner record over `shared/accel/crc.h`, the recurrence the
+emulator's CRC unit uses. Python's CRC words call its methods with their
+caller's `(COREID, TASK-ID)`. `bind_crc(service)` gives the program the
+runtime's service, and `run` takes `crc=True` while the runtime still keeps
+it; the run then admits `OP_CRC_MODE_STORE`, `OP_CRC_RESET`,
+`OP_CRC_INIT_STORE`, `OP_CRC_FEED`, `OP_CRC_FEED_BYTE`, `OP_CRC_FETCH`,
+`OP_CRC_RAW_FINAL_FETCH` and `OP_CRC_FINAL_FETCH`, the compiled calls of
+`CRC-MODE!`, `CRC-RESET`, `CRC-INIT!`, `CRC-FEED`, `CRC-FEED-BYTE`, `CRC@`,
+`CRC-RAW-FINAL@` and `CRC-FINAL@`, each costing the two ticks of an
+admitted primitive call and calling the same service as the hosted profile's
+one identity, `(0, 0)`. A word declines before any effect when its stack
+does not fit. A replaced service keeps the words in Python.
 
 ## Ownership and collection
 

@@ -47,6 +47,7 @@
 #include "../../shared/accel/tile_values_bindings.h"
 #include "../../shared/accel/chiplet_bindings.h"
 #include "../../shared/accel/storage_faults_bindings.h"
+#include "../../shared/accel/crc.h"
 #include "../../shared/accel/routine_call.h"
 #include "dbt/executable_arena.h"
 #include "dbt/x86_64/lowering.h"
@@ -140,10 +141,7 @@ static constexpr uint64_t MASK64 = 0xFFFFFFFFFFFFFFFFULL;
 static constexpr uint64_t SIGN64 = 1ULL << 63;
 
 static constexpr bool crc_mode_valid(uint64_t mode) noexcept {
-    return (
-        mode == 0 || mode == 1 || mode == 2 ||
-        mode == 4 || mode == 5 || mode == 6
-    );
+    return megapad::crc::mode_valid(mode);
 }
 
 // CSR addresses
@@ -11515,60 +11513,8 @@ static int exec_dict(CPUState& s, const StepCallbacks& cb) {
 //  EXT.CRYPTO (prefix FB) — per-core crypto ISA instructions
 // ---------------------------------------------------------------------------
 
-// Complete CRC mode polynomials. Modes 0/1/2 use the normal MSB-first
-// recurrence; modes 4/5/6 use the reflected LSB-first recurrence.
-static constexpr uint32_t CRC32_POLY       = 0x04C11DB7u;
-static constexpr uint32_t CRC32C_POLY      = 0x1EDC6F41u;
-static constexpr uint64_t CRC64_POLY       = 0x42F0E1EBA9EA3693ull;
-static constexpr uint32_t CRC32_REF_POLY   = 0xEDB88320u;
-static constexpr uint32_t CRC32C_REF_POLY  = 0x82F63B78u;
-static constexpr uint64_t CRC64_REF_POLY   = 0xC96C5795D7870F42ull;
-
-static inline uint32_t crc_byte_32(uint32_t acc, uint8_t b, uint32_t poly) {
-    acc ^= (uint32_t)b << 24;
-    for (int i = 0; i < 8; i++) {
-        if (acc & 0x80000000u)
-            acc = (acc << 1) ^ poly;
-        else
-            acc <<= 1;
-    }
-    return acc;
-}
-
-static inline uint64_t crc_byte_64(uint64_t acc, uint8_t b, uint64_t poly) {
-    acc ^= (uint64_t)b << 56;
-    for (int i = 0; i < 8; i++) {
-        if (acc & 0x8000000000000000ull)
-            acc = (acc << 1) ^ poly;
-        else
-            acc <<= 1;
-    }
-    return acc;
-}
-
-static inline uint32_t crc_byte_reflected_32(
-        uint32_t acc, uint8_t b, uint32_t poly) {
-    acc ^= b;
-    for (int i = 0; i < 8; i++) {
-        if (acc & 1u)
-            acc = (acc >> 1) ^ poly;
-        else
-            acc >>= 1;
-    }
-    return acc;
-}
-
-static inline uint64_t crc_byte_reflected_64(
-        uint64_t acc, uint8_t b, uint64_t poly) {
-    acc ^= b;
-    for (int i = 0; i < 8; i++) {
-        if (acc & 1ull)
-            acc = (acc >> 1) ^ poly;
-        else
-            acc >>= 1;
-    }
-    return acc;
-}
+// The six modes' recurrence is shared/accel/crc.h, which the simulator
+// engine's CRC words use too.
 
 // ---------------------------------------------------------------------------
 //  SHA-256 / SHA-512 helpers
@@ -11875,16 +11821,7 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
         // --- CRC unit ---
         if (!crc_mode_valid(s.crc_mode))
             s.crc_mode = 0;
-        const bool reflected = (s.crc_mode & 0x4) != 0;
-        const int tuple = s.crc_mode & 0x3;
-        const bool is64 = tuple == 2;
-        const uint32_t poly32 = tuple == 1
-            ? (reflected ? CRC32C_REF_POLY : CRC32C_POLY)
-            : (reflected ? CRC32_REF_POLY : CRC32_POLY);
-        const uint64_t poly64 =
-            reflected ? CRC64_REF_POLY : CRC64_POLY;
-        const uint64_t width_mask =
-            is64 ? 0xFFFFFFFFFFFFFFFFull : 0xFFFFFFFFu;
+        const uint64_t width_mask = megapad::crc::width_mask(s.crc_mode);
 
         switch (op) {
         case 0x0: { // CRC.INIT
@@ -11896,16 +11833,7 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
             int rd = (rex_d(s.ext_modifier) << 4) | ((rb >> 4) & 0xF);
             int rs = (rex_s(s.ext_modifier) << 4) | (rb & 0xF);
             uint8_t b = (uint8_t)(s.regs[rs] & 0xFF);
-            if (is64) {
-                s.crc_acc = reflected
-                    ? crc_byte_reflected_64(s.crc_acc, b, poly64)
-                    : crc_byte_64(s.crc_acc, b, poly64);
-            } else {
-                s.crc_acc = reflected
-                    ? crc_byte_reflected_32(
-                        (uint32_t)s.crc_acc, b, poly32)
-                    : crc_byte_32((uint32_t)s.crc_acc, b, poly32);
-            }
+            s.crc_acc = megapad::crc::feed_byte(s.crc_mode, s.crc_acc, b);
             s.regs[rd] = s.crc_acc;
             return 1;
         }
@@ -11913,26 +11841,8 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
             uint8_t rb = fetch8(s);
             int rd = (rex_d(s.ext_modifier) << 4) | ((rb >> 4) & 0xF);
             int rs = (rex_s(s.ext_modifier) << 4) | (rb & 0xF);
-            uint64_t val = s.regs[rs];
-            if (is64) {
-                uint64_t acc = s.crc_acc;
-                for (int i = 0; i < 8; i++)
-                    acc = reflected
-                        ? crc_byte_reflected_64(
-                            acc, (uint8_t)(val >> (i * 8)), poly64)
-                        : crc_byte_64(
-                            acc, (uint8_t)(val >> (i * 8)), poly64);
-                s.crc_acc = acc;
-            } else {
-                uint32_t acc = (uint32_t)s.crc_acc;
-                for (int i = 0; i < 8; i++)
-                    acc = reflected
-                        ? crc_byte_reflected_32(
-                            acc, (uint8_t)(val >> (i * 8)), poly32)
-                        : crc_byte_32(
-                            acc, (uint8_t)(val >> (i * 8)), poly32);
-                s.crc_acc = acc;
-            }
+            s.crc_acc = megapad::crc::feed_cell(
+                s.crc_mode, s.crc_acc, s.regs[rs]);
             s.regs[rd] = s.crc_acc;
             return 1;
         }

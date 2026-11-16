@@ -77,11 +77,12 @@ serve:
 	$(VENV_PY) megapad.py $(ARGS)
 
 # --- Hosted source simulator ---
-# This target intentionally does not depend on accel.  Simulator units are
-# seconds-scale semantic checks and must not compile or execute the exact MP64
-# backend merely to prove backend-independent behavior.
+# This target does not depend on accel: simulator units are seconds-scale
+# semantic checks and must not compile or execute the exact MP64 backend
+# merely to prove backend-independent behavior.  It builds the simulator's
+# own extension, whose native services (CRC, storage) the simulator needs.
 .PHONY: test-simulator
-test-simulator:
+test-simulator: simulator-accel
 	@set -eu; \
 	$(RESOLVE_TEST_PATHS) \
 	exec $(TEST_SUPERVISOR) foreground \
