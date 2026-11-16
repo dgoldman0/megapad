@@ -77,13 +77,25 @@ serve:
 	$(VENV_PY) megapad.py $(ARGS)
 
 # --- Hosted source simulator ---
+# The simulator's own extension, whose native services (CRC, storage) the
+# simulator needs whichever executor runs Forth.  Test targets depend on its
+# library file, so make builds it only when a source is newer and a current
+# build costs neither a build run nor a copy of the library; `make
+# simulator-accel` always runs the build.
+SIMULATOR_ACCEL_LIB := _megaforth_native$(shell $(VENV_PY) -c \
+	'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))')
+SIMULATOR_ACCEL_SOURCES := setup_simulator_accel.py $(wildcard \
+	simulator/accel/*.cpp simulator/accel/*.h shared/accel/*.cpp shared/accel/*.h)
+
+$(SIMULATOR_ACCEL_LIB): $(SIMULATOR_ACCEL_SOURCES)
+	$(VENV_PY) setup_simulator_accel.py build_ext --inplace
+	@touch $@
+
 # This target does not depend on accel: simulator units are seconds-scale
 # semantic checks and must not compile or execute the exact MP64 backend
-# merely to prove backend-independent behavior.  It builds the simulator's
-# own extension, whose native services (CRC, storage) the simulator needs
-# whichever executor runs Forth.
+# merely to prove backend-independent behavior.
 .PHONY: test-simulator
-test-simulator: simulator-accel
+test-simulator: $(SIMULATOR_ACCEL_LIB)
 	@set -eu; \
 	$(RESOLVE_TEST_PATHS) \
 	exec $(TEST_SUPERVISOR) foreground \
@@ -97,7 +109,7 @@ test-simulator: simulator-accel
 simulator-accel:
 	$(VENV_PY) setup_simulator_accel.py build_ext --inplace
 
-test-simulator-native: simulator-accel
+test-simulator-native: $(SIMULATOR_ACCEL_LIB)
 	MEGAFORTH_EXECUTOR=native $(MAKE) test-simulator \
 		SIMULATOR_TEST_PATH="$(SIMULATOR_TEST_PATH)" $(if $(K),K="$(K)",)
 
@@ -161,9 +173,9 @@ float-parity: accel
 		tacc_cycles
 
 # The suite runs the simulator too, which needs its own extension, so the
-# emulator's test targets build both extensions.
+# emulator's test targets depend on both extensions.
 .PHONY: test-sequential
-test-sequential: build
+test-sequential: accel $(SIMULATOR_ACCEL_LIB)
 	@set -eu; \
 	$(RESOLVE_TEST_PATHS) \
 	exec $(TEST_SUPERVISOR) foreground \
@@ -278,7 +290,7 @@ test-quick: accel
 
 # --- Single sequential test (usage: make test-one K=TestFoo) ---
 .PHONY: test-one
-test-one: build
+test-one: accel $(SIMULATOR_ACCEL_LIB)
 	@set -eu; \
 	$(RESOLVE_TEST_PATHS) \
 	if [ -z "$(K)" ]; then echo "Usage: make test-one K=TestFoo"; exit 1; fi; \
@@ -293,7 +305,7 @@ test-one: build
 #        make test-bg K=TestFoo (subset)
 # Then:  make test-status  or  make test-watch
 .PHONY: test-bg
-test-bg: build
+test-bg: accel $(SIMULATOR_ACCEL_LIB)
 	@set -eu; \
 	$(RESOLVE_TEST_PATHS) \
 	echo "Starting tests in background (C++ accel)..."; \
