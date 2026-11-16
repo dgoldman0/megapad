@@ -1,4 +1,8 @@
-"""The terminal frontend and hosted owner work without emulator imports."""
+"""The terminal frontend and hosted owner work without emulator imports.
+
+The hosted owner does load the simulator's own extension, _megaforth_native,
+since its CRC and storage services are native code; help loads no extension.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +15,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BLOCKED_MODULES = (
+EMULATOR_MODULES = (
     "emulator",
     "session",
     "system",
@@ -20,13 +24,14 @@ BLOCKED_MODULES = (
     "accel_wrapper",
     "asm",
     "_mp64_accel",
-    "_megaforth_native",
     "pygame",
 )
+# Help needs no build, so it loads neither native extension.
+HELP_BLOCKED_MODULES = (*EMULATOR_MODULES, "_megaforth_native")
 
 
 def _without_emulator(
-    source: str, *arguments: str,
+    source: str, *arguments: str, blocked: tuple[str, ...] = EMULATOR_MODULES,
 ) -> subprocess.CompletedProcess[str]:
     # A fresh interpreter matters: a warmed pytest process can hide a forbidden
     # dependency in sys.modules before the import blocker gets a chance to run.
@@ -36,7 +41,7 @@ import sys
 
 class BlockImports(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.split('.')[0] in {BLOCKED_MODULES!r}:
+        if fullname.split('.')[0] in {blocked!r}:
             raise AssertionError('unexpected frontend dependency: ' + fullname)
 
 sys.meta_path.insert(0, BlockImports())
@@ -70,7 +75,8 @@ def test_hosted_server_and_viewer_help_have_no_emulator_dependency(
 
         sys.argv = [{module_name!r}, '--help']
         importlib.import_module({module_name!r}).main()
-        """
+        """,
+        blocked=HELP_BLOCKED_MODULES,
     )
     assert result.returncode == 0, result.stderr
     assert help_option in result.stdout
