@@ -14,6 +14,7 @@ it, and the service lands exactly what that controller would have moved.
 
 from __future__ import annotations
 
+import mmap
 import os
 from pathlib import Path
 from typing import Callable
@@ -246,27 +247,55 @@ class HostedStorageService:
 
     def attach(
         self,
-        image: bytes | bytearray | memoryview,
+        image: bytes | bytearray | memoryview | mmap.mmap,
         *,
         image_path: str | os.PathLike[str] | Path | None = None,
         write_protected: bool = False,
+        file_holds_media: bool = False,
+        adopt: bool = False,
     ) -> None:
         """Replace media without flushing and advance its wrapping identity.
 
-        The first flush writes the whole image to IMAGE_PATH, which is not
-        known to hold it.
+        The service keeps a copy of IMAGE, or with ADOPT the bytearray or
+        writable mapping itself, so that the caller sees the guest's writes
+        land in it.  The first flush writes the whole image to IMAGE_PATH,
+        unless FILE_HOLDS_MEDIA says that the file already holds it, when
+        only the sectors changed since are written.
         """
 
         if not isinstance(write_protected, bool):
             raise TypeError("storage write_protected flag must be bool")
-        payload = self._validated_image(image)
+        if file_holds_media and image_path is None:
+            raise ValueError("a medium held in its file needs the file's path")
+        payload = (
+            self._adopted_image(image) if adopt
+            else self._validated_image(image)
+        )
         next_path = None if image_path is None else Path(image_path)
         self._image = payload
         self._image_path = next_path
-        self._host_file.media_attached(file_holds_media=False)
+        self._host_file.media_attached(file_holds_media=file_holds_media)
         self._present = True
         self._write_protected = write_protected
         self._advance_media_generation()
+
+    @staticmethod
+    def _adopted_image(image: bytearray | mmap.mmap) -> bytearray | mmap.mmap:
+        if not isinstance(image, (bytearray, mmap.mmap)):
+            raise TypeError(
+                "an adopted storage image must be a bytearray or a mapping"
+            )
+        with memoryview(image) as view:
+            if view.readonly:
+                raise TypeError("an adopted storage image must be writable")
+        if len(image) % SECTOR_SIZE:
+            raise ValueError(
+                f"storage image size {len(image)} is not a multiple of "
+                f"the {SECTOR_SIZE}-byte sector size"
+            )
+        if len(image) // SECTOR_SIZE > MAX_MEDIA_SECTORS:
+            raise ValueError("storage image exceeds the u32 sector capacity")
+        return image
 
     def detach(self) -> None:
         """Detach media without implicitly flushing guest changes."""

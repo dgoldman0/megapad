@@ -465,6 +465,69 @@ def test_media_attached_from_bytes_is_written_whole_by_the_first_flush(
     assert path.read_bytes() == b"\x5A" * (2 * SECTOR_SIZE)
 
 
+def test_media_its_file_holds_is_flushed_by_its_changes_alone(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "held.img"
+    path.write_bytes(bytes(4 * SECTOR_SIZE))
+    storage = HostedStorageService(bytes(SECTOR_SIZE))
+    storage.attach(
+        path.read_bytes(), image_path=path, file_holds_media=True
+    )
+    runtime = MegaForthRuntime(storage=storage)
+    runtime.memory.fill(0, SECTOR_SIZE, 0x3C)
+    assert _execute(runtime, "DISK-WRITE-CHECKED", 0, 2, 1) == (1, 0)
+    # The file is taken to hold the medium, so a sector changed behind the
+    # device's back stays as it is.
+    with path.open("r+b") as stream:
+        stream.write(b"\xEE" * SECTOR_SIZE)
+
+    assert _execute(runtime, "DISK-FLUSH-CHECKED") == (0,)
+    assert path.read_bytes() == (
+        b"\xEE" * SECTOR_SIZE
+        + bytes(SECTOR_SIZE)
+        + b"\x3C" * SECTOR_SIZE
+        + bytes(SECTOR_SIZE)
+    )
+    with pytest.raises(ValueError, match="needs the file's path"):
+        storage.attach(bytes(SECTOR_SIZE), file_holds_media=True)
+
+
+def test_an_adopted_medium_is_the_buffer_the_guest_writes(
+    tmp_path: Path,
+) -> None:
+    import mmap
+
+    medium = bytearray(2 * SECTOR_SIZE)
+    storage = HostedStorageService(bytes(SECTOR_SIZE))
+    storage.attach(medium, adopt=True)
+    runtime = MegaForthRuntime(storage=storage)
+    runtime.memory.fill(0, SECTOR_SIZE, 0x71)
+    assert _execute(runtime, "DISK-WRITE-CHECKED", 0, 1, 1) == (1, 0)
+    assert medium[SECTOR_SIZE:] == b"\x71" * SECTOR_SIZE
+
+    # A private mapping takes the guest's writes and leaves its file alone.
+    path = tmp_path / "mapped.img"
+    path.write_bytes(b"\x22" * (2 * SECTOR_SIZE))
+    with path.open("rb") as source, mmap.mmap(
+        source.fileno(), 0, access=mmap.ACCESS_COPY
+    ) as mapped:
+        storage.attach(mapped, adopt=True)
+        assert _execute(runtime, "DISK-WRITE-CHECKED", 0, 0, 1) == (1, 0)
+        assert mapped[:SECTOR_SIZE] == b"\x71" * SECTOR_SIZE
+        assert _execute(runtime, "DISK-READ-CHECKED", 4096, 1, 1) == (1, 0)
+        assert runtime.memory.read_bytes(4096, SECTOR_SIZE) == (
+            b"\x22" * SECTOR_SIZE
+        )
+        storage.detach()
+    assert path.read_bytes() == b"\x22" * (2 * SECTOR_SIZE)
+
+    with pytest.raises(TypeError, match="bytearray or a mapping"):
+        storage.attach(bytes(SECTOR_SIZE), adopt=True)
+    with pytest.raises(ValueError, match="multiple of"):
+        storage.attach(bytearray(SECTOR_SIZE + 1), adopt=True)
+
+
 def test_generation_guard_rejects_a_swap_at_flush_acceptance(
     tmp_path: Path,
 ) -> None:
