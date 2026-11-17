@@ -197,6 +197,31 @@ evidence is under its `local_testing/out/rich-main-integration-20260913/`.
 Preservation and build/test records remain in the workspace archive
 `worktree-retirement-archives/2026-09-13-rich-interaction/`.
 
+## Python that remains — recorded November 16, 2026
+
+The emulator and the simulator move towards C++ throughout, for full speed
+and clean code. New work in either is written in C++, with Python only as
+thin glue to it, and the native extensions are always built. The move of
+Akashic's ext4 tests onto the simulator put the storage faults, the request
+observer, the CRC recurrence and the simulator's storage service and disk
+words in C++ ([storage-faults.md](storage-faults.md)). This Python logic
+remains:
+
+- the disk-image writer, `HostImageFile` in `shared/storage.py`, which the
+  C++ storage service calls on every write and flush and the emulator's
+  controller also uses;
+- the emulator's storage controller, `Storage` in `emulator/devices.py`;
+- `shared/crc.py`, a second CRC recurrence beside `shared/accel/crc.h`, used
+  by the emulator's Python CPU (`emulator/megapad64.py`) and as a test oracle;
+- the spinlock bank, `simulator/spinlocks.py`, whose words return to Python;
+- `KEY?`, the UART read and `TYPE`;
+- the simulator's other Python services: SHA, AES, field arithmetic, NTT,
+  KEM and the timer;
+- the Python semantic executor, which embedded simulator runtimes still
+  select by default and which this document calls the correctness reference.
+
+None of it is scheduled, and nothing new joins the list.
+
 ## Typing execution follow-up — September 16, 2026
 
 A profiled ordinary Pad character performed 49.6 million native semantic
