@@ -609,6 +609,15 @@ class Megapad64:
         self._tacc_image_stage_acquire_hook = None
         self._tacc_image_stage_update_hook = None
         self._tacc_image_stage_release_hook = None
+        # A machine with chiplet ports installs the shared C++ port model's
+        # route through their windows and its write into memory a chiplet
+        # lends (docs/chiplet-link.md, sections 3 and 4).  The route hook
+        # takes (address, bytes) and returns None outside every window,
+        # (port, chiplet address) for a span a port takes, or (-1, first
+        # byte beyond the window).  The write hook takes (port, chiplet
+        # address, data, zero units) and returns the chiplet's answer.
+        self._tacc_window_route_hook = None
+        self._tacc_link_write_hook = None
         # System/cluster routing may install an additional whole-span policy
         # check.  It returns None when allowed or (ivec, first_bad_address)
         # when an equivalent routed-memory permission denies the request.
@@ -1218,8 +1227,13 @@ class Megapad64:
         return ew, signed
 
     def _tacc_preflight_span(self, addr: int, size: int, *,
-                             write: bool = False):
-        """Validate a TACC source/image span without legacy Bank-0 wrapping."""
+                             write: bool = False, link: bool = False):
+        """Validate a TACC source/image span without legacy Bank-0 wrapping.
+
+        With ``link``, the span may also lie in a chiplet port's window; the
+        result is then the (port, chiplet address) the write goes to, and
+        None for a span in memory.
+        """
         start = u64(addr)
         end = start + size
         if end > (1 << 64):
@@ -1258,6 +1272,7 @@ class Megapad64:
 
         region_found = False
         routed_to_hbw = False
+        link_route = None
         for base, region_size, is_hbw in regions:
             region_end = base + region_size
             if base <= start < region_end:
@@ -1270,6 +1285,20 @@ class Megapad64:
                 region_found = True
                 routed_to_hbw = is_hbw
                 break
+        if (not region_found and link
+                and self._tacc_window_route_hook is not None):
+            # A chiplet's window is a route for a STORE image alone.
+            route = self._tacc_window_route_hook(start, size)
+            if route is not None:
+                port, where = route
+                if port < 0:
+                    self._tacc_trap(
+                        IVEC_BUS_FAULT,
+                        "TACC image runs past its chiplet port's window",
+                        where,
+                    )
+                link_route = (port, where)
+                region_found = True
         if not region_found:
             self._tacc_trap(
                 IVEC_BUS_FAULT,
@@ -1314,8 +1343,10 @@ class Megapad64:
                     "TACC span denied by routed-memory policy",
                     first_forbidden,
                 )
+        return link_route
 
-    def _tacc_preflight_image(self, addr: int, *, write: bool = False):
+    def _tacc_preflight_image(self, addr: int, *, write: bool = False,
+                              link: bool = False):
         base = u64(addr)
         if base & 0x3F:
             self._tacc_trap(
@@ -1323,10 +1354,11 @@ class Megapad64:
                 "TACC image must be 64-byte aligned",
                 base,
             )
-        self._tacc_preflight_span(
+        return self._tacc_preflight_span(
             base,
             TACC_IMAGE_BYTES,
             write=write,
+            link=link,
         )
 
     def _tacc_image_stage_acquire(
@@ -3871,10 +3903,14 @@ class Megapad64:
         if funct == 5:  # TACC.STORE
             self._tacc_require_mine(valid=True)
             base = u64(self.tdst)
-            self._tacc_preflight_image(base, write=True)
+            link_route = self._tacc_preflight_image(
+                base, write=True, link=True)
             image = bytearray(self.tacc)
             active = self._tacc_active_bytes(self.tacc_format_ew)
             image[active:] = bytes(TACC_IMAGE_BYTES - active)
+            if link_route is not None:
+                return self._tacc_store_to_link(base, link_route, image,
+                                                active)
             if not self._tacc_begin_atomic_operation():
                 return 4
             stage_token = None
@@ -3926,6 +3962,50 @@ class Megapad64:
             # _tacc_wipe already clears BUSY and FORCE_PENDING.
             self._tacc_finish_atomic_operation()
         return 0
+
+    def _tacc_store_to_link(self, base: int, link_route, image: bytearray,
+                            active: int) -> int:
+        """Send a STORE image to the chiplet port whose window holds it.
+
+        The image's active units cross as one write, with the rest of the
+        256 bytes as units of zeros, through the shared C++ port model.  The
+        models give a chiplet no clock, so the write costs one cycle per
+        unit and one for the answer, whatever the answer.  Any answer but
+        OK is a bus fault at the image base, with TACC unchanged.
+        """
+        port, chiplet_addr = link_route
+        units = active // 64
+        cycles = units + 1
+        if not self._tacc_begin_atomic_operation():
+            return cycles
+        stage_token = None
+        try:
+            stage_token = self._tacc_image_stage_acquire(
+                "store",
+                base,
+                self.tacc_format_ew,
+                self.tacc_format_signed,
+                bytes(image),
+            )
+            answer = self._tacc_link_write_hook(
+                port,
+                chiplet_addr,
+                bytes(image[:active]),
+                TACC_IMAGE_BYTES // 64 - units,
+            )
+            if answer != 0:
+                self._tacc_fault_cycles = 2 + cycles
+                self._tacc_trap(
+                    IVEC_BUS_FAULT,
+                    f"chiplet port {port} did not take the TACC image "
+                    f"(answer {answer})",
+                    base,
+                )
+            self.tacc_dirty = False
+        finally:
+            self._tacc_image_stage_release(stage_token)
+            self._tacc_finish_atomic_operation()
+        return cycles
 
     def _exec_tacc_tamac(self, ss: int, funct_byte: int,
                           broadcast_reg: int) -> int:

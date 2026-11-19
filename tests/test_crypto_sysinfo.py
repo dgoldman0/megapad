@@ -25,14 +25,14 @@ def test_crypto_capability_and_requester_count_extend_exact_window():
     sysinfo = SystemInfo(
         crypto_caps=CRYPTO_CAP_CRC_REFLECT_RAW,
         num_bus_ports=9,
-        chiplet_ports=1 | (16 << 8) | (8 << 16),
+        chiplet_ports=1 | (16 << 8) | (8 << 16) | (48 << 24),
     )
     bus.register(sysinfo)
 
     assert sysinfo.size == 0x78
     assert _read_le(bus, SYSINFO_BASE + 0x60, 8) == CRYPTO_CAP_CRC_REFLECT_RAW
     assert _read_le(bus, SYSINFO_BASE + 0x68, 8) == 9
-    assert _read_le(bus, SYSINFO_BASE + 0x70, 8) == 0x08_10_01
+    assert _read_le(bus, SYSINFO_BASE + 0x70, 8) == 0x30_08_10_01
     with pytest.raises(BusError):
         bus.read8(SYSINFO_BASE + 0x78)
 
@@ -40,7 +40,7 @@ def test_crypto_capability_and_requester_count_extend_exact_window():
 def test_chiplet_ports_word_is_bounded_and_defaults_to_no_ports():
     assert SystemInfo().read8(0x70) == 0
     with pytest.raises(ValueError):
-        SystemInfo(chiplet_ports=1 << 24)
+        SystemInfo(chiplet_ports=1 << 32)
     with pytest.raises(ValueError):
         SystemInfo(chiplet_ports=-1)
 
@@ -50,7 +50,8 @@ def test_system_reports_its_chiplet_ports_as_the_port_window_does():
     word_addr = MMIO_START + SYSINFO_BASE + 0x70
     port_count_addr = MMIO_START + 0xE00
     # Two full cores and a cluster of four give the first port the ID 6.
-    assert system.cpu.mem_read64(word_addr) == 1 | (6 << 8) | (8 << 16)
+    assert system.cpu.mem_read64(word_addr) == (
+        1 | (6 << 8) | (8 << 16) | (48 << 24))
     assert system.cpu.mem_read64(word_addr) == (
         system.cpu.mem_read64(port_count_addr))
 

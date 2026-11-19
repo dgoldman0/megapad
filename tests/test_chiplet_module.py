@@ -52,9 +52,19 @@ READY = 1 << 2
 FAULT = 1 << 4
 ID_DONE = 1 << 5
 
+BORROW_EN = 1 << 5
+
 READ, WRITE = 1, 2
-REFUSED = 1
+OK, REFUSED = 0, 1
 NOT_LENT = 4
+
+# The test chiplet lends MegaPad 4 KiB of its own memory from its address
+# 0x1000, which appears in port 0's window; bit 8 of a command word asks it
+# to copy the first n words of that memory into the reply.
+WINDOW_BASE = 0x0100_0000_0000_0000
+LENT = 0x1000
+LENT_BYTES = 0x1000
+COPY_FROM_LENT = 0x100
 CORES = 4
 PORT_ID = CORES
 MASK64 = (1 << 64) - 1
@@ -339,6 +349,77 @@ def test_a_chiplet_saved_in_mid_command_finishes_the_same(native):
     for offset in range(0, 0x100, 8):
         assert second.link.read64(offset) == first.link.read64(offset)
     assert first.word(REPLY + 24 + 24) == 4
+
+
+def _units(*tags):
+    return b"".join(bytes([tag]) * 64 for tag in tags)
+
+
+def _lent(machine, words=32):
+    """The chiplet's lent memory, fetched back by its copy command."""
+    machine.command(0, COPY_FROM_LENT | words)
+    machine.run()
+    start = REPLY - EXT_BASE + 24
+    return bytes(machine.memory[start:start + 8 * words])
+
+
+def _open_for_writes(machine):
+    machine.bring_up()
+    machine.link.write64(CTRL, ENABLE | DOORBELL_EN | BORROW_EN)
+
+
+def test_the_chiplet_lends_nothing_until_it_runs(machine):
+    _open_for_writes(machine)
+    # Released, it has not fetched its image yet.
+    assert machine.link.lent_write(WINDOW_BASE + LENT, _units(1)) == REFUSED
+    machine.run()
+    assert machine.status() & READY
+    assert machine.link.lent_write(WINDOW_BASE + LENT, _units(1)) == OK
+
+
+def test_the_chiplet_takes_a_write_and_writes_its_zeros(machine):
+    _open_for_writes(machine)
+    machine.run()
+    whole = _units(0xA1, 0xA2, 0xA3, 0xA4)
+    assert machine.link.lent_write(WINDOW_BASE + LENT, whole) == OK
+    assert _lent(machine) == whole
+    assert machine.link.lent_write(
+        WINDOW_BASE + LENT + 0x40, _units(0xB1), 2) == OK
+    assert _lent(machine) == _units(0xA1, 0xB1, 0, 0)
+
+
+@pytest.mark.parametrize(
+    ("offset", "units", "zeros"),
+    [pytest.param(-0x40, 1, 0, id="below"),
+     pytest.param(LENT_BYTES - 0x40, 1, 1, id="past-the-end"),
+     pytest.param(0x8, 1, 0, id="misaligned")],
+)
+def test_the_chiplet_refuses_a_write_outside_what_it_lends(machine, offset,
+                                                          units, zeros):
+    _open_for_writes(machine)
+    machine.run()
+    data = _units(*([0xCC] * units))
+    assert machine.link.lent_write(
+        WINDOW_BASE + LENT + offset, data, zeros) == REFUSED
+    # The copy command reaches the first 255 words.
+    assert _lent(machine, 255) == bytes(255 * 8)
+    # A write that ends at the end of what it lends is taken.
+    assert machine.link.lent_write(
+        WINDOW_BASE + LENT + LENT_BYTES - 0x80, _units(0xCC), 1) == OK
+
+
+def test_the_lent_memory_is_saved_with_the_chiplet(native):
+    first = Machine(native)
+    _open_for_writes(first)
+    first.run()
+    assert first.link.lent_write(
+        WINDOW_BASE + LENT, _units(0x5A, 0x5B)) == OK
+    saved = first.link.save()
+
+    second = Machine(native)
+    second.memory[:] = first.memory
+    assert second.link.restore(saved)
+    assert _lent(second, 16) == _units(0x5A, 0x5B)
 
 
 def test_a_state_from_another_module_is_refused(native, machine):

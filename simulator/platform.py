@@ -131,8 +131,8 @@ class OneCoreSysInfo:
         # zero for a profile without ports.
         if isinstance(chiplet_ports, bool) or not isinstance(chiplet_ports, int):
             raise TypeError("chiplet ports must be an integer")
-        if not 0 <= chiplet_ports < 1 << 24:
-            raise ValueError("chiplet ports must be a 24-bit PORT_COUNT word")
+        if not 0 <= chiplet_ports < 1 << 32:
+            raise ValueError("chiplet ports must be a 32-bit PORT_COUNT word")
         self._chiplet_ports = chiplet_ports
         if (
             isinstance(crypto_capabilities, bool)

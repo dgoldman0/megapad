@@ -542,8 +542,9 @@ shared with the scalar engine) at the §10 cost.
 > **Implementation status:** the Python oracle, the native accelerator, the
 > strict-cycle system model and the RTL implement this contract, every
 > format included; the hosted simulator does not implement TACC. A store
-> into memory a chiplet lends (below) is built in the RTL; the emulator's
-> models do not implement it yet.
+> into memory a chiplet lends (below) is built in the RTL, the native
+> accelerator, the strict-cycle model and the Python oracle, which hands it
+> to the shared C++ port model.
 
 Each physical tile engine owns one 2,048-bit TACC bank plus owner, valid,
 dirty, format, busy, force-pending, and cancellation metadata.  Software

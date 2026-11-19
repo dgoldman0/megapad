@@ -42,6 +42,7 @@ RESET_HOLD = 1 << 1
 STOP_REQ = 1 << 2
 DOORBELL_EN = 1 << 3
 ATTN_EN = 1 << 4
+BORROW_EN = 1 << 5
 
 PRESENT = 1 << 0
 STOPPED = 1 << 1
@@ -49,6 +50,11 @@ READY = 1 << 2
 BUSY = 1 << 3
 FAULT = 1 << 4
 ID_DONE = 1 << 5
+BORROW_BUSY = 1 << 6
+
+WINDOW = 0xF0
+WINDOW_BASE = 0x0100_0000_0000_0000
+WINDOW_BYTES = 1 << 48
 
 OK, REFUSED, MEM_ERROR, CANCELLED = 0, 1, 2, 3
 CLOSED, MISALIGNED, NOT_EXTERNAL, NOT_LENT = 1, 2, 3, 4
@@ -135,10 +141,11 @@ def test_a_port_without_a_chiplet_reports_none(native):
 
 
 def test_port_count_names_the_ports_their_first_id_and_their_ranges(bench):
-    assert bench.link.read64(PORT_COUNT) == 1 | (PORT_ID << 8) | (6 << 16)
+    word = 1 | (PORT_ID << 8) | (6 << 16) | (48 << 24)
+    assert bench.link.read64(PORT_COUNT) == word
     assert bench.link.port_count_word == bench.link.read64(PORT_COUNT)
     bench.link.write64(PORT_COUNT, 0xFFFF)
-    assert bench.link.read64(PORT_COUNT) == 1 | (PORT_ID << 8) | (6 << 16)
+    assert bench.link.read64(PORT_COUNT) == word
 
 
 def test_a_port_sel_beyond_the_ports_selects_none(bench):
@@ -587,6 +594,97 @@ def test_a_memory_error_ends_a_burst_at_its_failing_word(bench):
 
 
 # ---------------------------------------------------------------------------
+#  MegaPad's writes into memory the chiplet lends
+# ---------------------------------------------------------------------------
+
+def _units(*tags):
+    return b"".join(bytes([tag]) * 64 for tag in tags)
+
+
+def test_each_port_reports_its_window_and_port_count_reports_w(native):
+    link = native.ChipletLink(bytearray(EXT_SIZE), EXT_BASE, 16, 2, 6)
+    assert (link.read64(PORT_COUNT) >> 24) & 0xFF == 48
+    assert link.window_bits == 48
+    assert link.read64(WINDOW) == WINDOW_BASE
+    link.write64(PORT_SEL, 1)
+    assert link.read64(WINDOW) == WINDOW_BASE + WINDOW_BYTES
+    link.write64(WINDOW, 0)
+    assert link.read64(WINDOW) == WINDOW_BASE + WINDOW_BYTES
+
+
+def test_borrow_en_is_a_ctrl_bit_that_resets_clear(bench):
+    assert bench.link.read64(CTRL) & BORROW_EN == 0
+    bench.open(BORROW_EN)
+    assert bench.link.read64(CTRL) == ENABLE | BORROW_EN
+    # Every write completes inside its call, so none is ever outstanding.
+    assert bench.link.read64(STATUS) & BORROW_BUSY == 0
+
+
+def test_the_route_through_the_windows(native):
+    link = native.ChipletLink(bytearray(EXT_SIZE), EXT_BASE, 16, 2, 6)
+    second = WINDOW_BASE + WINDOW_BYTES
+    assert link.route(WINDOW_BASE - 0x40, 256) is None
+    assert link.route(EXT_BASE, 256) is None
+    assert link.route(WINDOW_BASE + 0x40, 256) == (0, 0x40)
+    assert link.route(second + 0x100, 256) == (1, 0x100)
+    assert link.route(second - 0xC0, 256) == (-1, second)
+    assert link.route(second + WINDOW_BYTES, 64) is None
+
+
+def test_a_write_crosses_to_the_chiplet_with_its_answer(bench):
+    bench.open(BORROW_EN)
+    data = _units(0x11, 0x22)
+    assert bench.link.lent_write(WINDOW_BASE + 0x80, data, 2) == OK
+    assert bench.chiplet.lent_writes == [(0x80, data, 2)]
+    bench.chiplet.lent_code = MEM_ERROR
+    assert bench.link.lent_write(WINDOW_BASE + 0x80, data) == MEM_ERROR
+    # The write is not a request of the chiplet's: no refusal is recorded.
+    assert bench.link.read64(STATUS) & FAULT == 0
+
+
+def test_the_bridge_refuses_a_write_while_borrow_en_is_clear(bench):
+    bench.open()
+    assert bench.link.lent_write(WINDOW_BASE, _units(1)) == REFUSED
+    assert bench.chiplet.lent_writes == []
+
+
+def test_the_bridge_refuses_a_write_while_the_chiplet_is_in_reset(bench):
+    bench.link.write64(CTRL, RESET_HOLD | BORROW_EN)
+    assert bench.link.lent_write(WINDOW_BASE, _units(1)) == REFUSED
+    assert bench.chiplet.lent_writes == []
+
+
+def test_a_write_without_a_route_crosses_nowhere(bench):
+    bench.open(BORROW_EN)
+    assert bench.link.lent_write(WINDOW_BASE - 0x40, _units(1)) is None
+    end = WINDOW_BASE + WINDOW_BYTES
+    assert bench.link.lent_write(end - 0x40, _units(1), 1) is None
+    assert bench.chiplet.lent_writes == []
+    with pytest.raises(ValueError):
+        bench.link.lent_write(WINDOW_BASE, b"\0" * 63)
+
+
+@pytest.mark.parametrize(
+    ("ports", "bits"),
+    [pytest.param(1, 7, id="too-narrow"), pytest.param(1, 57, id="too-wide"),
+     pytest.param(2, 56, id="too-many")],
+)
+def test_the_windows_must_hold_an_image_and_fit(native, ports, bits):
+    with pytest.raises(ValueError):
+        native.ChipletLink(bytearray(EXT_SIZE), EXT_BASE, 16, ports, 6,
+                           window_bits=bits)
+
+
+def test_a_narrower_window_moves_every_port_but_the_first(native):
+    link = native.ChipletLink(bytearray(EXT_SIZE), EXT_BASE, 16, 2, 6,
+                              window_bits=32)
+    assert (link.read64(PORT_COUNT) >> 24) & 0xFF == 32
+    link.write64(PORT_SEL, 1)
+    assert link.read64(WINDOW) == WINDOW_BASE + (1 << 32)
+    assert link.route(WINDOW_BASE + (1 << 32) + 0x40, 256) == (1, 0x40)
+
+
+# ---------------------------------------------------------------------------
 #  Save and restore
 # ---------------------------------------------------------------------------
 
@@ -600,7 +698,7 @@ def test_the_links_state_survives_a_save_and_restore(native, bench):
     bench.link.write64(QOS, (9 << 16) | 4)
     bench.link.write64(EXT_CORE_QOS, 5)
     bench.link.write64(ID_INDEX, 1)
-    bench.open(DOORBELL_EN | ATTN_EN | (3 << 8))
+    bench.open(DOORBELL_EN | ATTN_EN | BORROW_EN | (3 << 8))
     bench.chiplet.set_status(True, False)
     bench.read(EXT_BASE)            # one refusal, recorded
     bench.chiplet.blob = [1, 2, 3]

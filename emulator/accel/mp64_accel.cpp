@@ -566,6 +566,32 @@ public:
             mmio_off - BASE < SIZE;
     }
 
+    // Where a span goes among the ports' windows into memory their chiplets
+    // lend. The windows are fixed when the ports are built.
+    megapad::chiplet::ChipletWindow::Route route(
+            uint64_t addr, uint64_t bytes) const noexcept {
+        return window_
+            ? window_->route(addr, bytes)
+            : megapad::chiplet::ChipletWindow::Route{};
+    }
+
+    // MegaPad's write into memory a port's chiplet lends: TACC.STORE's
+    // route. It runs while a core runs, and the chiplet's model takes it
+    // inside the call.
+    int lent_write(
+            int port,
+            uint64_t chiplet_addr,
+            const uint8_t* data,
+            unsigned units,
+            unsigned zeros) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        megapad::chiplet::ChipletPort* found =
+            window_ ? window_->port(port) : nullptr;
+        if (found == nullptr)
+            return MP64_CHIPLET_REFUSED;
+        return found->lent_write(chiplet_addr, data, units, zeros);
+    }
+
     // Every register is 64 bits wide and reached by an aligned 64-bit
     // access; any other shape is a bus fault.
     static bool shape_valid(uint32_t mmio_off, uint32_t width) noexcept {
@@ -2828,6 +2854,8 @@ struct ResumableInstruction {
     bool tacc_timed_external_response_error = false;
     bool tacc_timed_external_response_timeout = false;
     std::array<uint8_t, 64> tacc_timed_external_beat_data{};
+    // A STORE into a chiplet's window sends this many units; 0 otherwise.
+    uint8_t tacc_timed_link_units = 0;
     bool tacc_timed_transfer_faulted = false;
     uint8_t tacc_timed_fault_beat_index = 0;
     uint8_t tacc_timed_fault_word_index = 0;
@@ -2976,6 +3004,22 @@ struct TaccEngineTransportState {
     uint8_t beat_index = 0;
     std::array<uint8_t, TACC_IMAGE_BYTES> image{};
     uint64_t last_operation_token = 0;
+    // A STORE whose image goes to a chiplet port (docs/chiplet-link.md)
+    // sends no beat. Once it holds the stage it sends one unit a cycle, and
+    // the chiplet's answer arrives in the cycle after the last: the models
+    // give a chiplet no clock of its own.
+    bool link = false;
+    int link_port = -1;
+    uint64_t link_chiplet_addr = 0;
+    uint8_t link_units = 0;
+    uint64_t link_answer_cycle = 0;
+};
+
+// Where a timed STORE's image goes when a chiplet port takes it.
+struct TaccLinkRoute {
+    int port = -1;
+    uint64_t chiplet_addr = 0;
+    uint8_t units = 0;
 };
 
 struct TileMemoryPortRequest {
@@ -3262,10 +3306,23 @@ struct TileMemoryTransport {
             uint64_t caller_epoch,
             uint64_t operation_token,
             uint64_t ready_cycle,
-            const std::array<uint8_t, TACC_IMAGE_BYTES>& image) {
+            const std::array<uint8_t, TACC_IMAGE_BYTES>& image,
+            const std::optional<TaccLinkRoute>& link = std::nullopt) {
         if (!valid_engine_id(engine_id))
             throw std::out_of_range(
                 "TACC transport engine ID is outside the configured topology");
+        if (
+            link.has_value() &&
+            (
+                direction != TaccImageTransferStage::Direction::STORE ||
+                link->port < 0 ||
+                link->units == 0 ||
+                link->units > IMAGE_BEATS
+            )
+        ) {
+            throw std::invalid_argument(
+                "a TACC link transfer is a STORE of one to four units");
+        }
         if (!owner_maps_to_engine(engine_id, owner_core_id))
             throw std::invalid_argument(
                 "TACC transport owner does not map to its physical engine");
@@ -3360,6 +3417,12 @@ struct TileMemoryTransport {
         prepared.ready_cycle = ready_cycle;
         prepared.image = image;
         prepared.last_operation_token = operation_token;
+        if (link.has_value()) {
+            prepared.link = true;
+            prepared.link_port = link->port;
+            prepared.link_chiplet_addr = link->chiplet_addr;
+            prepared.link_units = link->units;
+        }
         state = prepared;
         return state;
     }
@@ -3444,7 +3507,20 @@ struct TileMemoryTransport {
         state.phase = TaccTransportPhase::ACTIVE;
         state.stage_token = stage.stage_epoch;
         state.stage_grant_cycle = cycle;
-        queue_image_beat_if_possible(stage, winner, cycle);
+        if (state.link) {
+            if (
+                cycle >
+                std::numeric_limits<uint64_t>::max() -
+                    (static_cast<uint64_t>(state.link_units) + 1)
+            ) {
+                throw std::overflow_error(
+                    "TACC link answer cycle overflow");
+            }
+            state.link_answer_cycle =
+                cycle + state.link_units + 1;
+        } else {
+            queue_image_beat_if_possible(stage, winner, cycle);
+        }
         return TaccStageGrant{
             state.identity,
             state.ready_cycle,
@@ -3904,6 +3980,46 @@ struct TileMemoryTransport {
         };
     }
 
+    // The cycle at which the chiplet answers the link transfer that holds
+    // the stage, if one does.
+    std::optional<uint64_t> link_answer_cycle(
+            const TaccImageTransferStage& stage) const noexcept {
+        if (!owns_stage(stage))
+            return std::nullopt;
+        const TaccEngineTransportState& state =
+            engines[static_cast<std::size_t>(stage.owner_engine_id)];
+        if (!state.link)
+            return std::nullopt;
+        return state.link_answer_cycle;
+    }
+
+    // The link transfer that holds the stage ends with the chiplet's answer
+    // and releases the stage.
+    void complete_link(
+            TaccImageTransferStage& stage,
+            int engine_id,
+            uint64_t answer_cycle) {
+        if (!valid_engine_id(engine_id))
+            throw std::out_of_range(
+                "TACC link completion names no engine");
+        TaccEngineTransportState& state =
+            engines[static_cast<std::size_t>(engine_id)];
+        if (
+            state.phase != TaccTransportPhase::ACTIVE ||
+            !state.link ||
+            state.link_answer_cycle != answer_cycle ||
+            !stage.owned_by(
+                engine_id,
+                state.identity.owner_core_id,
+                state.stage_token)
+        ) {
+            throw std::logic_error(
+                "TACC link answer does not match the stage's owner");
+        }
+        state.phase = TaccTransportPhase::COMPLETE;
+        stage.clear_active(false);
+    }
+
     bool cancel(
             TaccImageTransferStage& stage,
             int engine_id,
@@ -4160,6 +4276,7 @@ private:
             engines[index];
         if (
             state.phase != TaccTransportPhase::ACTIVE ||
+            state.link ||
             pending_port_requests[index].has_value() ||
             engine_port_is_active(engine_id) ||
             state.beat_index >= IMAGE_BEATS ||
@@ -8477,6 +8594,7 @@ struct StepCallbacks {
     bool tacc_timed_transfer_format_signed = false;
     bool tacc_timed_transfer_faulted = false;
     uint64_t tacc_timed_transfer_fault_address = 0;
+    uint8_t tacc_timed_transfer_link_units = 0;
     std::function<ExternalPhyResponse(
         BusOperation,
         uint8_t,
@@ -9296,6 +9414,44 @@ static inline int64_t native_tacc_sign_extend(
         (static_cast<__int128>(1) << bits));
 }
 
+// A TACC.STORE whose image lies in a chiplet port's window: one write of the
+// image's active units to that port, with the rest of the 256 bytes as units
+// of zeros (docs/chiplet-link.md, sections 3 and 4). The port's chiplet
+// answers inside the call. The models give a chiplet no clock, so the write
+// costs one cycle per unit and one for the answer, whatever the answer, and
+// any answer but OK is a bus fault at the image base with TACC unchanged.
+static int native_tacc_store_to_link(
+        CPUState& s,
+        uint64_t base,
+        const megapad::chiplet::ChipletWindow::Route& link) {
+    const unsigned units = static_cast<unsigned>(
+        native_tacc_active_bytes(s.tacc_format_ew) / TILE_BYTES);
+    const unsigned zeros =
+        static_cast<unsigned>(TACC_IMAGE_BYTES / TILE_BYTES) - units;
+    const uint64_t cycles = static_cast<uint64_t>(units) + 1;
+
+    NativeTaccOperation operation(s);
+    const int answer = s.chiplet->lent_write(
+        link.port,
+        link.chiplet_addr,
+        s.tacc.data(),
+        units,
+        zeros);
+    if (operation.cancelled())
+        return MEX_TACC_CANCELLED;
+    if (answer != MP64_CHIPLET_OK) {
+        const uint64_t fault_cycles = 2 + cycles;
+        s.trap_addr = base;
+        s.ext_modifier = -1;
+        s.cycle_count += fault_cycles;
+        if (s.perf_enable)
+            s.perf_cycles += fault_cycles;
+        throw std::runtime_error("TRAP:BUS_FAULT");
+    }
+    s.tacc_dirty = false;
+    return static_cast<int>(cycles);
+}
+
 static int exec_native_tacc_lifecycle(
         CPUState& s,
         const StepCallbacks& cb,
@@ -9439,6 +9595,17 @@ static int exec_native_tacc_lifecycle(
         if (!s.tacc_valid)
             return -1;
         const uint64_t base = s.tdst;
+        if ((base & 0x3F) == 0 && s.chiplet != nullptr) {
+            const megapad::chiplet::ChipletWindow::Route link =
+                s.chiplet->route(base, TACC_IMAGE_BYTES);
+            // An image that runs past its window faults at the first byte
+            // beyond it, which the oracle raises.
+            if (link.in_window) {
+                return link.port < 0
+                    ? -1
+                    : native_tacc_store_to_link(s, base, link);
+            }
+        }
         NativeTaccSpan image_span;
         if (
             (base & 0x3F) != 0 ||
@@ -9883,6 +10050,10 @@ static int exec_mex(
         // beats and published any LOAD image atomically. Replaying the
         // decoder here commits PC/performance state and the six-cycle base
         // latency without repeating a target effect or releasing BUSY early.
+        // A STORE into a chiplet's window took one cycle per unit and one
+        // for the answer instead.
+        if (cb.tacc_timed_transfer_link_units != 0)
+            return cb.tacc_timed_transfer_link_units + 1;
         return 4;
     }
     if (raw_tamac || raw_tacc_lifecycle) {
@@ -12134,6 +12305,11 @@ struct SystemInstructionTraits {
     uint8_t tacc_timed_format_ew = 0;
     bool tacc_timed_format_signed = false;
     bool tacc_timed_external_phy = false;
+    // A STORE whose image goes to a chiplet port: the units it sends, the
+    // port and the chiplet's address. Zero units for an image in memory.
+    uint8_t tacc_timed_link_units = 0;
+    int tacc_timed_link_port = -1;
+    uint64_t tacc_timed_link_chiplet_addr = 0;
     bool mutates_dictionary_cache = false;
 };
 
@@ -12256,6 +12432,23 @@ static bool native_tacc_span_preflight_valid(
         }
     }
     return routed;
+}
+
+// A user-mode STORE reaches a chiplet's window under its MPU policy, as it
+// reaches external RAM.
+static bool native_tacc_link_privilege_valid(
+        const CPUState& state,
+        uint64_t address) noexcept {
+    if (!state.priv_level)
+        return true;
+    const uint64_t last_address = address + (TACC_IMAGE_BYTES - 1);
+    return !(
+        state.mpu_limit > state.mpu_base &&
+        (
+            address < state.mpu_base ||
+            last_address >= state.mpu_limit
+        )
+    );
 }
 
 static uint64_t native_tamac_cycle_bound(
@@ -12395,6 +12588,7 @@ static SystemInstructionTraits native_tacc_instruction_traits(
         return traits;
 
     bool admitted = false;
+    megapad::chiplet::ChipletWindow::Route link{};
     switch (function) {
         case 0x2:  // TACC.TRY
             admitted =
@@ -12420,21 +12614,34 @@ static SystemInstructionTraits native_tacc_instruction_traits(
                 !state.tacc_busy &&
                 !state.tacc_force_pending;
             break;
-        case 0x5:  // TACC.STORE
-            admitted =
+        case 0x5: {  // TACC.STORE
+            const bool storable =
                 state.tacc_owner == state.core_id &&
                 state.tacc_valid &&
                 TileMemoryTransport::valid_format(
                     state.tacc_format_ew,
                     state.tacc_format_signed != 0) &&
                 (state.tdst & 0x3F) == 0 &&
-                native_tacc_span_preflight_valid(
-                    state,
-                    state.tdst,
-                    TACC_IMAGE_BYTES) &&
                 !state.tacc_busy &&
                 !state.tacc_force_pending;
+            // An image wholly inside a chiplet port's window goes to it.
+            if (storable && state.chiplet != nullptr)
+                link = state.chiplet->route(state.tdst, TACC_IMAGE_BYTES);
+            admitted =
+                storable &&
+                (
+                    link.in_window
+                    ? link.port >= 0 &&
+                        native_tacc_link_privilege_valid(
+                            state,
+                            state.tdst)
+                    : native_tacc_span_preflight_valid(
+                        state,
+                        state.tdst,
+                        TACC_IMAGE_BYTES)
+                );
             break;
+        }
         case 0x6:  // TACC.RELEASE
             admitted =
                 state.tacc_owner == state.core_id &&
@@ -12463,17 +12670,27 @@ static SystemInstructionTraits native_tacc_instruction_traits(
                 function == 0x4
                 ? state.tsrc0
                 : state.tdst;
-            NativeTaccSpan image_span;
-            if (!native_tacc_resolve_span(
-                    state,
-                    traits.tacc_timed_base_address,
-                    TACC_IMAGE_BYTES,
-                    image_span)) {
-                throw std::logic_error(
-                    "admitted TACC image span could not be resolved");
+            if (link.port >= 0) {
+                traits.tacc_timed_external_phy = false;
+                traits.tacc_timed_link_units = static_cast<uint8_t>(
+                    native_tacc_active_bytes(state.tacc_format_ew) /
+                    TILE_BYTES);
+                traits.tacc_timed_link_port = link.port;
+                traits.tacc_timed_link_chiplet_addr =
+                    link.chiplet_addr;
+            } else {
+                NativeTaccSpan image_span;
+                if (!native_tacc_resolve_span(
+                        state,
+                        traits.tacc_timed_base_address,
+                        TACC_IMAGE_BYTES,
+                        image_span)) {
+                    throw std::logic_error(
+                        "admitted TACC image span could not be resolved");
+                }
+                traits.tacc_timed_external_phy =
+                    image_span.external_phy;
             }
-            traits.tacc_timed_external_phy =
-                image_span.external_phy;
             if (function == 0x4) {
                 const int ew = tmode_ew(state.tmode);
                 traits.tacc_timed_format_ew =
@@ -17190,7 +17407,14 @@ static CycleCoreProgress run_cycle_core_once(
                     0,
                     operation_token,
                     instruction.start_cycle,
-                    image);
+                    image,
+                    traits.tacc_timed_link_units != 0
+                        ? std::optional<TaccLinkRoute>(TaccLinkRoute{
+                              traits.tacc_timed_link_port,
+                              traits.tacc_timed_link_chiplet_addr,
+                              traits.tacc_timed_link_units,
+                          })
+                        : std::nullopt);
             } catch (...) {
                 cycle_state.instruction.reset();
                 system.refresh_cycle_execution_pending();
@@ -17210,6 +17434,8 @@ static CycleCoreProgress run_cycle_core_once(
                 traits.tacc_timed_format_signed;
             instruction.tacc_timed_external_phy =
                 traits.tacc_timed_external_phy;
+            instruction.tacc_timed_link_units =
+                traits.tacc_timed_link_units;
             instruction.tacc_operation_epoch =
                 core.tacc_epoch;
             instruction.tacc_busy_published = true;
@@ -17309,6 +17535,8 @@ static CycleCoreProgress run_cycle_core_once(
                 instruction->tacc_timed_transfer_faulted;
             callbacks.tacc_timed_transfer_fault_address =
                 instruction->tacc_timed_fault_address;
+            callbacks.tacc_timed_transfer_link_units =
+                instruction->tacc_timed_link_units;
         }
     }
 
@@ -17661,10 +17889,16 @@ static CycleCoreProgress run_cycle_core_once(
             throw std::runtime_error(
                 "cycle-bounded core made invalid progress");
         }
+        // Two base cycles, then four beats, or a link's units and answer.
         if (
             instruction &&
             instruction->tacc_timed_image_transfer &&
-            raw.total_cycles != 6
+            raw.total_cycles !=
+                2 + (
+                    instruction->tacc_timed_link_units != 0
+                    ? instruction->tacc_timed_link_units + 1
+                    : 4
+                )
         ) {
             throw std::logic_error(
                 "timed TACC replay changed its six-cycle base latency");
@@ -19176,6 +19410,86 @@ static void complete_cycle_tile_target(
     system.refresh_cycle_execution_pending();
 }
 
+// The chiplet's answer to the link transfer that holds the image stage
+// (docs/chiplet-link.md, section 4). The write crosses as one call to the
+// port's model at this cycle, so a transfer cancelled before it never
+// reaches the chiplet. Any answer but OK ends the STORE with a bus fault at
+// its image base.
+static void complete_cycle_tacc_link(
+        SystemState& system,
+        uint64_t answer_cycle) {
+    TaccImageTransferStage& stage = system.tacc_image_stage;
+    TileMemoryTransport& transport = system.tile_memory_transport;
+    if (!transport.owns_stage(stage)) {
+        throw std::logic_error(
+            "TACC link answer has no stage owner");
+    }
+    const int engine_id = stage.owner_engine_id;
+    const TaccEngineTransportState state =
+        transport.engines[static_cast<std::size_t>(engine_id)];
+    const int owner_core_id = state.identity.owner_core_id;
+    if (
+        engine_id < 0 ||
+        engine_id >= system.full_core_count() ||
+        owner_core_id != engine_id
+    ) {
+        throw std::logic_error(
+            "cycle scheduler received a non-full-core TACC link transfer");
+    }
+    if (
+        !system.tile_transport_identity_is_live(
+            engine_id,
+            owner_core_id,
+            state.identity.engine_epoch,
+            state.identity.caller_epoch)
+    ) {
+        system.cancel_tacc_image_stage_for_core(owner_core_id);
+        return;
+    }
+    const int core_index =
+        full_core_index_for_requester(system, owner_core_id);
+    FullCoreCycleState& cycle_state =
+        system.full_core_cycle_states[
+            static_cast<std::size_t>(core_index)];
+    if (
+        !cycle_state.instruction ||
+        !cycle_state.instruction->tacc_timed_image_transfer ||
+        cycle_state.instruction->tacc_timed_transfer_complete ||
+        cycle_state.instruction->tacc_timed_link_units == 0 ||
+        cycle_state.instruction->tacc_timed_operation_token !=
+            state.identity.operation_token ||
+        cycle_state.instruction->tacc_operation_epoch !=
+            state.identity.engine_epoch
+    ) {
+        throw std::logic_error(
+            "TACC link answer has no matching suspended instruction");
+    }
+
+    // Arbitration samples pre-edge ownership, as at an image's last beat:
+    // a waiting engine takes the stage at the next edge.
+    (void)transport.try_grant_stage(stage, answer_cycle);
+    const unsigned units = state.link_units;
+    const int answer = system.shared_chiplet.lent_write(
+        state.link_port,
+        state.link_chiplet_addr,
+        state.image.data(),
+        units,
+        TileMemoryTransport::IMAGE_BEATS - units);
+    transport.complete_link(stage, engine_id, answer_cycle);
+
+    ResumableInstruction& instruction = *cycle_state.instruction;
+    if (answer != MP64_CHIPLET_OK) {
+        instruction.tacc_timed_transfer_faulted = true;
+        instruction.tacc_timed_fault_beat_index = 0;
+        instruction.tacc_timed_fault_word_index = 0;
+        instruction.tacc_timed_fault_address = state.base_address;
+    }
+    instruction.tacc_timed_transfer_complete = true;
+    instruction.tacc_timed_completion_cycle = answer_cycle;
+    cycle_state.ready_cycle = answer_cycle;
+    system.refresh_cycle_execution_pending();
+}
+
 static void complete_cycle_bus_target(
         SystemState& system,
         uint64_t completion_cycle,
@@ -20177,6 +20491,16 @@ static SystemBatchResult run_full_core_cycle_batch(
             throw std::logic_error(
                 "tile-memory target completion fell behind the scheduler");
         }
+        const std::optional<uint64_t> next_link_answer_cycle =
+            system.tile_memory_transport.link_answer_cycle(
+                system.tacc_image_stage);
+        if (
+            next_link_answer_cycle.has_value() &&
+            *next_link_answer_cycle < scheduler_cycle
+        ) {
+            throw std::logic_error(
+                "TACC link answer fell behind the scheduler");
+        }
         std::optional<uint64_t> next_core_cycle;
         const uint64_t suspended_guest_count =
             pending_guest_instruction_count(system);
@@ -20267,6 +20591,11 @@ static SystemBatchResult run_full_core_cycle_batch(
                 next_cycle,
                 *next_tile_completion_cycle);
         }
+        if (next_link_answer_cycle.has_value()) {
+            next_cycle = std::min(
+                next_cycle,
+                *next_link_answer_cycle);
+        }
         if (next_timer_cycle.has_value()) {
             next_cycle = std::min(
                 next_cycle,
@@ -20303,6 +20632,9 @@ static SystemBatchResult run_full_core_cycle_batch(
         const bool tile_target_frontier =
             next_tile_completion_cycle.has_value() &&
             *next_tile_completion_cycle == scheduler_cycle;
+        const bool link_answer_frontier =
+            next_link_answer_cycle.has_value() &&
+            *next_link_answer_cycle == scheduler_cycle;
 
         // Boundary order is fixed: settle virtual devices, commit main-bus
         // then tile-memory targets that sampled pre-edge state, apply
@@ -20311,7 +20643,8 @@ static SystemBatchResult run_full_core_cycle_batch(
             external_frontier ||
             idle_wake_frontier ||
             target_frontier ||
-            tile_target_frontier) {
+            tile_target_frontier ||
+            link_answer_frontier) {
             settle_cycle_clock_to(
                 system,
                 scheduler_cycle,
@@ -20331,6 +20664,8 @@ static SystemBatchResult run_full_core_cycle_batch(
                 scheduler_cycle,
                 callbacks);
         }
+        if (link_answer_frontier)
+            complete_cycle_tacc_link(system, scheduler_cycle);
         if (external_frontier) {
             const uint64_t applied =
                 apply_due_external_events(
@@ -29655,6 +29990,15 @@ static py::dict snapshot_tacc_engine_transport(
         reinterpret_cast<const char*>(
             state.image.data()),
         state.image.size());
+    snapshot["link_port"] =
+        optional_nonnegative_int(
+            state.link ? state.link_port : -1);
+    snapshot["link_chiplet_addr"] =
+        state.link_chiplet_addr;
+    snapshot["link_units"] =
+        state.link_units;
+    snapshot["link_answer_cycle"] =
+        state.link_answer_cycle;
     return snapshot;
 }
 
@@ -29922,7 +30266,7 @@ static constexpr std::array<const char*, 7>
         "last_arbitration_cycle",
     }};
 
-static constexpr std::array<const char*, 16>
+static constexpr std::array<const char*, 20>
     TILE_TRANSPORT_ENGINE_FIELDS{{
         "engine_id",
         "phase",
@@ -29940,6 +30284,10 @@ static constexpr std::array<const char*, 16>
         "stage_grant_cycle",
         "beat_index",
         "image",
+        "link_port",
+        "link_chiplet_addr",
+        "link_units",
+        "link_answer_cycle",
     }};
 
 static constexpr std::array<const char*, 13>
@@ -30201,9 +30549,41 @@ prepare_tacc_engine_transport(
             snapshot,
             "image",
             "TACC engine transport");
+    const int link_port =
+        optional_snapshot_int(snapshot, "link_port");
+    const int link_units =
+        snapshot_int(snapshot, "link_units");
+    state.link = link_port >= 0;
+    state.link_port = link_port;
+    state.link_chiplet_addr =
+        snapshot_u64(snapshot, "link_chiplet_addr");
+    state.link_answer_cycle =
+        snapshot_u64(snapshot, "link_answer_cycle");
+    if (!state.link) {
+        if (
+            state.link_chiplet_addr != 0 ||
+            link_units != 0 ||
+            state.link_answer_cycle != 0
+        ) {
+            throw std::invalid_argument(
+                "a TACC transport to memory carries no link state");
+        }
+    } else if (
+        link_units < 1 ||
+        link_units > TileMemoryTransport::IMAGE_BEATS ||
+        state.direction !=
+            TaccImageTransferStage::Direction::STORE ||
+        state.beat_index != 0
+    ) {
+        throw std::invalid_argument(
+            "a TACC link transport is a STORE of one to four units "
+            "that sends no beat");
+    }
+    state.link_units = static_cast<uint8_t>(link_units);
 
     if (state.phase == TaccTransportPhase::IDLE) {
         if (
+            state.link ||
             state.identity.owner_core_id != -1 ||
             state.identity.operation_token != 0 ||
             state.last_operation_token != 0 ||
@@ -30287,7 +30667,8 @@ prepare_tacc_engine_transport(
             if (
                 state.stage_token != 0 ||
                 state.stage_grant_cycle != 0 ||
-                state.beat_index != 0
+                state.beat_index != 0 ||
+                state.link_answer_cycle != 0
             ) {
                 throw std::invalid_argument(
                     "waiting TACC transport cannot claim stage progress");
@@ -30307,10 +30688,11 @@ prepare_tacc_engine_transport(
             if (
                 state.stage_token == 0 ||
                 state.beat_index !=
-                    TileMemoryTransport::IMAGE_BEATS
+                    (state.link ? 0 : TileMemoryTransport::IMAGE_BEATS)
             ) {
                 throw std::invalid_argument(
-                    "complete TACC transport must journal four beats");
+                    "complete TACC transport must journal four beats, "
+                    "or none for a link");
             }
             break;
         case TaccTransportPhase::CANCELED:
@@ -31108,9 +31490,26 @@ prepare_tile_memory_transport(
                 .has_value() &&
             prepared.transport.active_port_grant
                 ->request.identity.engine_id == owner;
-        if (!owner_pending && !owner_active)
+        // A link transfer holds the stage with no port traffic; its answer
+        // cycle is its resumable progress.
+        const TaccEngineTransportState& owner_state =
+            prepared.transport.engines[
+                static_cast<std::size_t>(owner)];
+        if (owner_state.link) {
+            if (
+                owner_pending ||
+                owner_active ||
+                owner_state.link_answer_cycle !=
+                    owner_state.stage_grant_cycle +
+                        owner_state.link_units + 1
+            ) {
+                throw std::invalid_argument(
+                    "active TACC link transfer has an incoherent answer");
+            }
+        } else if (!owner_pending && !owner_active) {
             throw std::invalid_argument(
                 "active TACC stage has no resumable physical-port beat");
+        }
     }
     for (const TaccEngineTransportState& state :
          prepared.transport.engines) {
@@ -37250,6 +37649,42 @@ PYBIND11_MODULE(_mp64_accel, m) {
             [](const SystemState& system) {
                 return system.shared_chiplet.work_waits();
             })
+        .def(
+            "chiplet_route",
+            [](const SystemState& system, uint64_t addr, uint64_t bytes) {
+                return megapad::chiplet::route_tuple(
+                    system.shared_chiplet.route(addr, bytes));
+            },
+            py::arg("addr"),
+            py::arg("bytes"),
+            "Where a span goes among the ports' windows: None, (port, "
+            "chiplet address), or (-1, the first byte beyond its window).")
+        .def(
+            "chiplet_lent_write",
+            [](SystemState& system, int port, uint64_t chiplet_addr,
+               const py::bytes& data, unsigned zeros) {
+                const std::string text = data;
+                if (
+                    text.empty() ||
+                    text.size() % MP64_CHIPLET_UNIT_BYTES != 0
+                ) {
+                    throw py::value_error(
+                        "a lent write carries whole 64-byte units");
+                }
+                return system.shared_chiplet.lent_write(
+                    port,
+                    chiplet_addr,
+                    reinterpret_cast<const uint8_t*>(text.data()),
+                    static_cast<unsigned>(
+                        text.size() / MP64_CHIPLET_UNIT_BYTES),
+                    zeros);
+            },
+            py::arg("port"),
+            py::arg("chiplet_addr"),
+            py::arg("data"),
+            py::arg("zeros"),
+            "MegaPad's write into memory a port's chiplet lends; returns "
+            "the chiplet's answer.")
         .def(
             "attach_test_chiplet",
             [](SystemState& system, int port) {

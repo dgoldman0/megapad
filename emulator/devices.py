@@ -1963,8 +1963,9 @@ class SystemInfo(Device):
         self.num_bus_ports = num_bus_ports
         # The chiplet ports, packed as PORT_COUNT of the port window packs
         # them: [7:0] ports built, [15:8] ID of port 0, [23:16] lent ranges
-        # per port.  Zero on a machine built without ports.
-        if chiplet_ports < 0 or chiplet_ports >> 24:
+        # per port, [31:24] W of each port's 2^W-byte window.  Zero on a
+        # machine built without ports.
+        if chiplet_ports < 0 or chiplet_ports >> 32:
             raise ValueError("SystemInfo chiplet_ports has reserved bits")
         self.chiplet_ports = chiplet_ports
         # Legacy flags (kept for backward compat, not in RTL)

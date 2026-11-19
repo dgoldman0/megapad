@@ -11,6 +11,11 @@
 //   3  probe address, one MegaPad has lent no write right for
 //   4  reserved
 //
+// Lent memory: 4 KiB of its own at its addresses 0x1000 to 0x1FFF, which it
+// lends MegaPad for writing while it runs (docs/chiplet-link.md, section 3).
+// It admits a write wholly inside that range, its zeros included, at an
+// address aligned to 64 bytes, and refuses any other untouched.
+//
 // After release it fetches the image in one burst and raises ready. For
 // each doorbell it then serves one command for the participant that rang:
 //   1. read the command word at the command address; its low byte is n;
@@ -18,12 +23,14 @@
 //   3. write the count of commands served, one byte, at reply + 8;
 //   4. try to write at the probe address, and
 //   5. store that request's response code as a word at reply + 16;
-//   6. when n > 0, read n words from command + 8 in one burst and
+//   6. when n > 0, read n words from command + 8 in one burst, or, when the
+//      command word's bit 8 is set, take the first n words of its lent
+//      memory, and
 //   7. write them at reply + 24 in one burst;
 //   8. ring the participant that rang.
-// A unit of work is one of these link operations, so a command can span
-// several steps. Asked to stop, it abandons the command in hand, reports
-// stopped and takes no doorbell until the request is withdrawn.
+// A unit of work is one of these steps, so a command can span several
+// steps. Asked to stop, it abandons the command in hand, reports stopped
+// and takes no doorbell until the request is withdrawn.
 //
 // The file builds two ways: into MegaPad's extensions, where the creating
 // function has an internal name, and alone as a loadable module, where it
@@ -42,6 +49,9 @@ constexpr std::uint64_t IDENTITY_0 = 0x4348495000000001ull;  // "CHIP", v1
 constexpr std::uint64_t IDENTITY_1 = 0x5049484354534554ull;  // "TESTCHIP"
 constexpr std::uint64_t BOOT_MAGIC = 0x544F4F4254534554ull;  // "TESTBOOT"
 constexpr unsigned IMAGE_WORDS = 5;
+constexpr std::uint64_t LENT_BASE = 0x1000;
+constexpr std::uint64_t LENT_BYTES = 0x1000;
+constexpr std::uint64_t COMMAND_FROM_LENT = 0x100;
 
 enum class Phase : std::uint8_t {
     Reset,      // held in reset
@@ -70,6 +80,7 @@ struct TestChiplet {
     std::uint64_t probe_code = 0;
     std::uint64_t served = 0;
     std::uint64_t words[255] = {};  // the burst a command carries
+    std::uint8_t lent[LENT_BYTES] = {};  // the memory it lends MegaPad
 };
 
 constexpr std::size_t SAVED_FROM = offsetof(TestChiplet, phase);
@@ -182,7 +193,9 @@ void serve_stage(TestChiplet& chip) {
                      &chip.probe_code, nullptr);
             break;
         case 6:
-            if (count > 0)
+            if (count > 0 && (chip.command & COMMAND_FROM_LENT) != 0)
+                std::memcpy(chip.words, chip.lent, count * 8);
+            else if (count > 0)
                 host.mem(host.ctx, chip.command_addr + 8, 3, count - 1, 0,
                          chip.words, nullptr);
             break;
@@ -243,6 +256,26 @@ int step(void* self, std::uint32_t budget) {
     return work_waits(chip);
 }
 
+int lent_write(void* self, std::uint64_t addr, const std::uint8_t* data,
+               unsigned units, unsigned zeros) {
+    auto& chip = *static_cast<TestChiplet*>(self);
+    // It lends its memory only while its runtime is up.
+    if (chip.phase != Phase::Running || data == nullptr || units == 0)
+        return MP64_CHIPLET_REFUSED;
+    const std::uint64_t unit = MP64_CHIPLET_UNIT_BYTES;
+    const std::uint64_t bytes =
+        (static_cast<std::uint64_t>(units) + zeros) * unit;
+    if ((addr & (unit - 1)) != 0 || addr < LENT_BASE ||
+        addr - LENT_BASE > LENT_BYTES ||
+        bytes > LENT_BYTES - (addr - LENT_BASE))
+        return MP64_CHIPLET_REFUSED;
+    std::uint8_t* at = chip.lent + (addr - LENT_BASE);
+    std::memcpy(at, data, static_cast<std::size_t>(units) * unit);
+    std::memset(at + static_cast<std::size_t>(units) * unit, 0,
+                static_cast<std::size_t>(zeros) * unit);
+    return MP64_CHIPLET_OK;
+}
+
 std::size_t save(void* self, std::uint8_t* buffer, std::size_t capacity) {
     if (buffer != nullptr && capacity >= SAVED_SIZE)
         std::memcpy(buffer,
@@ -295,6 +328,7 @@ int mp64_chiplet_create(const char*, mp64_chiplet_module* out)
     out->stop = stop;
     out->doorbell = doorbell;
     out->step = step;
+    out->lent_write = lent_write;
     out->save = save;
     out->restore = restore;
     out->destroy = destroy;

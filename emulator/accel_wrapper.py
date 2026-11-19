@@ -798,10 +798,16 @@ def {_attr}(self, v):
             fb._tacc_image_stage_acquire_hook = acquire_tacc_image_stage
             fb._tacc_image_stage_update_hook = update_tacc_image_stage
             fb._tacc_image_stage_release_hook = release_tacc_image_stage
+            # The machine's chiplet ports: the shared C++ port model routes a
+            # STORE image through their windows and carries its write.
+            fb._tacc_window_route_hook = owner.chiplet_route
+            fb._tacc_link_write_hook = owner.chiplet_lent_write
         else:
             fb._tacc_image_stage_acquire_hook = None
             fb._tacc_image_stage_update_hook = None
             fb._tacc_image_stage_release_hook = None
+            fb._tacc_window_route_hook = None
+            fb._tacc_link_write_hook = None
         fb.mem = self.mem               # share memory
         fb.mem_size = self.mem_size     # replacement may change geometry
         fb.mem_read8 = self.mem_read8    # use patched MMIO

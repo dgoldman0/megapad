@@ -1,6 +1,7 @@
 #include "chiplet_port.h"
 
 #include <cstring>
+#include <stdexcept>
 #include <utility>
 
 #include <dlfcn.h>
@@ -94,9 +95,11 @@ void host_status(void* ctx, int ready, int stopped) {
 // ---------------------------------------------------------------------------
 
 ChipletPort::ChipletPort(int index, int id, int range_count,
-                         ExternalMemory* memory, PortMailbox* mailbox)
+                         std::uint64_t window_base, ExternalMemory* memory,
+                         PortMailbox* mailbox)
     : index_(index),
       id_(id),
+      window_base_(window_base),
       memory_(memory),
       mailbox_(mailbox),
       range_sel_mask_(range_sel_mask_for(range_count)),
@@ -125,7 +128,8 @@ bool ChipletPort::attach(const mp64_chiplet_module& module) noexcept {
         module.identity == nullptr || module.reset == nullptr ||
         module.release == nullptr || module.stop == nullptr ||
         module.doorbell == nullptr || module.step == nullptr ||
-        module.save == nullptr || module.restore == nullptr)
+        module.lent_write == nullptr || module.save == nullptr ||
+        module.restore == nullptr)
         return false;
     detach();
     module_ = module;
@@ -170,8 +174,11 @@ std::uint64_t ChipletPort::read_register(unsigned index) const noexcept {
                    (stop_req_ ? CTRL_STOP_REQ : 0) |
                    (doorbell_en_ ? CTRL_DOORBELL_EN : 0) |
                    (attn_en_ ? CTRL_ATTN_EN : 0) |
+                   (borrow_en_ ? CTRL_BORROW_EN : 0) |
                    (static_cast<std::uint64_t>(attn_core_) << 8);
         case STATUS:
+            // BUSY and BORROW_BUSY read 0: every transfer completes inside
+            // the call that makes it.
             return (attached_ ? STATUS_PRESENT : 0) |
                    (stopped_ ? STATUS_STOPPED : 0) |
                    (ready_ ? STATUS_READY : 0) |
@@ -208,6 +215,8 @@ std::uint64_t ChipletPort::read_register(unsigned index) const noexcept {
             return boot_len_;
         case BOOT_ARG:
             return boot_arg_;
+        case WINDOW:
+            return window_base_;
         default:
             return 0;
     }
@@ -224,6 +233,7 @@ void ChipletPort::write_register(unsigned index,
             stop_req_ = (value & CTRL_STOP_REQ) != 0;
             doorbell_en_ = (value & CTRL_DOORBELL_EN) != 0;
             attn_en_ = (value & CTRL_ATTN_EN) != 0;
+            borrow_en_ = (value & CTRL_BORROW_EN) != 0;
             attn_core_ = static_cast<std::uint8_t>(value >> 8);
             const bool now_up = link_up();
             if (was_up && !now_up) {
@@ -412,6 +422,22 @@ int ChipletPort::request(std::uint64_t addr, unsigned size, unsigned len,
     return MP64_CHIPLET_OK;
 }
 
+int ChipletPort::lent_write(std::uint64_t addr, const std::uint8_t* data,
+                            unsigned units, unsigned zeros) noexcept {
+    // The bridge refuses a write itself while BORROW_EN is clear or the
+    // chiplet is absent or held in reset; nothing then crosses the link.
+    if (!link_up() || !borrow_en_)
+        return MP64_CHIPLET_REFUSED;
+    // The write channel carries 1 to 256 units and at most 255 of zeros.
+    if (data == nullptr || units == 0 || units > 256 || zeros > 255)
+        return MP64_CHIPLET_REFUSED;
+    const int code =
+        module_.lent_write(module_.self, addr, data, units, zeros);
+    // The answer is two bits on the link.
+    return code >= MP64_CHIPLET_OK && code <= MP64_CHIPLET_CANCELLED
+        ? code : MP64_CHIPLET_MEM_ERROR;
+}
+
 void ChipletPort::ring(std::uint8_t dst) noexcept {
     active_ = true;
     // While DOORBELL_EN is clear the bridge takes the chiplet's doorbells
@@ -563,6 +589,7 @@ bool ChipletPort::restore(const std::vector<std::uint8_t>& state) noexcept {
     stop_req_ = (ctrl & CTRL_STOP_REQ) != 0;
     doorbell_en_ = (ctrl & CTRL_DOORBELL_EN) != 0;
     attn_en_ = (ctrl & CTRL_ATTN_EN) != 0;
+    borrow_en_ = (ctrl & CTRL_BORROW_EN) != 0;
     attn_core_ = static_cast<std::uint8_t>(ctrl >> 8);
     range_sel_ = range_sel & range_sel_mask_;
     stage_base_ = stage_base;
@@ -596,12 +623,23 @@ bool ChipletPort::restore(const std::vector<std::uint8_t>& state) noexcept {
 
 ChipletWindow::ChipletWindow(int port_count, int first_port_id,
                              int range_count, ExternalMemory* memory,
-                             PortMailbox* mailbox)
+                             PortMailbox* mailbox, int window_bits)
     : first_port_id_(first_port_id),
-      range_count_(range_count < 1 ? 1 : range_count) {
+      range_count_(range_count < 1 ? 1 : range_count),
+      window_bits_(window_bits) {
+    // The windows hold a TACC image each and fit below twice their base,
+    // which leaves the window index well inside 64 bits.
+    if (window_bits < 8 || window_bits > 56 ||
+        (port_count > 0 &&
+         static_cast<std::uint64_t>(port_count) >
+             (WINDOW_BASE >> window_bits)))
+        throw std::invalid_argument(
+            "chiplet windows must hold an image and fit their space");
     for (int port = 0; port < port_count; ++port) {
         ports_.push_back(std::make_unique<ChipletPort>(
-            port, first_port_id + port, range_count_, memory, mailbox));
+            port, first_port_id + port, range_count_,
+            WINDOW_BASE + (static_cast<std::uint64_t>(port) << window_bits),
+            memory, mailbox));
         budgets_.push_back(DEFAULT_BUDGET);
     }
 }
@@ -609,7 +647,28 @@ ChipletWindow::ChipletWindow(int port_count, int first_port_id,
 std::uint64_t ChipletWindow::port_count_word() const noexcept {
     return static_cast<std::uint64_t>(ports_.size() & 0xFF) |
            (static_cast<std::uint64_t>(first_port_id_ & 0xFF) << 8) |
-           (static_cast<std::uint64_t>(range_count_ & 0xFF) << 16);
+           (static_cast<std::uint64_t>(range_count_ & 0xFF) << 16) |
+           (static_cast<std::uint64_t>(window_bits_ & 0xFF) << 24);
+}
+
+ChipletWindow::Route ChipletWindow::route(std::uint64_t addr,
+                                          std::uint64_t bytes) const noexcept {
+    Route route;
+    if (ports_.empty() || addr < WINDOW_BASE)
+        return route;
+    const std::uint64_t index = (addr - WINDOW_BASE) >> window_bits_;
+    if (index >= ports_.size())
+        return route;
+    route.in_window = true;
+    const std::uint64_t base = ports_[index]->window_base();
+    const std::uint64_t end = base + (std::uint64_t{1} << window_bits_);
+    if (bytes > end - addr) {
+        route.first_forbidden = end;
+        return route;
+    }
+    route.port = static_cast<int>(index);
+    route.chiplet_addr = addr - base;
+    return route;
 }
 
 std::uint64_t ChipletWindow::read64(unsigned offset) const noexcept {

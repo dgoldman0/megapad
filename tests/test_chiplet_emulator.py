@@ -117,7 +117,8 @@ def test_the_window_answers_a_core_that_python_runs():
     system = _machine(full_cores=2)
     cpu = system.cpu
     first_id = system.first_chiplet_port_id
-    assert cpu.mem_read64(WINDOW + PORT_COUNT) == 1 | (first_id << 8) | (8 << 16)
+    assert cpu.mem_read64(WINDOW + PORT_COUNT) == (
+        1 | (first_id << 8) | (8 << 16) | (48 << 24))
     assert cpu.mem_read64(WINDOW + CTRL) == RESET_HOLD
     assert (cpu.mem_read64(WINDOW + STATUS) >> 16) & 0xFF == first_id
 
@@ -126,7 +127,7 @@ def test_the_window_answers_a_core_that_python_runs():
     cpu.mem_write64(WINDOW + EXT_CORE_QOS, 7)
     assert system.cores[1].mem_read64(WINDOW + EXT_CORE_QOS) == 7
     assert system._native_system.chiplet_port_count_word == (
-        1 | (first_id << 8) | (8 << 16))
+        1 | (first_id << 8) | (8 << 16) | (48 << 24))
 
 
 @pytest.mark.parametrize(
@@ -182,7 +183,7 @@ def test_guest_code_reads_and_writes_the_window():
     """)
     _run(system, cpu)
     first_id = system.first_chiplet_port_id
-    assert cpu.regs[4] == 1 | (first_id << 8) | (8 << 16)
+    assert cpu.regs[4] == 1 | (first_id << 8) | (8 << 16) | (48 << 24)
     assert cpu.regs[5] == 0x0BAD_F00D_CAFE_0040
     assert cpu.regs[6] == RESET_HOLD
 

@@ -9,7 +9,10 @@
 // request in flight: STATUS.BUSY reads 0, and the CANCELLED response is
 // given only to a request made while the link is down. QOS and
 // EXT_CORE_QOS hold what software wrote and shape nothing, since the model
-// has no cycle-level arbitration at external memory.
+// has no cycle-level arbitration at external memory. MegaPad's writes into
+// memory a chiplet lends complete inside their call in the same way, so
+// STATUS.BORROW_BUSY reads 0 and the 255-cycle bounds of the link never
+// expire.
 //
 // The model has no Python dependency. Each backend supplies its external
 // memory and its mailbox through the two interfaces below.
@@ -90,6 +93,7 @@ public:
         BOOT_ADDR = 0xB,
         BOOT_LEN = 0xC,
         BOOT_ARG = 0xD,
+        WINDOW = 0xE,
     };
 
     // CTRL bits.
@@ -98,6 +102,7 @@ public:
     static constexpr std::uint64_t CTRL_STOP_REQ = 1u << 2;
     static constexpr std::uint64_t CTRL_DOORBELL_EN = 1u << 3;
     static constexpr std::uint64_t CTRL_ATTN_EN = 1u << 4;
+    static constexpr std::uint64_t CTRL_BORROW_EN = 1u << 5;
 
     // STATUS bits.
     static constexpr std::uint64_t STATUS_PRESENT = 1u << 0;
@@ -106,6 +111,7 @@ public:
     static constexpr std::uint64_t STATUS_BUSY = 1u << 3;
     static constexpr std::uint64_t STATUS_FAULT = 1u << 4;
     static constexpr std::uint64_t STATUS_ID_DONE = 1u << 5;
+    static constexpr std::uint64_t STATUS_BORROW_BUSY = 1u << 6;
 
     // Refusal reasons in FAULT_INFO.
     static constexpr unsigned WHY_CLOSED = 1;
@@ -113,7 +119,10 @@ public:
     static constexpr unsigned WHY_NOT_EXTERNAL = 3;
     static constexpr unsigned WHY_NOT_LENT = 4;
 
-    ChipletPort(int index, int id, int range_count, ExternalMemory* memory,
+    // window_base is where the chiplet's address 0 appears in MegaPad's
+    // address space (section 3 of docs/chiplet-link.md).
+    ChipletPort(int index, int id, int range_count,
+                std::uint64_t window_base, ExternalMemory* memory,
                 PortMailbox* mailbox);
     ~ChipletPort();
     ChipletPort(const ChipletPort&) = delete;
@@ -121,6 +130,7 @@ public:
 
     int index() const noexcept { return index_; }
     int id() const noexcept { return id_; }
+    std::uint64_t window_base() const noexcept { return window_base_; }
     int range_count() const noexcept {
         return static_cast<int>(ranges_.size());
     }
@@ -142,6 +152,15 @@ public:
     // it work. Returns whether more work waits.
     bool step(std::uint32_t budget) noexcept;
     bool work_waits() const noexcept;
+
+    // --- MegaPad's writes into memory the chiplet lends ---
+    // One write from the tile engine's TACC.STORE: `units` units of 64
+    // bytes from `data`, then `zeros` units of zeros, at the chiplet's own
+    // address. While BORROW_EN is clear, or the chiplet is absent or held
+    // in reset, the bridge refuses the write itself and nothing crosses.
+    // Returns the chiplet's answer, a response code of chiplet_module.h.
+    int lent_write(std::uint64_t addr, const std::uint8_t* data,
+                   unsigned units, unsigned zeros) noexcept;
 
     // --- The chiplet's side of the link ---
     // The host services of chiplet_module.h arrive here.
@@ -170,6 +189,7 @@ private:
 
     const int index_;
     const int id_;
+    const std::uint64_t window_base_;
     ExternalMemory* const memory_;
     PortMailbox* const mailbox_;
     const unsigned range_sel_mask_;
@@ -180,6 +200,7 @@ private:
     bool stop_req_ = false;
     bool doorbell_en_ = false;
     bool attn_en_ = false;
+    bool borrow_en_ = false;
     std::uint8_t attn_core_ = 0;
 
     // Lent ranges
@@ -220,7 +241,8 @@ private:
 };
 
 // The register window at MMIO offset 0xE00: the shared registers and the
-// selected port's block.
+// selected port's block. It also places each port's window into memory its
+// chiplet lends: port p's is the 2^W bytes at WINDOW_BASE + p * 2^W.
 class ChipletWindow {
 public:
     static constexpr unsigned SIZE = 0x100;
@@ -229,18 +251,37 @@ public:
     static constexpr unsigned EXT_CORE_QOS = 0x10;
     static constexpr unsigned PORT_BLOCK = 0x80;
     static constexpr std::uint32_t DEFAULT_BUDGET = 64;
+    static constexpr std::uint64_t WINDOW_BASE = 0x0100'0000'0000'0000ull;
+    static constexpr int DEFAULT_WINDOW_BITS = 48;
 
+    // window_bits is W. The windows must hold a TACC image and end at or
+    // below twice WINDOW_BASE, as the RTL requires.
     ChipletWindow(int port_count, int first_port_id, int range_count,
-                  ExternalMemory* memory, PortMailbox* mailbox);
+                  ExternalMemory* memory, PortMailbox* mailbox,
+                  int window_bits = DEFAULT_WINDOW_BITS);
 
     int port_count() const noexcept {
         return static_cast<int>(ports_.size());
     }
     int first_port_id() const noexcept { return first_port_id_; }
     int range_count() const noexcept { return range_count_; }
+    int window_bits() const noexcept { return window_bits_; }
     // PORT_COUNT's value, which System Info repeats: [7:0] ports,
-    // [15:8] the first port's ID, [23:16] lent ranges per port.
+    // [15:8] the first port's ID, [23:16] lent ranges per port, [31:24] W.
     std::uint64_t port_count_word() const noexcept;
+
+    // Where a span [addr, addr + bytes) goes among the windows. A span that
+    // starts in no built port's window has no route here. One that starts
+    // in a window and stays in it goes to that port, at the chiplet's
+    // address; one that runs past the window's end has no route, and
+    // first_forbidden is the first byte beyond the window.
+    struct Route {
+        bool in_window = false;
+        int port = -1;
+        std::uint64_t chiplet_addr = 0;
+        std::uint64_t first_forbidden = 0;
+    };
+    Route route(std::uint64_t addr, std::uint64_t bytes) const noexcept;
 
     ChipletPort* port(int index) noexcept {
         return index >= 0 && index < port_count()
@@ -265,6 +306,7 @@ public:
 private:
     const int first_port_id_;
     const int range_count_;
+    const int window_bits_;
     std::uint8_t port_sel_ = 0;
     std::uint8_t ext_core_qos_ = 1;
     std::vector<std::unique_ptr<ChipletPort>> ports_;

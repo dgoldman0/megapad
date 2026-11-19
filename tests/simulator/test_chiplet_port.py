@@ -40,7 +40,7 @@ RESET_HOLD = 1 << 1
 READY = 1 << 2
 FAULT = 1 << 4
 PORT_ID = 1
-PORT_WORD = 1 | (PORT_ID << 8) | (8 << 16)
+PORT_WORD = 1 | (PORT_ID << 8) | (8 << 16) | (48 << 24)
 
 IMAGE = EXTERNAL_BASE
 COMMAND = EXTERNAL_BASE + 0x100
@@ -128,7 +128,8 @@ def test_system_info_repeats_the_windows_port_count():
     assert memory.read64(WINDOW + PORT_COUNT) == PORT_WORD
     assert memory.read64(WINDOW + CTRL) == RESET_HOLD
     two = _memory(ports=2)
-    assert two.read64(WINDOW + PORT_COUNT) == 2 | (PORT_ID << 8) | (8 << 16)
+    assert two.read64(WINDOW + PORT_COUNT) == (
+        2 | (PORT_ID << 8) | (8 << 16) | (48 << 24))
 
 
 def test_the_window_holds_what_a_64_bit_write_gives_it():

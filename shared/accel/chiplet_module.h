@@ -9,6 +9,9 @@
  * every memory request against the ranges MegaPad has lent, exactly as the
  * hardware bridge does, so a module is held to the same bounds as a chip.
  *
+ * MegaPad's writes into memory the chiplet lends (docs/chiplet-link.md,
+ * sections 3 and 4) cross the other way, as one call to `lent_write`.
+ *
  * Calling rules:
  *   - The bridge makes one call into the module at a time, never
  *     re-entrantly. Successive calls may come from different threads.
@@ -17,6 +20,8 @@
  *     depend on the machine's state, its own state and the order of steps.
  *   - `identity` works at any time, in reset included. Between `reset` and
  *     the next `release` a module holds no request and makes no call.
+ *   - `lent_write` comes while a MegaPad core runs, outside `step`, and
+ *     the module calls no host service from inside it.
  */
 #ifndef MP64_CHIPLET_MODULE_H
 #define MP64_CHIPLET_MODULE_H
@@ -28,7 +33,10 @@
 extern "C" {
 #endif
 
-#define MP64_CHIPLET_ABI 1
+#define MP64_CHIPLET_ABI 2
+
+/* The unit of MegaPad's writes into lent memory, in bytes. */
+#define MP64_CHIPLET_UNIT_BYTES 64
 
 /* Response codes of a memory request, as on the link. */
 #define MP64_CHIPLET_OK        0
@@ -92,6 +100,21 @@ typedef struct mp64_chiplet_module {
     /* Do up to `budget` units of work, a unit being the module's own
        measure. Returns nonzero while more work waits. */
     int (*step)(void *self, uint32_t budget);
+
+    /*
+     * MegaPad writes into memory the chiplet lends: `units` units of
+     * MP64_CHIPLET_UNIT_BYTES from `data`, 1 to 256 of them, then `zeros`
+     * units of zeros, 0 to 255, from the chiplet's own address `addr`. The
+     * chiplet admits the whole write only when `addr` is aligned to a unit
+     * and a range it lends with the write right holds every byte the write
+     * covers, its zeros included; it decides before it writes anything.
+     * Returns OK once every byte can be read by the chiplet's own
+     * accesses, REFUSED with its memory untouched, or MEM_ERROR, after
+     * which some units may have landed. A chiplet that lends nothing
+     * refuses every write.
+     */
+    int (*lent_write)(void *self, uint64_t addr, const uint8_t *data,
+                      unsigned units, unsigned zeros);
 
     /* Write the module's whole state to `buffer` when `capacity` holds it.
        Returns the size the state needs. */

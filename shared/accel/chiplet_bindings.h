@@ -161,6 +161,11 @@ struct ManualChipletState {
         releases;
     std::vector<int> doorbells;
     std::vector<std::uint8_t> blob;     // what save yields and restore takes
+    // MegaPad's writes into memory the chiplet lends: each one's address,
+    // its data units and its count of zero units, and the answer to give.
+    std::vector<std::tuple<std::uint64_t, std::vector<std::uint8_t>, unsigned>>
+        lent_writes;
+    int lent_code = MP64_CHIPLET_OK;
 };
 
 inline mp64_chiplet_module make_manual_module(
@@ -202,6 +207,18 @@ inline mp64_chiplet_module make_manual_module(
         (*static_cast<Shared*>(self))->steps += 1;
         return 0;
     };
+    module.lent_write = [](void* self, std::uint64_t addr,
+                           const std::uint8_t* data, unsigned units,
+                           unsigned zeros) -> int {
+        auto& state = **static_cast<Shared*>(self);
+        state.lent_writes.emplace_back(
+            addr,
+            std::vector<std::uint8_t>(
+                data, data + static_cast<std::size_t>(units) *
+                                 MP64_CHIPLET_UNIT_BYTES),
+            zeros);
+        return state.lent_code;
+    };
     module.save = [](void* self, std::uint8_t* buffer,
                      std::size_t capacity) -> std::size_t {
         const auto& blob = (*static_cast<Shared*>(self))->blob;
@@ -230,13 +247,14 @@ public:
     // `buffer` is the same object as `memory` when the memory is a buffer,
     // and null otherwise; it serves the tests' error injection.
     ChipletLink(std::unique_ptr<ExternalMemory> memory, BufferMemory* buffer,
-                int core_count, int port_count, int range_count)
+                int core_count, int port_count, int range_count,
+                int window_bits)
         : memory_(std::move(memory)),
           buffer_(buffer),
           table_(core_count, port_count, core_count),
           mailbox_(&table_),
           window_(port_count, core_count, range_count, memory_.get(),
-                  &mailbox_) {}
+                  &mailbox_, window_bits) {}
 
     std::unique_ptr<ExternalMemory> memory_;
     BufferMemory* buffer_;
@@ -246,12 +264,29 @@ public:
 };
 
 inline void check_link_shape(int core_count, int port_count,
-                             int range_count) {
+                             int range_count, int window_bits) {
     if (core_count < 1 || port_count < 0 || core_count + port_count > 256)
         throw pybind11::value_error(
             "cores and ports must share the 8-bit ID space");
     if (range_count < 1 || range_count > 255)
         throw pybind11::value_error("range_count must be 1 to 255");
+    if (window_bits < 8 || window_bits > 56 ||
+        (port_count > 0 &&
+         static_cast<std::uint64_t>(port_count) >
+             (ChipletWindow::WINDOW_BASE >> window_bits)))
+        throw pybind11::value_error(
+            "window_bits must give windows that hold an image and fit");
+}
+
+// A Route as Python sees it: None for a span that starts in no window,
+// (port, chiplet address) for one a port takes, and (-1, first forbidden
+// byte) for one that runs past its window's end.
+inline pybind11::object route_tuple(const ChipletWindow::Route& route) {
+    if (!route.in_window)
+        return pybind11::none();
+    if (route.port < 0)
+        return pybind11::make_tuple(-1, route.first_forbidden);
+    return pybind11::make_tuple(route.port, route.chiplet_addr);
 }
 
 inline void register_bindings(pybind11::module_& module) {
@@ -338,6 +373,20 @@ inline void register_bindings(pybind11::module_& module) {
         .def_readonly("steps", &ManualChipletState::steps)
         .def_readonly("releases", &ManualChipletState::releases)
         .def_readonly("doorbells", &ManualChipletState::doorbells)
+        .def_readwrite("lent_code", &ManualChipletState::lent_code)
+        // Each write as (chiplet address, data units as bytes, zero units).
+        .def_property_readonly(
+            "lent_writes",
+            [](const ManualChipletState& state) {
+                py::list writes;
+                for (const auto& [addr, data, zeros] : state.lent_writes)
+                    writes.append(py::make_tuple(
+                        addr,
+                        py::bytes(reinterpret_cast<const char*>(data.data()),
+                                  data.size()),
+                        zeros));
+                return writes;
+            })
         // One memory request as the chiplet. `data` gives the words of a
         // write. Returns (code, words done, the words read).
         .def("request",
@@ -383,34 +432,41 @@ inline void register_bindings(pybind11::module_& module) {
     };
     py::class_<ChipletLink>(module, "ChipletLink", py::module_local())
         .def(py::init([](py::buffer memory, std::uint64_t memory_base,
-                         int core_count, int port_count, int range_count) {
-                 check_link_shape(core_count, port_count, range_count);
+                         int core_count, int port_count, int range_count,
+                         int window_bits) {
+                 check_link_shape(core_count, port_count, range_count,
+                                  window_bits);
                  auto buffer = std::make_unique<BufferMemory>(
                      std::move(memory), memory_base);
                  BufferMemory* raw = buffer.get();
                  return std::make_unique<ChipletLink>(
                      std::move(buffer), raw, core_count, port_count,
-                     range_count);
+                     range_count, window_bits);
              }),
              py::arg("memory"), py::arg("memory_base"),
              py::arg("core_count") = 4, py::arg("port_count") = 1,
-             py::arg("range_count") = 8)
+             py::arg("range_count") = 8,
+             py::arg("window_bits") = ChipletWindow::DEFAULT_WINDOW_BITS)
         // The same link over memory that two callables read and write.
         .def_static(
             "over_callbacks",
             [](py::object reader, py::object writer,
                std::uint64_t memory_base, std::uint64_t memory_size,
-               int core_count, int port_count, int range_count) {
-                check_link_shape(core_count, port_count, range_count);
+               int core_count, int port_count, int range_count,
+               int window_bits) {
+                check_link_shape(core_count, port_count, range_count,
+                                 window_bits);
                 return std::make_unique<ChipletLink>(
                     std::make_unique<CallbackMemory>(
                         std::move(reader), std::move(writer), memory_base,
                         memory_size),
-                    nullptr, core_count, port_count, range_count);
+                    nullptr, core_count, port_count, range_count,
+                    window_bits);
             },
             py::arg("reader"), py::arg("writer"), py::arg("memory_base"),
             py::arg("memory_size"), py::arg("core_count") = 4,
-            py::arg("port_count") = 1, py::arg("range_count") = 8)
+            py::arg("port_count") = 1, py::arg("range_count") = 8,
+            py::arg("window_bits") = ChipletWindow::DEFAULT_WINDOW_BITS)
         .def_property_readonly(
             "mailbox",
             [](ChipletLink& link) -> MailboxPending& { return link.table_; },
@@ -422,6 +478,39 @@ inline void register_bindings(pybind11::module_& module) {
                                [](const ChipletLink& link) {
                  return link.window_.port_count_word();
              })
+        .def_property_readonly("window_bits", [](const ChipletLink& link) {
+                 return link.window_.window_bits();
+             })
+        .def("route",
+             [](const ChipletLink& link, std::uint64_t addr,
+                std::uint64_t bytes) {
+                 return route_tuple(link.window_.route(addr, bytes));
+             },
+             py::arg("addr"), py::arg("bytes"))
+        // MegaPad's write of whole units at a window address, as TACC.STORE
+        // makes it. Returns the chiplet's answer, or None when the span has
+        // no route through the windows.
+        .def("lent_write",
+             [](ChipletLink& link, std::uint64_t addr, const py::bytes& data,
+                unsigned zeros) -> py::object {
+                 const std::string text = data;
+                 if (text.empty() ||
+                     text.size() % MP64_CHIPLET_UNIT_BYTES != 0)
+                     throw py::value_error(
+                         "a lent write carries whole 64-byte units");
+                 const unsigned units = static_cast<unsigned>(
+                     text.size() / MP64_CHIPLET_UNIT_BYTES);
+                 const ChipletWindow::Route route = link.window_.route(
+                     addr, (static_cast<std::uint64_t>(units) + zeros) *
+                               MP64_CHIPLET_UNIT_BYTES);
+                 if (route.port < 0)
+                     return py::none();
+                 return py::int_(link.window_.port(route.port)->lent_write(
+                     route.chiplet_addr,
+                     reinterpret_cast<const std::uint8_t*>(text.data()),
+                     units, zeros));
+             },
+             py::arg("addr"), py::arg("data"), py::arg("zeros") = 0)
         .def("read64",
              [window_offset](const ChipletLink& link, unsigned offset) {
                  return link.window_.read64(window_offset(offset));

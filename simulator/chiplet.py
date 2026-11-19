@@ -30,6 +30,10 @@ from simulator.memory import AddressClass, SparseAddressSpace
 CHIPLET_OFFSET = 0xE00
 CHIPLET_LIMIT = 0xF00
 CHIPLET_RANGES = 8
+# W: each port's window into memory its chiplet lends is 2^W bytes. The
+# hosted profile has no tile engine to write into a window, but PORT_COUNT
+# reports W as the model's register does.
+CHIPLET_WINDOW_BITS = 48
 
 MAILBOX_OFFSET = 0x500
 MAILBOX_LIMIT = 0x510
@@ -117,6 +121,7 @@ class HostedChipletPorts:
             self._port_count
             | (self.first_port_id << 8)
             | (CHIPLET_RANGES << 16)
+            | (CHIPLET_WINDOW_BITS << 24)
         )
 
     def bind(self, memory: SparseAddressSpace) -> None:
