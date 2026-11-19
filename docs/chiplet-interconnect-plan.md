@@ -6,10 +6,13 @@ end, a link endpoint and a boot fetch, is in LM1's RTL (`rtl/link/` in the
 lm1 repository), where a bench joins it to MegaPad's RTL. The emulator and
 the simulator model MegaPad's side, and a chiplet's model attaches to it
 through a C interface. The wiring of LM1's end into its cluster, LM1's own
-model and the software are still to come. This note records how chiplets attach to MegaPad in
-Leviathan: the contract every chiplet meets, how the chips share memory, how
-they signal and exchange work, and how LM1, the first chiplet, runs sandbox
-jobs and managed data over the link. It schedules no work. The release
+model and the software are still to come. The second direction of lending
+in §3, in which the tile engine stores its accumulator into memory a chiplet
+lends, was proposed on 2026-11-19 and is neither accepted nor built. This
+note records how chiplets attach to MegaPad in Leviathan: the contract every
+chiplet meets, how the chips share memory, how they signal and exchange
+work, and how LM1, the first chiplet, runs sandbox jobs and managed data
+over the link. It schedules no work. The release
 plan's side is decision 37 and Parts 3d, 8 and 9 of `dev/PLAN.md` in
 fantasy-engine.
 
@@ -93,22 +96,58 @@ is acknowledged, and a doorbell arrives after the data it announces. Each
 chip reads shared data from that memory on every use, so the memory holds
 the only copy.
 
-### A chiplet lends: in the contract, unbuilt
+### A chiplet lends: the tile engine's stores, proposed
 
-A chiplet may offer ranges of its own memory to MegaPad. Such a range
-appears in MegaPad's address space as a region that behaves as external
-memory does today: the bus waits for the answer under the same timeout, and
-a failed read is an ordinary bus fault for the core that made it. The
-chiplet checks MegaPad's accesses and grants reads only, unless it offers
-more, which keeps MegaPad from forging LM1 references. Each read of such a
-region holds MegaPad's bus for the round trip, so data on Desk's hot paths
-stays in MegaPad's memory, and heavy use would call for an arbiter that lets
-other cores proceed during a slow read. Under the placement in §1 LM1 works
-without this direction, and the first build leaves it out.
+A chiplet may lend ranges of its own memory to MegaPad. Each port has a
+window in MegaPad's address space, and the chiplet's address `a` appears at
+the window's base plus `a`, so a request across the link carries the
+chiplet's own address. The chiplet checks each of MegaPad's accesses
+against the ranges it lends and their rights, and orders it among its own;
+MegaPad keeps no copy of those ranges. A chiplet grants reads only unless it
+offers more, and it lends a range for writing only where it keeps plain
+data, never words it reads as references. LM1 lends for writing the bytes
+of a pinned bytevector, or a region outside its collected heap, so MegaPad
+can store numbers in LM1's memory and can never forge a reference that LM1
+would follow. A lent range stays in place until the chiplet withdraws it.
+
+The first use of this direction is the tile engine's `TACC.STORE`, whose
+result LM1 may need at once. A store whose destination lies in a port's
+window sends the accumulator's canonical 256-byte image
+([tile-engine.md](tile-engine.md)) across the link as one write of 64-byte
+units, and MegaPad's external memory never holds it. The chip-wide stage
+that holds an image during a store to memory holds this one until the
+chiplet answers, so the path needs no buffer of its own. A format that
+fills part of the image sends only its active units and has the chiplet
+write zeros over the rest: four units for 8- and 16-bit integers, two for
+32-bit integers, FP16, BF16 and FP32, and one for FP64. The chiplet answers
+once every byte is in its memory, the store retires on that answer, and a
+doorbell the core rings afterwards follows the data, as in the first
+direction.
+
+Through external memory the same image costs 64 transactions at the
+controller: the tile engines' 32 word writes, which go ahead of every core
+and chiplet, and the chiplet's 32 word reads. In simulation of today's RTL,
+leaving out the link's crossings, with a memory that answers each word in
+the cycle after accepting it, the store takes 81 cycles and the chiplet's
+reread 162, and the controller is busy for 130 of them; with a memory that
+answers after 21 cycles they take 721 and 802 cycles, and the controller is
+busy for 1,410. The direct path does not wait on that memory. By estimate
+it takes the link's two crossings and the chiplet's own writes, about 50
+cycles in all for LM1, which writes its memory 64 bits at a time.
+
+Reads of a chiplet's memory stay unbuilt. A core's read would hold
+MegaPad's bus for the round trip, so data on Desk's hot paths stays in
+MegaPad's memory, and heavy use would call for an arbiter that lets other
+cores proceed during a slow read. A `TACC.LOAD` would hold the image stage
+that all seven tile engines share for the same round trip. Until a use
+needs more, a `TACC.LOAD`, a tile operand or a core's access that names a
+window is a bus fault, and under the placement in §1 LM1 needs none of
+them.
 
 Start-up, signalling, jobs and Desk's shared data depend on the first
 direction alone, so a failed chiplet can disturb only code that chose to
-read memory the chiplet lent.
+use memory the chiplet lent, and a store into that memory ends in a fault,
+never a hang.
 
 ## 4. Signals and work
 
@@ -156,10 +195,11 @@ exists, then takes over the work the chiplet was doing. The sideband also
 carries wake, debug access and the self-tests of §2.
 
 Each die makes one check. MegaPad's bridge bounds everything a chiplet can
-reach in MegaPad's memory. Inside LM1, capability mode bounds each job to
-its own data, and only LM1's runtime turns an address received from MegaPad
-into a capability, so a reference stored in shared memory gains authority
-there and nowhere else.
+reach in MegaPad's memory, and a chiplet's end of the link bounds what
+MegaPad can reach in the chiplet's (§3). Inside LM1, capability mode bounds
+each job to its own data, and only LM1's runtime turns an address received
+from MegaPad into a capability, so a reference stored in shared memory
+gains authority there and nowhere else.
 
 ## 6. The physical link
 
@@ -224,8 +264,8 @@ limit at the controller bound what a chiplet takes from Desk.
 - **MegaPad RTL:** the external-memory controller (chiplet ports as clients,
   their weights and limits, the address width), the mailbox (ports as
   participants, the microcores beside them, the register path, a pending
-  mask indexed by ID), the external-flag wiring, System Info, and the new
-  port bridge.
+  mask indexed by ID), the external-flag wiring, System Info, the new port
+  bridge, and the tile engine's route into a chiplet's window (§3).
 - **BIOS:** bringing the link up, and the doorbell interrupt.
 - **KDOS:** the system module for chiplets, and an allocator for lendable
   memory.
@@ -260,7 +300,8 @@ queue and taking a result, and over those the sandbox and managed-data
 words. Its word list follows the queue and offer formats of
 [chiplet-link.md](chiplet-link.md) §8.
 - **LM1's spec:** external I/O, boot, the memory map, roots, the write
-  barrier, safepoints, and capability mode as a required part.
+  barrier, safepoints, capability mode as a required part, and the memory
+  LM1 lends MegaPad for writing.
 
 The external-memory controller needs the most work, since every access to
 shared memory passes through it. Today it moves one 64-bit word per
@@ -276,7 +317,15 @@ are built too, and the queues and offers are specified.
 ## 10. Open
 
 - **LM1's memory and size** (the release plan's D8), which set the lane
-  count and the load on the external-memory controller.
+  count, together with the image traffic of §3, and the load on the
+  external-memory controller.
+- **Other accesses to memory a chiplet lends.** The cores' loads and
+  stores, `TACC.LOAD` and tile operands wait for a use that needs them, and
+  a core's read would also need a bus that serves other cores while one
+  waits on the link.
+- **Where LM1 receives images.** A pinned bytevector or a region outside
+  the collected heap; LM1's runtime settles which, with the rest of what it
+  lends.
 - **Lendable memory in Akashic.** Zero-copy depends on the data handed to a
   job being created in lendable memory, and the job service's allocation has
   yet to be read with that in mind.

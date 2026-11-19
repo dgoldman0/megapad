@@ -2,11 +2,13 @@
 
 Status: MegaPad's side is implemented in RTL and simulated, LM1's end
 (`rtl/link/` in the lm1 repository) passes a bench joined to it, and the
-emulator and the simulator model MegaPad's side (section 9). This is the
-specification of the link between MegaPad and one chiplet: the port's
-identity, its register window, the channels that cross the link, the
-sideband, and the queues in lent memory through which the two chips exchange
-work (section 8). The design it follows, with its reasons, is
+emulator and the simulator model MegaPad's side (section 9). MegaPad's
+writes into memory a chiplet lends (sections 3, 4 and 8) were proposed on
+2026-11-19 and are not built. This is the specification of the link between
+MegaPad and one chiplet: the port's identity, its register window, the
+channels that cross the link, the sideband, and the queues in lent memory
+through which the two chips exchange work (section 8). The design it
+follows, with its reasons, is
 [chiplet-interconnect-plan.md](chiplet-interconnect-plan.md). Section 10
 lists the parts of the chiplet contract that remain to be specified or
 built.
@@ -45,7 +47,8 @@ ends it as a bus fault.
 `PORT_SEL` is shared by every core, and installing a range takes several
 writes, so the software that owns the window serializes its use. A
 `PORT_SEL` value beyond the ports built selects no port: its block reads
-zero and ignores writes.
+zero and ignores writes. Section 3's ranges a chiplet lends add four fields
+to this window when they are built.
 
 ### Port block
 
@@ -97,6 +100,35 @@ that the bridge has already admitted completes under the range it was
 admitted with; asking the chiplet to stop (section 6) before withdrawing a
 range is the orderly path.
 
+### Ranges a chiplet lends
+
+Proposed and not built. A chiplet may lend ranges of its own memory to
+MegaPad, which writes into them with the write of section 4. Port `p` has a
+window of 2^`W` bytes in MegaPad's address space at
+`0x0100_0000_0000_0000 + p × 2^W`, and the chiplet's address `a` appears at
+the window's base plus `a`. `W` is a build parameter, 48 by default, which
+`PORT_COUNT` reports in bits 31:24, and a read-only `WINDOW` register at
+`+0xF0` holds the selected port's base. A write across the link carries the
+chiplet's address.
+
+The chiplet sets the ranges it lends, keeps them and checks each of
+MegaPad's writes against them; MegaPad holds no copy. The chiplet admits a
+write when its address is aligned to 64 bytes and a range it lends with the
+write right contains every byte the write covers, its zero units included.
+It admits or refuses the whole write at its first message, so a refused
+write leaves the chiplet's memory untouched. A chiplet lends a range for
+writing only where it keeps plain data, never words it reads as
+references, and keeps a lent range in place until it withdraws it
+(section 8).
+
+On MegaPad's side, privilege and the MPU decide which code may write into a
+window, as for any memory. `CTRL` bit 5, `BORROW_EN`, opens the port to
+MegaPad's writes and resets clear. While it is clear, or while the chiplet
+is absent or held in reset, the bridge refuses each write itself and
+nothing crosses the link. `STATUS` bit 6, `BORROW_BUSY`, is set while one
+of MegaPad's writes is outstanding, a cancelled one awaiting its answer
+included.
+
 ## 4. Channels
 
 Each channel is a valid/ready handshake: a message transfers in the cycle in
@@ -147,6 +179,52 @@ An access is one transaction at external memory. A sub-word write reads and
 rewrites its word inside that one transaction, and the arbiter grants one
 transaction at a time, so two chips writing different bytes of one word both
 succeed.
+
+### Write to lent memory (MegaPad to chiplet)
+
+Proposed and not built (section 3).
+
+| Field | Width | Meaning |
+|-------|-------|---------|
+| `addr` | 64 | The chiplet's address, aligned to 64 bytes |
+| `data` | 512 | One 64-byte unit, its first byte in the low bits |
+| `len` | 8 | Units beyond the first: 0 for one unit, up to 255 |
+| `zeros` | 8 | Units of zeros the chiplet writes after the data |
+
+A write covers `len + 1 + zeros` consecutive 64-byte units from `addr`. It
+is `len + 1` messages: the first carries `addr`, `len`, `zeros` and the
+first unit, and each further one carries its unit. One write is outstanding
+at a time, and MegaPad sends the next after the chiplet has answered the
+last. `cancel`, a level beside the channel, abandons the outstanding write.
+
+The unit is logical. The physical layer carries a unit over however many
+lanes the link has, so the traffic the link must carry sets its width, and
+the unit does not. The tile engine's `TACC.STORE` is the one writer
+([tile-engine.md](tile-engine.md)): it sends an image as one write of the
+units its format fills, four, two or one, with `zeros` covering the rest of
+the 256 bytes.
+
+### Write answer (chiplet to MegaPad)
+
+| Field | Width | Meaning |
+|-------|-------|---------|
+| `code` | 2 | 0 `OK`, 1 `REFUSED`, 2 `MEM_ERROR`, 3 `CANCELLED` |
+
+A running chiplet answers every write once. `OK` means every byte the write
+covers can be read by the chiplet's own accesses. `REFUSED` means the
+chiplet admitted nothing and its memory is untouched; the answer may come
+before the last unit, and MegaPad then sends no more of the write.
+`MEM_ERROR` means the chiplet's memory failed and `CANCELLED` answers a
+cancelled write, and after either some units may have landed. MegaPad
+bounds each phase of a write to 255 cycles, as it bounds each word at
+external memory. When the chiplet leaves a unit untaken or the answer
+missing that long, the store that made the write takes a fault, and the
+bridge holds `cancel` and sends nothing more until the answer arrives or
+the port is reset. A chiplet returned to reset answers nothing, so the
+bridge ends a write then outstanding with a fault for its store.
+
+A write is complete when its answer returns, so a doorbell MegaPad rings
+after it follows the data, as in the other direction.
 
 ### Doorbells
 
@@ -330,6 +408,7 @@ to the control queues.
 |-----------|--------|---------|
 | `CANCEL` | 1 | Abandon the request that has this entry's tag. It has no reply of its own: the request's one reply confirms it, with `CANCELLED`, or with the ordinary result when the work had finished |
 | `OFFER` | 2 | On the control queue from the chiplet: a function the chiplet provides, and what it asks for |
+| `LEND` | 3 | On the control queue from the chiplet: a range of its own memory it lends to MegaPad, or withdraws. Proposed, below |
 
 ### Offers and grants
 
@@ -354,6 +433,19 @@ states what it granted. A chiplet that later needs more sends another
 registers a granted function under its class, and software asks for a class
 and is given whichever chiplet provides it. Class 0 is reserved, and class
 numbers are assigned in this section as functions are specified.
+
+### Ranges a chiplet lends
+
+Proposed and not built, with the ranges of section 3. A chiplet names each
+range it lends to MegaPad in a `LEND`: `IN_ADDR` holds the range's base in
+the chiplet's addresses, `IN_LEN` its length, and `ARG0` its rights in bits
+1:0, [0] read and [1] write, and in bits 63:32 the class of the function
+the range serves. MegaPad replies `OK` once it has recorded the range, and
+KDOS gives the range to software of that class at its address in the
+port's window. A `LEND` with rights of zero for a recorded base withdraws
+the range: MegaPad stops giving it out, replies once its own writes into
+the range have ended, and the chiplet takes the range out of its check
+after that reply.
 
 ### Bounded waiting
 
@@ -432,7 +524,15 @@ and a worked example of the interface.
   would remove the condition.
 - **IDs above 63.** The 64-bit pending mask covers IDs 0 to 63: the 16
   cores and 48 ports. A die with more ports needs a wider mask.
-- **A chiplet lending memory to MegaPad.** The contract allows it, and no
-  channel carries it yet.
+- **MegaPad's writes into a chiplet.** Sections 3, 4 and 8 specify them for
+  the tile engine's `TACC.STORE`, and none of it is built: the bridge's
+  writer, the tile engine's route, the models, and LM1's end, whose cluster
+  has no write path from outside yet. Reads of memory a chiplet lends, by
+  the cores or the tile engine, are still to specify.
+- **Accesses outside MegaPad's map.** In the RTL a core's access above the
+  map reaches external memory at its low 32 bits and is answered as a
+  success, and in the emulator an access outside the map lands in Bank 0;
+  only `TACC`'s own check faults one. The windows of section 3 lie in that
+  space, and a bus fault for such accesses is built with them.
 - **The physical layer.** The channels are logical; framing them onto UCIe's
   layers waits for the choice of where LM1's memory is placed.

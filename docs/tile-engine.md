@@ -111,9 +111,10 @@ accumulator, or `TCTRL`. The TACC lifecycle follows its own format rules:
 format, and `TRY`, `STORE`, and `RELEASE` do not read `TMODE`.
 
 > **Implementation status:** FP32 (EW 6) and FP64 (EW 7) element-wise
-> operations, reductions, dot products, and TACC formats run in every
-> backend. Their VSEL and the new `EXT.8` operations follow in Phases 6 and 8
-> of `docs/megapad-full-float-plan.md`.
+> operations, reductions, and dot products run in every backend, and their
+> TACC formats in every backend that implements TACC. Their VSEL and the
+> new `EXT.8` operations follow in Phases 6 and 8 of
+> `docs/megapad-full-float-plan.md`.
 
 **Common TMODE values:**
 
@@ -521,8 +522,9 @@ and RTL implement these rules.  The software backends take their values from
 `shared/ieee_fp.py`, a seeded differential test holds the native accelerator
 to the Python results, and the RTL replays emulator-generated golden vectors
 (`rtl/sim/tile_fp_vectors.vec`).  FP32 and FP64 element-wise operations,
-reductions, dot products, and TACC formats run in all four backends.  The RTL
-computes their arithmetic on two multi-format FMA units per engine
+reductions, and dot products run in all four backends, and their TACC
+formats in the three that implement TACC.  The RTL computes their
+arithmetic on two multi-format FMA units per engine
 (`rtl/core/mp64_fma.v`): element-wise operations take four beats, the
 canonical tree schedules its products, levels, and reserved `ACC_ACC` beats
 over the same units, and `TAMAC` gives each unit one binary64 lane per beat,
@@ -537,10 +539,11 @@ shared with the scalar engine) at the §10 cost.
 
 ## Full-Width Tile Accumulator (TACC)
 
-> **Implementation status:** the Python oracle, native accelerator, and
-> strict-cycle system model implement this contract in emulator Phase 1.
-> Portable RTL implementation is Phase 2 work; the existing RTL must not yet
-> be described as implementing TACC.
+> **Implementation status:** the Python oracle, the native accelerator, the
+> strict-cycle system model and the RTL implement this contract, every
+> format included; the hosted simulator does not implement TACC. A store
+> into memory a chiplet lends (below) was proposed on 2026-11-19 and is not
+> built.
 
 Each physical tile engine owns one 2,048-bit TACC bank plus owner, valid,
 dirty, format, busy, force-pending, and cancellation metadata.  Software
@@ -640,13 +643,13 @@ initialization or accumulation.
 
 ### Canonical image, memory, and faults
 
-`TACC.LOAD` and `TACC.STORE` transfer exactly 256 bytes aligned to 64 bytes as
-four consecutive 64-byte beats.  Lanes and bytes within each lane are
-little-endian.  U8/S8 and U16/S16 use the full image.  U32/S32, FP16, and BF16
-use bytes 0–127, and FP32 uses bytes 0–127 and FP64 bytes 0–63 once
-implemented; `STORE` writes zeros to inactive bytes and `LOAD` ignores them
-and commits zeros.  Transfers do not advance or rewrite source, destination,
-or cursor CSRs.  A saved context therefore consists of the 256-byte image plus
+`TACC.LOAD` and `TACC.STORE` transfer exactly 256 bytes aligned to 64 bytes,
+as four consecutive 64-byte beats when the image is in memory.  Lanes and
+bytes within each lane are little-endian.  U8/S8 and U16/S16 use the full
+image.  U32/S32, FP16, BF16, and FP32 use bytes 0–127, and FP64 uses bytes
+0–63; `STORE` writes zeros to inactive bytes and `LOAD` ignores them and
+commits zeros.  Transfers do not advance or rewrite source, destination, or
+cursor CSRs.  A saved context therefore consists of the 256-byte image plus
 its format.
 
 Internal memory, attached RAM, and external RAM use the same image.  MMIO is
@@ -666,6 +669,13 @@ its first beat.  User-mode HBW images are forbidden.
   every load fault leaves the old bank unchanged.
 - A failed external `STORE` may leave only its acknowledged memory prefix
   visible.  TACC remains valid and retains its preinstruction `DIRTY` value.
+- A `STORE` into a chiplet's window (below) raises `IVEC_BUS_FAULT` with the
+  image base in `TRAP_ADDR` when the port does not admit MegaPad's writes,
+  when the chiplet refuses the write, which leaves its memory untouched,
+  when the chiplet's memory fails or the write is cancelled, which may leave
+  some units written, and when the chiplet leaves a unit untaken or its
+  answer missing for 255 cycles.  TACC remains valid with its preinstruction
+  `DIRTY` value, as for any failed `STORE`.
 - A faulting instruction does not retire or increment `PERF_TILE_OPS`.
 
 Every TACC trap saves the architectural PC after the complete decoded
@@ -675,7 +685,23 @@ instruction, matching the existing MEX return-PC convention.  An unsuccessful
 External images serialize each 64-byte beat into eight 64-bit PHY words.
 Each successful word increments `PERF_EXTMEM`.  A response on cycle 255 wins;
 no response, or a response later than 255 cycles, becomes an acknowledged bus
-fault at the exact current word rather than hanging the engine.
+fault at the exact current word rather than hanging the engine.  An
+external `STORE` makes all 32 words in every format, its inactive beats
+carrying zeros.
+
+A `STORE` may also name memory that a chiplet lends to MegaPad, a span
+inside one chiplet port's window (`docs/chiplet-link.md` §3).  The image
+then crosses the link and never reaches external memory, so it makes no PHY
+word and leaves `PERF_EXTMEM` unchanged.  The image stage holds it as for
+any store and sends the active 64-byte units of its format as one write:
+four for U8/S8 and U16/S16, two for U32/S32, FP16, BF16, and FP32, and one
+for FP64.  The chiplet writes zeros over the rest, so the destination holds
+the same canonical image that memory would.  The store retires when the
+chiplet answers that every byte is written, so the issuing core's next
+instruction, a doorbell included, follows the data.  User mode reaches a
+window under its MPU policy, as it reaches external RAM.  A `LOAD` image or
+a `TAMAC` source in a window raises `IVEC_BUS_FAULT` before any access.
+This path is proposed and not yet built.
 
 ### Context switching, reset, and cancellation
 
