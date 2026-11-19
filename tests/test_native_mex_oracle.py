@@ -3143,7 +3143,14 @@ def test_near_uint64_max_address_cannot_overflow_aperture_bounds(
     attach_name: str,
     access: str,
 ) -> None:
-    """A failed range check must not turn into an out-of-bounds host pointer."""
+    """A failed range check must not turn into an out-of-bounds host pointer.
+
+    The aperture starts at address 0, so a tile address 32 bytes below 2^64,
+    whose end wraps past zero, would pass a bounds check that overflowed.
+    The tile lies outside the memory map: both cores fault at its address
+    and move nothing.  The program sits in Bank 0 above the aperture, which
+    holds the addresses below 64.
+    """
     script = textwrap.dedent(
         f"""
         import json
@@ -3151,7 +3158,7 @@ def test_near_uint64_max_address_cannot_overflow_aperture_bounds(
 
         from accel_wrapper import Megapad64
         from asm import assemble
-        from megapad64 import MASK64
+        from megapad64 import MASK64, TrapError
 
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         cpu = Megapad64(mem_size=512)
@@ -3170,16 +3177,23 @@ def test_near_uint64_max_address_cannot_overflow_aperture_bounds(
             cpu.tsrc0 = 128
             cpu.tsrc1 = 192
             cpu.tdst = MASK64 - 31
-        cpu.load_bytes(0, assemble("t.add\\nhalt"))
-        cpu.pc = 0
+        cpu.load_bytes(0x180, assemble("t.add\\nhalt"))
+        cpu.pc = 0x180
 
         def forbid_fallback():
             raise AssertionError("overflowing aperture address left native path")
 
         cpu._step_python_fallback = forbid_fallback
-        mex_cycles = cpu.step()
+        try:
+            mex_cycles = cpu.step()
+            ivec_id = None
+        except TrapError as trap:
+            mex_cycles = None
+            ivec_id = trap.ivec_id
         print(json.dumps({{
             "mex_cycles": mex_cycles,
+            "ivec_id": ivec_id,
+            "trap_addr": cpu.trap_addr,
             "pc": cpu.pc,
             "cycle_count": cpu.cycle_count,
             "acc": list(cpu.acc),
@@ -3219,11 +3233,15 @@ def test_near_uint64_max_address_cannot_overflow_aperture_bounds(
         cpu.tsrc0 = 128
         cpu.tsrc1 = 192
         cpu.tdst = MASK64 - 31
-    cpu.load_bytes(0, assemble("t.add\nhalt"))
-    cpu.pc = 0
-    mex_cycles = cpu.step()
+    cpu.load_bytes(0x180, assemble("t.add\nhalt"))
+    cpu.pc = 0x180
+    memory_before = bytes(cpu.mem)
+    with pytest.raises(TrapError) as trap:
+        cpu.step()
     oracle = {
-        "mex_cycles": mex_cycles,
+        "mex_cycles": None,
+        "ivec_id": trap.value.ivec_id,
+        "trap_addr": cpu.trap_addr,
         "pc": cpu.pc,
         "cycle_count": cpu.cycle_count,
         "acc": list(cpu.acc),
@@ -3232,6 +3250,10 @@ def test_near_uint64_max_address_cannot_overflow_aperture_bounds(
         "mem": bytes(cpu.mem).hex(),
         "aperture": bytes(aperture).hex(),
     }
+    assert oracle["ivec_id"] == IVEC_BUS_FAULT
+    assert oracle["trap_addr"] == MASK64 - 31
+    assert bytes.fromhex(oracle["mem"]) == memory_before
+    assert bytes.fromhex(oracle["aperture"]) == bytes(range(64))
     assert native == oracle
 
 

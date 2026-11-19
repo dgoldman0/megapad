@@ -1010,11 +1010,8 @@ def test_mmio_instruction_fetch_is_explicitly_unsupported(
     for cpu in system.cores:
         cpu.halted = True
         cpu.idle = False
-    if instruction_address == MMIO_BASE - 1:
-        system.load_binary(
-            instruction_address,
-            bytes((0x30,)),
-        )
+    # No memory lies just below MMIO, so nothing is loaded there: the batch
+    # refuses a fetch whose decode window reaches MMIO before reading a byte.
     micro.pc = instruction_address
     micro.halted = False
 
