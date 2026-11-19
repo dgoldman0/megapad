@@ -22,8 +22,19 @@
 //
 // LOAD data remains private to the stage until all four beats succeed.
 // result_image is nonzero/valid only alongside a successful held LOAD done.
-// STORE snapshots its source bank at admission.  Modes other than TMODE_8 and
-// TMODE_16 always force canonical image bytes 128..255 to zero.
+// STORE snapshots its source bank at admission.  TMODE_FP64 forces canonical
+// image bytes 64..255 to zero, and every mode other than TMODE_8, TMODE_16
+// and TMODE_FP64 bytes 128..255.
+//
+// A STORE whose image lies in a chiplet port's window arrives with req_link
+// and the port's index (docs/chiplet-link.md section 3).  The stage then
+// sends no beat: it offers that port's bridge one write of the image's
+// active 64-byte units, four, two or one, through the same unit multiplexer,
+// with the remaining units of the 256 bytes counted as zeros, and holds the
+// image until the bridge reports the chiplet's answer.  Any failure the
+// bridge reports ends the STORE with a bus fault at the image base.
+// Cancellation is held on the bridge until it confirms that the write can
+// no longer complete.
 // ============================================================================
 
 `include "mp64_pkg.vh"
@@ -40,6 +51,8 @@ module mp64_tacc_transfer #(
     input  wire [SOURCE_COUNT-1:0]      req,
     input  wire [SOURCE_COUNT-1:0]      req_store,
     input  wire [SOURCE_COUNT-1:0]      req_ext,
+    input  wire [SOURCE_COUNT-1:0]      req_link,
+    input  wire [SOURCE_COUNT*8-1:0]    req_port,
     input  wire [SOURCE_COUNT*64-1:0]   req_base,
     input  wire [SOURCE_COUNT*4-1:0]    req_format_ew,
     input  wire [SOURCE_COUNT*TOKEN_BITS-1:0] req_token,
@@ -76,7 +89,23 @@ module mp64_tacc_transfer #(
     output reg  [SOURCE_COUNT*64-1:0]   response_fault_addr,
 
     // Broadcast result; meaningful only with a successful LOAD done.
-    output wire [2047:0]                result_image
+    output wire [2047:0]                result_image,
+
+    // A STORE into a chiplet's window: one write to the bridge of port
+    // link_port (mp64_chiplet_port.v, its bw_* side).  link_valid and the
+    // current unit hold until link_ready.  link_done, link_error and
+    // link_cancel_done are the bridge's pulses.
+    output wire                         link_valid,
+    input  wire                         link_ready,
+    output wire [7:0]                   link_port,
+    output wire [63:0]                  link_addr,
+    output wire [511:0]                 link_data,
+    output wire [7:0]                   link_len,
+    output wire [7:0]                   link_zeros,
+    output wire                         link_cancel,
+    input  wire                         link_done,
+    input  wire                         link_error,
+    input  wire                         link_cancel_done
 );
 
     reg [SOURCE_COUNT-1:0] seen;
@@ -86,6 +115,8 @@ module mp64_tacc_transfer #(
     reg [OWNER_BITS-1:0]   owner;
     reg                    owner_store;
     reg                    owner_ext;
+    reg                    owner_link;   // the image goes to a chiplet port
+    reg [7:0]              owner_port;
     reg [63:0]             owner_base;
     reg [3:0]              owner_format_ew;
 
@@ -114,8 +145,9 @@ module mp64_tacc_transfer #(
     // This is the sole chip-wide canonical transfer image.
     reg [2047:0] stage_image;
 
-    reg [1:0] beat_index;
+    reg [1:0] beat_index;       // also the link's unit index
     reg       beat_outstanding;
+    reg       link_sent;        // the bridge has taken every unit
     reg       cancelling;
     reg       terminal;
     reg       terminal_success;
@@ -155,8 +187,11 @@ module mp64_tacc_transfer #(
     wire owner_ack = |(port_ack & owner_mask);
     wire owner_error = |(port_error & owner_mask);
     wire owner_cancel_done = |(port_cancel_done & owner_mask);
+    wire link_unit_go = link_valid && link_ready;
     wire [SOURCE_COUNT-1:0] owner_progress =
-        (active && owner_ack) ? owner_mask : {SOURCE_COUNT{1'b0}};
+        (active && (owner_ack ||
+                    (owner_link && (link_unit_go || link_done))))
+            ? owner_mask : {SOURCE_COUNT{1'b0}};
 
     assign stall_cycle =
         req & ~req_cancel & ~done & ~owner_progress;
@@ -165,8 +200,8 @@ module mp64_tacc_transfer #(
     // Masking the live cancel in this combinational boundary prevents a beat
     // from being fabricated on the edge that cancellation becomes visible.
     wire issue_beat =
-        active && !terminal && !cancelling && !beat_outstanding &&
-        !owner_cancel;
+        active && !owner_link && !terminal && !cancelling &&
+        !beat_outstanding && !owner_cancel;
 
     assign beat_req = issue_beat
                     ? owner_mask : {SOURCE_COUNT{1'b0}};
@@ -177,6 +212,20 @@ module mp64_tacc_transfer #(
     assign beat_wdata = owner_store
                       ? stage_image[beat_index*512 +: 512]
                       : 512'd0;
+
+    // The link write offers units from the same multiplexer.
+    wire [2:0] owner_units = active_beats(owner_format_ew);
+    assign link_valid =
+        active && owner_link && !terminal && !cancelling &&
+        !owner_cancel && !link_sent;
+    assign link_port  = owner_port;
+    assign link_addr  = owner_base;
+    assign link_data  = beat_wdata;
+    assign link_len   = {5'd0, owner_units} - 8'd1;
+    assign link_zeros = 8'd4 - {5'd0, owner_units};
+    // Held until the bridge confirms, as port_cancel is for a beat.
+    assign link_cancel =
+        active && owner_link && !terminal && (cancelling || owner_cancel);
 
     // Hold cancel until the arbiter confirms that its captured/issued beat
     // can no longer return a response to this source.
@@ -199,12 +248,15 @@ module mp64_tacc_transfer #(
             owner               <= {OWNER_BITS{1'b0}};
             owner_store         <= 1'b0;
             owner_ext           <= 1'b0;
+            owner_link          <= 1'b0;
+            owner_port          <= 8'd0;
             owner_base          <= 64'd0;
             owner_format_ew     <= 4'd0;
             owner_token         <= {TOKEN_BITS{1'b0}};
             stage_image         <= 2048'd0;
             beat_index          <= 2'd0;
             beat_outstanding    <= 1'b0;
+            link_sent           <= 1'b0;
             cancelling          <= 1'b0;
             terminal            <= 1'b0;
             terminal_success    <= 1'b0;
@@ -231,12 +283,15 @@ module mp64_tacc_transfer #(
                         active              <= 1'b0;
                         owner_store         <= 1'b0;
                         owner_ext           <= 1'b0;
+                        owner_link          <= 1'b0;
+                        owner_port          <= 8'd0;
                         owner_base          <= 64'd0;
                         owner_format_ew     <= 4'd0;
                         owner_token         <= {TOKEN_BITS{1'b0}};
                         stage_image         <= 2048'd0;
                         beat_index          <= 2'd0;
                         beat_outstanding    <= 1'b0;
+                        link_sent           <= 1'b0;
                         cancelling          <= 1'b0;
                         terminal            <= 1'b0;
                         terminal_success    <= 1'b0;
@@ -252,16 +307,21 @@ module mp64_tacc_transfer #(
                     // No emitted beat needs a drain.  Otherwise retain the
                     // owner and stage until the arbiter confirms cancellation.
                     done <= {SOURCE_COUNT{1'b0}};
-                    if (!beat_outstanding || owner_cancel_done) begin
+                    if (owner_link ? link_cancel_done
+                                   : (!beat_outstanding ||
+                                      owner_cancel_done)) begin
                         active              <= 1'b0;
                         owner_store         <= 1'b0;
                         owner_ext           <= 1'b0;
+                        owner_link          <= 1'b0;
+                        owner_port          <= 8'd0;
                         owner_base          <= 64'd0;
                         owner_format_ew     <= 4'd0;
                         owner_token         <= {TOKEN_BITS{1'b0}};
                         stage_image         <= 2048'd0;
                         beat_index          <= 2'd0;
                         beat_outstanding    <= 1'b0;
+                        link_sent           <= 1'b0;
                         cancelling          <= 1'b0;
                         terminal            <= 1'b0;
                         terminal_success    <= 1'b0;
@@ -273,6 +333,28 @@ module mp64_tacc_transfer #(
                             {(SOURCE_COUNT*64){1'b0}};
                     end else begin
                         cancelling <= 1'b1;
+                    end
+                end else if (owner_link) begin
+                    if (link_done) begin
+                        // The chiplet's answer, or the bridge's own
+                        // refusal, timeout or loss of the link.
+                        terminal         <= 1'b1;
+                        terminal_success <= !link_error;
+                        done             <= owner_mask;
+                        response_token[
+                            owner*TOKEN_BITS +: TOKEN_BITS
+                        ] <= owner_token;
+                        response_fault[
+                            owner*3 +: 3
+                        ] <= link_error ? MEX_FAULT_BUS : MEX_FAULT_NONE;
+                        response_fault_addr[
+                            owner*64 +: 64
+                        ] <= link_error ? owner_base : 64'd0;
+                    end else if (link_unit_go) begin
+                        if ({1'b0, beat_index} == owner_units - 3'd1)
+                            link_sent <= 1'b1;
+                        else
+                            beat_index <= beat_index + 2'd1;
                     end
                 end else begin
                     if (issue_beat)
@@ -330,6 +412,8 @@ module mp64_tacc_transfer #(
                 owner           <= next_owner;
                 owner_store     <= req_store[next_owner];
                 owner_ext       <= req_ext[next_owner];
+                owner_link      <= req_link[next_owner];
+                owner_port      <= req_port[next_owner*8 +: 8];
                 owner_base      <= req_base[next_owner*64 +: 64];
                 owner_format_ew <=
                     req_format_ew[next_owner*4 +: 4];
@@ -337,6 +421,7 @@ module mp64_tacc_transfer #(
                     req_token[next_owner*TOKEN_BITS +: TOKEN_BITS];
                 beat_index       <= 2'd0;
                 beat_outstanding <= 1'b0;
+                link_sent        <= 1'b0;
                 cancelling       <= 1'b0;
                 terminal         <= 1'b0;
                 terminal_success <= 1'b0;
@@ -375,6 +460,11 @@ module mp64_tacc_transfer #(
                 $error("TACC transfer received error without ACK");
             if (active && (owner >= SOURCE_COUNT))
                 $error("TACC transfer owner is outside SOURCE_COUNT");
+            if (active && owner_link && !owner_store)
+                $error("TACC transfer routed a LOAD to a chiplet port");
+            if (link_done && !(active && owner_link && !terminal &&
+                               !cancelling))
+                $error("TACC transfer received a link answer it did not await");
         end
     end
 `endif

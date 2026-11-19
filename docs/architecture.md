@@ -479,7 +479,7 @@ CLUSTER_EN.
 | VRAM_SIZE | `+0x58` | 64-bit | 4 MiB | Dedicated VRAM size in bytes |
 | CRYPTO_CAPS | `+0x60` | 64-bit | `0xF` | Bit 0: reflected/raw CRC; bit 1: checked SHA3/SHAKE; bit 2: raw Keccak-f[1600]; bit 3: production WOTS chain |
 | NUM_BUS_PORTS | `+0x68` | 64-bit | varies | Exact weighted-arbiter requester count: full cores + clusters + NIC + disk + WOTS |
-| CHIPLET_PORTS | `+0x70` | 64-bit | `0x08_10_01` | [7:0] chiplet ports built, [15:8] ID of port 0, [23:16] lent ranges per port: the value of `PORT_COUNT` in the chiplet port window. Zero on a machine built without ports, whose port window answers nothing |
+| CHIPLET_PORTS | `+0x70` | 64-bit | `0x30_08_10_01` | [7:0] chiplet ports built, [15:8] ID of port 0, [23:16] lent ranges per port, [31:24] `W`, each port's window into memory its chiplet lends being 2^`W` bytes: the value of `PORT_COUNT` in the chiplet port window. Zero on a machine built without ports, whose port window answers nothing |
 
 Byte reads return the corresponding little-endian byte. Halfword, word, and
 qword accesses must be naturally aligned and wholly contained in the device

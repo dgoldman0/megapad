@@ -542,8 +542,8 @@ shared with the scalar engine) at the §10 cost.
 > **Implementation status:** the Python oracle, the native accelerator, the
 > strict-cycle system model and the RTL implement this contract, every
 > format included; the hosted simulator does not implement TACC. A store
-> into memory a chiplet lends (below) was proposed on 2026-11-19 and is not
-> built.
+> into memory a chiplet lends (below) is built in the RTL; the emulator's
+> models do not implement it yet.
 
 Each physical tile engine owns one 2,048-bit TACC bank plus owner, valid,
 dirty, format, busy, force-pending, and cancellation metadata.  Software
@@ -701,7 +701,6 @@ chiplet answers that every byte is written, so the issuing core's next
 instruction, a doorbell included, follows the data.  User mode reaches a
 window under its MPU policy, as it reaches external RAM.  A `LOAD` image or
 a `TAMAC` source in a window raises `IVEC_BUS_FAULT` before any access.
-This path is proposed and not yet built.
 
 ### Context switching, reset, and cancellation
 

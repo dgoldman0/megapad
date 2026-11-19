@@ -153,9 +153,15 @@ module tb_tacc_cycles;
     reg [2047:0] vector_final_tacc;
     reg [2047:0] cycle_bank_snapshot;
 
+    // Two chiplet ports are built: windows at 0x0100_0000_0000_0000 and
+    // 0x0101_0000_0000_0000, each 2^48 bytes.
+    wire        tacc_xfer_link;
+    wire [7:0]  tacc_xfer_port;
+
     mp64_tile #(
         .TACC_CALLER_BASE (5'd4),
-        .TACC_CALLER_COUNT(4)
+        .TACC_CALLER_COUNT(4),
+        .TACC_WINDOW_PORTS(2)
     ) uut (
         .clk                    (clk),
         .rst_n                  (rst_n),
@@ -201,6 +207,8 @@ module tb_tacc_cycles;
         .tacc_xfer_req          (tacc_xfer_req),
         .tacc_xfer_store        (tacc_xfer_store),
         .tacc_xfer_ext          (tacc_xfer_ext),
+        .tacc_xfer_link         (tacc_xfer_link),
+        .tacc_xfer_port         (tacc_xfer_port),
         .tacc_xfer_base         (tacc_xfer_base),
         .tacc_xfer_format_ew    (tacc_xfer_format_ew),
         .tacc_xfer_token        (tacc_xfer_token),
@@ -376,6 +384,61 @@ module tb_tacc_cycles;
               mex_fault_addr == expected_addr);
         check("address preflight emits no stage or memory request",
               !tacc_xfer_req && !tile_req && !ext_tile_req);
+        tick;
+    end
+    endtask
+
+    task dispatch_image_fault;
+        input [2:0]  funct;
+        input [2:0]  expected_fault;
+        input [63:0] expected_addr;
+    begin
+        set_lifecycle(funct, {5'd0, funct});
+        mex_valid = 1'b1;
+        tick;
+        mex_valid = 1'b0;
+        check("image preflight emits no stage or memory request",
+              !tacc_xfer_req && !tile_req && !ext_tile_req);
+        tick;
+        check("image preflight fault completes in second base cycle",
+              mex_done && !mex_busy &&
+              mex_fault == expected_fault);
+        check("image preflight reports the first forbidden byte",
+              mex_fault_addr == expected_addr);
+        tick;
+    end
+    endtask
+
+    // A STORE the preflight routes to a chiplet port; the bench answers for
+    // the stage with the given fault.
+    task dispatch_link_store;
+        input [7:0]  expected_port;
+        input [63:0] expected_base;
+        input [2:0]  answer_fault;
+    begin
+        set_lifecycle(ETSYS_TACC_STORE, {5'd0, ETSYS_TACC_STORE});
+        mex_valid = 1'b1;
+        tick;
+        mex_valid = 1'b0;
+        check("a STORE into a built window goes to the stage as a link write",
+              tacc_xfer_req && tacc_xfer_store && tacc_xfer_link &&
+              !tacc_xfer_ext && tacc_xfer_port == expected_port &&
+              tacc_xfer_base == expected_base);
+        check("a link STORE makes no tile-memory request",
+              !tile_req && !ext_tile_req);
+        tacc_xfer_response_token = tacc_xfer_token;
+        tacc_xfer_fault = answer_fault;
+        tacc_xfer_fault_addr =
+            (answer_fault == MEX_FAULT_NONE) ? 64'd0 : expected_base;
+        tacc_xfer_done = 1'b1;
+        tick;
+        tacc_xfer_done = 1'b0;
+        tacc_xfer_fault = MEX_FAULT_NONE;
+        tacc_xfer_fault_addr = 64'd0;
+        check("the link STORE retires with the stage's answer",
+              mex_done && mex_fault == answer_fault &&
+              mex_fault_addr ==
+                ((answer_fault == MEX_FAULT_NONE) ? 64'd0 : expected_base));
         tick;
     end
     endtask
@@ -576,6 +639,49 @@ module tb_tacc_cycles;
         mex_priv = 1'b0;
         mex_mpu_enabled = 1'b0;
         write_csr(CSR_TSRC0, 64'd0);
+
+        // A STORE image wholly inside a built port's window goes to that
+        // port.  Any other image operation there, a window beyond the ports
+        // built, and a span that leaves its window have no route.
+        write_csr(CSR_TDST, 64'h0101_0000_0000_1000);
+        dispatch_link_store(8'd1, 64'h0101_0000_0000_1000, MEX_FAULT_NONE);
+        dispatch_link_store(8'd1, 64'h0101_0000_0000_1000, MEX_FAULT_BUS);
+        check("a failed link STORE leaves TACC valid and clean",
+              tacc_status_raw[TACC_STATUS_BIT_VALID] &&
+              !tacc_status_raw[TACC_STATUS_BIT_DIRTY]);
+        write_csr(CSR_TDST, 64'h0100_0000_0000_0000);
+        dispatch_link_store(8'd0, 64'h0100_0000_0000_0000, MEX_FAULT_NONE);
+        write_csr(CSR_TDST, 64'h0102_0000_0000_0000);
+        dispatch_image_fault(ETSYS_TACC_STORE, MEX_FAULT_BUS,
+                             64'h0102_0000_0000_0000);
+        write_csr(CSR_TDST, 64'h0101_FFFF_FFFF_FFC0);
+        dispatch_image_fault(ETSYS_TACC_STORE, MEX_FAULT_BUS,
+                             64'h0102_0000_0000_0000);
+        write_csr(CSR_TDST, 64'h0100_FFFF_FFFF_FF80);
+        dispatch_image_fault(ETSYS_TACC_STORE, MEX_FAULT_BUS,
+                             64'h0101_0000_0000_0000);
+        write_csr(CSR_TDST, 64'h00FF_FFFF_FFFF_FF00);
+        dispatch_image_fault(ETSYS_TACC_STORE, MEX_FAULT_BUS,
+                             64'h00FF_FFFF_FFFF_FF00);
+        write_csr(CSR_TSRC0, 64'h0100_0000_0000_1000);
+        dispatch_image_fault(ETSYS_TACC_LOAD, MEX_FAULT_BUS,
+                             64'h0100_0000_0000_1000);
+        write_csr(CSR_TSRC0, 64'd0);
+        // User mode reaches a window under its MPU policy.
+        mex_priv = 1'b1;
+        mex_mpu_enabled = 1'b1;
+        mex_mpu_base = 64'h0100_0000_0000_0000;
+        mex_mpu_limit = 64'h0100_0000_0000_1000;
+        write_csr(CSR_TDST, 64'h0100_0000_0000_1000);
+        dispatch_image_fault(ETSYS_TACC_STORE, MEX_FAULT_PRIV,
+                             64'h0100_0000_0000_1000);
+        write_csr(CSR_TDST, 64'h0100_0000_0000_0F00);
+        dispatch_link_store(8'd0, 64'h0100_0000_0000_0F00, MEX_FAULT_NONE);
+        mex_priv = 1'b0;
+        mex_mpu_enabled = 1'b0;
+        mex_mpu_base = 64'd0;
+        mex_mpu_limit = 64'd0;
+        write_csr(CSR_TDST, 64'd0);
 
         // Execute the checked-in Phase-1 emulator oracle vectors.  The file
         // carries complete 2,048-bit initial/final images, not a duplicate RTL
@@ -941,6 +1047,21 @@ module tb_tacc_cycles;
               !tile_req && !ext_tile_req);
         tick;
         mex_allow_cluster_spad = 1'b0;
+
+        // A source in a chiplet's window has no route either.
+        write_csr(CSR_TSRC1, 64'h0100_0000_0000_0000);
+        tamac_mem_req_count = 0;
+        mex_valid = 1'b1;
+        tick;
+        mex_valid = 1'b0;
+        check("window source preflight prevents the first source read",
+              tamac_mem_req_count == 0 && !tile_req && !ext_tile_req &&
+              !tacc_xfer_req);
+        tick;
+        check("a source in a chiplet's window faults BUS at its base",
+              mex_done && mex_fault == MEX_FAULT_BUS &&
+              mex_fault_addr == 64'h0100_0000_0000_0000);
+        tick;
 
         // Dynamic target errors qualify the acknowledged source beat and
         // retire without exposing any partial arithmetic.

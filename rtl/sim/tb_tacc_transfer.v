@@ -16,6 +16,8 @@ module tb_tacc_transfer;
     reg [SOURCE_COUNT-1:0] req;
     reg [SOURCE_COUNT-1:0] req_store;
     reg [SOURCE_COUNT-1:0] req_ext;
+    reg [SOURCE_COUNT-1:0] req_link;
+    reg [SOURCE_COUNT*8-1:0] req_port;
     reg [SOURCE_COUNT*64-1:0] req_base;
     reg [SOURCE_COUNT*4-1:0] req_format_ew;
     reg [SOURCE_COUNT*TOKEN_BITS-1:0] req_token;
@@ -44,6 +46,19 @@ module tb_tacc_transfer;
     wire [SOURCE_COUNT*64-1:0] response_fault_addr;
     wire [2047:0] result_image;
 
+    // The bridge's side of a STORE into a chiplet's window.
+    wire        link_valid;
+    reg         link_ready;
+    wire [7:0]  link_port;
+    wire [63:0] link_addr;
+    wire [511:0] link_data;
+    wire [7:0]  link_len;
+    wire [7:0]  link_zeros;
+    wire        link_cancel;
+    reg         link_done;
+    reg         link_error;
+    reg         link_cancel_done;
+
     reg [2047:0] source_image [0:SOURCE_COUNT-1];
     reg [2047:0] expected_image;
     reg [511:0] load_beat [0:3];
@@ -60,6 +75,8 @@ module tb_tacc_transfer;
         .req                 (req),
         .req_store           (req_store),
         .req_ext             (req_ext),
+        .req_link            (req_link),
+        .req_port            (req_port),
         .req_base            (req_base),
         .req_format_ew       (req_format_ew),
         .req_token           (req_token),
@@ -83,7 +100,18 @@ module tb_tacc_transfer;
         .response_token      (response_token),
         .response_fault      (response_fault),
         .response_fault_addr (response_fault_addr),
-        .result_image        (result_image)
+        .result_image        (result_image),
+        .link_valid          (link_valid),
+        .link_ready          (link_ready),
+        .link_port           (link_port),
+        .link_addr           (link_addr),
+        .link_data           (link_data),
+        .link_len            (link_len),
+        .link_zeros          (link_zeros),
+        .link_cancel         (link_cancel),
+        .link_done           (link_done),
+        .link_error          (link_error),
+        .link_cancel_done    (link_cancel_done)
     );
 
     initial clk = 1'b0;
@@ -229,6 +257,8 @@ module tb_tacc_transfer;
         req = {SOURCE_COUNT{1'b0}};
         req_store = {SOURCE_COUNT{1'b0}};
         req_ext = {SOURCE_COUNT{1'b0}};
+        req_link = {SOURCE_COUNT{1'b0}};
+        req_port = {(SOURCE_COUNT*8){1'b0}};
         req_base = {(SOURCE_COUNT*64){1'b0}};
         req_format_ew = {(SOURCE_COUNT*4){1'b0}};
         req_token = {(SOURCE_COUNT*TOKEN_BITS){1'b0}};
@@ -241,6 +271,10 @@ module tb_tacc_transfer;
         tile_rdata = 512'd0;
         ext_rdata = 512'd0;
         port_cancel_done = {SOURCE_COUNT{1'b0}};
+        link_ready = 1'b0;
+        link_done = 1'b0;
+        link_error = 1'b0;
+        link_cancel_done = 1'b0;
         expected_image = 2048'd0;
         for (source_index = 0;
              source_index < SOURCE_COUNT;
@@ -263,7 +297,7 @@ module tb_tacc_transfer;
 
         check("reset clears all request and response outputs",
               beat_req == 0 && port_cancel == 0 && stall_cycle == 0
-              && done == 0);
+              && done == 0 && !link_valid && !link_cancel);
         check("reset hides and zeroizes the shared image",
               result_image == 2048'd0);
 
@@ -683,6 +717,204 @@ module tb_tacc_transfer;
         check("fresh completion cannot fabricate stale/live token",
               response_token[3*TOKEN_BITS +: TOKEN_BITS] == 8'h34);
         finish_and_release(3);
+
+
+        // ------------------------------------------------------------------
+        // A STORE routed to a chiplet port emits no memory beat.  It offers
+        // that port's bridge one write of the image's active 64-byte units,
+        // counts the rest of the 256 bytes as zeros, and ends on the bridge's
+        // report of the chiplet's answer.
+        // ------------------------------------------------------------------
+        source_image[1] = {{64{8'h1D}}, {64{8'h1C}},
+                           {64{8'h1B}}, {64{8'h1A}}};
+        set_request(
+            1, 1'b1, 1'b0, 64'h0100_0000_0000_4000,
+            TMODE_8, 8'h71, source_image[1]
+        );
+        req_link[1] = 1'b1;
+        req_port[1*8 +: 8] = 8'd2;
+        tick;
+        check("a link STORE emits no memory beat",
+              beat_req == 0 && port_cancel == 0);
+        check("it offers one write to the bridge of its port",
+              link_valid && link_port == 8'd2 &&
+              link_addr == 64'h0100_0000_0000_4000 && !link_cancel);
+        check("a U8 image is four units with no zeros",
+              link_len == 8'd3 && link_zeros == 8'd0);
+        check("an offered unit not yet taken is a stall",
+              stall_cycle == 7'b0000010);
+        for (beat_number = 0;
+             beat_number < 4;
+             beat_number = beat_number + 1) begin
+            check("each unit is the next 64 bytes of the image",
+                  link_valid &&
+                  link_data == source_image[1][beat_number*512 +: 512]);
+            link_ready = 1'b1;
+            #1;
+            check("a unit taken is progress", stall_cycle == 0);
+            tick;
+            link_ready = 1'b0;
+            #1;
+        end
+        check("after the last unit the stage offers nothing",
+              !link_valid && beat_req == 0 && done == 0);
+        check("waiting for the answer is a stall",
+              stall_cycle == 7'b0000010);
+        repeat (3) tick;
+        check("the image is held until the answer",
+              !link_valid && done == 0);
+        link_done = 1'b1;
+        #1;
+        check("the answer is progress", stall_cycle == 0);
+        tick;
+        link_done = 1'b0;
+        check("the chiplet's OK ends the STORE without a fault",
+              done == 7'b0000010 &&
+              response_token[1*TOKEN_BITS +: TOKEN_BITS] == 8'h71 &&
+              response_fault[1*3 +: 3] == MEX_FAULT_NONE &&
+              response_fault_addr[1*64 +: 64] == 64'd0);
+        check("a link STORE publishes no result image",
+              result_image == 2048'd0);
+        req[1] = 1'b0;
+        req_link[1] = 1'b0;
+        finish_and_release(1);
+        check("release leaves nothing offered to the bridge",
+              !link_valid && !link_cancel);
+
+        // A 128-byte image sends two units and four of zeros, FP64 one and
+        // three; inactive bytes never cross the link.
+        source_image[6] = {{128{8'h6F}}, {64{8'h62}}, {64{8'h61}}};
+        set_request(
+            6, 1'b1, 1'b0, 64'h0100_0001_0000_0100,
+            TMODE_FP32, 8'h76, source_image[6]
+        );
+        req_link[6] = 1'b1;
+        req_port[6*8 +: 8] = 8'd1;
+        tick;
+        req[6] = 1'b0;
+        check("an FP32 image is two units and two of zeros",
+              link_valid && link_port == 8'd1 &&
+              link_len == 8'd1 && link_zeros == 8'd2);
+        for (beat_number = 0;
+             beat_number < 2;
+             beat_number = beat_number + 1) begin
+            check("its units are the active 128 bytes",
+                  link_valid &&
+                  link_data == source_image[6][beat_number*512 +: 512]);
+            link_ready = 1'b1;
+            tick;
+            link_ready = 1'b0;
+            #1;
+        end
+        check("and no third unit is offered", !link_valid);
+        link_done = 1'b1;
+        tick;
+        link_done = 1'b0;
+        check("the FP32 STORE completes",
+              done == 7'b1000000 &&
+              response_fault[6*3 +: 3] == MEX_FAULT_NONE);
+        req_link[6] = 1'b0;
+        finish_and_release(6);
+
+        source_image[0] = {{192{8'h0E}}, {64{8'h0A}}};
+        set_request(
+            0, 1'b1, 1'b0, 64'h0100_0000_0000_0040,
+            TMODE_FP64, 8'h70, source_image[0]
+        );
+        req_link[0] = 1'b1;
+        req_port[0*8 +: 8] = 8'd0;
+        tick;
+        req[0] = 1'b0;
+        check("an FP64 image is one unit and three of zeros",
+              link_valid && link_len == 8'd0 && link_zeros == 8'd3 &&
+              link_data == {64{8'h0A}});
+        link_ready = 1'b1;
+        tick;
+        link_ready = 1'b0;
+        #1;
+        check("the one unit is all it offers", !link_valid);
+        link_done = 1'b1;
+        link_error = 1'b1;
+        tick;
+        link_done = 1'b0;
+        link_error = 1'b0;
+        check("a failure the bridge reports is a bus fault at the image base",
+              done == 7'b0000001 &&
+              response_token[0*TOKEN_BITS +: TOKEN_BITS] == 8'h70 &&
+              response_fault[0*3 +: 3] == MEX_FAULT_BUS &&
+              response_fault_addr[0*64 +: 64] ==
+                64'h0100_0000_0000_0040);
+        req_link[0] = 1'b0;
+        finish_and_release(0);
+
+        // An answer before the last unit ends the STORE there.
+        set_request(
+            2, 1'b1, 1'b0, 64'h0100_0000_0000_8000,
+            TMODE_16, 8'h72, source_image[2]
+        );
+        req_link[2] = 1'b1;
+        req_port[2*8 +: 8] = 8'd3;
+        tick;
+        req[2] = 1'b0;
+        link_ready = 1'b1;
+        tick;
+        link_ready = 1'b0;
+        link_done = 1'b1;
+        link_error = 1'b1;
+        tick;
+        link_done = 1'b0;
+        link_error = 1'b0;
+        check("a refusal after one unit ends the STORE with a bus fault",
+              done == 7'b0000100 &&
+              response_fault[2*3 +: 3] == MEX_FAULT_BUS &&
+              response_fault_addr[2*64 +: 64] ==
+                64'h0100_0000_0000_8000);
+        check("and the stage offers no further unit", !link_valid);
+        req_link[2] = 1'b0;
+        finish_and_release(2);
+
+        // Cancellation withdraws the offer at once and holds cancel on the
+        // bridge until it confirms; a peer waits for the stage meanwhile.
+        source_image[4] = {256{8'h44}};
+        source_image[5] = {256{8'h55}};
+        set_request(
+            4, 1'b1, 1'b0, 64'h0100_0000_0000_C000,
+            TMODE_8, 8'h74, source_image[4]
+        );
+        req_link[4] = 1'b1;
+        req_port[4*8 +: 8] = 8'd1;
+        tick;
+        check("the link owner holds the stage", link_valid && beat_req == 0);
+        set_request(
+            5, 1'b1, 1'b0, 64'h0000_0000_0000_9000,
+            TMODE_8, 8'h75, source_image[5]
+        );
+        link_ready = 1'b1;
+        tick;
+        link_ready = 1'b0;
+        check("a peer's memory STORE waits behind the link write",
+              beat_req == 0 && stall_cycle[5]);
+        req_cancel[4] = 1'b1;
+        #1;
+        check("cancel withdraws the offered unit at once",
+              !link_valid && link_cancel);
+        tick;
+        req_cancel[4] = 1'b0;
+        req[4] = 1'b0;
+        repeat (3) tick;
+        check("cancel stays on the bridge until it confirms",
+              link_cancel && !link_valid && done == 0 && beat_req == 0);
+        link_cancel_done = 1'b1;
+        tick;
+        link_cancel_done = 1'b0;
+        check("the confirmation releases the stage with no response",
+              !link_cancel && done[4] == 1'b0);
+        req_link[4] = 1'b0;
+        tick;
+        check("the waiting peer is admitted to memory",
+              beat_req == 7'b0100000 && beat_addr == 64'h9000);
+        complete_store(5, 64'h9000, 1'b0, source_image[5], 8'h75);
+        finish_and_release(5);
 
         if (fail_count == 0) begin
             $display("");

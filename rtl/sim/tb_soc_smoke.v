@@ -135,6 +135,16 @@ module tb_soc_smoke;
         .cl_dbr_valid  (1'b0),
         .cl_dbr_ready  (),
         .cl_dbr_dst    (8'd0),
+        .cl_wq_valid   (),
+        .cl_wq_ready   (1'b0),
+        .cl_wq_addr    (),
+        .cl_wq_data    (),
+        .cl_wq_len     (),
+        .cl_wq_zeros   (),
+        .cl_wq_cancel  (),
+        .cl_wa_valid   (1'b0),
+        .cl_wa_ready   (),
+        .cl_wa_code    (2'd0),
         .cl_sb_present (1'b0),
         .cl_sb_rst_n   (),
         .cl_sb_stop_req(),
@@ -268,10 +278,10 @@ module tb_soc_smoke;
         force u_soc.bus_mmio_addr = 12'h370;
         force u_soc.bus_mmio_size = BUS_DWORD;
         #1;
-        check("SysInfo reports the chiplet ports, their first ID and ranges",
+        check("SysInfo reports the chiplet ports, their first ID, ranges, W",
               u_soc.bus_mmio_ack === 1'b1
               && u_soc.bus_mmio_rdata ==
-                 {40'd0, 8'd8, u_soc.CHIPLET_ID_BASE, 8'd1});
+                 {32'd0, 8'd48, 8'd8, u_soc.CHIPLET_ID_BASE, 8'd1});
 
         force u_soc.bus_mmio_addr = 12'h360;
         force u_soc.bus_mmio_size = BUS_DWORD;

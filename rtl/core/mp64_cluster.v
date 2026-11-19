@@ -31,7 +31,11 @@ module mp64_cluster #(
     parameter [63:0] TACC_EXT_LIMIT   = 64'h0000_0000_FF00_0000,
     parameter [63:0] TACC_VRAM_BASE   = 64'h0000_0000_FF00_0000,
     parameter [63:0] TACC_VRAM_LIMIT  = 64'h0000_0000_FF40_0000,
-    parameter [63:0] TACC_HBW_LIMIT   = 64'h0000_0001_0000_0000
+    parameter [63:0] TACC_HBW_LIMIT   = 64'h0000_0001_0000_0000,
+    // Chiplet windows, passed to the shared tile engine (mp64_tile.v).
+    parameter [63:0] TACC_WINDOW_BASE  = 64'h0100_0000_0000_0000,
+    parameter integer TACC_WINDOW_BITS  = 48,
+    parameter integer TACC_WINDOW_PORTS = 0
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -83,6 +87,8 @@ module mp64_cluster #(
     output wire         tacc_xfer_req,
     output wire         tacc_xfer_store,
     output wire         tacc_xfer_ext,
+    output wire         tacc_xfer_link,
+    output wire [7:0]   tacc_xfer_port,
     output wire [63:0]  tacc_xfer_base,
     output wire [3:0]   tacc_xfer_format_ew,
     output wire [7:0]   tacc_xfer_token,
@@ -2363,7 +2369,10 @@ module mp64_cluster #(
         .TACC_EXT_LIMIT   (TACC_EXT_LIMIT),
         .TACC_VRAM_BASE   (TACC_VRAM_BASE),
         .TACC_VRAM_LIMIT  (TACC_VRAM_LIMIT),
-        .TACC_HBW_LIMIT   (TACC_HBW_LIMIT)
+        .TACC_HBW_LIMIT   (TACC_HBW_LIMIT),
+        .TACC_WINDOW_BASE (TACC_WINDOW_BASE),
+        .TACC_WINDOW_BITS (TACC_WINDOW_BITS),
+        .TACC_WINDOW_PORTS(TACC_WINDOW_PORTS)
     ) u_tile (
         .clk           (clk),
         .rst_n         (~cl_rst),
@@ -2419,6 +2428,8 @@ module mp64_cluster #(
         .tacc_xfer_req (tacc_xfer_req),
         .tacc_xfer_store(tacc_xfer_store),
         .tacc_xfer_ext (tacc_xfer_ext),
+        .tacc_xfer_link(tacc_xfer_link),
+        .tacc_xfer_port(tacc_xfer_port),
         .tacc_xfer_base(tacc_xfer_base),
         .tacc_xfer_format_ew(tacc_xfer_format_ew),
         .tacc_xfer_token(tacc_xfer_token),

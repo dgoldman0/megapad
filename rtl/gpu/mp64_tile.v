@@ -27,6 +27,13 @@ module mp64_tile #(
     parameter [63:0] TACC_VRAM_BASE   = 64'h0000_0000_FF00_0000,
     parameter [63:0] TACC_VRAM_LIMIT  = 64'h0000_0000_FF40_0000,
     parameter [63:0] TACC_HBW_LIMIT   = 64'h0000_0001_0000_0000,
+    // Chiplet windows (docs/chiplet-link.md section 3): port p's window is
+    // the 2^TACC_WINDOW_BITS bytes at TACC_WINDOW_BASE + p * 2^TACC_WINDOW_BITS,
+    // for the TACC_WINDOW_PORTS ports built.  A TACC.STORE image wholly
+    // inside one window goes to that port's bridge.
+    parameter [63:0] TACC_WINDOW_BASE  = 64'h0100_0000_0000_0000,
+    parameter integer TACC_WINDOW_BITS  = 48,
+    parameter integer TACC_WINDOW_PORTS = 0,
     // Multi-format FMA units for FP32/FP64 element-wise arithmetic: 1, 2, 4,
     // or 8.  The architectural timing model is FMA_UNITS = 2.
     parameter integer FMA_UNITS = 2
@@ -84,6 +91,8 @@ module mp64_tile #(
     output wire         tacc_xfer_req,
     output wire         tacc_xfer_store,
     output wire         tacc_xfer_ext,
+    output wire         tacc_xfer_link,   // the image goes to a chiplet port
+    output wire [7:0]   tacc_xfer_port,   // that port's index
     output wire [63:0]  tacc_xfer_base,
     output wire [3:0]   tacc_xfer_format_ew,
     output wire [7:0]   tacc_xfer_token,
@@ -615,25 +624,38 @@ module mp64_tile #(
         (tacc_req_funct == ETSYS_TACC_STORE);
     localparam [63:0] TACC_MMIO_END =
         64'hFFFF_FF80_0000_0000;
+    // The windows of the ports built, [TACC_WINDOW_BASE, TACC_WINDOWS_END).
+    localparam [64:0] TACC_WINDOW_SPAN = 65'd1 << TACC_WINDOW_BITS;
+    localparam [64:0] TACC_WINDOWS_END =
+        {1'b0, TACC_WINDOW_BASE} + TACC_WINDOW_PORTS * TACC_WINDOW_SPAN;
     reg [2:0]  tacc_req_preflight_fault;
     reg [63:0] tacc_req_preflight_fault_addr;
     reg        tacc_req_image_ext;
     reg        tacc_req_image_hbw;
+    reg        tacc_req_image_link;
+    reg [7:0]  tacc_req_image_port;
     reg [2:0]  tamac_src_a_preflight_fault;
     reg [63:0] tamac_src_a_preflight_fault_addr;
     reg        tamac_src_a_ext;
     reg        tamac_src_a_hbw;
+    reg        tamac_src_a_link;
+    reg [7:0]  tamac_src_a_port;
     reg [2:0]  tamac_src_b_preflight_fault;
     reg [63:0] tamac_src_b_preflight_fault_addr;
     reg        tamac_src_b_ext;
     reg        tamac_src_b_hbw;
+    reg        tamac_src_b_link;
+    reg [7:0]  tamac_src_b_port;
 
     // The task is pure combinational routing policy.  It deliberately does
     // not issue a memory request, so both TAMAC source spans can be checked
-    // before the first source beat becomes visible.
+    // before the first source beat becomes visible.  A chiplet's window is a
+    // route only for a STORE image (link_ok); any other span there has no
+    // route and faults at its base.
     task tacc_preflight_span;
         input  [63:0] address;
         input  [8:0]  span_bytes;
+        input         link_ok;
         input         caller_priv;
         input  [63:0] caller_mpu_base;
         input  [63:0] caller_mpu_limit;
@@ -642,13 +664,23 @@ module mp64_tile #(
         output [63:0] fault_address;
         output        routed_ext;
         output        routed_hbw;
+        output        routed_link;
+        output [7:0]  link_port;
         reg [64:0] span_end;
+        reg [63:0] window_index;
+        reg [64:0] window_end;
         begin
             fault         = MEX_FAULT_NONE;
             fault_address = 64'd0;
             routed_ext    = 1'b0;
             routed_hbw    = 1'b0;
+            routed_link   = 1'b0;
+            link_port     = 8'd0;
             span_end      = {1'b0, address} + span_bytes;
+            window_index  = (address - TACC_WINDOW_BASE) >> TACC_WINDOW_BITS;
+            window_end    = {1'b0, TACC_WINDOW_BASE} +
+                            (({1'b0, window_index} + 65'd1) <<
+                             TACC_WINDOW_BITS);
 
             if (span_end[64]) begin
                 fault         = MEX_FAULT_BUS;
@@ -691,6 +723,17 @@ module mp64_tile #(
                     fault         = MEX_FAULT_BUS;
                     fault_address = TACC_HBW_LIMIT;
                 end
+            end else if (link_ok && (TACC_WINDOW_PORTS > 0) &&
+                         (address >= TACC_WINDOW_BASE) &&
+                         ({1'b0, address} < TACC_WINDOWS_END)) begin
+                // The span must lie in this port's window; the next byte
+                // past it is the first one forbidden.
+                routed_link = 1'b1;
+                link_port   = window_index[7:0];
+                if (span_end > window_end) begin
+                    fault         = MEX_FAULT_BUS;
+                    fault_address = window_end[63:0];
+                end
             end else begin
                 fault         = MEX_FAULT_BUS;
                 fault_address = address;
@@ -723,6 +766,8 @@ module mp64_tile #(
         tacc_req_preflight_fault_addr = 64'd0;
         tacc_req_image_ext            = 1'b0;
         tacc_req_image_hbw            = 1'b0;
+        tacc_req_image_link           = 1'b0;
+        tacc_req_image_port           = 8'd0;
 
         if (tacc_req_image_operation) begin
             if (tacc_req_image_addr[5:0] != 6'd0) begin
@@ -730,12 +775,16 @@ module mp64_tile #(
                 tacc_req_preflight_fault_addr = tacc_req_image_addr;
             end else begin
                 tacc_preflight_span(
-                    tacc_req_image_addr, 9'd256, tacc_req_priv,
+                    tacc_req_image_addr, 9'd256,
+                    !tacc_req_is_tamac &&
+                        (tacc_req_funct == ETSYS_TACC_STORE),
+                    tacc_req_priv,
                     tacc_req_mpu_base, tacc_req_mpu_limit,
                     tacc_req_mpu_enabled,
                     tacc_req_preflight_fault,
                     tacc_req_preflight_fault_addr,
-                    tacc_req_image_ext, tacc_req_image_hbw);
+                    tacc_req_image_ext, tacc_req_image_hbw,
+                    tacc_req_image_link, tacc_req_image_port);
             end
         end
 
@@ -743,10 +792,14 @@ module mp64_tile #(
         tamac_src_a_preflight_fault_addr = 64'd0;
         tamac_src_a_ext                  = 1'b0;
         tamac_src_a_hbw                  = 1'b0;
+        tamac_src_a_link                 = 1'b0;
+        tamac_src_a_port                 = 8'd0;
         tamac_src_b_preflight_fault      = MEX_FAULT_NONE;
         tamac_src_b_preflight_fault_addr = 64'd0;
         tamac_src_b_ext                  = 1'b0;
         tamac_src_b_hbw                  = 1'b0;
+        tamac_src_b_link                 = 1'b0;
+        tamac_src_b_port                 = 8'd0;
 
         if (tacc_req_is_tamac) begin
             // A source row is a physical 512-bit request, not a byte-addressed
@@ -764,20 +817,22 @@ module mp64_tile #(
                     tacc_req_tamac_src_b;
             end else begin
                 tacc_preflight_span(
-                    tacc_req_tamac_src_a, 9'd64, tacc_req_priv,
+                    tacc_req_tamac_src_a, 9'd64, 1'b0, tacc_req_priv,
                     tacc_req_mpu_base, tacc_req_mpu_limit,
                     tacc_req_mpu_enabled,
                     tamac_src_a_preflight_fault,
                     tamac_src_a_preflight_fault_addr,
-                    tamac_src_a_ext, tamac_src_a_hbw);
+                    tamac_src_a_ext, tamac_src_a_hbw,
+                    tamac_src_a_link, tamac_src_a_port);
                 if (tacc_req_tamac_has_b)
                     tacc_preflight_span(
-                        tacc_req_tamac_src_b, 9'd64, tacc_req_priv,
+                        tacc_req_tamac_src_b, 9'd64, 1'b0, tacc_req_priv,
                         tacc_req_mpu_base, tacc_req_mpu_limit,
                         tacc_req_mpu_enabled,
                         tamac_src_b_preflight_fault,
                         tamac_src_b_preflight_fault_addr,
-                        tamac_src_b_ext, tamac_src_b_hbw);
+                        tamac_src_b_ext, tamac_src_b_hbw,
+                        tamac_src_b_link, tamac_src_b_port);
 
                 if (tamac_src_a_preflight_fault != MEX_FAULT_NONE) begin
                     tacc_req_preflight_fault =
@@ -863,7 +918,9 @@ module mp64_tile #(
         .bank_state            (tacc_bank_state)
     );
 
-    assign tacc_xfer_ext = tacc_req_image_ext;
+    assign tacc_xfer_ext  = tacc_req_image_ext;
+    assign tacc_xfer_link = tacc_req_image_link;
+    assign tacc_xfer_port = tacc_req_image_port;
 
     assign mex_done_internal = mex_done_reg | tacc_req_done;
     assign mex_fault_internal =

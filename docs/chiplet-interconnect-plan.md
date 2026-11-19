@@ -6,15 +6,15 @@ end, a link endpoint and a boot fetch, is in LM1's RTL (`rtl/link/` in the
 lm1 repository), where a bench joins it to MegaPad's RTL. The emulator and
 the simulator model MegaPad's side, and a chiplet's model attaches to it
 through a C interface. The wiring of LM1's end into its cluster, LM1's own
-model and the software are still to come. The second direction of lending
-in §3, in which the tile engine stores its accumulator into memory a chiplet
-lends, was proposed on 2026-11-19 and is neither accepted nor built. This
-note records how chiplets attach to MegaPad in Leviathan: the contract every
-chiplet meets, how the chips share memory, how they signal and exchange
-work, and how LM1, the first chiplet, runs sandbox jobs and managed data
-over the link. It schedules no work. The release
-plan's side is decision 37 and Parts 3d, 8 and 9 of `dev/PLAN.md` in
-fantasy-engine.
+model and the software are still to come. The second direction of lending in
+§3, in which the tile engine stores its accumulator into memory a chiplet
+lends, was accepted on 2026-11-19 for `TACC.STORE`. MegaPad's RTL builds it;
+its models in the emulator, LM1's end of it and its software are not built
+yet. This note records how chiplets attach to MegaPad in Leviathan: the
+contract every chiplet meets, how the chips share memory, how they signal
+and exchange work, and how LM1, the first chiplet, runs sandbox jobs and
+managed data over the link. It schedules no work. The release plan's side is
+decision 37 and Parts 3d, 8 and 9 of `dev/PLAN.md` in fantasy-engine.
 
 ## 1. A chiplet works on memory lent to it
 
@@ -96,7 +96,7 @@ is acknowledged, and a doorbell arrives after the data it announces. Each
 chip reads shared data from that memory on every use, so the memory holds
 the only copy.
 
-### A chiplet lends: the tile engine's stores, proposed
+### A chiplet lends: the tile engine's stores
 
 A chiplet may lend ranges of its own memory to MegaPad. Each port has a
 window in MegaPad's address space, and the chiplet's address `a` appears at
@@ -309,8 +309,9 @@ transaction for a core, always serves the tile engines first, and takes a
 32-bit address (`rtl/mem/mp64_extmem.v`).
 
 Of the RTL items, the port bridge, the client arbiter with its weights and
-limits, the mailbox's ports, its register path, the external-flag wiring and
-System Info's field are built. The models of the emulator and the simulator
+limits, the mailbox's ports, its register path, the external-flag wiring,
+System Info's field, and the tile engine's route into a chiplet's window
+with the bridge's writer are built. The models of the emulator and the simulator
 are built too, and the queues and offers are specified.
 [chiplet-link.md](chiplet-link.md) §10 lists what is left for later.
 

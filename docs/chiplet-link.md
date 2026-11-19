@@ -3,8 +3,10 @@
 Status: MegaPad's side is implemented in RTL and simulated, LM1's end
 (`rtl/link/` in the lm1 repository) passes a bench joined to it, and the
 emulator and the simulator model MegaPad's side (section 9). MegaPad's
-writes into memory a chiplet lends (sections 3, 4 and 8) were proposed on
-2026-11-19 and are not built. This is the specification of the link between
+writes into memory a chiplet lends (sections 3 and 4), accepted on
+2026-11-19 for the tile engine's `TACC.STORE`, are built in MegaPad's RTL;
+the emulator's models, LM1's end and the `LEND` entries of section 8 are
+not built yet. This is the specification of the link between
 MegaPad and one chiplet: the port's identity, its register window, the
 channels that cross the link, the sideband, and the queues in lent memory
 through which the two chips exchange work (section 8). The design it
@@ -39,7 +41,7 @@ ends it as a bus fault.
 
 | Offset | Register | Access | Contents |
 |--------|----------|--------|----------|
-| `+0x00` | `PORT_COUNT` | R | [7:0] ports built, [15:8] ID of port 0, [23:16] lent ranges per port |
+| `+0x00` | `PORT_COUNT` | R | [7:0] ports built, [15:8] ID of port 0, [23:16] lent ranges per port, [31:24] `W`, each port's window being 2^`W` bytes (section 3) |
 | `+0x08` | `PORT_SEL` | R/W | Port whose block appears at `+0x80` |
 | `+0x10` | `EXT_CORE_QOS` | R/W | [7:0] the core path's weight at external memory (reset: 1) |
 | `+0x80` | port block | | The selected port's registers, below |
@@ -47,15 +49,14 @@ ends it as a bus fault.
 `PORT_SEL` is shared by every core, and installing a range takes several
 writes, so the software that owns the window serializes its use. A
 `PORT_SEL` value beyond the ports built selects no port: its block reads
-zero and ignores writes. Section 3's ranges a chiplet lends add four fields
-to this window when they are built.
+zero and ignores writes.
 
 ### Port block
 
 | Offset | Register | Access | Contents |
 |--------|----------|--------|----------|
-| `+0x80` | `CTRL` | R/W | [0] `ENABLE`, [1] `RESET_HOLD`, [2] `STOP_REQ`, [3] `DOORBELL_EN`, [4] `ATTN_EN`, [15:8] `ATTN_CORE` |
-| `+0x88` | `STATUS` | R, W1C | [0] `PRESENT`, [1] `STOPPED`, [2] `READY`, [3] `BUSY`, [4] `FAULT`, [5] `ID_DONE`, [23:16] port ID, [39:32] lent ranges |
+| `+0x80` | `CTRL` | R/W | [0] `ENABLE`, [1] `RESET_HOLD`, [2] `STOP_REQ`, [3] `DOORBELL_EN`, [4] `ATTN_EN`, [5] `BORROW_EN`, [15:8] `ATTN_CORE` |
+| `+0x88` | `STATUS` | R, W1C | [0] `PRESENT`, [1] `STOPPED`, [2] `READY`, [3] `BUSY`, [4] `FAULT`, [5] `ID_DONE`, [6] `BORROW_BUSY`, [23:16] port ID, [39:32] lent ranges |
 | `+0x90` | `FAULT_ADDR` | R | Address of the first refused request since `FAULT` was cleared |
 | `+0x98` | `FAULT_INFO` | R | [1:0] size, [2] write, [7:4] reason, [15:8] burst length, [31:16] refusals |
 | `+0xA0` | `RANGE_SEL` | R/W | Range addressed by the three registers below |
@@ -68,6 +69,7 @@ to this window when they are built.
 | `+0xD8` | `BOOT_ADDR` | R/W | Address of the image the chiplet starts from |
 | `+0xE0` | `BOOT_LEN` | R/W | Its length in bytes |
 | `+0xE8` | `BOOT_ARG` | R/W | The address of the port's control block (section 8) |
+| `+0xF0` | `WINDOW` | R | The base of the port's window in MegaPad's address space (section 3) |
 
 `CTRL` resets to `RESET_HOLD` alone: the chiplet is held in reset and the
 port admits nothing. `ENABLE` opens the port to memory requests.
@@ -102,14 +104,20 @@ range is the orderly path.
 
 ### Ranges a chiplet lends
 
-Proposed and not built. A chiplet may lend ranges of its own memory to
-MegaPad, which writes into them with the write of section 4. Port `p` has a
-window of 2^`W` bytes in MegaPad's address space at
-`0x0100_0000_0000_0000 + p × 2^W`, and the chiplet's address `a` appears at
-the window's base plus `a`. `W` is a build parameter, 48 by default, which
-`PORT_COUNT` reports in bits 31:24, and a read-only `WINDOW` register at
-`+0xF0` holds the selected port's base. A write across the link carries the
-chiplet's address.
+A chiplet may lend ranges of its own memory to MegaPad, which writes into
+them with the write of section 4. Port `p` has a window of 2^`W` bytes in
+MegaPad's address space at `0x0100_0000_0000_0000 + p × 2^W`, and the
+chiplet's address `a` appears at the window's base plus `a`. `W` is a build
+parameter, 48 by default, which `PORT_COUNT` reports in bits 31:24, and a
+read-only `WINDOW` register at `+0xF0` holds the selected port's base. A
+write across the link carries the chiplet's address.
+
+The tile engine's `TACC.STORE` is the one writer: a store whose image lies
+wholly inside one port's window goes to that port, and one that runs past
+the window's end faults at the first byte beyond it. Any other access that
+names a window, a core's load or store, a `TACC.LOAD` or a tile operand,
+has no route and is a bus fault, as every access outside MegaPad's memory
+is.
 
 The chiplet sets the ranges it lends, keeps them and checks each of
 MegaPad's writes against them; MegaPad holds no copy. The chiplet admits a
@@ -181,8 +189,6 @@ transaction at a time, so two chips writing different bytes of one word both
 succeed.
 
 ### Write to lent memory (MegaPad to chiplet)
-
-Proposed and not built (section 3).
 
 | Field | Width | Meaning |
 |-------|-------|---------|
@@ -524,15 +530,11 @@ and a worked example of the interface.
   would remove the condition.
 - **IDs above 63.** The 64-bit pending mask covers IDs 0 to 63: the 16
   cores and 48 ports. A die with more ports needs a wider mask.
-- **MegaPad's writes into a chiplet.** Sections 3, 4 and 8 specify them for
-  the tile engine's `TACC.STORE`, and none of it is built: the bridge's
-  writer, the tile engine's route, the models, and LM1's end, whose cluster
-  has no write path from outside yet. Reads of memory a chiplet lends, by
-  the cores or the tile engine, are still to specify.
-- **Accesses outside MegaPad's map.** In the RTL a core's access above the
-  map reaches external memory at its low 32 bits and is answered as a
-  success, and in the emulator an access outside the map lands in Bank 0;
-  only `TACC`'s own check faults one. The windows of section 3 lie in that
-  space, and a bus fault for such accesses is built with them.
+- **The rest of MegaPad's writes into a chiplet.** Sections 3 and 4
+  specify them for the tile engine's `TACC.STORE`, and MegaPad's RTL builds
+  them. The emulator's models, LM1's end, whose cluster has no write path
+  from outside yet, and the `LEND` entries of section 8 are still to build.
+  Reads of memory a chiplet lends, by the cores or the tile engine, are
+  still to specify.
 - **The physical layer.** The channels are logical; framing them onto UCIe's
   layers waits for the choice of where LM1's memory is placed.

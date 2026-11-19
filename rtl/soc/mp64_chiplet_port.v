@@ -13,10 +13,15 @@
 //   - Doorbells cross in both directions between the chiplet and the mailbox.
 //   - The sideband holds the chiplet in reset, asks it to stop and flush,
 //     reads its identity record, and names the image it starts from.
+//   - MegaPad's writes into memory the chiplet lends leave through it: the
+//     TACC image stage hands it one write of 64-byte units, which it sends
+//     across the link and answers once the chiplet has answered.  The
+//     chiplet checks those writes against the ranges it lends; the bridge
+//     refuses one itself only while BORROW_EN is clear or the link is down.
 //
 // Link channels use valid/ready handshakes, so any link layer that delivers
-// each message once and in order can carry them.  One memory request is
-// outstanding at a time.
+// each message once and in order can carry them.  One request is
+// outstanding at a time in each direction.
 //
 // Request channel (chiplet -> MegaPad):  addr, wdata, wen, size, len.
 //   Sizes are the bus sizes (byte, half, word, dword), naturally aligned.
@@ -38,16 +43,35 @@
 // Cancel: lk_rq_cancel abandons the outstanding request.  The bridge still
 //   answers it, with LK_CANCELLED unless its response was already waiting.
 //
+// Write channel (MegaPad -> chiplet): addr, data, len, zeros.
+//   One write covers len + 1 units of 64 bytes from addr, the chiplet's own
+//   address, then zeros units that the chiplet fills with zeros.  It is
+//   len + 1 messages, each carrying its unit; addr, len and zeros ride on
+//   every message, and the chiplet takes them from the first.  The stage
+//   names the write by MegaPad's address in the port's window, and the
+//   bridge sends that address less WINDOW_BASE.
+// Answer channel (chiplet -> MegaPad): code, one of the codes above.
+//   A running chiplet answers each write once, OK once every byte it covers
+//   can be read by its own accesses.  An answer before the last unit ends
+//   the write.  lk_wq_cancel abandons the outstanding write, which the
+//   chiplet still answers.  Each phase, a unit waiting to be taken or the
+//   answer waiting to come, is bounded to 255 cycles.  On expiry the bridge
+//   fails the write to the stage, holds lk_wq_cancel until the answer comes
+//   or the link goes down, and refuses further writes meanwhile.
+//
 // Register block (64-bit registers, offsets within the port's block):
 //   0x00 CTRL        [0] ENABLE      admit memory requests
 //                    [1] RESET_HOLD  hold the chiplet in reset (reset: 1)
 //                    [2] STOP_REQ    ask the chiplet to stop and flush
 //                    [3] DOORBELL_EN accept doorbells from the chiplet
 //                    [4] ATTN_EN     ring ATTN_CORE when a request is refused
+//                    [5] BORROW_EN   send MegaPad's writes to the chiplet
 //                    [15:8] ATTN_CORE
 //   0x08 STATUS      [0] PRESENT [1] STOPPED [2] READY [3] BUSY
 //                    [4] FAULT (write 1 to clear, with the refusal record)
 //                    [5] ID_DONE
+//                    [6] BORROW_BUSY one of MegaPad's writes is outstanding,
+//                        a cancelled one awaiting its answer included
 //                    [23:16] this port's ID   [39:32] ranges per port
 //   0x10 FAULT_ADDR  address of the first refused request since the clear
 //   0x18 FAULT_INFO  [1:0] size [2] wen [7:4] reason [15:8] len
@@ -64,6 +88,8 @@
 //   0x60 BOOT_LEN    its length in bytes
 //   0x68 BOOT_ARG    a word given to the chiplet with them: the address of
 //                    its control block
+//   0x70 WINDOW      read-only: the address at which the chiplet's address 0
+//                    appears in MegaPad's address space
 //
 // Coding standard: Verilog-2001, sync reset, non-blocking assigns.
 //
@@ -75,7 +101,9 @@ module mp64_chiplet_port #(
     parameter        RANGE_BITS = 3,      // ceil(log2(RANGES)), at least 1
     parameter [7:0]  PORT_ID    = 8'd16,  // this port's ID
     parameter [63:0] EXT_BASE   = 64'h0000_0000_0010_0000,
-    parameter [63:0] EXT_LIMIT  = 64'h0000_0000_FF00_0000
+    parameter [63:0] EXT_LIMIT  = 64'h0000_0000_FF00_0000,
+    // Base of this port's window in MegaPad's address space.
+    parameter [63:0] WINDOW_BASE = 64'h0100_0000_0000_0000
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -113,6 +141,35 @@ module mp64_chiplet_port #(
     input  wire        lk_dbr_valid,
     output wire        lk_dbr_ready,
     input  wire [7:0]  lk_dbr_dst,
+
+    // === Link: MegaPad's write (MegaPad -> chiplet) ===
+    output wire         lk_wq_valid,
+    input  wire         lk_wq_ready,
+    output wire [63:0]  lk_wq_addr,
+    output wire [511:0] lk_wq_data,
+    output wire [7:0]   lk_wq_len,     // units beyond the first
+    output wire [7:0]   lk_wq_zeros,   // units of zeros after the data
+    output wire         lk_wq_cancel,
+
+    // === Link: its answer (chiplet -> MegaPad) ===
+    input  wire         lk_wa_valid,
+    output wire         lk_wa_ready,
+    input  wire [1:0]   lk_wa_code,
+
+    // === MegaPad's writer, the TACC image stage ===
+    // bw_valid and the current unit hold until bw_ready; addr, len and zeros
+    // hold for the whole write.  The stage drops bw_valid once its last unit
+    // is taken or the write ends.  bw_done and bw_cancel_done are pulses.
+    input  wire         bw_valid,
+    output wire         bw_ready,
+    input  wire [63:0]  bw_addr,       // MegaPad's address, in this window
+    input  wire [511:0] bw_data,
+    input  wire [7:0]   bw_len,
+    input  wire [7:0]   bw_zeros,
+    input  wire         bw_cancel,     // level: abandon the outstanding write
+    output reg          bw_done,       // the write ended
+    output reg          bw_error,      // with bw_done: it failed
+    output reg          bw_cancel_done,
 
     // === Sideband ===
     input  wire        sb_present,     // a chiplet is attached
@@ -176,6 +233,7 @@ module mp64_chiplet_port #(
     localparam [3:0] R_BOOT_ADDR  = 4'hB;
     localparam [3:0] R_BOOT_LEN   = 4'hC;
     localparam [3:0] R_BOOT_ARG   = 4'hD;
+    localparam [3:0] R_WINDOW     = 4'hE;
 
     // ========================================================================
     // Registers
@@ -185,6 +243,7 @@ module mp64_chiplet_port #(
     reg        ctl_stop_req;
     reg        ctl_doorbell_en;
     reg        ctl_attn_en;
+    reg        ctl_borrow_en;
     reg [7:0]  ctl_attn_core;
 
     reg [RANGE_BITS-1:0] range_sel;
@@ -223,6 +282,152 @@ module mp64_chiplet_port #(
     assign sb_boot_arg  = boot_arg;
     assign m_weight     = qos_weight;
     assign m_bwlimit    = qos_bwlimit;
+
+    // ========================================================================
+    // MegaPad's writes into memory the chiplet lends
+    // ========================================================================
+    // WR_IDLE   no write; a new one is refused here or starts sending
+    // WR_SEND   units pass from the stage to the link as the link takes them
+    // WR_ANSWER every unit is sent; the chiplet's answer is awaited
+    // WR_DRAIN  the write has failed or been cancelled toward the stage;
+    //           cancel is held until the chiplet's answer arrives
+    localparam [1:0] WR_IDLE   = 2'd0;
+    localparam [1:0] WR_SEND   = 2'd1;
+    localparam [1:0] WR_ANSWER = 2'd2;
+    localparam [1:0] WR_DRAIN  = 2'd3;
+
+    reg [1:0] wr_state;
+    reg [7:0] wr_left;        // units after the one now offered
+    reg [7:0] wr_timer;       // cycles the chiplet has kept this phase waiting
+    reg       wr_answered;    // the stage's write ended; wait for bw_valid low
+    reg       wr_cancelled;   // the outstanding write was cancelled
+    reg       wr_cancel_seen; // this cancel is confirmed; wait for it to drop
+
+    wire wr_sending  = (wr_state == WR_SEND);
+    wire wr_waiting  = wr_sending || (wr_state == WR_ANSWER);
+    wire wr_open     = link_up && ctl_borrow_en;
+    wire wr_new      = bw_valid && !bw_cancel && !wr_answered &&
+                       (wr_state == WR_IDLE || wr_state == WR_DRAIN);
+    wire wr_cancel   = bw_cancel && !wr_cancel_seen;
+    wire wr_unit_go  = lk_wq_valid && lk_wq_ready;
+    wire wr_answer   = lk_wa_valid && lk_wa_ready;
+    // Between units the stage may take a cycle to offer the next one; those
+    // cycles are the stage's, and the bound counts only the chiplet's.
+    wire wr_stage_holds = wr_sending && !bw_valid && !bw_cancel &&
+                          !wr_cancelled;
+    // A unit taken or an answer given on the 255th cycle still counts.
+    wire wr_expired  = (wr_timer == 8'd254) && !wr_unit_go &&
+                       !wr_stage_holds;
+
+    assign lk_wq_valid  = link_up && wr_sending && bw_valid &&
+                          !bw_cancel && !wr_cancelled;
+    assign bw_ready     = lk_wq_valid && lk_wq_ready;
+    // The link carries the chiplet's own address.
+    assign lk_wq_addr   = bw_addr - WINDOW_BASE;
+    assign lk_wq_data   = bw_data;
+    assign lk_wq_len    = bw_len;
+    assign lk_wq_zeros  = bw_zeros;
+    assign lk_wq_cancel = link_up &&
+                          ((wr_state == WR_DRAIN) ||
+                           (wr_waiting && (bw_cancel || wr_cancelled)));
+    assign lk_wa_ready  = link_up && (wr_state != WR_IDLE);
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            wr_state       <= WR_IDLE;
+            wr_left        <= 8'd0;
+            wr_timer       <= 8'd0;
+            wr_answered    <= 1'b0;
+            wr_cancelled   <= 1'b0;
+            wr_cancel_seen <= 1'b0;
+            bw_done        <= 1'b0;
+            bw_error       <= 1'b0;
+            bw_cancel_done <= 1'b0;
+        end else begin
+            bw_done        <= 1'b0;
+            bw_error       <= 1'b0;
+            bw_cancel_done <= 1'b0;
+            if (!bw_valid)
+                wr_answered <= 1'b0;
+            if (!bw_cancel)
+                wr_cancel_seen <= 1'b0;
+
+            case (wr_state)
+                WR_IDLE: begin
+                    wr_timer     <= 8'd0;
+                    wr_cancelled <= 1'b0;
+                    if (wr_cancel) begin
+                        // Nothing of the stage's has left the bridge.
+                        bw_cancel_done <= 1'b1;
+                        wr_cancel_seen <= 1'b1;
+                    end else if (wr_new) begin
+                        if (!wr_open) begin
+                            // Refused here: nothing crosses the link.
+                            bw_done     <= 1'b1;
+                            bw_error    <= 1'b1;
+                            wr_answered <= 1'b1;
+                        end else begin
+                            wr_left  <= bw_len;
+                            wr_state <= WR_SEND;
+                        end
+                    end
+                end
+
+                WR_SEND, WR_ANSWER: begin
+                    if (wr_cancel)
+                        wr_cancelled <= 1'b1;
+
+                    if (!link_up || wr_answer || wr_expired) begin
+                        // (wr_expired excludes a unit taken this cycle.)
+                        // The write ends: answered, lost with a chiplet put
+                        // back into reset, or out of time.  A cancelled
+                        // write is confirmed rather than answered.
+                        if (wr_cancel || wr_cancelled) begin
+                            bw_cancel_done <= 1'b1;
+                            wr_cancel_seen <= 1'b1;
+                        end else begin
+                            bw_done  <= 1'b1;
+                            bw_error <= !link_up || !wr_answer ||
+                                        (lk_wa_code != LK_OK);
+                        end
+                        wr_answered  <= 1'b1;
+                        wr_cancelled <= 1'b0;
+                        wr_timer     <= 8'd0;
+                        // Out of time, cancel stays on the link until the
+                        // chiplet answers.
+                        wr_state <= (link_up && !wr_answer) ? WR_DRAIN
+                                                            : WR_IDLE;
+                    end else if (wr_unit_go) begin
+                        wr_timer <= 8'd0;
+                        if (wr_left == 8'd0)
+                            wr_state <= WR_ANSWER;
+                        else
+                            wr_left <= wr_left - 8'd1;
+                    end else if (!wr_stage_holds) begin
+                        wr_timer <= wr_timer + 8'd1;
+                    end
+                end
+
+                WR_DRAIN: begin
+                    if (wr_cancel) begin
+                        // The stage's write already ended.
+                        bw_cancel_done <= 1'b1;
+                        wr_cancel_seen <= 1'b1;
+                    end
+                    if (!link_up || wr_answer) begin
+                        wr_state <= WR_IDLE;
+                    end else if (wr_new) begin
+                        // Writes are refused until the answer arrives.
+                        bw_done     <= 1'b1;
+                        bw_error    <= 1'b1;
+                        wr_answered <= 1'b1;
+                    end
+                end
+
+                default: wr_state <= WR_IDLE;
+            endcase
+        end
+    end
 
     // ========================================================================
     // Request state
@@ -320,6 +525,7 @@ module mp64_chiplet_port #(
             ctl_stop_req    <= 1'b0;
             ctl_doorbell_en <= 1'b0;
             ctl_attn_en     <= 1'b0;
+            ctl_borrow_en   <= 1'b0;
             ctl_attn_core   <= 8'd0;
             range_sel       <= {RANGE_BITS{1'b0}};
             stage_base      <= 64'd0;
@@ -369,6 +575,7 @@ module mp64_chiplet_port #(
                         ctl_stop_req    <= reg_wdata[2];
                         ctl_doorbell_en <= reg_wdata[3];
                         ctl_attn_en     <= reg_wdata[4];
+                        ctl_borrow_en   <= reg_wdata[5];
                         ctl_attn_core   <= reg_wdata[15:8];
                     end
                     R_STATUS: begin
@@ -549,12 +756,14 @@ module mp64_chiplet_port #(
     always @(*) begin
         reg_rdata = 64'd0;
         case (reg_idx)
-            R_CTRL:       reg_rdata = {48'd0, ctl_attn_core, 3'd0,
+            R_CTRL:       reg_rdata = {48'd0, ctl_attn_core, 2'd0,
+                                       ctl_borrow_en,
                                        ctl_attn_en, ctl_doorbell_en,
                                        ctl_stop_req, ctl_reset_hold,
                                        ctl_enable};
             R_STATUS:     reg_rdata = {24'd0, RANGES[7:0], 8'd0, PORT_ID,
-                                       10'd0, id_done, fault,
+                                       9'd0, (wr_state != WR_IDLE),
+                                       id_done, fault,
                                        (state != ST_IDLE), sb_ready,
                                        sb_stopped, sb_present};
             R_FAULT_ADDR: reg_rdata = fault_addr;
@@ -574,6 +783,7 @@ module mp64_chiplet_port #(
             R_BOOT_ADDR:  reg_rdata = boot_addr;
             R_BOOT_LEN:   reg_rdata = boot_len;
             R_BOOT_ARG:   reg_rdata = boot_arg;
+            R_WINDOW:     reg_rdata = WINDOW_BASE;
             default:      reg_rdata = 64'd0;
         endcase
     end

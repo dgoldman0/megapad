@@ -435,6 +435,11 @@ localparam MP64_EXT_BURST_LEN     = 8;            // 8-beat = 64 bytes
 localparam [31:0] MP64_VRAM_BASE_ADDR = 32'hFF00_0000;
 localparam [31:0] MP64_VRAM_DEFAULT_SIZE = 32'h0040_0000;
 
+// Chiplet windows (docs/chiplet-link.md section 3): port p's window starts at
+// MP64_CHIPLET_WINDOW_BASE + p * 2^W, W the SoC's CHIPLET_WINDOW_BITS, and the
+// chiplet's own address a appears at the window's base plus a.
+localparam [63:0] MP64_CHIPLET_WINDOW_BASE = 64'h0100_0000_0000_0000;
+
 // MMIO
 localparam [63:0] MP64_MMIO_BASE = 64'hFFFF_FF00_0000_0000;
 localparam [31:0] MP64_MMIO_HI   = 32'hFFFF_FF00;

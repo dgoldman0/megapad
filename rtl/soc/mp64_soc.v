@@ -43,6 +43,8 @@ module mp64_soc #(
     // Port vectors keep one element when no port is built; it is unused then.
     parameter NUM_CHIPLET_PORTS = 1,
     parameter CHIPLET_RANGES    = 8,
+    // Each port's window into memory its chiplet lends is 2^W bytes.
+    parameter CHIPLET_WINDOW_BITS = 48,
     parameter CP_W = (NUM_CHIPLET_PORTS > 0) ? NUM_CHIPLET_PORTS : 1
 )(
     input  wire        sys_clk,
@@ -130,6 +132,17 @@ module mp64_soc #(
     input  wire [CP_W-1:0]    cl_dbr_valid,
     output wire [CP_W-1:0]    cl_dbr_ready,
     input  wire [CP_W*8-1:0]  cl_dbr_dst,
+    // MegaPad's writes into memory the chiplet lends, and their answers
+    output wire [CP_W-1:0]     cl_wq_valid,
+    input  wire [CP_W-1:0]     cl_wq_ready,
+    output wire [CP_W*64-1:0]  cl_wq_addr,
+    output wire [CP_W*512-1:0] cl_wq_data,
+    output wire [CP_W*8-1:0]   cl_wq_len,
+    output wire [CP_W*8-1:0]   cl_wq_zeros,
+    output wire [CP_W-1:0]     cl_wq_cancel,
+    input  wire [CP_W-1:0]     cl_wa_valid,
+    output wire [CP_W-1:0]     cl_wa_ready,
+    input  wire [CP_W*2-1:0]   cl_wa_code,
     // Sideband
     input  wire [CP_W-1:0]    cl_sb_present,
     output wire [CP_W-1:0]    cl_sb_rst_n,
@@ -560,6 +573,8 @@ module mp64_soc #(
     wire         cluster_tacc_xfer_req [0:NUM_CLUSTERS-1];
     wire         cluster_tacc_xfer_store[0:NUM_CLUSTERS-1];
     wire         cluster_tacc_xfer_ext [0:NUM_CLUSTERS-1];
+    wire         cluster_tacc_xfer_link[0:NUM_CLUSTERS-1];
+    wire [7:0]   cluster_tacc_xfer_port[0:NUM_CLUSTERS-1];
     wire [63:0]  cluster_tacc_xfer_base[0:NUM_CLUSTERS-1];
     wire [3:0]   cluster_tacc_xfer_format_ew[0:NUM_CLUSTERS-1];
     wire [7:0]   cluster_tacc_xfer_token[0:NUM_CLUSTERS-1];
@@ -592,7 +607,10 @@ module mp64_soc #(
                 .TACC_EXT_LIMIT  (EXT_MEM_LIMIT),
                 .TACC_VRAM_BASE  ({32'd0, MP64_VRAM_BASE_ADDR}),
                 .TACC_VRAM_LIMIT (VRAM_LIMIT),
-                .TACC_HBW_LIMIT  (HBW_LIMIT)
+                .TACC_HBW_LIMIT  (HBW_LIMIT),
+                .TACC_WINDOW_BASE (MP64_CHIPLET_WINDOW_BASE),
+                .TACC_WINDOW_BITS (CHIPLET_WINDOW_BITS),
+                .TACC_WINDOW_PORTS(NUM_CHIPLET_PORTS)
             ) u_cluster (
                 .clk         (sys_clk),
                 .rst         (rst_h),
@@ -643,6 +661,8 @@ module mp64_soc #(
                 .tacc_xfer_req (cluster_tacc_xfer_req[ki]),
                 .tacc_xfer_store(cluster_tacc_xfer_store[ki]),
                 .tacc_xfer_ext (cluster_tacc_xfer_ext[ki]),
+                .tacc_xfer_link(cluster_tacc_xfer_link[ki]),
+                .tacc_xfer_port(cluster_tacc_xfer_port[ki]),
                 .tacc_xfer_base(cluster_tacc_xfer_base[ki]),
                 .tacc_xfer_format_ew(
                     cluster_tacc_xfer_format_ew[ki]),
@@ -1205,6 +1225,8 @@ module mp64_soc #(
     wire        core_tacc_xfer_req [0:NUM_CORES-1];
     wire        core_tacc_xfer_store[0:NUM_CORES-1];
     wire        core_tacc_xfer_ext [0:NUM_CORES-1];
+    wire        core_tacc_xfer_link[0:NUM_CORES-1];
+    wire [7:0]  core_tacc_xfer_port[0:NUM_CORES-1];
     wire [63:0] core_tacc_xfer_base[0:NUM_CORES-1];
     wire [3:0]  core_tacc_xfer_format_ew[0:NUM_CORES-1];
     wire [7:0]  core_tacc_xfer_token[0:NUM_CORES-1];
@@ -1238,6 +1260,8 @@ module mp64_soc #(
     wire [TILE_SOURCE_COUNT-1:0] tacc_stage_req;
     wire [TILE_SOURCE_COUNT-1:0] tacc_stage_store;
     wire [TILE_SOURCE_COUNT-1:0] tacc_stage_ext;
+    wire [TILE_SOURCE_COUNT-1:0] tacc_stage_link;
+    wire [TILE_SOURCE_COUNT*8-1:0] tacc_stage_port;
     wire [TILE_SOURCE_COUNT*64-1:0] tacc_stage_base;
     wire [TILE_SOURCE_COUNT*4-1:0] tacc_stage_format_ew;
     wire [TILE_SOURCE_COUNT*8-1:0] tacc_stage_token;
@@ -1303,6 +1327,8 @@ module mp64_soc #(
             assign tacc_stage_req[tai] = core_tacc_xfer_req[tai];
             assign tacc_stage_store[tai] = core_tacc_xfer_store[tai];
             assign tacc_stage_ext[tai] = core_tacc_xfer_ext[tai];
+            assign tacc_stage_link[tai] = core_tacc_xfer_link[tai];
+            assign tacc_stage_port[tai*8 +: 8] = core_tacc_xfer_port[tai];
             assign tacc_stage_base[tai*64 +: 64] =
                 core_tacc_xfer_base[tai];
             assign tacc_stage_format_ew[tai*4 +: 4] =
@@ -1383,6 +1409,10 @@ module mp64_soc #(
                 cluster_tacc_xfer_store[tai];
             assign tacc_stage_ext[TILE_LANE] =
                 cluster_tacc_xfer_ext[tai];
+            assign tacc_stage_link[TILE_LANE] =
+                cluster_tacc_xfer_link[tai];
+            assign tacc_stage_port[TILE_LANE*8 +: 8] =
+                cluster_tacc_xfer_port[tai];
             assign tacc_stage_base[TILE_LANE*64 +: 64] =
                 cluster_tacc_xfer_base[tai];
             assign tacc_stage_format_ew[TILE_LANE*4 +: 4] =
@@ -1428,6 +1458,20 @@ module mp64_soc #(
         tacc_port_cancel | cluster_disable_cancel |
         tile_engine_source_cancel;
 
+    // A STORE into a chiplet's window leaves the stage as one write to the
+    // bridge of its port (Chiplet Ports section below).
+    wire         tacc_link_valid;
+    wire         tacc_link_ready;
+    wire [7:0]   tacc_link_port;
+    wire [63:0]  tacc_link_addr;
+    wire [511:0] tacc_link_data;
+    wire [7:0]   tacc_link_len;
+    wire [7:0]   tacc_link_zeros;
+    wire         tacc_link_cancel;
+    wire         tacc_link_done;
+    wire         tacc_link_error;
+    wire         tacc_link_cancel_done;
+
     mp64_tacc_transfer #(
         .SOURCE_COUNT(TILE_SOURCE_COUNT),
         .OWNER_BITS  (TILE_OWNER_BITS),
@@ -1438,6 +1482,8 @@ module mp64_soc #(
         .req                (tacc_stage_req),
         .req_store          (tacc_stage_store),
         .req_ext            (tacc_stage_ext),
+        .req_link           (tacc_stage_link),
+        .req_port           (tacc_stage_port),
         .req_base           (tacc_stage_base),
         .req_format_ew      (tacc_stage_format_ew),
         .req_token          (tacc_stage_token),
@@ -1461,7 +1507,18 @@ module mp64_soc #(
         .response_token     (tacc_stage_response_token),
         .response_fault     (tacc_stage_fault),
         .response_fault_addr(tacc_stage_fault_addr),
-        .result_image       (tacc_stage_result_image)
+        .result_image       (tacc_stage_result_image),
+        .link_valid         (tacc_link_valid),
+        .link_ready         (tacc_link_ready),
+        .link_port          (tacc_link_port),
+        .link_addr          (tacc_link_addr),
+        .link_data          (tacc_link_data),
+        .link_len           (tacc_link_len),
+        .link_zeros         (tacc_link_zeros),
+        .link_cancel        (tacc_link_cancel),
+        .link_done          (tacc_link_done),
+        .link_error         (tacc_link_error),
+        .link_cancel_done   (tacc_link_cancel_done)
     );
 
     mp64_tile_port_arbiter #(
@@ -1558,7 +1615,10 @@ module mp64_soc #(
                     .TACC_VRAM_BASE   (
                         {32'd0, MP64_VRAM_BASE_ADDR}),
                     .TACC_VRAM_LIMIT  (VRAM_LIMIT),
-                    .TACC_HBW_LIMIT   (HBW_LIMIT)
+                    .TACC_HBW_LIMIT   (HBW_LIMIT),
+                    .TACC_WINDOW_BASE (MP64_CHIPLET_WINDOW_BASE),
+                    .TACC_WINDOW_BITS (CHIPLET_WINDOW_BITS),
+                    .TACC_WINDOW_PORTS(NUM_CHIPLET_PORTS)
                 ) u_tile (
                     .clk       (sys_clk),
                     .rst_n     (sys_rst_n),
@@ -1610,6 +1670,8 @@ module mp64_soc #(
                     .tacc_xfer_req (core_tacc_xfer_req[fti]),
                     .tacc_xfer_store(core_tacc_xfer_store[fti]),
                     .tacc_xfer_ext (core_tacc_xfer_ext[fti]),
+                    .tacc_xfer_link(core_tacc_xfer_link[fti]),
+                    .tacc_xfer_port(core_tacc_xfer_port[fti]),
                     .tacc_xfer_base(core_tacc_xfer_base[fti]),
                     .tacc_xfer_format_ew(
                         core_tacc_xfer_format_ew[fti]),
@@ -1676,6 +1738,12 @@ module mp64_soc #(
     initial begin
         if (NUM_CORES < 1 || NUM_CORES > FULL_TILE_SOURCE_COUNT)
             $fatal(1, "mp64_soc supports one to four full cores");
+        // The windows must hold an image and fit below twice their base.
+        if (NUM_CHIPLET_PORTS > 0 &&
+            (CHIPLET_WINDOW_BITS < 8 ||
+             (NUM_CHIPLET_PORTS * (65'd1 << CHIPLET_WINDOW_BITS)) >
+                 {1'b0, MP64_CHIPLET_WINDOW_BASE}))
+            $fatal(1, "mp64_soc: chiplet windows do not fit their space");
         if (NUM_CLUSTERS < 1 || NUM_CLUSTERS > 3)
             $fatal(1, "mp64_soc supports one to three microclusters");
     end
@@ -2009,7 +2077,8 @@ module mp64_soc #(
     // One bridge per port.  The window at CHIPLET_BASE holds three shared
     // registers and, from +0x80, the register block of the selected port:
     //   +0x00 PORT_COUNT   [7:0] ports built  [15:8] ID of port 0
-    //                      [23:16] lent ranges per port         (read-only)
+    //                      [23:16] lent ranges per port
+    //                      [31:24] W, each window being 2^W bytes (read-only)
     //   +0x08 PORT_SEL     port whose block appears at +0x80
     //   +0x10 EXT_CORE_QOS [7:0] the core path's weight at external memory
     //   +0x80 ...          the selected port's block (mp64_chiplet_port.v)
@@ -2030,6 +2099,18 @@ module mp64_soc #(
     wire chiplet_sel_shared = mmio_sel_chiplet && !mmio_addr_eff[7];
     wire chiplet_sel_block  = mmio_sel_chiplet &&  mmio_addr_eff[7];
 
+    // The image stage's write goes to the bridge of its port, and only that
+    // bridge answers it.
+    wire [CP_W-1:0] cp_bw_sel;
+    wire [CP_W-1:0] cp_bw_ready;
+    wire [CP_W-1:0] cp_bw_done;
+    wire [CP_W-1:0] cp_bw_error;
+    wire [CP_W-1:0] cp_bw_cancel_done;
+    assign tacc_link_ready       = |(cp_bw_ready & cp_bw_sel);
+    assign tacc_link_done        = |(cp_bw_done & cp_bw_sel);
+    assign tacc_link_error       = |(cp_bw_error & cp_bw_sel);
+    assign tacc_link_cancel_done = |(cp_bw_cancel_done & cp_bw_sel);
+
     always @(posedge sys_clk) begin
         if (!sys_rst_n) begin
             chiplet_port_sel <= 8'd0;
@@ -2046,13 +2127,18 @@ module mp64_soc #(
     genvar cpi;
     generate
         for (cpi = 0; cpi < CP_W; cpi = cpi + 1) begin : g_chiplet_port
+            assign cp_bw_sel[cpi] = (tacc_link_port == cpi);
             if (NUM_CHIPLET_PORTS > 0) begin : g_port
+                localparam [63:0] PORT_WINDOW =
+                    MP64_CHIPLET_WINDOW_BASE +
+                    ((64'd0 + cpi) << CHIPLET_WINDOW_BITS);
                 mp64_chiplet_port #(
                     .RANGES     (CHIPLET_RANGES),
                     .RANGE_BITS (CP_RANGE_BITS),
                     .PORT_ID    (CHIPLET_ID_BASE + cpi),
                     .EXT_BASE   ({32'd0, EXT_MEM_BASE}),
-                    .EXT_LIMIT  (EXT_MEM_LIMIT)
+                    .EXT_LIMIT  (EXT_MEM_LIMIT),
+                    .WINDOW_BASE(PORT_WINDOW)
                 ) u_port (
                     .clk          (sys_clk),
                     .rst_n        (sys_rst_n),
@@ -2081,6 +2167,26 @@ module mp64_soc #(
                     .lk_dbr_valid (cl_dbr_valid[cpi]),
                     .lk_dbr_ready (cl_dbr_ready[cpi]),
                     .lk_dbr_dst   (cl_dbr_dst[cpi*8 +: 8]),
+                    .lk_wq_valid  (cl_wq_valid[cpi]),
+                    .lk_wq_ready  (cl_wq_ready[cpi]),
+                    .lk_wq_addr   (cl_wq_addr[cpi*64 +: 64]),
+                    .lk_wq_data   (cl_wq_data[cpi*512 +: 512]),
+                    .lk_wq_len    (cl_wq_len[cpi*8 +: 8]),
+                    .lk_wq_zeros  (cl_wq_zeros[cpi*8 +: 8]),
+                    .lk_wq_cancel (cl_wq_cancel[cpi]),
+                    .lk_wa_valid  (cl_wa_valid[cpi]),
+                    .lk_wa_ready  (cl_wa_ready[cpi]),
+                    .lk_wa_code   (cl_wa_code[cpi*2 +: 2]),
+                    .bw_valid     (tacc_link_valid && cp_bw_sel[cpi]),
+                    .bw_ready     (cp_bw_ready[cpi]),
+                    .bw_addr      (tacc_link_addr),
+                    .bw_data      (tacc_link_data),
+                    .bw_len       (tacc_link_len),
+                    .bw_zeros     (tacc_link_zeros),
+                    .bw_cancel    (tacc_link_cancel && cp_bw_sel[cpi]),
+                    .bw_done      (cp_bw_done[cpi]),
+                    .bw_error     (cp_bw_error[cpi]),
+                    .bw_cancel_done(cp_bw_cancel_done[cpi]),
                     .sb_present   (cl_sb_present[cpi]),
                     .sb_rst_n     (cl_sb_rst_n[cpi]),
                     .sb_stop_req  (cl_sb_stop_req[cpi]),
@@ -2123,6 +2229,17 @@ module mp64_soc #(
                 assign cl_dbt_valid[cpi]             = 1'b0;
                 assign cl_dbt_src[cpi*8 +: 8]        = 8'd0;
                 assign cl_dbr_ready[cpi]             = 1'b0;
+                assign cl_wq_valid[cpi]              = 1'b0;
+                assign cl_wq_addr[cpi*64 +: 64]      = 64'd0;
+                assign cl_wq_data[cpi*512 +: 512]    = 512'd0;
+                assign cl_wq_len[cpi*8 +: 8]         = 8'd0;
+                assign cl_wq_zeros[cpi*8 +: 8]       = 8'd0;
+                assign cl_wq_cancel[cpi]             = 1'b0;
+                assign cl_wa_ready[cpi]              = 1'b0;
+                assign cp_bw_ready[cpi]              = 1'b0;
+                assign cp_bw_done[cpi]               = 1'b0;
+                assign cp_bw_error[cpi]              = 1'b0;
+                assign cp_bw_cancel_done[cpi]        = 1'b0;
                 assign cl_sb_rst_n[cpi]              = 1'b0;
                 assign cl_sb_stop_req[cpi]           = 1'b0;
                 assign cl_sb_id_req[cpi]             = 1'b0;
@@ -2157,7 +2274,8 @@ module mp64_soc #(
                 chiplet_rdata = cp_reg_rdata[chiplet_port_sel*64 +: 64];
         end else begin
             case (mmio_addr_eff[6:3])
-                4'h0: chiplet_rdata = {40'd0, CHIPLET_RANGES[7:0],
+                4'h0: chiplet_rdata = {32'd0, CHIPLET_WINDOW_BITS[7:0],
+                                       CHIPLET_RANGES[7:0],
                                        CHIPLET_ID_BASE,
                                        NUM_CHIPLET_PORTS[7:0]};
                 4'h1: chiplet_rdata = {56'd0, chiplet_port_sel};
@@ -2428,7 +2546,8 @@ module mp64_soc #(
         //   0x68  NUM_BUS_PORTS — weighted-arbiter requester count, including
         //                           the physical WOTS requester slot
         //   0x70  CHIPLET_PORTS — [7:0] chiplet ports built, [15:8] ID of
-        //                           port 0, [23:16] lent ranges per port; the
+        //                           port 0, [23:16] lent ranges per port,
+        //                           [31:24] W of the 2^W-byte windows; the
         //                           value of PORT_COUNT in the port window,
         //                           and zero on a die built without ports,
         //                           whose window answers nothing
@@ -2449,7 +2568,8 @@ module mp64_soc #(
                 4'hC: mmio_rdata_mux = CRYPTO_CAPS;              // 0x60
                 4'hD: mmio_rdata_mux = N_BUS_PORTS;              // 0x68
                 4'hE: mmio_rdata_mux = (NUM_CHIPLET_PORTS > 0)   // 0x70
-                          ? {40'd0, CHIPLET_RANGES[7:0], CHIPLET_ID_BASE,
+                          ? {32'd0, CHIPLET_WINDOW_BITS[7:0],
+                             CHIPLET_RANGES[7:0], CHIPLET_ID_BASE,
                              NUM_CHIPLET_PORTS[7:0]}
                           : 64'd0;
                 default: mmio_rdata_mux = 64'd0;

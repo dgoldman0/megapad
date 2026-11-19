@@ -7,7 +7,10 @@
 // the mailbox.  Covers admission against lent ranges and external memory,
 // the refusal record and its attention ring, staged range installation,
 // memory errors, cancellation, doorbells in both directions, the sideband,
-// and the behaviour of a port whose chiplet returns to reset.
+// and the behaviour of a port whose chiplet returns to reset.  A stand-in
+// for the TACC image stage drives MegaPad's writes into memory the chiplet
+// lends: BORROW_EN, the units and zeros, each answer code, the 255-cycle
+// bounds and the drain that follows them, cancellation and reset.
 //
 
 `timescale 1ns/1ps
@@ -107,12 +110,30 @@ module tb_chiplet_port;
     wire        mb_take_valid, mb_send_valid;
     wire [7:0]  mb_take_src, mb_send_dst;
 
+    // MegaPad's writes: the link side and the stage side.
+    wire         lk_wq_valid, lk_wq_cancel, lk_wa_ready;
+    wire [63:0]  lk_wq_addr;
+    wire [511:0] lk_wq_data;
+    wire [7:0]   lk_wq_len, lk_wq_zeros;
+    reg          lk_wq_ready, lk_wa_valid;
+    reg  [1:0]   lk_wa_code;
+    wire         bw_valid, bw_ready, bw_done, bw_error, bw_cancel_done;
+    wire [511:0] bw_data;
+    reg  [63:0]  bw_addr;
+    reg  [7:0]   bw_len, bw_zeros;
+    reg          bw_cancel;
+
+    localparam [63:0] WINDOW_BASE = 64'h0100_0000_0000_0000;
+    localparam [63:0] CTL_BORROW  = 64'h20;
+    localparam [3:0]  R_WINDOW    = 4'hE;
+
     mp64_chiplet_port #(
         .RANGES    (6),
         .RANGE_BITS(3),
         .PORT_ID   (8'd16),
         .EXT_BASE  (64'h0000_0000_0010_0000),
-        .EXT_LIMIT (64'h0000_0000_0800_0000)
+        .EXT_LIMIT (64'h0000_0000_0800_0000),
+        .WINDOW_BASE(WINDOW_BASE)
     ) dut (
         .clk(clk), .rst_n(rst_n),
         .reg_sel(reg_sel), .reg_wen(reg_wen), .reg_idx(reg_addr[6:3]),
@@ -128,6 +149,16 @@ module tb_chiplet_port;
         .lk_dbt_src(lk_dbt_src),
         .lk_dbr_valid(lk_dbr_valid), .lk_dbr_ready(lk_dbr_ready),
         .lk_dbr_dst(lk_dbr_dst),
+        .lk_wq_valid(lk_wq_valid), .lk_wq_ready(lk_wq_ready),
+        .lk_wq_addr(lk_wq_addr), .lk_wq_data(lk_wq_data),
+        .lk_wq_len(lk_wq_len), .lk_wq_zeros(lk_wq_zeros),
+        .lk_wq_cancel(lk_wq_cancel),
+        .lk_wa_valid(lk_wa_valid), .lk_wa_ready(lk_wa_ready),
+        .lk_wa_code(lk_wa_code),
+        .bw_valid(bw_valid), .bw_ready(bw_ready), .bw_addr(bw_addr),
+        .bw_data(bw_data), .bw_len(bw_len), .bw_zeros(bw_zeros),
+        .bw_cancel(bw_cancel), .bw_done(bw_done), .bw_error(bw_error),
+        .bw_cancel_done(bw_cancel_done),
         .sb_present(sb_present), .sb_rst_n(sb_rst_n),
         .sb_stop_req(sb_stop_req), .sb_stopped(sb_stopped),
         .sb_ready(sb_ready), .sb_id_req(sb_id_req),
@@ -195,6 +226,147 @@ module tb_chiplet_port;
             last_take_src = mb_take_src;
         end
     end
+
+    // ------------------------------------------------------------------
+    // MegaPad's writes: a stand-in for the image stage and a behavioural
+    // chiplet target.  The stage offers units 0..s_len, unit n holding
+    // 64-bit words 0xDA7A_00nn_0000_00ww, and drops bw_valid after its last
+    // unit is taken or the write ends.  The target records what it takes.
+    // ------------------------------------------------------------------
+    reg        s_go;
+    reg        s_busy;
+    integer    s_next;
+    reg        s_done, s_error, s_cancel_done;
+    integer    t_units;           // units the target took in this write
+    integer    wq_cycles;         // cycles lk_wq_valid was high
+    reg [63:0] t_addr;
+    reg [7:0]  t_len, t_zeros;
+    reg [511:0] t_unit [0:7];
+    integer    wi;
+    integer    cyc;               // clock count, kept by the stand-in
+    integer    wq_first;          // cycle lk_wq_valid first rose in the write
+    integer    end_cyc;           // cycle the stage saw the write end
+    initial cyc = 0;
+
+    function [511:0] unit_data;
+        input integer n;
+        integer w;
+        begin
+            for (w = 0; w < 8; w = w + 1)
+                unit_data[w*64 +: 64] = 64'hDA7A_0000_0000_0000 |
+                                        (n << 32) | w;
+        end
+    endfunction
+
+    assign bw_valid = s_busy;
+    assign bw_data  = unit_data(s_next);
+
+    always @(posedge clk) begin
+        cyc = cyc + 1;
+        if (!rst_n) begin
+            s_busy <= 1'b0;
+            s_next <= 0;
+        end else begin
+            if (s_go) begin
+                s_busy <= 1'b1;
+                s_next <= 0;
+            end else if (bw_valid && bw_ready) begin
+                if (s_next == bw_len)
+                    s_busy <= 1'b0;
+                s_next <= s_next + 1;
+            end
+            if (bw_done) begin
+                s_busy  <= 1'b0;
+                s_done  = 1'b1;
+                s_error = bw_error;
+                end_cyc = cyc;
+            end
+            if (bw_cancel_done) begin
+                s_busy <= 1'b0;
+                s_cancel_done = 1'b1;
+                end_cyc = cyc;
+            end
+            if (lk_wq_valid) begin
+                if (wq_cycles == 0)
+                    wq_first = cyc;
+                wq_cycles = wq_cycles + 1;
+            end
+            if (lk_wq_valid && lk_wq_ready) begin
+                if (t_units == 0) begin
+                    t_addr  = lk_wq_addr;
+                    t_len   = lk_wq_len;
+                    t_zeros = lk_wq_zeros;
+                end
+                if (t_units < 8)
+                    t_unit[t_units] = lk_wq_data;
+                t_units = t_units + 1;
+            end
+        end
+    end
+
+    // addr is the chiplet's address; the stage names it in the window.
+    task start_write;
+        input [63:0] addr;
+        input [7:0]  len;
+        input [7:0]  zeros;
+        begin
+            @(posedge clk);
+            bw_addr <= WINDOW_BASE + addr; bw_len <= len; bw_zeros <= zeros;
+            s_done = 1'b0; s_error = 1'b0; s_cancel_done = 1'b0;
+            t_units = 0; wq_cycles = 0; wq_first = 0; end_cyc = 0;
+            s_go <= 1'b1;
+            @(posedge clk);
+            s_go <= 1'b0;
+        end
+    endtask
+
+    function units_in_order;
+        input integer n;
+        integer k;
+        begin
+            units_in_order = 1'b1;
+            for (k = 0; k < n; k = k + 1)
+                if (t_unit[k] != unit_data(k))
+                    units_in_order = 1'b0;
+        end
+    endfunction
+
+    // The chiplet answers the outstanding write.
+    task answer;
+        input [1:0] code;
+        begin
+            @(posedge clk);
+            lk_wa_valid <= 1'b1; lk_wa_code <= code;
+            guard = 0;
+            @(posedge clk);
+            while (!lk_wa_ready && guard < 100) begin
+                @(posedge clk); guard = guard + 1;
+            end
+            lk_wa_valid <= 1'b0;
+            #1;
+        end
+    endtask
+
+    task wait_units;
+        input integer n;
+        begin
+            guard = 0;
+            while (t_units < n && guard < 1000) begin
+                @(posedge clk); guard = guard + 1;
+            end
+            #1;
+        end
+    endtask
+
+    task wait_end;
+        begin
+            guard = 0;
+            while (!s_done && !s_cancel_done && guard < 2000) begin
+                @(posedge clk); guard = guard + 1;
+            end
+            #1;
+        end
+    endtask
 
     // ------------------------------------------------------------------
     // Register and link tasks
@@ -394,6 +566,11 @@ module tb_chiplet_port;
         sb_present = 1'b1; sb_stopped = 0; sb_ready = 0;
         sb_id_ack = 0; sb_id_data = 0;
         mb_db_valid = 0; mb_db_src = 0;
+        s_go = 1'b0; bw_cancel = 1'b0;
+        bw_addr = 64'd0; bw_len = 8'd0; bw_zeros = 8'd0;
+        s_done = 1'b0; s_error = 1'b0; s_cancel_done = 1'b0;
+        t_units = 0; wq_cycles = 0; wq_first = 0; end_cyc = 0;
+        lk_wq_ready = 1'b1; lk_wa_valid = 1'b0; lk_wa_code = LK_OK;
         repeat (5) @(posedge clk);
         rst_n = 1'b1;
         repeat (3) @(posedge clk);
@@ -726,6 +903,163 @@ module tb_chiplet_port;
         mem_fail = 1'b0;
         link_access(64'h0030_0000, 64'd0, 1'b0, 2'd3, 0);
         check("single accesses still work after bursts", rs_code == LK_OK);
+
+        // --------------------------------------------------------------
+        $display("\nMegaPad's writes into memory the chiplet lends");
+        reg_read(R_WINDOW);
+        check("WINDOW holds the base of the port's window",
+              rd == WINDOW_BASE);
+        reg_read(R_CTRL);
+        check("BORROW_EN is clear until software sets it", rd[5] == 1'b0);
+        start_write(64'h1000, 8'd3, 8'd0);
+        wait_end;
+        check("with BORROW_EN clear the bridge refuses a write",
+              s_done && s_error && !s_cancel_done);
+        check("and nothing of it crosses the link",
+              wq_cycles == 0 && t_units == 0);
+
+        reg_write(R_CTRL, CTL_ENABLE | CTL_BORROW);
+        reg_read(R_CTRL);
+        check("BORROW_EN reads back", rd[5] == 1'b1);
+        start_write(64'h1000, 8'd3, 8'd0);
+        wait_units(4);
+        check("four units cross in order",
+              t_units == 4 && units_in_order(4));
+        check("the write carries the chiplet's address, its length and zeros",
+              t_addr == 64'h1000 && t_len == 8'd3 && t_zeros == 8'd0);
+        reg_read(R_STATUS);
+        check("BORROW_BUSY is set while the answer is awaited",
+              rd[6] == 1'b1);
+        check("the write does not end before its answer",
+              !s_done && !s_cancel_done);
+        answer(LK_OK);
+        wait_end;
+        check("the chiplet's OK ends the write without error",
+              s_done && !s_error);
+        reg_read(R_STATUS);
+        check("BORROW_BUSY clears with the answer", rd[6] == 1'b0);
+
+        start_write(64'h2040, 8'd0, 8'd3);
+        wait_units(1);
+        answer(LK_OK);
+        wait_end;
+        check("a write of one unit carries three units of zeros",
+              t_units == 1 && units_in_order(1) && t_addr == 64'h2040 &&
+              t_len == 8'd0 && t_zeros == 8'd3);
+        check("and ends without error", s_done && !s_error);
+
+        @(posedge clk); lk_wq_ready <= 1'b0;
+        start_write(64'h3000, 8'd3, 8'd0);
+        repeat (5) @(posedge clk);
+        answer(LK_REFUSED);
+        wait_end;
+        check("a REFUSED answer before the units ends the write in error",
+              s_done && s_error && t_units == 0);
+        prev_n = wq_cycles;
+        repeat (5) @(posedge clk);
+        check("and no unit is offered after it",
+              wq_cycles == prev_n && lk_wq_valid == 1'b0);
+        @(posedge clk); lk_wq_ready <= 1'b1;
+
+        start_write(64'h3000, 8'd1, 8'd2);
+        wait_units(2);
+        answer(LK_MEM_ERROR);
+        wait_end;
+        check("a MEM_ERROR answer ends the write in error",
+              s_done && s_error && t_units == 2);
+
+        @(posedge clk); lk_wq_ready <= 1'b0;
+        start_write(64'h4000, 8'd1, 8'd2);
+        wait_end;
+        check("a unit the chiplet leaves untaken ends the write in error",
+              s_done && s_error && t_units == 0);
+        check("after the chiplet has had it for 255 cycles",
+              end_cyc - wq_first == 255);
+        check("the bridge then holds cancel on the link",
+              lk_wq_cancel == 1'b1 && lk_wq_valid == 1'b0);
+        reg_read(R_STATUS);
+        check("and BORROW_BUSY until the chiplet answers", rd[6] == 1'b1);
+        start_write(64'h5000, 8'd0, 8'd3);
+        wait_end;
+        check("a write meanwhile is refused without crossing the link",
+              s_done && s_error && wq_cycles == 0);
+        answer(LK_CANCELLED);
+        repeat (2) @(posedge clk);
+        check("the late answer releases cancel", lk_wq_cancel == 1'b0);
+        reg_read(R_STATUS);
+        check("and BORROW_BUSY", rd[6] == 1'b0);
+        @(posedge clk); lk_wq_ready <= 1'b1;
+        start_write(64'h5000, 8'd0, 8'd3);
+        wait_units(1);
+        answer(LK_OK);
+        wait_end;
+        check("the next write completes",
+              s_done && !s_error && t_units == 1);
+
+        start_write(64'h6000, 8'd0, 8'd3);
+        wait_end;
+        check("an answer missing for 255 cycles ends the write in error",
+              s_done && s_error && t_units == 1);
+        check("and the bridge holds cancel", lk_wq_cancel == 1'b1);
+        answer(LK_OK);
+        repeat (2) @(posedge clk);
+        check("until the late answer arrives", lk_wq_cancel == 1'b0);
+
+        @(posedge clk); lk_wq_ready <= 1'b0;
+        start_write(64'h7000, 8'd3, 8'd0);
+        repeat (4) @(posedge clk);
+        bw_cancel <= 1'b1;
+        repeat (2) @(posedge clk);
+        check("cancel withdraws the offered unit and signals the chiplet",
+              lk_wq_valid == 1'b0 && lk_wq_cancel == 1'b1);
+        check("the cancelled write waits for its answer",
+              !s_cancel_done && !s_done);
+        answer(LK_CANCELLED);
+        wait_end;
+        check("the answer confirms the cancel, and the write reports no end",
+              s_cancel_done && !s_done);
+        @(posedge clk); bw_cancel <= 1'b0; lk_wq_ready <= 1'b1;
+        repeat (2) @(posedge clk);
+        check("cancel leaves the link", lk_wq_cancel == 1'b0);
+
+        s_done = 1'b0; s_cancel_done = 1'b0; wq_cycles = 0;
+        @(posedge clk); bw_cancel <= 1'b1;
+        wait_end;
+        check("a cancel with no write outstanding is confirmed by the bridge",
+              s_cancel_done && !s_done && wq_cycles == 0 &&
+              lk_wq_cancel == 1'b0);
+        @(posedge clk); bw_cancel <= 1'b0;
+
+        @(posedge clk); lk_wq_ready <= 1'b0;
+        start_write(64'h8000, 8'd3, 8'd0);
+        repeat (4) @(posedge clk);
+        reg_write(R_CTRL, CTL_ENABLE | CTL_BORROW | CTL_RESET);
+        wait_end;
+        check("a chiplet put back into reset ends the write in error",
+              s_done && s_error);
+        reg_read(R_STATUS);
+        check("and leaves the port free of it", rd[6] == 1'b0);
+        start_write(64'h8000, 8'd0, 8'd3);
+        wait_end;
+        check("a write to a chiplet held in reset is refused at the bridge",
+              s_done && s_error && wq_cycles == 0);
+        @(posedge clk); lk_wq_ready <= 1'b1;
+        reg_write(R_CTRL, CTL_ENABLE | CTL_BORROW);
+        start_write(64'h8000, 8'd0, 8'd3);
+        wait_units(1);
+        answer(LK_OK);
+        wait_end;
+        check("released again, the port carries writes", s_done && !s_error);
+
+        @(posedge clk); lk_wq_ready <= 1'b0;
+        start_write(64'h9000, 8'd0, 8'd3);
+        repeat (200) @(posedge clk);
+        lk_wq_ready <= 1'b1;
+        wait_units(1);
+        answer(LK_OK);
+        wait_end;
+        check("a unit taken after 200 cycles of waiting still completes",
+              s_done && !s_error && t_units == 1);
 
         $display("\n============================================");
         $display(" tb_chiplet_port: %0d passed, %0d failed",

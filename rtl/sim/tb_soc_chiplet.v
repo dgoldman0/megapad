@@ -13,7 +13,12 @@
 //   - the core path and the chiplet sharing external memory;
 //   - doorbells in both directions through the mailbox, with the IPI line
 //     and the external flag;
-//   - the sideband: reset, identity and the boot words.
+//   - the sideband: reset, identity and the boot words;
+//   - a TACC.STORE whose image lies in the port's window, from core 0's tile
+//     engine through the image stage and the bridge to the chiplet, which
+//     holds the image before a doorbell rung after the store; and the
+//     faults of a closed port, a refusing chiplet, a LOAD from the window
+//     and a core's access there.
 //
 
 `timescale 1ns / 1ps
@@ -102,6 +107,70 @@ module tb_soc_chiplet;
     reg  [63:0] cl_sb_id_data;
     wire [63:0] cl_sb_boot_addr, cl_sb_boot_len, cl_sb_boot_arg;
 
+    // MegaPad's writes into the memory the chiplet lends.  The chiplet keeps
+    // 16 units of 64 bytes at its own addresses 0x4000-0x43FF.  It answers
+    // with t_code: OK after taking every unit and writing the data and the
+    // zeros, any other code at once, taking no unit and writing nothing.
+    wire         cl_wq_valid, cl_wq_cancel, cl_wa_ready;
+    wire [63:0]  cl_wq_addr;
+    wire [511:0] cl_wq_data;
+    wire [7:0]   cl_wq_len, cl_wq_zeros;
+    reg          cl_wa_valid;
+    reg  [1:0]   cl_wa_code;
+    localparam [63:0] LENT_BASE = 64'h4000;
+    reg  [511:0] lent [0:15];
+    reg  [1:0]   t_code;
+    reg          t_answering;
+    integer      t_units, t_wait, t_writes, t_unit_count;
+    integer      cyc, answer_cyc, dbt_cyc;
+    integer      li, lz;
+    wire cl_wq_ready = (t_code == 2'd0) && !t_answering;
+
+    initial begin
+        cyc = 0; answer_cyc = 0; dbt_cyc = 0;
+        for (li = 0; li < 16; li = li + 1) lent[li] = 512'd0;
+    end
+
+    always @(posedge clk) begin
+        cyc = cyc + 1;
+        if (cl_dbt_valid && dbt_cyc == 0)
+            dbt_cyc = cyc;
+        if (!rst_n) begin
+            t_units = 0; t_answering = 1'b0; t_writes = 0; t_unit_count = 0;
+            cl_wa_valid <= 1'b0; cl_wa_code <= 2'd0;
+        end else begin
+            if (cl_wq_valid && cl_wq_ready) begin
+                lent[(cl_wq_addr - LENT_BASE) / 64 + t_units] = cl_wq_data;
+                t_units = t_units + 1;
+                t_unit_count = t_unit_count + 1;
+                if (t_units == cl_wq_len + 1) begin
+                    for (lz = 0; lz < cl_wq_zeros; lz = lz + 1)
+                        lent[(cl_wq_addr - LENT_BASE) / 64 + t_units + lz] =
+                            512'd0;
+                    t_answering = 1'b1;
+                    t_wait = 3;
+                end
+            end else if (cl_wq_valid && t_code != 2'd0 && !t_answering) begin
+                t_answering = 1'b1;
+                t_wait = 0;
+            end
+            if (t_answering) begin
+                if (t_wait > 0) begin
+                    t_wait = t_wait - 1;
+                end else if (!cl_wa_valid) begin
+                    cl_wa_valid <= 1'b1;
+                    cl_wa_code  <= t_code;
+                end else if (cl_wa_ready) begin
+                    cl_wa_valid <= 1'b0;
+                    t_answering = 1'b0;
+                    t_units = 0;
+                    t_writes = t_writes + 1;
+                    answer_cyc = cyc;
+                end
+            end
+        end
+    end
+
     // The chiplet's identity record: word n reads "LM1" and n.
     always @(posedge clk) begin
         cl_sb_id_ack <= 1'b0;
@@ -152,6 +221,12 @@ module tb_soc_chiplet;
         .cl_dbt_src(cl_dbt_src),
         .cl_dbr_valid(cl_dbr_valid), .cl_dbr_ready(cl_dbr_ready),
         .cl_dbr_dst(cl_dbr_dst),
+        .cl_wq_valid(cl_wq_valid), .cl_wq_ready(cl_wq_ready),
+        .cl_wq_addr(cl_wq_addr), .cl_wq_data(cl_wq_data),
+        .cl_wq_len(cl_wq_len), .cl_wq_zeros(cl_wq_zeros),
+        .cl_wq_cancel(cl_wq_cancel),
+        .cl_wa_valid(cl_wa_valid), .cl_wa_ready(cl_wa_ready),
+        .cl_wa_code(cl_wa_code),
         .cl_sb_present(1'b1), .cl_sb_rst_n(cl_sb_rst_n),
         .cl_sb_stop_req(cl_sb_stop_req), .cl_sb_stopped(1'b0),
         .cl_sb_ready(1'b1), .cl_sb_id_req(cl_sb_id_req),
@@ -205,6 +280,7 @@ module tb_soc_chiplet;
     localparam [11:0] P_ID_INDEX = 12'hEC8, P_ID_DATA = 12'hED0;
     localparam [11:0] P_BOOT_ADDR = 12'hED8, P_BOOT_LEN = 12'hEE0,
                       P_BOOT_ARG = 12'hEE8;
+    localparam [11:0] P_WINDOW = 12'hEF0;
     localparam [11:0] MB_SEND = 12'h508, MB_STATUS = 12'h509, MB_ACK = 12'h50A;
 
     // ------------------------------------------------------------------
@@ -258,6 +334,7 @@ module tb_soc_chiplet;
 
     // One access on the core path, through the arbiter's memory seam.
     reg [63:0] core_rd;
+    reg        core_fault;
     task core_access;
         input [63:0] addr;
         input [63:0] wdata;
@@ -275,14 +352,57 @@ module tb_soc_chiplet;
                 @(posedge clk); guard = guard + 1;
             end
             core_rd = u_soc.bus_mem_rdata;
+            core_fault = u_soc.bus_mem_fault;
             @(negedge clk);
             force u_soc.bus_mem_req = 1'b0;
             repeat (2) @(posedge clk);
         end
     endtask
 
+    // Core 0's tile engine, driven at its dispatch and CSR boundary.
+    reg [2:0]  mex_f;
+    reg [63:0] mex_fa;
+    integer    mex_cycles;
+    integer    done_cyc;          // cycle count when the operation ended
+
+    task tile_csr(input [7:0] a, input [63:0] d);
+        begin
+            @(negedge clk);
+            force u_soc.core_csr_addr[0]  = a;
+            force u_soc.core_csr_wdata[0] = d;
+            force u_soc.core_csr_wen[0]   = 1'b1;
+            @(negedge clk);
+            force u_soc.core_csr_wen[0]   = 1'b0;
+        end
+    endtask
+
+    // One TACC lifecycle operation; returns its fault and fault address.
+    task tacc_op(input [2:0] funct);
+        begin
+            @(negedge clk);
+            force u_soc.core_mex_funct[0]      = funct;
+            force u_soc.core_mex_funct_byte[0] = {5'd0, funct};
+            force u_soc.core_mex_valid[0]      = 1'b1;
+            @(negedge clk);
+            force u_soc.core_mex_valid[0]      = 1'b0;
+            mex_cycles = 1;
+            while (!u_soc.core_mex_done[0] && mex_cycles < 2000) begin
+                @(negedge clk); mex_cycles = mex_cycles + 1;
+            end
+            mex_f  = u_soc.core_mex_fault[0];
+            mex_fa = u_soc.core_mex_fault_addr[0];
+            done_cyc = cyc;
+            @(negedge clk);
+        end
+    endtask
+
+    function [511:0] unit_of(input [7:0] tag);
+        unit_of = {64{tag}};
+    endfunction
+
     integer prev_n;
     localparam [7:0] PORT_ID = 8'd3;      // one full core and two microcores
+    localparam [63:0] WINDOW = 64'h0100_0000_0000_0000;
 
     initial begin
         pass_count = 0; fail_count = 0; phy_launches = 0;
@@ -292,6 +412,7 @@ module tb_soc_chiplet;
         cl_rq_len = 8'd0;
         cl_dbt_ready = 0; cl_dbr_valid = 0; cl_dbr_dst = 0;
         cl_sb_id_ack = 0; cl_sb_id_data = 0;
+        t_code = 2'd0;
 
         // Hold every core in reset and take the arbiter's seams.
         force u_soc.core_domain_reset   = 1'b1;
@@ -310,8 +431,9 @@ module tb_soc_chiplet;
 
         $display("\nThe register window");
         reg_rd(W_COUNT);
-        check("PORT_COUNT reports one port, ID 3, eight ranges",
-              mmio_acked && mmio_rd == {40'd0, 8'd8, PORT_ID, 8'd1});
+        check("PORT_COUNT reports one port, ID 3, eight ranges, W = 48",
+              mmio_acked &&
+              mmio_rd == {32'd0, 8'd48, 8'd8, PORT_ID, 8'd1});
         mmio_access(W_COUNT, 64'd0, 1'b0, BUS_WORD);
         check("a narrower access to the window goes unanswered",
               mmio_acked === 1'b0);
@@ -461,6 +583,147 @@ module tb_soc_chiplet;
         repeat (2) @(posedge clk);
         check("the small core's acknowledgement clears them",
               u_soc.ipi_out == 3'b000 && u_soc.mbox_ef == 3'b000);
+
+
+        $display("\nTACC.STORE into memory the chiplet lends");
+        reg_rd(P_WINDOW);
+        check("WINDOW reads the base of port 0's window",
+              mmio_acked && mmio_rd == WINDOW);
+        prev_n = phy_launches;
+        core_access(WINDOW + LENT_BASE, 64'd0, 1'b0);
+        check("a core's load from the window is a bus fault",
+              core_fault == 1'b1);
+        check("and reaches neither the PHY nor the chiplet",
+              phy_launches == prev_n && t_unit_count == 0);
+
+        // Core 0 leaves reset with its fetch held off; the bench drives its
+        // tile engine's dispatch and CSR boundary.
+        force u_soc.cpu_icache_req[0]      = 1'b0;
+        force u_soc.core_mex_valid[0]      = 1'b0;
+        force u_soc.core_mex_ss[0]         = 2'd0;
+        force u_soc.core_mex_op[0]         = MEX_TSYS;
+        force u_soc.core_mex_funct[0]      = ETSYS_TACC_TRY;
+        force u_soc.core_mex_funct_byte[0] = {5'd0, ETSYS_TACC_TRY};
+        force u_soc.core_mex_ext_mod[0]    = 4'd8;
+        force u_soc.core_mex_ext_active[0] = 1'b1;
+        force u_soc.core_mex_gpr_val[0]    = 64'd0;
+        force u_soc.core_mex_imm8[0]       = 8'd0;
+        force u_soc.core_csr_wen[0]        = 1'b0;
+        force u_soc.core_legacy_acc_wen[0] = 4'b0000;
+        release u_soc.core_domain_reset;
+        repeat (4) @(posedge clk);
+
+        u_soc.u_memory.g_bank[0].u_sram.mem[8]  = unit_of(8'hA0);
+        u_soc.u_memory.g_bank[0].u_sram.mem[9]  = unit_of(8'hA1);
+        u_soc.u_memory.g_bank[0].u_sram.mem[10] = unit_of(8'hA2);
+        u_soc.u_memory.g_bank[0].u_sram.mem[11] = unit_of(8'hA3);
+        tacc_op(ETSYS_TACC_TRY);
+        check("core 0 claims its TACC", mex_f == MEX_FAULT_NONE);
+        tile_csr(CSR_TMODE, {60'd0, TMODE_8});
+        tile_csr(CSR_TSRC0, 64'h200);
+        tacc_op(ETSYS_TACC_LOAD);
+        check("and loads an image from Bank 0", mex_f == MEX_FAULT_NONE);
+
+        reg_wr(P_CTRL, 64'h29);              // ENABLE, DOORBELL_EN, BORROW_EN
+        reg_rd(P_CTRL);
+        check("BORROW_EN reads back", mmio_rd[5] == 1'b1);
+        for (li = 0; li < 16; li = li + 1) lent[li] = unit_of(8'hEE);
+        prev_n = phy_launches;
+        tile_csr(CSR_TDST, WINDOW + LENT_BASE + 64'h40);
+        tacc_op(ETSYS_TACC_STORE);
+        check("TACC.STORE into the window completes without a fault",
+              mex_f == MEX_FAULT_NONE);
+        $display("    (dispatch to retirement: %0d cycles, the chiplet taking",
+                 mex_cycles);
+        $display("     each unit at once and answering 3 cycles after the last)");
+        check("the chiplet took four units and answered once",
+              t_unit_count == 4 && t_writes == 1);
+        check("the chiplet holds the image at its own address 0x4040",
+              lent[1] == unit_of(8'hA0) && lent[2] == unit_of(8'hA1) &&
+              lent[3] == unit_of(8'hA2) && lent[4] == unit_of(8'hA3));
+        check("around it the chiplet's memory is untouched",
+              lent[0] == unit_of(8'hEE) && lent[5] == unit_of(8'hEE));
+        check("the image never reached external memory",
+              phy_launches == prev_n);
+        check("the store retired only after the chiplet's answer",
+              answer_cyc != 0 && answer_cyc < done_cyc);
+        dbt_cyc = 0;
+        force u_soc.bus_mmio_requester_valid = 1'b1;
+        force u_soc.bus_mmio_requester_id    = 8'd0;
+        mmio_access(MB_SEND, {56'd0, PORT_ID}, 1'b1, BUS_BYTE);
+        release u_soc.bus_mmio_requester_valid;
+        release u_soc.bus_mmio_requester_id;
+        repeat (3) @(posedge clk);
+        check("a doorbell rung after the store reaches the chiplet",
+              cl_dbt_valid == 1'b1 && dbt_cyc != 0);
+        check("after the chiplet answered for the data",
+              dbt_cyc > answer_cyc);
+        cl_dbt_ready <= 1'b1;
+        @(posedge clk);
+        cl_dbt_ready <= 1'b0;
+        repeat (2) @(posedge clk);
+        reg_rd(P_STATUS);
+        check("BORROW_BUSY is clear once the store retired",
+              mmio_rd[6] == 1'b0);
+
+        // An FP64 image is one unit; the chiplet writes three of zeros.
+        tile_csr(CSR_TMODE, {60'd0, TMODE_FP64});
+        tacc_op(ETSYS_TACC_LOAD);
+        check("an FP64 image loads", mex_f == MEX_FAULT_NONE);
+        for (li = 0; li < 16; li = li + 1) lent[li] = unit_of(8'hEE);
+        prev_n = t_unit_count;
+        tile_csr(CSR_TDST, WINDOW + LENT_BASE + 64'h100);
+        tacc_op(ETSYS_TACC_STORE);
+        check("an FP64 TACC.STORE into the window completes",
+              mex_f == MEX_FAULT_NONE);
+        $display("    (dispatch to retirement: %0d cycles)", mex_cycles);
+        check("one unit crosses the link", t_unit_count == prev_n + 1);
+        check("the destination holds the canonical image",
+              lent[4] == unit_of(8'hA0) && lent[5] == 512'd0 &&
+              lent[6] == 512'd0 && lent[7] == 512'd0 &&
+              lent[8] == unit_of(8'hEE));
+
+        // Failures end the store with a bus fault at the image base.
+        t_code = 2'd1;
+        prev_n = t_unit_count;
+        tile_csr(CSR_TDST, WINDOW + LENT_BASE + 64'h200);
+        tacc_op(ETSYS_TACC_STORE);
+        check("a refusing chiplet makes TACC.STORE a bus fault",
+              mex_f == MEX_FAULT_BUS &&
+              mex_fa == WINDOW + LENT_BASE + 64'h200);
+        check("and its memory is untouched",
+              t_unit_count == prev_n && lent[8] == unit_of(8'hEE));
+        t_code = 2'd0;
+        check("TACC stays valid after the failed store",
+              u_soc.core_tacc_status_raw[0][TACC_STATUS_BIT_VALID]);
+
+        reg_wr(P_CTRL, 64'h09);              // BORROW_EN clear
+        prev_n = t_writes;
+        tacc_op(ETSYS_TACC_STORE);
+        check("with BORROW_EN clear TACC.STORE is a bus fault",
+              mex_f == MEX_FAULT_BUS &&
+              mex_fa == WINDOW + LENT_BASE + 64'h200);
+        check("and nothing crosses the link", t_writes == prev_n);
+        reg_wr(P_CTRL, 64'h29);
+
+        tile_csr(CSR_TSRC0, WINDOW + LENT_BASE);
+        prev_n = t_writes;
+        tacc_op(ETSYS_TACC_LOAD);
+        check("TACC.LOAD from the window is a bus fault at its base",
+              mex_f == MEX_FAULT_BUS && mex_fa == WINDOW + LENT_BASE);
+        check("and makes no link traffic", t_writes == prev_n);
+
+        tile_csr(CSR_TDST, WINDOW + 64'h0001_0000_0000_0000);
+        tacc_op(ETSYS_TACC_STORE);
+        check("a store past the last port's window is a bus fault",
+              mex_f == MEX_FAULT_BUS &&
+              mex_fa == WINDOW + 64'h0001_0000_0000_0000);
+        tile_csr(CSR_TDST, WINDOW + 64'h0000_FFFF_FFFF_FFC0);
+        tacc_op(ETSYS_TACC_STORE);
+        check("a store running off the window's end faults at that end",
+              mex_f == MEX_FAULT_BUS &&
+              mex_fa == WINDOW + 64'h0001_0000_0000_0000);
+        force u_soc.core_domain_reset = 1'b1;
 
         $display("\nReturn to reset");
         reg_wr(P_CTRL, 64'h0B);
