@@ -192,6 +192,46 @@ def test_ordinary_tile_read_uses_registered_request_grant_ack_edges():
     assert tuple(at_r_plus_two["port"]["grant_counts"]) == (1,)
 
 
+def test_ordinary_tile_read_outside_the_map_faults_at_its_ack():
+    """A tile read outside the memory map is requested and granted like any
+    other; its acknowledgement carries a bus fault, so the operation
+    publishes nothing and leaves the tile's address in TRAP_ADDR.  With no
+    vector table the system retires the faulting instruction."""
+    system = _system()
+    cpu = system.cpu
+    source = 0x1000  # just past this system's 4 KiB Bank 0
+    cpu.tmode = EW_FP16
+    cpu.tsrc0 = source
+    cpu.acc[0] = 0xA5A5_A5A5
+    cpu.regs[7] = 0
+
+    code = _BROADCAST_FP16_RMIN_R7 + assemble("halt")
+    _install(system, 0, code)
+    cpu.pc = 0
+    before = _counter_state(cpu)
+
+    captured = system.run_cycle_batch(1, max_instructions=1)
+
+    assert captured.instructions_executed == 0
+    request = dict(
+        system._native_system._tacc_transport_snapshot()
+    )["port"]["pending"][0]
+    assert request is not None
+    assert request["direction"] == "read"
+    assert request["address"] == source
+
+    acknowledged = system.run_cycle_batch(1, max_instructions=1)
+
+    assert acknowledged.instructions_executed == 1
+    assert acknowledged.per_core_stop_reasons[0][5] == 1  # one trap stop
+    assert cpu.trap_addr == source
+    assert cpu.acc[0] == 0xA5A5_A5A5
+    assert _counter_state(cpu) == before
+    port = dict(system._native_system._tacc_transport_snapshot())["port"]
+    assert port["grant_count"] == 1
+    assert port["pending"][0] is None
+
+
 def test_ordinary_tile_write_commits_once_at_its_registered_ack():
     system = _system()
     cpu = system.cpu

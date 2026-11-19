@@ -324,6 +324,10 @@ def test_partial_row_overlap_falls_through_to_bios_ordered_copy():
 
 def test_hook_registration_fails_fast_from_execution_callback():
     cpu = Megapad64(mem_size=64)
+    # A lone CPU has no MMIO devices: port 1 drives no bridged device, and
+    # its byte reaches only the output callback.
+    cpu.port_map[1] = 0xFFFF
+    cpu._cs.set_port_map(1, 0xFFFF)
     cpu.load_bytes(0, assemble("out1"))
     cpu.pc = 0
     rejected: list[str] = []

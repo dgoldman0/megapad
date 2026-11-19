@@ -35,15 +35,6 @@ enum class MemoryAccessPolicy : uint8_t {
     SUPERVISOR_BYTE,
 };
 
-enum class Bank0Addressing : uint8_t {
-    // Authoritative scalar operations preserve the architectural modulo
-    // alias. A span ends at the alias boundary and falls back bytewise.
-    MODULO_ALIAS,
-
-    // Preflight consumers may require a non-wrapping physical Bank 0 span.
-    BOUNDED,
-};
-
 enum class MemoryRegionKind : uint8_t {
     NONE,
     VRAM,
@@ -58,7 +49,6 @@ struct ResolvedMemorySpan {
     MemoryRegionKind region = MemoryRegionKind::NONE;
     uint8_t priority = 0;
     MemoryAccessPolicy policy = MemoryAccessPolicy::SCALAR;
-    Bank0Addressing bank0 = Bank0Addressing::MODULO_ALIAS;
 
     explicit operator bool() const noexcept {
         return data != nullptr;
@@ -93,8 +83,7 @@ inline ResolvedMemorySpan explicit_region(
         uint64_t address,
         MemoryRegionKind region,
         uint8_t priority,
-        MemoryAccessPolicy policy,
-        Bank0Addressing bank0) noexcept {
+        MemoryAccessPolicy policy) noexcept {
     if (!data || !region_contains(base, size, address))
         return {};
     const uint64_t offset = address - base;
@@ -104,7 +93,6 @@ inline ResolvedMemorySpan explicit_region(
         region,
         priority,
         policy,
-        bank0,
     };
 }
 
@@ -137,14 +125,15 @@ inline void cap_at_guest_wrap(
 }  // namespace detail
 
 // Resolve the maximum directly contiguous extent from one guest address.
-// The result selects a region once, stops before a Bank 0 alias boundary or
-// guest-address wrap, and caps the extent at the first higher-priority
-// aperture. Callers retain MMIO, privilege, and bus-transaction policy.
+// The result selects a region once, stops before guest-address wrap, and
+// caps the extent at the first higher-priority aperture. An address in no
+// region resolves to nothing: it lies outside the memory map, and the
+// caller faults the access. Callers retain MMIO, privilege, and
+// bus-transaction policy.
 inline ResolvedMemorySpan resolve_memory_span(
         const GuestMemoryMap& memory,
         uint64_t address,
-        MemoryAccessPolicy policy,
-        Bank0Addressing bank0) noexcept {
+        MemoryAccessPolicy policy) noexcept {
     ResolvedMemorySpan resolved;
     if (policy == MemoryAccessPolicy::SCALAR) {
         resolved = detail::explicit_region(
@@ -154,8 +143,7 @@ inline ResolvedMemorySpan resolve_memory_span(
             address,
             MemoryRegionKind::VRAM,
             0,
-            policy,
-            bank0);
+            policy);
         if (!resolved) {
             resolved = detail::explicit_region(
                 memory.ext_mem,
@@ -164,8 +152,7 @@ inline ResolvedMemorySpan resolve_memory_span(
                 address,
                 MemoryRegionKind::EXTERNAL,
                 1,
-                policy,
-                bank0);
+                policy);
         }
         if (!resolved) {
             resolved = detail::explicit_region(
@@ -175,8 +162,7 @@ inline ResolvedMemorySpan resolve_memory_span(
                 address,
                 MemoryRegionKind::HBW,
                 2,
-                policy,
-                bank0);
+                policy);
         }
     } else {
         resolved = detail::explicit_region(
@@ -186,8 +172,7 @@ inline ResolvedMemorySpan resolve_memory_span(
             address,
             MemoryRegionKind::HBW,
             0,
-            policy,
-            bank0);
+            policy);
         if (!resolved) {
             resolved = detail::explicit_region(
                 memory.ext_mem,
@@ -196,8 +181,7 @@ inline ResolvedMemorySpan resolve_memory_span(
                 address,
                 MemoryRegionKind::EXTERNAL,
                 1,
-                policy,
-                bank0);
+                policy);
         }
         if (!resolved) {
             resolved = detail::explicit_region(
@@ -207,42 +191,19 @@ inline ResolvedMemorySpan resolve_memory_span(
                 address,
                 MemoryRegionKind::VRAM,
                 2,
-                policy,
-                bank0);
+                policy);
         }
     }
 
-    if (!resolved && memory.mem && memory.mem_size != 0) {
-        uint64_t offset = address;
-        if (bank0 == Bank0Addressing::MODULO_ALIAS) {
-            if (address >= memory.mem_size) {
-                // Preserve aliases through the exact byte route. Wider
-                // callers see a one-byte extent and retain bytewise modulo
-                // resolution even when this particular alias would happen
-                // to remain contiguous in the host buffer.
-                offset %= memory.mem_size;
-                resolved = {
-                    memory.mem + offset,
-                    1,
-                    MemoryRegionKind::BANK0,
-                    3,
-                    policy,
-                    bank0,
-                };
-            }
-        } else if (address >= memory.mem_size) {
-            return {};
-        }
-        if (!resolved) {
-            resolved = {
-                memory.mem + offset,
-                memory.mem_size - offset,
-                MemoryRegionKind::BANK0,
-                3,
-                policy,
-                bank0,
-            };
-        }
+    if (!resolved) {
+        resolved = detail::explicit_region(
+            memory.mem,
+            0,
+            memory.mem_size,
+            address,
+            MemoryRegionKind::BANK0,
+            3,
+            policy);
     }
     if (!resolved)
         return {};

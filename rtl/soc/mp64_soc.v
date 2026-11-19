@@ -861,6 +861,8 @@ module mp64_soc #(
     wire [1:0]  bus_mem_size;
     wire [63:0] bus_mem_rdata;
     wire        bus_mem_ack;
+    // The memory subsystem's answer to an address outside the memory map.
+    wire        bus_mem_fault;
 
     wire        bus_mmio_req;
     wire [11:0] bus_mmio_addr;
@@ -903,10 +905,9 @@ module mp64_soc #(
         .mem_size  (bus_mem_size),
         .mem_rdata (bus_mem_rdata),
         .mem_ack   (bus_mem_ack),
-        // Bank 0 SRAM has no target-fault source.  The explicit response-code
-        // seam remains available to the WOTS controller and focused fault
-        // injection without conflating a target fault with bus timeout.
-        .mem_resp_code(BUS_RESP_OK),
+        // An address outside the memory map is a target fault, distinct
+        // from a bus timeout.  External-memory errors still answer OK.
+        .mem_resp_code(bus_mem_fault ? BUS_RESP_TARGET_FAULT : BUS_RESP_OK),
 
         .mmio_req   (bus_mmio_req),
         .mmio_addr  (bus_mmio_addr),
@@ -950,7 +951,11 @@ module mp64_soc #(
     wire        mem_ext_ack;
 
     mp64_memory #(
-        .BANK_DEPTH (MEM_DEPTH)
+        .BANK_DEPTH (MEM_DEPTH),
+        .EXT_BASE   ({32'd0, EXT_MEM_BASE}),
+        .EXT_LIMIT  (EXT_MEM_LIMIT),
+        .VRAM_BASE  ({32'd0, MP64_VRAM_BASE_ADDR}),
+        .VRAM_LIMIT (VRAM_LIMIT)
     ) u_memory (
         .clk       (sys_clk),
         .rst_n     (sys_rst_n),
@@ -963,6 +968,7 @@ module mp64_soc #(
         .cpu_size  (bus_mem_size),
         .cpu_rdata (bus_mem_rdata),
         .cpu_ack   (bus_mem_ack),
+        .cpu_fault (bus_mem_fault),
 
         // Tile port (from tile engine)
         .tile_req  (tile_mem_req),
@@ -1000,6 +1006,49 @@ module mp64_soc #(
     wire        ext_tile_error;
     wire [63:0] ext_tile_fault_addr;
     wire        ext_tile_word_done;
+
+    // The tile engines route every address that is not in a bank to this
+    // port.  Only a 64-byte span wholly inside external memory or the video
+    // window reaches the controller, which keeps the low 32 address bits.
+    // Any other span lies outside the memory map: it is answered here, in
+    // the cycle after the request, with an error at its address and no
+    // memory traffic, and its engine takes a bus fault.
+    wire [64:0] ext_tile_end = {1'b0, ext_tile_addr} + 65'd64;
+    wire ext_tile_mapped =
+        ((ext_tile_addr >= {32'd0, EXT_MEM_BASE}) &&
+         (ext_tile_end <= {1'b0, EXT_MEM_LIMIT})) ||
+        ((ext_tile_addr >= {32'd0, MP64_VRAM_BASE_ADDR}) &&
+         (ext_tile_end <= {1'b0, VRAM_LIMIT}));
+    wire        xm_tile_accept;
+    wire        xm_tile_ack;
+    wire        xm_tile_error;
+    wire [63:0] xm_tile_fault_addr;
+    reg         unmapped_tile_resp;
+    reg         unmapped_tile_seen;
+    reg  [63:0] unmapped_tile_addr;
+
+    always @(posedge sys_clk) begin
+        if (!sys_rst_n) begin
+            unmapped_tile_resp <= 1'b0;
+            unmapped_tile_seen <= 1'b0;
+            unmapped_tile_addr <= 64'd0;
+        end else begin
+            unmapped_tile_resp <= 1'b0;
+            if (!ext_tile_req)
+                unmapped_tile_seen <= 1'b0;
+            if (ext_tile_req && !ext_tile_mapped && !unmapped_tile_seen) begin
+                unmapped_tile_resp <= 1'b1;
+                unmapped_tile_seen <= 1'b1;
+                unmapped_tile_addr <= ext_tile_addr;
+            end
+        end
+    end
+
+    assign ext_tile_accept = xm_tile_accept | unmapped_tile_resp;
+    assign ext_tile_ack    = xm_tile_ack    | unmapped_tile_resp;
+    assign ext_tile_error  = xm_tile_error  | unmapped_tile_resp;
+    assign ext_tile_fault_addr =
+        unmapped_tile_resp ? unmapped_tile_addr : xm_tile_fault_addr;
 
     // PHY interface (internal 32-bit addr + phy_ack)
     wire        extmem_phy_req;
@@ -1095,17 +1144,17 @@ module mp64_soc #(
         .cpu_ack   (xm_ack),
         .cpu_error (xm_error),
 
-        // Tile port
-        .tile_req  (ext_tile_req),
+        // Tile port: mapped spans only (see ext_tile_mapped above)
+        .tile_req  (ext_tile_req && ext_tile_mapped),
         .tile_addr (ext_tile_addr[31:0]),
         .tile_wdata(ext_tile_wdata),
         .tile_wen  (ext_tile_wen),
         .tile_cancel(ext_tile_cancel),
-        .tile_accept(ext_tile_accept),
+        .tile_accept(xm_tile_accept),
         .tile_rdata(ext_tile_rdata),
-        .tile_ack  (ext_tile_ack),
-        .tile_error(ext_tile_error),
-        .tile_fault_addr(ext_tile_fault_addr),
+        .tile_ack  (xm_tile_ack),
+        .tile_error(xm_tile_error),
+        .tile_fault_addr(xm_tile_fault_addr),
         .tile_word_done(ext_tile_word_done),
 
         // PHY

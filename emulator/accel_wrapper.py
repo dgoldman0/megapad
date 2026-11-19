@@ -461,51 +461,57 @@ def {_attr}(self, v):
 
     # ── Memory access ────────────────────────────────────
     # These are the methods that system.py monkey-patches for MMIO.
-    # They start as direct C++ buffer access (fast path) and get
-    # replaced by patched_read8/write8 closures in system.py.
+    # They reach Bank 0 directly; the native core and system.py's patched
+    # closures serve every other region.  An access that leaves Bank 0
+    # reaches no memory here: it lies outside the memory map and raises
+    # IVEC_BUS_FAULT at its address.
+
+    def _bank0_offset(self, addr: int, width: int) -> int:
+        a = u64(addr)
+        if a + width > self.mem_size:
+            self.trap_addr = a
+            raise TrapError(
+                IVEC_BUS_FAULT,
+                f"Bus fault @ {a:#018x}: outside the memory map",
+            )
+        return a
 
     def mem_read8(self, addr: int) -> int:
-        return self.mem[u64(addr) % self.mem_size]
+        return self.mem[self._bank0_offset(addr, 1)]
 
     def mem_write8(self, addr: int, val: int):
-        self.mem[u64(addr) % self.mem_size] = val & 0xFF
-        self._cs.icache_invalidate_span(u64(addr), 1)
+        a = self._bank0_offset(addr, 1)
+        self.mem[a] = val & 0xFF
+        self._cs.icache_invalidate_span(a, 1)
+
+    def _read_bank0(self, addr: int, width: int) -> int:
+        a = self._bank0_offset(addr, width)
+        return int.from_bytes(self.mem[a:a + width], "little")
+
+    def _write_bank0(self, addr: int, width: int, val: int):
+        a = self._bank0_offset(addr, width)
+        self.mem[a:a + width] = (
+            val & ((1 << (8 * width)) - 1)
+        ).to_bytes(width, "little")
+        self._cs.icache_invalidate_span(a, width)
 
     def mem_read16(self, addr: int) -> int:
-        a = u64(addr) % self.mem_size
-        return self.mem[a] | (self.mem[(a+1) % self.mem_size] << 8)
+        return self._read_bank0(addr, 2)
 
     def mem_write16(self, addr: int, val: int):
-        a = u64(addr) % self.mem_size
-        self.mem[a] = val & 0xFF
-        self.mem[(a+1) % self.mem_size] = (val >> 8) & 0xFF
-        self._cs.icache_invalidate_span(u64(addr), 2)
+        self._write_bank0(addr, 2, val)
 
     def mem_read32(self, addr: int) -> int:
-        a = u64(addr) % self.mem_size
-        v = 0
-        for i in range(4):
-            v |= self.mem[(a+i) % self.mem_size] << (8*i)
-        return v
+        return self._read_bank0(addr, 4)
 
     def mem_write32(self, addr: int, val: int):
-        a = u64(addr) % self.mem_size
-        for i in range(4):
-            self.mem[(a+i) % self.mem_size] = (val >> (8*i)) & 0xFF
-        self._cs.icache_invalidate_span(u64(addr), 4)
+        self._write_bank0(addr, 4, val)
 
     def mem_read64(self, addr: int) -> int:
-        a = u64(addr) % self.mem_size
-        v = 0
-        for i in range(8):
-            v |= self.mem[(a+i) % self.mem_size] << (8*i)
-        return v
+        return self._read_bank0(addr, 8)
 
     def mem_write64(self, addr: int, val: int):
-        a = u64(addr) % self.mem_size
-        for i in range(8):
-            self.mem[(a+i) % self.mem_size] = (val >> (8*i)) & 0xFF
-        self._cs.icache_invalidate_span(u64(addr), 8)
+        self._write_bank0(addr, 8, val)
 
     # -- Stack helpers --
 

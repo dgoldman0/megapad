@@ -16,6 +16,9 @@
 //   9.  Held CPU requests execute once (internal RMW and external forward)
 //  10.  Concurrent tile + CPU on different banks
 //  11.  Invalid tile requests accept and return a precise terminal error
+//  12.  CPU accesses outside the memory map fault without traffic: above the
+//       map, past a bank's rows, and between the video window and the HBW
+//       banks; the video window is still forwarded
 //
 
 `timescale 1ns/1ps
@@ -44,6 +47,7 @@ module tb_memory;
     reg  [1:0]   cpu_size;
     wire [63:0]  cpu_rdata;
     wire         cpu_ack;
+    wire         cpu_fault;
 
     reg          tile_req;
     reg  [31:0]  tile_addr;
@@ -132,6 +136,7 @@ module tb_memory;
         .cpu_size  (cpu_size),
         .cpu_rdata (cpu_rdata),
         .cpu_ack   (cpu_ack),
+        .cpu_fault (cpu_fault),
         .tile_req  (tile_req),
         .tile_addr (tile_addr),
         .tile_wen  (tile_wen),
@@ -220,6 +225,49 @@ module tb_memory;
             rdata = cpu_rdata;
             @(negedge clk);
             cpu_req <= 1'b0;
+        end
+    endtask
+
+    // An access outside the memory map: one ACK with CPU_FAULT, read data
+    // zero, no SRAM enable and no external request, however long REQ stays
+    // high.
+    task unmapped_access;
+        input [63:0]  addr;
+        input         wen;
+        input [255:0] label;
+        integer wd;
+        integer faults;
+        integer ce_before;
+        integer rises_before;
+        begin
+            ce_before    = bank0_ce_count;
+            rises_before = ext_req_rise_count;
+            faults       = 0;
+            @(negedge clk);
+            cpu_req   <= 1'b1;
+            cpu_addr  <= addr;
+            cpu_wdata <= 64'hDEAD_0000_0000_0001;
+            cpu_wen   <= wen;
+            cpu_size  <= SZ_DWORD;
+            wd = 0;
+            while (!cpu_ack && wd < 50) begin
+                @(posedge clk); #1;
+                wd = wd + 1;
+            end
+            check({label, ": ACK carries the fault"},
+                  cpu_ack && cpu_fault && cpu_rdata == 64'd0);
+            repeat (6) begin
+                if (cpu_fault) faults = faults + 1;
+                @(posedge clk); #1;
+            end
+            check({label, ": one fault while REQ is held"}, faults == 1);
+            check({label, ": no SRAM or external traffic"},
+                  bank0_ce_count == ce_before &&
+                  ext_req_rise_count == rises_before && !ext_req);
+            @(negedge clk);
+            cpu_req <= 1'b0;
+            cpu_wen <= 1'b0;
+            @(negedge clk);
         end
     endtask
 
@@ -534,6 +582,80 @@ module tb_memory;
 
         tile_read(32'hFFD0_0080, rd512);
         check("concurrent tile data", rd512 == {8{64'h1111_C0CC}});
+
+        // ---- Test 12: Accesses outside the memory map ----
+        $display("--- Test 12: Outside the memory map ---");
+        unmapped_access(64'h4000_0000_0010_0000, 1'b1,
+                        "above the map");
+        // BANK_DEPTH 64 gives 4 KiB banks: the rest of the 1 MiB slot is
+        // no memory, where the old decode aliased bank rows.
+        unmapped_access(64'h0000_0000_0000_1000, 1'b1,
+                        "past Bank 0's rows");
+        unmapped_access(64'h0000_0000_FFD0_2000, 1'b0,
+                        "past an HBW bank's rows");
+        unmapped_access(64'h0000_0000_FF40_0000, 1'b0,
+                        "between video and HBW");
+        // The old decode wrapped 0x1000 onto Bank 0's first word.
+        cpu_read(64'h0000_0000_0000_0000, SZ_DWORD, rd64);
+        check("Bank 0's first word is untouched by the faulted write",
+              rd64 == 64'h0000_0000_0000_A000);
+
+        // The video window is forwarded to the external controller.
+        begin : blk_t12_vram
+            integer wd;
+            integer rises_before;
+            rises_before = ext_req_rise_count;
+            @(negedge clk);
+            cpu_req  <= 1'b1;
+            cpu_addr <= 64'h0000_0000_FF00_0040;
+            cpu_wen  <= 1'b0;
+            cpu_size <= SZ_DWORD;
+            wd = 0;
+            while (!ext_req && wd < 50) begin
+                @(posedge clk); #1;
+                wd = wd + 1;
+            end
+            check("video window access is forwarded",
+                  ext_req && ext_addr == 64'h0000_0000_FF00_0040);
+            @(negedge clk);
+            ext_rdata <= 64'h0000_0000_5EE0_0001;
+            ext_ack   <= 1'b1;
+            @(posedge clk); #1;
+            check("forwarded video read answers without a fault",
+                  cpu_ack && !cpu_fault &&
+                  cpu_rdata == 64'h0000_0000_5EE0_0001);
+            @(negedge clk);
+            ext_ack <= 1'b0;
+            cpu_req <= 1'b0;
+            @(negedge clk);
+            check("video window access makes one external request",
+                  ext_req_rise_count == rises_before + 1);
+        end
+
+        // The tile port answers past a bank's rows with an error.
+        begin : blk_t12_tile
+            integer ce_before;
+            ce_before = tile_ce_count;
+            @(negedge clk);
+            tile_req   <= 1'b1;
+            tile_addr  <= 32'h0000_1000;
+            tile_wdata <= {8{64'hBAD1_BAD1_BAD1_BAD1}};
+            tile_wen   <= 1'b1;
+            @(posedge clk); #1;
+            @(posedge clk); #1;
+            check("tile access past Bank 0's rows reports an error",
+                  tile_ack && tile_error &&
+                  tile_fault_addr == 64'h0000_0000_0000_1000);
+            check("faulted tile write never enables SRAM",
+                  tile_ce_count == ce_before);
+            @(negedge clk);
+            tile_req <= 1'b0;
+            tile_wen <= 1'b0;
+            @(negedge clk);
+        end
+        tile_read(32'h0000_0000, rd512);
+        check("Bank 0 row 0 keeps its pattern after the faulted tile write",
+              rd512[63:0] == 64'h0000_0000_0000_A000);
 
         // ================================================================
         // Summary

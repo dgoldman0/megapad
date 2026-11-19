@@ -162,8 +162,13 @@ The machine memory layer selects a region once and returns a bounded resolved
 span containing the host pointer, available extent, selected priority, access
 policy, and any generation needed for safe reuse. It proves guest-address
 non-wrap and higher-priority aperture nonintersection algebraically. Exact
-bytewise resolution remains the slow path for Bank 0 aliases, aperture edges,
-wrap, MMIO, privilege, and other exceptional shapes.
+bytewise resolution remains the slow path for aperture edges, wrap, MMIO,
+privilege, and other exceptional shapes. An address in no region lies outside
+the memory map and resolves to nothing; the access is a bus fault at its first
+such byte, raised before any byte moves. Until 2026-11-19 such an address
+wrapped into Bank 0 modulo its size, the flat memory of the first emulator,
+and the exact slow path preserved that alias; the RTL, the emulator and the
+hosted simulator now all fault it.
 
 ### Decoded instruction and block IR
 
@@ -322,8 +327,7 @@ remains deferred.
 - Share the proof with instruction fill, stack traffic, authoritative scalar
   operations, block preflight, and bounded storage where their access policies
   are identical.
-- Preserve modulo Bank 0 aliases and every overlap-priority edge through the
-  exact slow path.
+- Preserve every overlap-priority edge through the exact slow path.
 - Remove redundant prove-then-resolve pairs from the hot path.
 
 First-slice evidence (2026-08-27): `emulator/accel/machine/memory.h` now owns the pure,
@@ -757,7 +761,9 @@ publishes its one-instruction/one-cycle prefix, and leaves the terminal store
 untouched before normal interrupt settlement. The diagnostic adds no generated
 entry branch and changes no DBT ABI. The sequential build and 13 focused
 preflight, multi-memory, callback-prefix, interrupt, store, CALL, and RET cases
-pass.
+pass. Since 2026-11-19 that later store lies outside the memory map: the same
+preflight still makes zero block progress, ordinary execution retires the
+load, and the store faults at its address.
 
 The fourth consolidation slice resolves EK-F1 at a compact, evidence-driven
 boundary rather than expanding it into an opcode cross-product. All sixteen
@@ -1127,7 +1133,11 @@ wrap, Bank 0 aliasing, aperture crossings, and any incomplete proof retain the
 original bytewise path. The FNV result, cache lookup or mutation, flags, and
 the helper's `length + 2` cycle charge are unchanged. Bank 0, external RAM,
 wrap, external-end, MMIO-order, MPU first-fault, empty-name, and checkpointed
-strict-replay oracles pass in the complete 23-case focused EXT.DICT file.
+strict-replay oracles pass in the complete 23-case focused EXT.DICT file. When
+Bank 0 aliasing gave way to bus faults on 2026-11-19, the wrap and
+external-end oracles became names that cross from Bank 0 into external RAM
+and from external RAM into HBW, beside a name that runs past the map and
+faults.
 
 Position-balanced `DFIND; LBR` hit loops show the intended name-length scaling.
 A six-byte Bank 0 name improved from 15.54--15.75 to 19.20--20.04 Msteps/s.

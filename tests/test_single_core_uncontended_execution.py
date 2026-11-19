@@ -4836,12 +4836,11 @@ def _run_external_natural_cross_aperture(
         ext_mem_size=4096,
     )
     base = system.ext_mem_base
-    source = base + len(system._ext_mem) - 4
+    external_end = base + len(system._ext_mem)
+    source = external_end - 4
     destination = base + 0x303
-    external_tail = bytes.fromhex("10 32 54 76")
-    system.load_binary(source, external_tail)
+    system.load_binary(source, bytes.fromhex("10 32 54 76"))
     system.load_binary(destination, b"\xEE" * 8)
-    expected = external_tail + bytes(system.cpu.mem[:4])
 
     owner = system._native_system
     if not reference:
@@ -4854,14 +4853,18 @@ def _run_external_natural_cross_aperture(
         {} if reference else dict(owner._stop_concurrency_profile())
     )
 
+    # The load's last four bytes lie past external memory, outside the
+    # memory map, so it faults at the first of them.  With no vector table
+    # the system retires the load without effect, and the store then copies
+    # r0's zero.
     assert copied.instructions_executed == 2
-    assert copied.system_cycles_advanced == 2
-    assert system.cpu.regs[0] == int.from_bytes(expected, "little")
+    assert system.cpu.trap_addr == external_end
+    assert system.cpu.regs[0] == 0
     assert bytes(
         system._ext_mem[
             destination - base:destination - base + 8
         ]
-    ) == expected
+    ) == bytes(8)
     signature = (
         _core_signature(system),
         bytes(system._ext_mem),
@@ -4898,17 +4901,22 @@ def _warmed_byte_copy_system(*, reference: bool) -> MegapadSystem:
     return system
 
 
-def _run_later_span_alias_fallback(
+def _run_later_span_outside_the_map(
     *,
     reference: bool,
 ) -> tuple[tuple, dict]:
+    """The warmed block's later span, the byte store, lies outside the
+    memory map: the block makes no progress, the exact path performs the
+    load, and the store faults at its address.  With no vector table the
+    system retires the faulting store without effect."""
     system = _warmed_byte_copy_system(reference=reference)
     system.load_binary(0x220, b"\xA5")
     system.load_binary(0x320, b"\xEE")
+    destination = len(system.cpu.mem) + 0x320
     system.cpu.pc = 1
     system.cpu.regs[0] = 0
     system.cpu.regs[9] = 0x220
-    system.cpu.regs[7] = len(system.cpu.mem) + 0x320
+    system.cpu.regs[7] = destination
     owner = system._native_system
     if not reference:
         owner._start_concurrency_profile()
@@ -4919,18 +4927,18 @@ def _run_later_span_alias_fallback(
     )
 
     assert stats.instructions_executed == 2
-    assert stats.system_cycles_advanced == 2
+    assert system.cpu.trap_addr == destination
     assert system.cpu.regs[0] == 0xA5
     assert system.cpu.regs[9] == 0x220
-    assert system.cpu.regs[7] == len(system.cpu.mem) + 0x320
+    assert system.cpu.regs[7] == destination
     assert system.cpu.pc == 5
-    assert system.cpu.mem[0x320] == 0xA5
+    assert system.cpu.mem[0x320] == 0xEE
     return _core_signature(system), snapshot
 
 
 def test_later_span_preflight_failure_makes_zero_block_progress() -> None:
-    fast, snapshot = _run_later_span_alias_fallback(reference=False)
-    reference, _ = _run_later_span_alias_fallback(reference=True)
+    fast, snapshot = _run_later_span_outside_the_map(reference=False)
+    reference, _ = _run_later_span_outside_the_map(reference=True)
 
     assert fast == reference
     counts = dict(snapshot["counts"])

@@ -12,6 +12,7 @@ from devices import MMIO_BASE
 from megapad64 import (
     DICT_NUM_SETS,
     DICT_NUM_WAYS,
+    IVEC_BUS_FAULT,
     IVEC_PRIV_FAULT,
     Megapad64 as PythonMegapad64,
     TrapError,
@@ -216,20 +217,30 @@ def test_dict_name_span_empty_name_keeps_one_byte_path() -> None:
     assert observed == [(3, 0xC0DE, 6, 0x01)] * 2
 
 
+_SPAN_BANK0_SIZE = 0x4000
+_SPAN_EXT_BASE = 0x10_0000
+_SPAN_EXT_SIZE = 0x20
+
+
 def _run_cross_span_name_workload(cpu_type, layout: str) -> tuple:
-    cpu = cpu_type(mem_size=0x4000)
+    """A name whose length byte ends one region and whose bytes begin the
+    next, so the instruction takes its bytewise route across the edge."""
+    cpu = cpu_type(mem_size=_SPAN_BANK0_SIZE)
     cpu.load_bytes(_SPAN_CODE_BASE, _CODE)
-    if layout == "bank0-wrap":
-        address = len(cpu.mem) - 1
+    following = bytearray(0x20)
+    following[:len(_SPAN_NAME)] = _SPAN_NAME
+    if layout == "bank0-into-external":
+        address = _SPAN_BANK0_SIZE - 1
         cpu.mem[-1] = 0xE0 | len(_SPAN_NAME)
-        cpu.mem[:len(_SPAN_NAME)] = _SPAN_NAME
+        cpu.attach_ext_mem(following, _SPAN_BANK0_SIZE, len(following))
     else:
-        aperture = bytearray(0x20)
-        cpu.attach_ext_mem(aperture, 0x10_0000, len(aperture))
-        address = 0x10_0000 + len(aperture) - 1
+        aperture = bytearray(_SPAN_EXT_SIZE)
+        cpu.attach_ext_mem(aperture, _SPAN_EXT_BASE, len(aperture))
+        address = _SPAN_EXT_BASE + len(aperture) - 1
         aperture[-1] = 0xE0 | len(_SPAN_NAME)
-        bank0_offset = (address + 1) % len(cpu.mem)
-        cpu.mem[bank0_offset:bank0_offset + len(_SPAN_NAME)] = _SPAN_NAME
+        cpu.attach_hbw(
+            following, _SPAN_EXT_BASE + _SPAN_EXT_SIZE, len(following)
+        )
 
     insert_cycles = _execute(
         cpu, _SPAN_CODE_BASE + _DINS_PC, address, 0xBEEF
@@ -245,7 +256,9 @@ def _run_cross_span_name_workload(cpu_type, layout: str) -> tuple:
     )
 
 
-@pytest.mark.parametrize("layout", ("bank0-wrap", "external-end"))
+@pytest.mark.parametrize(
+    "layout", ("bank0-into-external", "external-into-hbw")
+)
 def test_dict_name_span_cross_boundary_fallback_matches_python(
     layout: str,
 ) -> None:
@@ -257,6 +270,30 @@ def test_dict_name_span_cross_boundary_fallback_matches_python(
     assert observed == (
         (expected_cycles, expected_cycles, 0xBEEF, 1, 2 * expected_cycles),
     ) * 2
+
+
+def _run_name_past_the_map(cpu_type) -> tuple:
+    cpu = cpu_type(mem_size=_SPAN_BANK0_SIZE)
+    cpu.load_bytes(_SPAN_CODE_BASE, _CODE)
+    cpu.mem[-1] = 0xE0 | len(_SPAN_NAME)
+    with pytest.raises(TrapError) as raised:
+        _execute(
+            cpu,
+            _SPAN_CODE_BASE + _DINS_PC,
+            _SPAN_BANK0_SIZE - 1,
+            0xBEEF,
+        )
+    return raised.value.ivec_id, cpu.trap_addr
+
+
+def test_dict_name_running_past_the_map_is_a_bus_fault() -> None:
+    """A name that runs off the end of Bank 0 into no memory faults at the
+    first byte outside the map, where the old decode wrapped to Bank 0."""
+    observed = tuple(
+        _run_name_past_the_map(cpu_type)
+        for cpu_type in (PythonMegapad64, NativeMegapad64)
+    )
+    assert observed == ((IVEC_BUS_FAULT, _SPAN_BANK0_SIZE),) * 2
 
 
 def test_dict_name_span_mmio_fallback_reads_each_byte_at_same_cost() -> None:
