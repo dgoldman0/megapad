@@ -188,7 +188,8 @@ def test_release_hands_the_chiplet_its_boot_words(bench):
     assert bench.link.read64(BOOT_ADDR) == EXT_BASE + 0x100
     assert bench.link.read64(BOOT_LEN) == 40
     assert bench.link.read64(BOOT_ARG) == EXT_BASE + 0x800
-    assert bench.link.read64(0xF0) == 0
+    # The block's last slot, past WINDOW, holds no register.
+    assert bench.link.read64(0xF8) == 0
 
 
 # ---------------------------------------------------------------------------
