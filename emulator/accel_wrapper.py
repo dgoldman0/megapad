@@ -1118,33 +1118,40 @@ def {_attr}(self, v):
     # -- Load bytes --
 
     def _map_regions(self) -> list:
-        """The memory map's regions as (name, base, limit, buffer)."""
-        regions = [("Bank 0", 0, self.mem_size, self.mem)]
+        """The memory map's regions as (name, base, limit, buffer).
+
+        They come in the order in which the core's scalar accesses resolve
+        an address: VRAM, external memory, HBW, then Bank 0.  A region
+        attached over part of Bank 0 therefore holds the bytes it covers.
+        """
+        regions = []
         for name, owner, base, size in (
-            ("HBW", "_hbw_buf", "hbw_base", "hbw_size"),
-            ("external", "_ext_mem_buf", "ext_mem_base", "ext_mem_size"),
             ("VRAM", "_vram_buf", "vram_base", "vram_size"),
+            ("external", "_ext_mem_buf", "ext_mem_base", "ext_mem_size"),
+            ("HBW", "_hbw_buf", "hbw_base", "hbw_size"),
         ):
             buf = getattr(self, owner, None)
             if buf is not None and getattr(self._cs, size):
                 start = getattr(self._cs, base)
                 regions.append(
                     (name, start, start + getattr(self._cs, size), buf))
+        regions.append(("Bank 0", 0, self.mem_size, self.mem))
         return regions
 
     def load_bytes(self, addr: int, data: bytes | bytearray):
         """Write raw bytes into memory at the given address.
 
-        The bytes may run from one region into the next.  A byte outside the
-        memory map raises ValueError, naming its address and the map's
-        regions, before any byte is written.
+        Each byte lands where the core reads that address, so the bytes may
+        run from one region into the next.  A byte outside the memory map
+        raises ValueError, naming its address and the map's regions, before
+        any byte is written.
         """
         regions = self._map_regions()
         chunks = []
         pos = 0
         target = u64(addr)
         while pos < len(data):
-            for _name, base, limit, buf in regions:
+            for index, (_name, base, limit, buf) in enumerate(regions):
                 if base <= target < limit:
                     break
             else:
@@ -1152,6 +1159,10 @@ def {_attr}(self, v):
                     "load_bytes", target, len(data) - pos,
                     [region[:3] for region in regions])
             count = min(len(data) - pos, limit - target)
+            # A region that resolves first takes over where it begins.
+            for _name, first, _limit, _buf in regions[:index]:
+                if target < first < target + count:
+                    count = first - target
             chunks.append((buf, target - base, pos, count))
             pos += count
             target += count

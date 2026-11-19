@@ -245,16 +245,19 @@ def test_reference_uart_listener_preserves_ring_batch():
     assert calls == [payload]
 
 
-def test_load_binary_uses_regions_and_preserves_ram_wrap():
+def test_load_binary_uses_regions_and_refuses_bytes_past_ram():
     system = MegapadSystem(
         ram_size=64,
         hbw_size=64,
         ext_mem_size=64,
         vram_size=64,
     )
-    system.load_binary(62, b"ABCD")
-    assert bytes(system.cpu.mem[62:64]) == b"AB"
-    assert bytes(system.cpu.mem[0:2]) == b"CD"
+    before = bytes(system.cpu.mem)
+    # RAM ends at 64 and external memory starts far above it, so the load's
+    # last two bytes have no memory; it is refused before writing any byte.
+    with pytest.raises(ValueError, match="binary load at 0x0000000000000040"):
+        system.load_binary(62, b"ABCD")
+    assert bytes(system.cpu.mem) == before
 
     system.load_binary(HBW_BASE + 4, b"HBW")
     system.load_binary(EXT_MEM_BASE + 5, b"EXT")
