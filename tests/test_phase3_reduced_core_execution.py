@@ -939,13 +939,13 @@ def _scratchpad_route_boundary_signature(
     micro = cluster.cores[0]
     code = assemble("mul r1, r2")
     assert len(code) == 2
+    # The aperture's neighbours lie outside the memory map, so only the
+    # instruction's byte inside the aperture has a place to live.
     if scratchpad_first:
         address = CLUSTER_SPAD_ADDR + 0xFFFF_FFFF
         cluster.spad_write8(0xFFFF_FFFF, code[0])
-        system.load_binary(address + 1, code[1:])
     else:
         address = CLUSTER_SPAD_ADDR - 1
-        system.load_binary(address, code[:1])
         cluster.spad_write8(0, code[1])
     for cpu in system.cores:
         cpu.halted = True
@@ -955,18 +955,14 @@ def _scratchpad_route_boundary_signature(
     micro.regs[2] = 7
     micro.halted = False
 
-    stats = system.run_batch_stats(1)
+    with pytest.raises(RuntimeError, match="TRAP:BUS_FAULT"):
+        system.run_batch_stats(1)
     arbiter = system._native_system._cluster_arbiter_snapshot(0)
     return (
-        stats.instructions_executed,
-        stats.per_core_instructions,
-        stats.native_continuations,
-        system._scheduler_cursor,
+        micro.trap_addr,
         micro.pc,
         micro.regs[1],
         arbiter["grant_counts"]["mul_div"],
-        arbiter["last_grants"]["mul_div"],
-        arbiter["grant_sequence"],
     )
 
 
@@ -974,7 +970,7 @@ def _scratchpad_route_boundary_signature(
     "scratchpad_first",
     (False, True),
 )
-def test_shared_decode_routes_each_scratchpad_boundary_byte(
+def test_shared_decode_faults_at_the_byte_beyond_the_scratchpad(
     scratchpad_first: bool,
 ) -> None:
     signatures = {
@@ -994,17 +990,10 @@ def test_shared_decode_routes_each_scratchpad_boundary_byte(
         if scratchpad_first
         else CLUSTER_SPAD_ADDR - 1
     )
-    assert reference == (
-        1,
-        (0, 1, 0, 0, 0),
-        1,
-        2,
-        start + 2,
-        42,
-        1,
-        0,
-        1,
-    )
+    first_outside = start + 1 if scratchpad_first else start
+    # The fetch faults at the instruction's byte outside the map, before
+    # the multiply reaches the cluster's shared unit.
+    assert reference == (first_outside, start, 6, 0)
 
 
 @pytest.mark.parametrize(

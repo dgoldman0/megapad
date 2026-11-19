@@ -157,9 +157,10 @@ class SharedMachine(SharedSessionOwner):
         if latest_variable is None or here_variable is None:
             return [], 0
 
-        # Scalar CPU reads alias unmapped addresses into Bank 0, so validate
-        # headers against the only two regions where Forth may build words.
-        # ENTER/LEAVE-USERLAND can make the link chain alternate between them.
+        # Forth builds words in RAM and external memory alone, so headers are
+        # validated against those two regions, and a read outside the memory
+        # map faults and ends the walk. ENTER/LEAVE-USERLAND can make the link
+        # chain alternate between the two.
         system = self.session.system
         regions = [("ram", 0, int(system.ram_size))]
         if system.ext_mem_size:
@@ -304,11 +305,13 @@ class SharedMachine(SharedSessionOwner):
         registers = [int(value) for value in cpu.regs]
 
         def cells(address: int, count: int = 8) -> list[int]:
+            # A stack whose pointer sits at the top of RAM has no cells to
+            # show: the listing ends at the first cell outside the map.
             values = []
             for index in range(count):
                 try:
                     values.append(int(cpu.mem_read64(address + index * 8)))
-                except (IndexError, RuntimeError, ValueError):
+                except (IndexError, Megapad64Error, RuntimeError, ValueError):
                     break
             return values
 

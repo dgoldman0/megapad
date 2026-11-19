@@ -331,7 +331,9 @@ def test_wrapper_region_replacement_is_transactional(region: Region):
 
 def test_attachment_and_metadata_mutation_fail_fast_during_execution():
     state = _mp64_accel.CPUState()
-    program = bytearray([0x91])  # OUT1; callback runs inside step_one().
+    # OUT1, whose callback runs inside step_one(), in one whole
+    # instruction-fetch line, so the fetch stays inside the map.
+    program = bytearray([0x91]) + bytearray(15)
     replacement = bytearray([0x00])
     _attach_native(state, REGIONS[0], program, len(program))
     state.psel = 3
@@ -373,7 +375,9 @@ def test_attachment_and_metadata_mutation_fail_fast_during_execution():
 
 def test_nested_execution_on_one_state_fails_fast():
     state = _mp64_accel.CPUState()
-    program = bytearray([0x91])  # OUT1; callback runs inside step_one().
+    # OUT1, whose callback runs inside step_one(), in one whole
+    # instruction-fetch line.
+    program = bytearray([0x91]) + bytearray(15)
     state.attach_mem(program, len(program))
     state.psel = 3
     state.xsel = 2
@@ -411,7 +415,9 @@ def test_nested_execution_on_one_state_fails_fast():
 
 def test_framebuffer_render_from_execution_callback_fails_before_relocking():
     state = _mp64_accel.CPUState()
-    program = bytearray([0x91])  # OUT1; callback runs inside run_steps().
+    # OUT1, whose callback runs inside run_steps(), in one whole
+    # instruction-fetch line.
+    program = bytearray([0x91]) + bytearray(15)
     vram = bytearray([0xE0, 0x07])
     state.attach_mem(program, len(program))
     state.attach_vram(vram, REGION_BASE, len(vram))
@@ -465,7 +471,7 @@ def _call_native_once(state, entry_point):
 @pytest.mark.parametrize("entry_point", ("step_one", "run_steps"))
 def test_render_first_native_execution_waits_then_progresses(entry_point):
     state = _mp64_accel.CPUState()
-    program = bytearray([0x01])  # NOP
+    program = bytearray([0x01] * 16)  # NOPs filling one fetch line
     side = 1024
     backing = bytearray(side * side * 4)
     state.attach_mem(program, len(program))
@@ -675,19 +681,21 @@ class _JoiningBufferExporter:
 def test_buffer_acquisition_callback_can_join_execution_without_lock_cycle(
     region: Region,
 ):
+    # NOPs filling one whole instruction-fetch line, in main memory and in
+    # the exporter, which may become main memory.
     state = _mp64_accel.CPUState()
-    state.attach_mem(bytearray([0x01, 0x01]), 2)
+    state.attach_mem(bytearray([0x01] * 16), 16)
     state.psel = 3
     state.xsel = 2
     state.set_reg(3, 0)
     state.set_reg(2, 0)
     exporter = _JoiningBufferExporter(
-        bytearray([0x01, 0x01]),
+        bytearray([0x01] * 16),
         lambda: _call_native_once(state, "step_one"),
         "acquire",
     )
 
-    _attach_native(state, region, exporter, 2)
+    _attach_native(state, region, exporter, 16)
     exporter.finish_workers()
 
     assert not exporter.join_timed_out
@@ -700,19 +708,19 @@ def test_buffer_release_callback_can_join_execution_without_lock_cycle(
     region: Region,
 ):
     state = _mp64_accel.CPUState()
-    state.attach_mem(bytearray([0x01, 0x01]), 2)
+    state.attach_mem(bytearray([0x01] * 16), 16)
     state.psel = 3
     state.xsel = 2
     state.set_reg(3, 0)
     state.set_reg(2, 0)
     exporter = _JoiningBufferExporter(
-        bytearray([0x01, 0x01]),
+        bytearray([0x01] * 16),
         lambda: _call_native_once(state, "step_one"),
         "release",
     )
-    _attach_native(state, region, exporter, 2)
+    _attach_native(state, region, exporter, 16)
 
-    _attach_native(state, region, bytearray([0x01, 0x01]), 2)
+    _attach_native(state, region, bytearray([0x01] * 16), 16)
     exporter.finish_workers()
 
     assert not exporter.join_timed_out

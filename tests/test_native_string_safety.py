@@ -51,18 +51,21 @@ def test_user_bfill_cannot_use_host_memset_to_bypass_mpu():
     assert bytes(cpu.mem) == memory_before
 
 
-def test_bfill_crossing_backing_end_uses_wrapped_scalar_writes():
+def test_bfill_crossing_the_end_of_memory_faults_beyond_it():
     cpu = Megapad64(mem_size=64)
     cpu.load_bytes(16, assemble("bfill r1, r2"))
     cpu.pc = 16
     cpu.regs[1] = 63
     cpu.regs[2] = 2
     cpu.d_reg = 0x5A
+    memory_before = bytes(cpu.mem)
 
-    # EXT.STRING's prefix fetch adds one cycle to BFILL's len + 2 cost.
-    assert cpu.step() == 5
+    with pytest.raises(TrapError):
+        cpu.step()
 
-    assert cpu.mem[63] == 0x5A
-    assert cpu.mem[0] == 0x5A
-    assert cpu.regs[1] == 65
-    assert cpu.regs[2] == 0
+    # The fill leaves the 64-byte buffer only through the scalar path, which
+    # faults at the first byte outside the map: no host memset runs past the
+    # buffer, and nothing wraps onto address 0.
+    assert cpu.trap_addr == 64
+    assert len(cpu.mem) == 64
+    assert bytes(cpu.mem[:63]) == memory_before[:63]

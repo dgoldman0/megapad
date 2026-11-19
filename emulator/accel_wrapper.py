@@ -34,7 +34,7 @@ from shared.scalar_fp import FPCSR_WRITE_MASK
 from .megapad64 import (
     Megapad64 as _PyMegapad64,
     Megapad64Micro as _PyMegapad64Micro,
-    Megapad64Error, TrapError, HaltError,
+    Megapad64Error, TrapError, HaltError, outside_map_error,
     u64, s64, sign_extend, zero_extend,
     MASK64, SIGN64,
     # Condition codes
@@ -1117,11 +1117,47 @@ def {_attr}(self, v):
 
     # -- Load bytes --
 
+    def _map_regions(self) -> list:
+        """The memory map's regions as (name, base, limit, buffer)."""
+        regions = [("Bank 0", 0, self.mem_size, self.mem)]
+        for name, owner, base, size in (
+            ("HBW", "_hbw_buf", "hbw_base", "hbw_size"),
+            ("external", "_ext_mem_buf", "ext_mem_base", "ext_mem_size"),
+            ("VRAM", "_vram_buf", "vram_base", "vram_size"),
+        ):
+            buf = getattr(self, owner, None)
+            if buf is not None and getattr(self._cs, size):
+                start = getattr(self._cs, base)
+                regions.append(
+                    (name, start, start + getattr(self._cs, size), buf))
+        return regions
+
     def load_bytes(self, addr: int, data: bytes | bytearray):
-        """Write raw bytes into memory at the given address."""
+        """Write raw bytes into memory at the given address.
+
+        The bytes may run from one region into the next.  A byte outside the
+        memory map raises ValueError, naming its address and the map's
+        regions, before any byte is written.
+        """
+        regions = self._map_regions()
+        chunks = []
+        pos = 0
+        target = u64(addr)
+        while pos < len(data):
+            for _name, base, limit, buf in regions:
+                if base <= target < limit:
+                    break
+            else:
+                raise outside_map_error(
+                    "load_bytes", target, len(data) - pos,
+                    [region[:3] for region in regions])
+            count = min(len(data) - pos, limit - target)
+            chunks.append((buf, target - base, pos, count))
+            pos += count
+            target += count
         with self._cs._memory_use():
-            for i, b in enumerate(data):
-                self.mem[(addr + i) % self.mem_size] = b
+            for buf, offset, start, count in chunks:
+                buf[offset:offset + count] = data[start:start + count]
 
     # -- Debug / introspection --
 
