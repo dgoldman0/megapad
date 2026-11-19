@@ -35,6 +35,11 @@ module tb_tacc_soc;
     integer tacc_write_commit_count;
     reg     track_rr_commits;
     reg     track_tacc_commits;
+    // Writes the image stage offers a chiplet port's bridge.
+    reg     track_link_offers;
+    integer link_offers;
+    reg [7:0] link_port_seen;
+    reg [2:0] link_owner_seen;
     reg [2047:0] tacc_bank_snapshot [0:6];
     reg [63:0]   tacc_status_snapshot[0:6];
     integer snapshot_index;
@@ -180,6 +185,14 @@ module tb_tacc_soc;
         if (phy_req && !phy_req_d)
             phy_req_count = phy_req_count + 1;
         phy_req_d <= phy_req;
+    end
+
+    always @(posedge sys_clk) begin
+        if (track_link_offers && u_soc.tacc_link_valid) begin
+            link_offers = link_offers + 1;
+            link_port_seen = u_soc.tacc_link_port;
+            link_owner_seen = u_soc.u_tacc_transfer.owner;
+        end
     end
 
     // Core 0 runs TSYS.ZERO into TDST and must take a bus fault at TDST,
@@ -427,6 +440,10 @@ module tb_tacc_soc;
         tacc_write_commit_count = 0;
         track_rr_commits = 1'b0;
         track_tacc_commits = 1'b0;
+        track_link_offers = 1'b0;
+        link_offers = 0;
+        link_port_seen = 8'hFF;
+        link_owner_seen = 3'd7;
         sys_rst_n = 1'b0;
 
         // Hold CPU fetch and cluster tile producers quiescent.  The focused
@@ -988,6 +1005,54 @@ module tb_tacc_soc;
               && u_soc.g_cluster[0].u_cluster.te_tacc_status_raw[
                   TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] == 5'd4);
         clock;
+
+        // A shared engine's STORE into chiplet port 0's window leaves the
+        // image stage as a write to that port's bridge.  No chiplet is
+        // attached here, so the bridge refuses it and the STORE faults at
+        // its image base.
+        u_soc.g_cluster[0].u_cluster.u_tile.tdst = 64'h0100_0000_0000_1000;
+        link_offers = 0;
+        track_link_offers = 1'b1;
+        phy_req_count = 0;
+        force u_soc.g_cluster[0].u_cluster.te_mex_caller_id = 5'd4;
+        force u_soc.g_cluster[0].u_cluster.te_mex_caller_slot = 2'd0;
+        force u_soc.g_cluster[0].u_cluster.te_mex_caller_epoch = 8'd1;
+        force u_soc.g_cluster[0].u_cluster.te_mex_funct =
+            ETSYS_TACC_STORE;
+        force u_soc.g_cluster[0].u_cluster.te_mex_funct_byte =
+            {5'd0, ETSYS_TACC_STORE};
+        force u_soc.g_cluster[0].u_cluster.te_mex_valid = 1'b1;
+        clock;
+        force u_soc.g_cluster[0].u_cluster.te_mex_valid = 1'b0;
+        guard = 0;
+        while (!u_soc.g_cluster[0].u_cluster.te_mex_done) begin
+            clock;
+            guard = guard + 1;
+            if (guard > 100) begin
+                $display("  FAIL: timeout waiting for the window STORE");
+                fail_count = fail_count + 1;
+                $fatal(1, "cluster window STORE timeout");
+            end
+        end
+        track_link_offers = 1'b0;
+        check("a shared engine's window STORE goes to port 0's bridge",
+              link_offers != 0 && link_port_seen == 8'd0
+              && link_owner_seen == 3'd4);
+        check("with no chiplet the bridge refuses it: a fault at its base",
+              u_soc.g_cluster[0].u_cluster.te_mex_fault == MEX_FAULT_BUS
+              && u_soc.g_cluster[0].u_cluster.te_mex_fault_addr
+                    == 64'h0100_0000_0000_1000);
+        check("the window STORE reaches no external memory",
+              phy_req_count == 0);
+        clock;
+        check("the failed STORE leaves the shared TACC valid and dirty",
+              u_soc.g_cluster[0].u_cluster.te_tacc_status_raw[
+                  TACC_STATUS_BIT_VALID]
+              && u_soc.g_cluster[0].u_cluster.te_tacc_status_raw[
+                  TACC_STATUS_BIT_DIRTY]);
+        force u_soc.g_cluster[0].u_cluster.te_mex_funct = ETSYS_TACC_TRY;
+        force u_soc.g_cluster[0].u_cluster.te_mex_funct_byte =
+            {5'd0, ETSYS_TACC_TRY};
 
         // Release the four full-core domains before the existing stateless
         // memory-arbitration test, then reset its completion counters.
