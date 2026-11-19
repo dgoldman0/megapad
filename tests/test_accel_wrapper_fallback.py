@@ -22,7 +22,7 @@ from system import MegapadSystem
     ("initial_size", "replacement_size", "source_addr", "written", "expected"),
     (
         pytest.param(128, 1024, 512, 64, 64, id="grow"),
-        pytest.param(1024, 128, 96, 32, 0, id="shrink"),
+        pytest.param(1024, 128, 64, 32, 32, id="shrink"),
     ),
 )
 def test_cached_python_fallback_tracks_replacement_memory_geometry(
@@ -51,6 +51,15 @@ def test_cached_python_fallback_tracks_replacement_memory_geometry(
     assert cpu._py_fallback is cached_fallback
     assert cached_fallback.mem is replacement
     assert cached_fallback.mem_size == replacement_size
+
+    if replacement_size < initial_size:
+        # The replacement's end bounds the fallback: a tile across it lies
+        # outside the memory map, where the old geometry held memory.
+        cpu.tsrc0 = replacement_size - 32
+        cpu.pc = 0
+        with pytest.raises(TrapError) as raised:
+            cpu.step()
+        assert raised.value.ivec_id == IVEC_BUS_FAULT
 
 
 def _integer_reduction_cpu(

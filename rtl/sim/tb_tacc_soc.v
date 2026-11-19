@@ -159,6 +159,59 @@ module tb_tacc_soc;
     end
     endtask
 
+    // External-memory PHY launches; an access outside the map makes none.
+    integer phy_req_count;
+    reg     phy_req_d;
+    initial begin
+        phy_req_count = 0;
+        phy_req_d = 1'b0;
+    end
+    always @(posedge sys_clk) begin
+        if (phy_req && !phy_req_d)
+            phy_req_count = phy_req_count + 1;
+        phy_req_d <= phy_req;
+    end
+
+    // Core 0 runs TSYS.ZERO into TDST and must take a bus fault at TDST,
+    // with no SRAM write commit and no external request.
+    task unmapped_tile_store;
+        input [63:0]  address;
+        input [255:0] label;
+    begin
+        force u_soc.core_mex_op[0] = MEX_TSYS;
+        force u_soc.core_mex_funct[0] = TSYS_ZERO;
+        force u_soc.core_mex_funct_byte[0] = {5'd0, TSYS_ZERO};
+        force u_soc.core_mex_ext_mod[0] = 4'd0;
+        force u_soc.core_mex_ext_active[0] = 1'b0;
+        force u_soc.core_csr_addr[0] = CSR_TDST;
+        force u_soc.core_csr_wdata[0] = address;
+        force u_soc.core_csr_wen[0] = 1'b1;
+        clock;
+        force u_soc.core_csr_wen[0] = 1'b0;
+        phy_req_count = 0;
+        force u_soc.core_mex_valid[0] = 1'b1;
+        clock;
+        force u_soc.core_mex_valid[0] = 1'b0;
+        guard = 0;
+        while (!u_soc.core_mex_done[0]) begin
+            clock;
+            guard = guard + 1;
+            if (guard > 100) begin
+                $display("  FAIL: timeout waiting for %0s", label);
+                fail_count = fail_count + 1;
+                $fatal(1, "unmapped tile store timeout");
+            end
+        end
+        check({label, ": bus fault"},
+              u_soc.core_mex_fault[0] == MEX_FAULT_BUS);
+        check({label, ": fault address"},
+              u_soc.core_mex_fault_addr[0] == address);
+        repeat (3) clock;
+        check({label, ": no external request"}, phy_req_count == 0);
+        check({label, ": engine returns idle"}, !u_soc.core_mex_busy[0]);
+    end
+    endtask
+
     task check_tacc_domain_cleared;
         input [511:0] label;
         input integer domain;
@@ -1038,6 +1091,48 @@ module tb_tacc_soc;
         check("all full-core engines return idle",
               !u_soc.core_mex_busy[0] && !u_soc.core_mex_busy[1]
               && !u_soc.core_mex_busy[2] && !u_soc.core_mex_busy[3]);
+
+        // An ordinary tile store outside the memory map is a bus fault at
+        // its address, whichever port the engine routes it to, and moves
+        // nothing.  Above the map it takes the external route, which the SoC
+        // answers before the controller; past this build's 1 KiB Bank 0 it
+        // takes the bank port.
+        unmapped_tile_store(64'h4000_0000_0000_0000,
+                            "tile store above the map");
+        unmapped_tile_store(64'h0000_0000_0000_0400,
+                            "tile store past Bank 0's rows");
+
+        // A core's scalar read above the map ends as a bus error on its
+        // port, with no external-memory traffic.
+        phy_req_count = 0;
+        force u_soc.core_bus_addr[0]    = 64'h4000_0000_0010_0000;
+        force u_soc.core_bus_wdata[0]   = 64'd0;
+        force u_soc.core_bus_size[0]    = BUS_DWORD;
+        force u_soc.core_bus_wen[0]     = 1'b0;
+        force u_soc.core_bus_port_io[0] = 1'b0;
+        force u_soc.core_bus_valid[0]   = 1'b1;
+        guard = 0;
+        while (!u_soc.core_bus_ready[0]) begin
+            clock;
+            guard = guard + 1;
+            if (guard > 100) begin
+                $display("  FAIL: timeout waiting for the bus response");
+                fail_count = fail_count + 1;
+                $fatal(1, "unmapped scalar read timeout");
+            end
+        end
+        check("scalar read above the map ends as a bus error",
+              u_soc.core_bus_error[0]);
+        force u_soc.core_bus_valid[0] = 1'b0;
+        clock;
+        release u_soc.core_bus_valid[0];
+        release u_soc.core_bus_addr[0];
+        release u_soc.core_bus_wdata[0];
+        release u_soc.core_bus_size[0];
+        release u_soc.core_bus_wen[0];
+        release u_soc.core_bus_port_io[0];
+        check("scalar read above the map makes no external request",
+              phy_req_count == 0);
 
         // Re-establish nonzero claimed state in every physical engine so the
         // whole-SoC reset assertion proves a seven-domain wipe rather than

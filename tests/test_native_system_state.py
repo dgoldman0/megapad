@@ -2134,23 +2134,25 @@ def test_system_mapping_replacement_is_transactional_before_sealing(
         replacement.storage[target] = 0xC3
     else:
         replacement.storage[target - replacement_base] = 0xC3
+    # Sixteen bytes, one whole instruction-fetch line, so a core executing
+    # from the replacement main memory fetches inside the map.
     _attach_system_region(
         owner,
         attach_name,
         replacement_base,
         replacement,
-        12,
+        16,
     )
 
     assert original.releases == 1
     assert replacement.acquisitions == 1
     assert replacement.releases == 0
-    assert getattr(owner, size_attr) == 12
+    assert getattr(owner, size_attr) == 16
     buffer_attr = "mem_buffer" if region == "main" else f"{region}_buffer"
     assert getattr(owner, buffer_attr) is replacement
     core0 = owner.core(0)
     core1 = owner.core(1)
-    assert getattr(core0, size_attr) == getattr(core1, size_attr) == 12
+    assert getattr(core0, size_attr) == getattr(core1, size_attr) == 16
     if base is not None:
         assert (
             getattr(core0, f"{region}_base")
@@ -2267,7 +2269,8 @@ def test_buffer_callback_sealing_aborts_system_replacement_transactionally() -> 
 
 def test_system_mapping_lease_follows_a_retained_core_view() -> None:
     owner = NativeSystemState(1)
-    exported = array.array("B", [0x01])
+    # One whole instruction-fetch line, so fetch stays inside the map.
+    exported = array.array("B", [0x01] * 16)
     exported_ref = weakref.ref(exported)
     owner.attach_mem(exported, len(exported))
     core = owner.core(0)
@@ -2286,7 +2289,8 @@ def test_system_mapping_lease_follows_a_retained_core_view() -> None:
 
 def test_cross_core_execution_and_render_use_one_mapping_guard() -> None:
     owner = NativeSystemState(2)
-    owner.attach_mem(bytearray([0x91]), 1)
+    # One whole instruction-fetch line, so fetch stays inside the map.
+    owner.attach_mem(bytearray([0x91]) + bytearray(15), 16)
     owner.attach_vram(bytearray([0xE0, 0x07]), 0x3000, 2)
     core0 = owner.core(0)
     core1 = owner.core(1)
@@ -2365,7 +2369,7 @@ def test_python_memory_scope_retains_the_borrowed_core_and_system_owner() -> Non
 
 def test_out_of_order_scope_close_retains_the_root_mapping_lease() -> None:
     owner = NativeSystemState(2)
-    owner.attach_mem(bytearray([0x01, 0x01]), 2)
+    owner.attach_mem(bytearray([0x01] * 16), 16)
     core0 = owner.core(0)
     core1 = owner.core(1)
     _set_pc(core0, 0)
@@ -2392,7 +2396,7 @@ def test_out_of_order_scope_close_retains_the_root_mapping_lease() -> None:
 
 def test_callback_retained_scope_keeps_native_root_ownership_alive() -> None:
     owner = NativeSystemState(2)
-    owner.attach_mem(bytearray([0x91, 0x01]), 2)
+    owner.attach_mem(bytearray([0x91, 0x01]) + bytearray(14), 16)
     core0 = owner.core(0)
     core1 = owner.core(1)
     _set_pc(core0, 0)

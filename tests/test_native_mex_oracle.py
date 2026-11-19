@@ -2877,8 +2877,8 @@ def test_attached_region_tail_requires_a_complete_64_byte_tile(
     destination = bytes([0xA5] * 64)
 
     def setup(cpu: Any) -> Watchers:
-        # Seed the modulo-alias in Bank0.  An aperture tail that incorrectly
-        # falls through is therefore both observable and destructive.
+        # Seed Bank 0 so that a tile access falling through to it would be
+        # both observable and destructive.
         cpu.mem[:] = bytes(
             (index * 13 + 0x3D) & 0xFF for index in range(MEM_SIZE)
         )
@@ -2898,29 +2898,34 @@ def test_attached_region_tail_requires_a_complete_64_byte_tile(
         watchers[region] = lambda: bytes(aperture)
         return watchers
 
-    oracle = _assert_native_matches_oracle(
+    if complete_tile:
+        oracle = _assert_native_matches_oracle(
+            "t.add", setup, expected_dispatch="native"
+        )
+        if access == "read":
+            expected = bytes(
+                (left + right) & 0xFF
+                for left, right in zip(aperture_template[64:128], source1)
+            )
+            assert oracle["after_mex"]["memory:dst0"] == expected
+        else:
+            assert (
+                oracle["after_mex"][f"memory:{region}"][64:]
+                != bytes(aperture_template[64:])
+            )
+        return
+
+    # A tile that leaves its region lies outside the memory map: a bus
+    # fault at the tile's address that moves nothing.
+    result = _assert_trapping_tacc_matches_oracle(
         "t.add", setup, expected_dispatch="native"
     )
-    if access == "read":
-        actual = oracle["after_mex"]["memory:dst0"]
-        aperture_source = (
-            bytes(aperture_template[64:128]) if complete_tile else bytes(64)
-        )
-        expected = bytes(
-            (left + right) & 0xFF
-            for left, right in zip(aperture_source, source1)
-        )
-        assert actual == expected
-    elif complete_tile:
-        assert (
-            oracle["after_mex"][f"memory:{region}"][64:]
-            != bytes(aperture_template[64:])
-        )
-    else:
-        assert (
-            oracle["after_mex"][f"memory:{region}"]
-            == bytes(aperture_template)
-        )
+    assert result["ivec_id"] == IVEC_BUS_FAULT
+    after = result["after"]
+    assert after["interrupt"][2] == base + offset
+    assert after[f"memory:{region}"] == bytes(aperture_template)
+    assert after["memory:dst0"] == destination
+    assert after["memory:bank0"] == result["before"]["memory:bank0"]
 
 
 @pytest.mark.parametrize(
@@ -2930,7 +2935,7 @@ def test_attached_region_tail_requires_a_complete_64_byte_tile(
         pytest.param("write", id="write"),
     ],
 )
-def test_main_memory_final_63_bytes_are_not_a_wrapping_tile(
+def test_main_memory_final_63_bytes_are_a_bus_fault_not_a_tile(
     access: str,
 ) -> None:
     tail_address = MEM_SIZE - 63
@@ -2952,27 +2957,24 @@ def test_main_memory_final_63_bytes_are_not_a_wrapping_tile(
             cpu.tsrc0 = tail_address
         else:
             cpu.tdst = tail_address
-        watchers["main_tail"] = lambda: bytes(cpu.mem[tail_address:])
         return watchers
 
-    oracle = _assert_native_matches_oracle(
+    # The tile's last byte lies past Bank 0, outside the memory map.
+    result = _assert_trapping_tacc_matches_oracle(
         "t.add", setup, expected_dispatch="native"
     )
-    if access == "read":
-        assert oracle["after_mex"]["memory:dst0"] == source1
-    else:
-        assert (
-            oracle["after_mex"]["memory:main_tail"]
-            == initial_memory[tail_address:]
-        )
+    assert result["ivec_id"] == IVEC_BUS_FAULT
+    after = result["after"]
+    assert after["interrupt"][2] == tail_address
+    assert after["memory:bank0"] == result["before"]["memory:bank0"]
 
 
 @pytest.mark.parametrize(
-    ("region", "attach_name", "base"),
+    ("region", "attach_name"),
     [
-        pytest.param("hbw", "attach_hbw", 0x1_0020, id="hbw"),
-        pytest.param("ext", "attach_ext_mem", 0x2_0040, id="ext"),
-        pytest.param("vram", "attach_vram", 0x3_0060, id="vram"),
+        pytest.param("hbw", "attach_hbw", id="hbw"),
+        pytest.param("ext", "attach_ext_mem", id="ext"),
+        pytest.param("vram", "attach_vram", id="vram"),
     ],
 )
 @pytest.mark.parametrize(
@@ -2983,27 +2985,28 @@ def test_main_memory_final_63_bytes_are_not_a_wrapping_tile(
     ],
 )
 @pytest.mark.parametrize(
-    ("boundary", "start_delta", "expected_load"),
+    "boundary",
     [
-        pytest.param("enter", -1, 0xAACC, id="enter-aperture"),
-        pytest.param("exit", 1, 0xCCBB, id="exit-aperture"),
+        pytest.param("enter", id="enter-aperture"),
+        pytest.param("exit", id="exit-aperture"),
     ],
 )
 def test_scalar_halfword_crosses_aperture_tail_byte_by_byte(
     region: str,
     attach_name: str,
-    base: int,
     access: str,
     boundary: str,
-    start_delta: int,
-    expected_load: int,
 ) -> None:
-    """Mirror system.py's byte routing at a scalar aperture boundary."""
+    """Mirror system.py's byte routing at a scalar aperture boundary.
+
+    The two-byte aperture directly follows a 256-byte Bank 0.  A halfword
+    that enters it from Bank 0 crosses two mapped regions byte by byte; one
+    that leaves it runs into no memory and is a bus fault at that byte,
+    with no byte written.
+    """
     program_address = 0x80
-    start_address = base + start_delta
-    bank0_address = (
-        start_address if boundary == "enter" else start_address + 1
-    ) % 256
+    base = 256
+    start_address = base - 1 if boundary == "enter" else base + 1
 
     def run(cpu_type: CPUFactory) -> dict[str, Any]:
         cpu = cpu_type(mem_size=256)
@@ -3034,6 +3037,9 @@ def test_scalar_halfword_crosses_aperture_tail_byte_by_byte(
             )
 
         def mapped_write16(addr: int, value: int) -> None:
+            # Both bytes resolve before either moves, as the native core's
+            # bytewise route does.
+            mapped_read16(addr)
             mapped_write8(addr, value)
             mapped_write8((addr + 1) & MASK64, value >> 8)
 
@@ -3045,14 +3051,20 @@ def test_scalar_halfword_crosses_aperture_tail_byte_by_byte(
         cpu.regs[1] = start_address
         cpu.regs[2] = start_address
         if access.startswith("ld"):
-            cpu.mem[bank0_address] = 0xCC
+            cpu.mem[base - 1] = 0xCC
         else:
             cpu.regs[2] = 0xCCDD
         cpu.load_bytes(program_address, assemble(access))
         cpu.pc = program_address
-        cycles = cpu.step()
+        trap = None
+        try:
+            cycles = cpu.step()
+        except TrapError as raised:
+            cycles = None
+            trap = raised.ivec_id
         return {
             "cycles": cycles,
+            "trap": trap,
             "state": _snapshot(cpu, {region: lambda: bytes(aperture)}),
         }
 
@@ -3064,14 +3076,17 @@ def test_scalar_halfword_crosses_aperture_tail_byte_by_byte(
         "differently:\n  "
         + "\n  ".join(differences)
     )
-    if access.startswith("ld"):
-        assert oracle["state"]["regs"][1] == expected_load
-    elif boundary == "enter":
-        assert oracle["state"][f"memory:{region}"] == b"\xCC\xBB"
-        assert oracle["state"]["memory:bank0"][bank0_address] == 0xDD
+    if boundary == "exit":
+        assert oracle["trap"] == IVEC_BUS_FAULT
+        assert oracle["state"]["interrupt"][2] == base + 2
+        assert oracle["state"][f"memory:{region}"] == b"\xAA\xBB"
+    elif access.startswith("ld"):
+        assert oracle["trap"] is None
+        assert oracle["state"]["regs"][1] == 0xAACC
     else:
-        assert oracle["state"][f"memory:{region}"] == b"\xAA\xDD"
-        assert oracle["state"]["memory:bank0"][bank0_address] == 0xCC
+        assert oracle["trap"] is None
+        assert oracle["state"][f"memory:{region}"] == b"\xCC\xBB"
+        assert oracle["state"]["memory:bank0"][base - 1] == 0xDD
 
 
 def test_attached_regions_support_exact_tiles_near_uint64_max() -> None:

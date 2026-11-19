@@ -797,54 +797,33 @@ class Megapad64:
 
     # -- Tile memory helpers (unified address resolution) --
 
+    def _tile_span(self, addr: int) -> tuple:
+        """(buffer, offset) of a 64-byte tile inside one memory region.
+
+        A tile that starts in no region, or leaves the region it starts
+        in, lies outside the memory map and raises IVEC_BUS_FAULT at its
+        address.
+        """
+        a = u64(addr)
+        buf, off, sz = self._resolve_addr(a)
+        if off + 64 > sz:
+            self.trap_addr = a
+            raise TrapError(
+                IVEC_BUS_FAULT,
+                f"Bus fault @ {a:#018x}: tile leaves its memory region",
+            )
+        return buf, off
+
     def _read_tile(self, addr: int) -> bytearray:
         """Read a 64-byte tile from unified address space."""
-        a = u64(addr)
-        if self._vram_mem and self._vram_base <= a < self._vram_base + self._vram_size:
-            off = a - self._vram_base
-            if off + 64 <= self._vram_size:
-                return bytearray(self._vram_mem[off:off+64])
-            return bytearray(64)
-        if self._ext_mem and self._ext_mem_base <= a < self._ext_mem_base + self._ext_mem_size:
-            off = a - self._ext_mem_base
-            if off + 64 <= self._ext_mem_size:
-                return bytearray(self._ext_mem[off:off+64])
-            return bytearray(64)
-        if self._hbw_mem and self._hbw_base <= a < self._hbw_base + self._hbw_size:
-            off = a - self._hbw_base
-            if off + 64 <= self._hbw_size:
-                return bytearray(self._hbw_mem[off:off+64])
-            return bytearray(64)
-        a = a % self.mem_size
-        if a + 64 <= self.mem_size:
-            return bytearray(self.mem[a:a+64])
-        return bytearray(64)
+        buf, off = self._tile_span(addr)
+        return bytearray(buf[off:off+64])
 
     def _write_tile(self, addr: int, data: bytearray):
         """Write a 64-byte tile to unified address space."""
-        a = u64(addr)
-        if self._vram_mem and self._vram_base <= a < self._vram_base + self._vram_size:
-            off = a - self._vram_base
-            if off + 64 <= self._vram_size:
-                self._vram_mem[off:off+64] = data[:64]
-                self._icache_invalidate_span(a, 64)
-            return
-        if self._ext_mem and self._ext_mem_base <= a < self._ext_mem_base + self._ext_mem_size:
-            off = a - self._ext_mem_base
-            if off + 64 <= self._ext_mem_size:
-                self._ext_mem[off:off+64] = data[:64]
-                self._icache_invalidate_span(a, 64)
-            return
-        if self._hbw_mem and self._hbw_base <= a < self._hbw_base + self._hbw_size:
-            off = a - self._hbw_base
-            if off + 64 <= self._hbw_size:
-                self._hbw_mem[off:off+64] = data[:64]
-                self._icache_invalidate_span(a, 64)
-            return
-        a = a % self.mem_size
-        if a + 64 <= self.mem_size:
-            self.mem[a:a+64] = data[:64]
-            self._icache_invalidate_span(addr, 64)
+        buf, off = self._tile_span(addr)
+        buf[off:off+64] = data[:64]
+        self._icache_invalidate_span(u64(addr), 64)
 
     # -- Property shortcuts --
 
@@ -903,10 +882,11 @@ class Megapad64:
     def _resolve_addr(self, addr: int) -> tuple:
         """Resolve a unified address to (buffer, offset, buf_size).
 
-        Checks VRAM, XMEM, and HBW apertures before falling back to
-        Bank 0 (system RAM).  Mirrors the RTL address decode in
-        mp64_memory.v so that string instructions and scalar
-        load/stores route correctly to all memory regions.
+        Checks VRAM, XMEM, and HBW apertures before Bank 0 (system RAM),
+        as the RTL address decode in mp64_memory.v does, so that string
+        instructions and scalar load/stores reach every memory region.
+        An address in no region lies outside the memory map and raises
+        IVEC_BUS_FAULT there.
         """
         a = u64(addr)
         if self._vram_mem and self._vram_base <= a < self._vram_base + self._vram_size:
@@ -915,13 +895,48 @@ class Megapad64:
             return self._ext_mem, a - self._ext_mem_base, self._ext_mem_size
         if self._hbw_mem and self._hbw_base <= a < self._hbw_base + self._hbw_size:
             return self._hbw_mem, a - self._hbw_base, self._hbw_size
-        return self.mem, a % self.mem_size, self.mem_size
+        if a < self.mem_size:
+            return self.mem, a, self.mem_size
+        self.trap_addr = a
+        raise TrapError(
+            IVEC_BUS_FAULT,
+            f"Bus fault @ {a:#018x}: outside the memory map",
+        )
 
     def _check_addr(self, addr: int, size: int = 1):
         addr = u64(addr)
         if addr + size > self.mem_size:
             self.trap_addr = addr
             raise TrapError(IVEC_BUS_FAULT, f"Bus fault @ {addr:#018x}")
+
+    def _access_bytes(self, addr: int, width: int) -> list:
+        """(buffer, offset) for each byte of an access that leaves the
+        region it starts in.  Every byte resolves before any moves, so the
+        access continues into the next region or faults whole, at its first
+        byte outside the map."""
+        return [
+            self._resolve_addr(u64(addr + i))[:2]
+            for i in range(width)
+        ]
+
+    def _read_scalar(self, addr: int, width: int) -> int:
+        buf, off, sz = self._resolve_addr(addr)
+        if off + width <= sz:
+            return int.from_bytes(buf[off:off + width], "little")
+        return int.from_bytes(
+            bytes(b[o] for b, o in self._access_bytes(addr, width)),
+            "little",
+        )
+
+    def _write_scalar(self, addr: int, width: int, val: int):
+        data = (val & ((1 << (8 * width)) - 1)).to_bytes(width, "little")
+        buf, off, sz = self._resolve_addr(addr)
+        if off + width <= sz:
+            buf[off:off + width] = data
+        else:
+            for (b, o), byte in zip(self._access_bytes(addr, width), data):
+                b[o] = byte
+        self._icache_invalidate_span(addr, width)
 
     def mem_read8(self, addr: int) -> int:
         buf, off, _ = self._resolve_addr(addr)
@@ -933,40 +948,22 @@ class Megapad64:
         self._icache_invalidate_span(addr, 1)
 
     def mem_read16(self, addr: int) -> int:
-        buf, off, sz = self._resolve_addr(addr)
-        return buf[off] | (buf[(off+1) % sz] << 8)
+        return self._read_scalar(addr, 2)
 
     def mem_write16(self, addr: int, val: int):
-        buf, off, sz = self._resolve_addr(addr)
-        buf[off]            = val & 0xFF
-        buf[(off+1) % sz]   = (val >> 8) & 0xFF
-        self._icache_invalidate_span(addr, 2)
+        self._write_scalar(addr, 2, val)
 
     def mem_read32(self, addr: int) -> int:
-        buf, off, sz = self._resolve_addr(addr)
-        v = 0
-        for i in range(4):
-            v |= buf[(off+i) % sz] << (8*i)
-        return v
+        return self._read_scalar(addr, 4)
 
     def mem_write32(self, addr: int, val: int):
-        buf, off, sz = self._resolve_addr(addr)
-        for i in range(4):
-            buf[(off+i) % sz] = (val >> (8*i)) & 0xFF
-        self._icache_invalidate_span(addr, 4)
+        self._write_scalar(addr, 4, val)
 
     def mem_read64(self, addr: int) -> int:
-        buf, off, sz = self._resolve_addr(addr)
-        v = 0
-        for i in range(8):
-            v |= buf[(off+i) % sz] << (8*i)
-        return v
+        return self._read_scalar(addr, 8)
 
     def mem_write64(self, addr: int, val: int):
-        buf, off, sz = self._resolve_addr(addr)
-        for i in range(8):
-            buf[(off+i) % sz] = (val >> (8*i)) & 0xFF
-        self._icache_invalidate_span(addr, 8)
+        self._write_scalar(addr, 8, val)
 
     # -- Stack helpers --
 

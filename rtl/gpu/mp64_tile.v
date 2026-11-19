@@ -880,6 +880,49 @@ module mp64_tile #(
     assign mex_fault_addr =
         tacc_req_done ? tacc_req_fault_addr : mex_fault_addr_reg;
 
+    // The states in which an ordinary operation waits for one memory access,
+    // on the bank port or the external port.  TAMAC sources fault through
+    // the TACC leaf instead.
+    reg ordinary_wait_internal;
+    reg ordinary_wait_external;
+    always @(*) begin
+        ordinary_wait_internal = 1'b0;
+        ordinary_wait_external = 1'b0;
+        case (state)
+            S_LOAD_A, S_LOAD_B, S_LOAD_C,
+            S_STORE2, S_STORE_WAIT, S_STORE2_WAIT,
+            S_LOAD2D_WAIT, S_STORE2D_WAIT,
+            S_STORE2D_WRITE_WAIT:
+                ordinary_wait_internal = 1'b1;
+            S_EXT_LOAD_A, S_EXT_LOAD_B, S_EXT_STORE,
+            S_EXT_STORE2_WAIT:
+                ordinary_wait_external = 1'b1;
+            S_CVT_READ_WAIT, S_CVT_WRITE_WAIT: begin
+                ordinary_wait_internal = !cvt_ext;
+                ordinary_wait_external = cvt_ext;
+            end
+            default: ;
+        endcase
+    end
+    // The bank port errs only for an address outside the banks.  On the
+    // external port, an error for a span outside external memory and the
+    // video window marks an address outside the memory map; an error for a
+    // mapped span is a transport failure, which ordinary operations do not
+    // report.
+    wire [64:0] ext_tile_span_end = {1'b0, ext_tile_addr} + 65'd64;
+    wire ext_tile_addr_mapped =
+        ((ext_tile_addr >= {32'd0, MP64_EXT_MEM_BASE}) &&
+         (ext_tile_span_end <= {1'b0, TACC_EXT_LIMIT})) ||
+        ((ext_tile_addr >= TACC_VRAM_BASE) &&
+         (ext_tile_span_end <= {1'b0, TACC_VRAM_LIMIT}));
+    wire ordinary_access_fault =
+        !engine_reset && !active_cancelled &&
+        ((ordinary_wait_internal && tile_ack && tile_error) ||
+         (ordinary_wait_external && ext_tile_ack && ext_tile_error &&
+          !ext_tile_addr_mapped));
+    wire [63:0] ordinary_access_fault_addr =
+        ordinary_wait_external ? ext_tile_fault_addr : tile_fault_addr;
+
     // Count only cycles in which the leaf is genuinely blocked on a target
     // acknowledgement.  Dispatch, compute, and fixed completion cycles are
     // useful work and remain part of the architectural base latency.
@@ -4602,6 +4645,21 @@ module mp64_tile #(
             end
             default: state <= S_IDLE;
             endcase
+
+            // An ordinary operation whose memory access lies outside the
+            // memory map ends here with a bus fault at the target's fault
+            // address.  It issues nothing further and publishes no result; a
+            // multi-tile operation keeps the tiles it wrote before the
+            // failing one.
+            if (ordinary_access_fault) begin
+                mex_fault_reg      <= MEX_FAULT_BUS;
+                mex_fault_addr_reg <= ordinary_access_fault_addr;
+                tile_req           <= 1'b0;
+                tile_wen           <= 1'b0;
+                ext_tile_req       <= 1'b0;
+                ext_tile_wen       <= 1'b0;
+                state              <= S_DONE;
+            end
             end
         end
     end

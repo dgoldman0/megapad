@@ -74,7 +74,6 @@ namespace mp64_routine = mp64::cpu::routine;
 
 using mp64::machine::SystemClock;
 using mp64::machine::UnboundedSettlementRequest;
-using mp64::machine::Bank0Addressing;
 using mp64::machine::GuestMemoryMap;
 using mp64::machine::MemoryAccessPolicy;
 using mp64::machine::MemoryRegionKind;
@@ -2770,6 +2769,9 @@ struct TileReplayRecord {
     TileAccessRequest request{};
     uint64_t completion_cycle = 0;
     std::optional<std::array<uint8_t, 64>> read_data;
+    // The address lay outside the memory map: the target answered with a
+    // fault, and the replaying instruction takes a bus fault here.
+    bool bus_fault = false;
 };
 
 enum class CycleSharedAccessKind : uint8_t {
@@ -6224,6 +6226,12 @@ private:
                 instruction,
                 CycleSharedAccessKind::TILE_MEMORY);
             instruction.tile_replay_cursor++;
+            if (record.bus_fault) {
+                // The span lay outside the memory map.
+                system_.cores[static_cast<std::size_t>(core_index_)]
+                    ->trap_addr = address;
+                throw std::runtime_error("TRAP:BUS_FAULT");
+            }
             if (operation == BusOperation::READ) {
                 if (!record.read_data.has_value()) {
                     throw std::logic_error(
@@ -7154,32 +7162,39 @@ enum StepResult {
 // ---------------------------------------------------------------------------
 //
 // The machine memory layer selects the scalar routing policy once and proves
-// the maximum direct extent algebraically. Aperture edges, Bank 0 aliases,
-// and guest-address wrap retain the exact bytewise path below.
-static inline ResolvedMemorySpan resolve_scalar_memory_byte(
+// the maximum direct extent algebraically. Aperture edges and guest-address
+// wrap take the exact bytewise path below. An address in no region lies
+// outside the memory map: an access that touches one is a bus fault at its
+// first such byte, raised before any of its bytes moves.
+[[noreturn]] static void raise_unmapped_memory_access(
         CPUState& state,
         uint64_t address) {
-    const ResolvedMemorySpan resolved = resolve_memory_span(
-        *state.memory,
-        address,
-        MemoryAccessPolicy::SCALAR,
-        Bank0Addressing::MODULO_ALIAS);
-    if (!resolved)
+    if (!state.memory->mem || state.memory->mem_size == 0)
         throw std::runtime_error("main memory is not attached");
-    return resolved;
+    state.trap_addr = address;
+    throw std::runtime_error("TRAP:BUS_FAULT");
 }
 
-static inline ResolvedMemorySpan resolve_supervisor_memory_byte(
+static inline uint8_t* resolve_memory_byte(
         CPUState& state,
-        uint64_t address) {
+        uint64_t address,
+        MemoryAccessPolicy policy) {
     const ResolvedMemorySpan resolved = resolve_memory_span(
         *state.memory,
         address,
-        MemoryAccessPolicy::SUPERVISOR_BYTE,
-        Bank0Addressing::MODULO_ALIAS);
-    if (!resolved)
-        throw std::runtime_error("main memory is not attached");
-    return resolved;
+        policy);
+    if (__builtin_expect(!resolved, 0))
+        raise_unmapped_memory_access(state, address);
+    return resolved.data;
+}
+
+static inline uint8_t* resolve_supervisor_memory_byte(
+        CPUState& state,
+        uint64_t address) {
+    return resolve_memory_byte(
+        state,
+        address,
+        MemoryAccessPolicy::SUPERVISOR_BYTE);
 }
 
 static inline ResolvedMemorySpan resolve_direct_scalar_memory_span(
@@ -7188,12 +7203,27 @@ static inline ResolvedMemorySpan resolve_direct_scalar_memory_span(
     return resolve_memory_span(
         *state.memory,
         address,
-        MemoryAccessPolicy::SCALAR,
-        Bank0Addressing::BOUNDED);
+        MemoryAccessPolicy::SCALAR);
+}
+
+// The bytewise route of a scalar access resolves every byte before any
+// moves, so an access that leaves the memory map faults whole.
+template <std::size_t Width>
+static inline std::array<uint8_t*, Width> resolve_scalar_access_bytes(
+        CPUState& s,
+        uint64_t addr) {
+    std::array<uint8_t*, Width> bytes;
+    for (std::size_t i = 0; i < Width; i++) {
+        bytes[i] = resolve_memory_byte(
+            s,
+            addr + static_cast<uint64_t>(i),
+            MemoryAccessPolicy::SCALAR);
+    }
+    return bytes;
 }
 
 static inline uint8_t mem_read8(CPUState& s, uint64_t addr) {
-    return *resolve_scalar_memory_byte(s, addr).data;
+    return *resolve_memory_byte(s, addr, MemoryAccessPolicy::SCALAR);
 }
 
 static inline std::pair<std::size_t, uint64_t>
@@ -7266,7 +7296,7 @@ static inline void icache_reset(CPUState& s) {
 }
 
 static inline void mem_write8(CPUState& s, uint64_t addr, uint8_t val) {
-    *resolve_scalar_memory_byte(s, addr).data = val;
+    *resolve_memory_byte(s, addr, MemoryAccessPolicy::SCALAR) = val;
     icache_invalidate_span(s, addr, 1);
 }
 
@@ -7277,10 +7307,10 @@ static inline uint16_t mem_read16(CPUState& s, uint64_t addr) {
     if (__builtin_expect(resolved.covers(2), 1))
         std::memcpy(&v, resolved.data, 2);
     else {
+        const auto bytes = resolve_scalar_access_bytes<2>(s, addr);
         v = 0;
         for (int i = 0; i < 2; i++)
-            v |= uint16_t(mem_read8(s, addr + static_cast<uint64_t>(i)))
-                 << (8 * i);
+            v |= uint16_t(*bytes[i]) << (8 * i);
     }
     return v;
 }
@@ -7291,9 +7321,9 @@ static inline void mem_write16(CPUState& s, uint64_t addr, uint16_t val) {
     if (__builtin_expect(resolved.covers(2), 1))
         std::memcpy(resolved.data, &val, 2);
     else {
+        const auto bytes = resolve_scalar_access_bytes<2>(s, addr);
         for (int i = 0; i < 2; i++)
-            mem_write8(s, addr + static_cast<uint64_t>(i),
-                       static_cast<uint8_t>(val >> (8 * i)));
+            *bytes[i] = static_cast<uint8_t>(val >> (8 * i));
     }
     icache_invalidate_span(s, addr, 2);
 }
@@ -7305,10 +7335,10 @@ static inline uint32_t mem_read32(CPUState& s, uint64_t addr) {
     if (__builtin_expect(resolved.covers(4), 1))
         std::memcpy(&v, resolved.data, 4);
     else {
+        const auto bytes = resolve_scalar_access_bytes<4>(s, addr);
         v = 0;
         for (int i = 0; i < 4; i++)
-            v |= uint32_t(mem_read8(
-                     s, addr + static_cast<uint64_t>(i))) << (8 * i);
+            v |= uint32_t(*bytes[i]) << (8 * i);
     }
     return v;
 }
@@ -7319,9 +7349,9 @@ static inline void mem_write32(CPUState& s, uint64_t addr, uint32_t val) {
     if (__builtin_expect(resolved.covers(4), 1))
         std::memcpy(resolved.data, &val, 4);
     else {
+        const auto bytes = resolve_scalar_access_bytes<4>(s, addr);
         for (int i = 0; i < 4; i++)
-            mem_write8(s, addr + static_cast<uint64_t>(i),
-                       static_cast<uint8_t>(val >> (8 * i)));
+            *bytes[i] = static_cast<uint8_t>(val >> (8 * i));
     }
     icache_invalidate_span(s, addr, 4);
 }
@@ -7333,10 +7363,10 @@ static inline uint64_t mem_read64(CPUState& s, uint64_t addr) {
     if (__builtin_expect(resolved.covers(8), 1))
         std::memcpy(&v, resolved.data, 8);
     else {
+        const auto bytes = resolve_scalar_access_bytes<8>(s, addr);
         v = 0;
         for (int i = 0; i < 8; i++)
-            v |= uint64_t(mem_read8(
-                     s, addr + static_cast<uint64_t>(i))) << (8 * i);
+            v |= uint64_t(*bytes[i]) << (8 * i);
     }
     return v;
 }
@@ -7347,9 +7377,9 @@ static inline void mem_write64(CPUState& s, uint64_t addr, uint64_t val) {
     if (__builtin_expect(resolved.covers(8), 1))
         std::memcpy(resolved.data, &val, 8);
     else {
+        const auto bytes = resolve_scalar_access_bytes<8>(s, addr);
         for (int i = 0; i < 8; i++)
-            mem_write8(s, addr + static_cast<uint64_t>(i),
-                       static_cast<uint8_t>(val >> (8 * i)));
+            *bytes[i] = static_cast<uint8_t>(val >> (8 * i));
     }
     icache_invalidate_span(s, addr, 8);
 }
@@ -7463,8 +7493,7 @@ static inline ResolvedMemorySpan resolve_direct_memory_span(
     const ResolvedMemorySpan resolved = resolve_memory_span(
         *s.memory,
         addr,
-        policy,
-        Bank0Addressing::BOUNDED);
+        policy);
     return resolved.covers(size) ? resolved : ResolvedMemorySpan{};
 }
 
@@ -8708,80 +8737,56 @@ static inline __int128 floor_shift_right(__int128 value, unsigned shift) {
 //  Unified tile memory access (64-byte reads/writes with address decoding)
 // ---------------------------------------------------------------------------
 
+// A tile access covers 64 bytes inside one memory region, found in the
+// VRAM, external, HBW, Bank 0 order. A span that starts in no region, or
+// leaves the region it starts in, lies outside the memory map: the access
+// is a bus fault at the tile's address and moves nothing. find_tile_span
+// returns null for such a span; resolve_tile_span raises the fault.
+static inline uint8_t* find_tile_span(CPUState& s, uint64_t addr) {
+    const auto in_region = [addr](
+            uint8_t* memory,
+            uint64_t base,
+            uint64_t size,
+            uint8_t*& span) {
+        if (!memory || !region_contains(base, size, addr))
+            return false;
+        const uint64_t off = addr - base;
+        span = region_span_fits(size, off, TILE_BYTES)
+            ? memory + off : nullptr;
+        return true;
+    };
+    uint8_t* span = nullptr;
+    if (!in_region(s.memory->vram_mem, s.memory->vram_base,
+                   s.memory->vram_size, span) &&
+        !in_region(s.memory->ext_mem, s.memory->ext_mem_base,
+                   s.memory->ext_mem_size, span) &&
+        !in_region(s.memory->hbw_mem, s.memory->hbw_base,
+                   s.memory->hbw_size, span)) {
+        in_region(s.memory->mem, 0, s.memory->mem_size, span);
+    }
+    return span;
+}
+
+static inline uint8_t* resolve_tile_span(CPUState& s, uint64_t addr) {
+    uint8_t* const span = find_tile_span(s, addr);
+    if (__builtin_expect(span == nullptr, 0))
+        raise_unmapped_memory_access(s, addr);
+    return span;
+}
+
 static inline void tile_read_64bytes_direct(
         CPUState& s,
         uint64_t addr,
         Tile& out) {
-    if (s.memory->vram_mem && region_contains(s.memory->vram_base, s.memory->vram_size, addr)) {
-        const uint64_t off = addr - s.memory->vram_base;
-        if (region_span_fits(s.memory->vram_size, off, TILE_BYTES))
-            std::memcpy(out.data(), s.memory->vram_mem + off, TILE_BYTES);
-        else
-            out.fill(0);
-        return;
-    }
-    if (s.memory->ext_mem && region_contains(s.memory->ext_mem_base, s.memory->ext_mem_size, addr)) {
-        const uint64_t off = addr - s.memory->ext_mem_base;
-        if (region_span_fits(s.memory->ext_mem_size, off, TILE_BYTES))
-            std::memcpy(out.data(), s.memory->ext_mem + off, TILE_BYTES);
-        else
-            out.fill(0);
-        return;
-    }
-    if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
-        const uint64_t off = addr - s.memory->hbw_base;
-        if (region_span_fits(s.memory->hbw_size, off, TILE_BYTES))
-            std::memcpy(out.data(), s.memory->hbw_mem + off, TILE_BYTES);
-        else
-            out.fill(0);
-        return;
-    }
-    if (!s.memory->mem || s.memory->mem_size == 0) {
-        out.fill(0);
-        return;
-    }
-    uint64_t a = addr % s.memory->mem_size;
-    if (region_span_fits(s.memory->mem_size, a, TILE_BYTES))
-        std::memcpy(out.data(), s.memory->mem + a, TILE_BYTES);
-    else
-        out.fill(0);
+    std::memcpy(out.data(), resolve_tile_span(s, addr), TILE_BYTES);
 }
 
 static inline void tile_write_64bytes_direct(
         CPUState& s,
         uint64_t addr,
         const Tile& data) {
-    if (s.memory->vram_mem && region_contains(s.memory->vram_base, s.memory->vram_size, addr)) {
-        const uint64_t off = addr - s.memory->vram_base;
-        if (region_span_fits(s.memory->vram_size, off, TILE_BYTES)) {
-            std::memcpy(s.memory->vram_mem + off, data.data(), TILE_BYTES);
-            icache_invalidate_span(s, addr, TILE_BYTES);
-        }
-        return;
-    }
-    if (s.memory->ext_mem && region_contains(s.memory->ext_mem_base, s.memory->ext_mem_size, addr)) {
-        const uint64_t off = addr - s.memory->ext_mem_base;
-        if (region_span_fits(s.memory->ext_mem_size, off, TILE_BYTES)) {
-            std::memcpy(s.memory->ext_mem + off, data.data(), TILE_BYTES);
-            icache_invalidate_span(s, addr, TILE_BYTES);
-        }
-        return;
-    }
-    if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
-        const uint64_t off = addr - s.memory->hbw_base;
-        if (region_span_fits(s.memory->hbw_size, off, TILE_BYTES)) {
-            std::memcpy(s.memory->hbw_mem + off, data.data(), TILE_BYTES);
-            icache_invalidate_span(s, addr, TILE_BYTES);
-        }
-        return;
-    }
-    if (!s.memory->mem || s.memory->mem_size == 0)
-        return;
-    uint64_t a = addr % s.memory->mem_size;
-    if (region_span_fits(s.memory->mem_size, a, TILE_BYTES)) {
-        std::memcpy(s.memory->mem + a, data.data(), TILE_BYTES);
-        icache_invalidate_span(s, addr, TILE_BYTES);
-    }
+    std::memcpy(resolve_tile_span(s, addr), data.data(), TILE_BYTES);
+    icache_invalidate_span(s, addr, TILE_BYTES);
 }
 
 static inline void tile_read_64bytes(
@@ -10267,7 +10272,7 @@ static inline uint8_t sys_read8(
         }
         mpu_check(s, addr);
     }
-    return *resolve_supervisor_memory_byte(s, addr).data;
+    return *resolve_supervisor_memory_byte(s, addr);
 }
 
 static inline bool write_native_nic_bytes(
@@ -10363,7 +10368,7 @@ static inline void sys_write8(
         }
         mpu_check(s, addr);
     }
-    *resolve_supervisor_memory_byte(s, addr).data = val;
+    *resolve_supervisor_memory_byte(s, addr) = val;
     icache_invalidate_span(s, addr, 1);
 }
 
@@ -10858,7 +10863,7 @@ static inline uint8_t direct_system_memory_read8(
         CPUState& s,
         uint64_t address) {
     preflight_resumable_bus_access(s, address);
-    return *resolve_supervisor_memory_byte(s, address).data;
+    return *resolve_supervisor_memory_byte(s, address);
 }
 
 static inline void direct_system_memory_write8(
@@ -10866,7 +10871,7 @@ static inline void direct_system_memory_write8(
         uint64_t address,
         uint8_t value) {
     preflight_resumable_bus_access(s, address);
-    *resolve_supervisor_memory_byte(s, address).data = value;
+    *resolve_supervisor_memory_byte(s, address) = value;
     icache_invalidate_span(s, address, 1);
 }
 
@@ -13038,7 +13043,7 @@ public:
             throw py::type_error("publication requires a RoutineImage");
         auto guard = acquire_execution();
         const auto code = resolve_memory_span(*state_->memory, image->code_base,
-            MemoryAccessPolicy::SCALAR, Bank0Addressing::BOUNDED);
+            MemoryAccessPolicy::SCALAR);
         if (!code.covers(image->code.size()))
             throw py::value_error("routine code must fit one mapped ordinary region");
         if (std::memcmp(code.data, image->code.data(), image->code.size()) != 0)
@@ -13323,7 +13328,7 @@ private:
             prepared.reservation = std::make_unique<RoutineCPUReservation>(*state_, this);
         prepared.guard = acquire_execution(this);
         const auto stack = resolve_memory_span(*state_->memory, floor,
-            MemoryAccessPolicy::SCALAR, Bank0Addressing::BOUNDED);
+            MemoryAccessPolicy::SCALAR);
         if (!stack.covers(frontier - floor))
             throw py::value_error("the return stack must fit one mapped ordinary region");
         validate_spans(borrowed, {floor, frontier - floor});
@@ -13532,7 +13537,7 @@ private:
                 if (span.overlaps({image->code_base, image->code.size()}))
                     throw py::value_error("a borrowed span exposes published routine code");
             const auto resolved = resolve_memory_span(*state_->memory, span.base,
-                MemoryAccessPolicy::SCALAR, Bank0Addressing::BOUNDED);
+                MemoryAccessPolicy::SCALAR);
             if (!resolved.covers(span.size))
                 throw py::value_error("a borrowed span must fit one mapped region without aliases");
         }
@@ -13549,7 +13554,7 @@ private:
         for (const auto& span : entry.spans) {
             if ((write ? span.write : span.read) && span.contains(address, width)) {
                 const auto resolved = resolve_memory_span(*state_->memory, address,
-                    MemoryAccessPolicy::SCALAR, Bank0Addressing::BOUNDED);
+                    MemoryAccessPolicy::SCALAR);
                 if (resolved.covers(width))
                     return resolved.data;
                 break;
@@ -19122,21 +19127,27 @@ static void complete_cycle_tile_target(
 
     CPUState& core = *system.cores[index];
     std::optional<std::array<uint8_t, 64>> read_data;
+    bool bus_fault = false;
     {
         auto memory_guard =
             acquire_shared_memory_use(core);
+        // A span outside the memory map completes with a fault, which the
+        // replaying instruction raises. A faulted read still returns the
+        // 64 bytes the transport requires; the replay never uses them.
+        uint8_t* const span =
+            find_tile_span(core, grant.request.address);
+        bus_fault = span == nullptr;
         if (grant.request.operation == BusOperation::READ) {
             std::array<uint8_t, 64> data{};
-            tile_read_64bytes_direct(
-                core,
-                grant.request.address,
-                data);
+            if (span != nullptr)
+                std::memcpy(data.data(), span, TILE_BYTES);
             read_data = data;
-        } else {
-            tile_write_64bytes_direct(
+        } else if (span != nullptr) {
+            std::memcpy(span, grant.request.data.data(), TILE_BYTES);
+            icache_invalidate_span(
                 core,
                 grant.request.address,
-                grant.request.data);
+                TILE_BYTES);
         }
     }
 
@@ -19156,6 +19167,7 @@ static void complete_cycle_tile_target(
             *instruction.pending_tile_request,
             completion_cycle,
             read_data,
+            bus_fault,
         });
     instruction.completed_access_order.push_back(
         CycleSharedAccessKind::TILE_MEMORY);

@@ -14,7 +14,13 @@
 // Port B (CPU):   64-bit w/ sub-word RMW for byte/half/word writes.
 //
 // Uses mp64_sram_dp primitives — no vendor RAM attributes.
-// Addresses not matching any bank are forwarded to external memory.
+// Each bank holds BANK_DEPTH rows; an address past a bank's rows inside its
+// 1 MiB slot belongs to no bank.  The CPU port forwards external memory and
+// the video window to the external controller, and answers every other
+// address with CPU_FAULT beside its ACK, touching nothing: the address lies
+// outside the machine's memory map, and the bus ends the access as a bus
+// fault.  The tile port answers an address outside the banks with
+// TILE_ERROR the same way.
 //
 // Timing:
 //   Reads:              2 cycles (request + SRAM pipeline)
@@ -22,6 +28,7 @@
 //   Sub-word writes:    3 cycles (read-modify-write)
 //   Tile (512b):        2 cycles
 //   External forward:   variable (waits for ext_ack)
+//   Outside the map:    1 cycle (CPU_FAULT with the ACK)
 //
 // Coding standard: Verilog-2001, sync reset, non-blocking assigns.
 //
@@ -29,7 +36,12 @@
 module mp64_memory #(
     parameter BANK_DEPTH  = 16384,    // rows per bank (@ 512-bit each)
     parameter ADDR_W_TILE = 14,       // log2(BANK_DEPTH)
-    parameter ADDR_W_CPU  = 17        // log2(BANK_DEPTH * 8)
+    parameter ADDR_W_CPU  = 17,       // log2(BANK_DEPTH * 8)
+    // The windows the CPU port forwards to the external controller.
+    parameter [63:0] EXT_BASE   = 64'h0000_0000_0010_0000,
+    parameter [63:0] EXT_LIMIT  = 64'h0000_0000_FF00_0000,
+    parameter [63:0] VRAM_BASE  = 64'h0000_0000_FF00_0000,
+    parameter [63:0] VRAM_LIMIT = 64'h0000_0000_FF40_0000
 )(
     input  wire         clk,
     input  wire         rst_n,
@@ -42,6 +54,8 @@ module mp64_memory #(
     input  wire [1:0]   cpu_size,
     output reg  [63:0]  cpu_rdata,
     output reg          cpu_ack,
+    // Pulses with CPU_ACK when the address lies outside the memory map.
+    output reg          cpu_fault,
 
     // === Tile port (512-bit) ===
     input  wire         tile_req,
@@ -81,21 +95,29 @@ module mp64_memory #(
     // sampled low so returning to MEM_IDLE cannot execute it a second time.
     reg       cpu_req_seen;
 
+    // Bytes held by one bank.  A bank fills the low part of its 1 MiB slot.
+    localparam [20:0] BANK_BYTES = BANK_DEPTH * 64;
+
     // ========================================================================
     // Bank address decode — Tile port
     // ========================================================================
-    wire tile_is_bank0 = (tile_addr[31:20] == 12'd0);
-    wire tile_is_hbw   = (tile_addr[31:20] >= 12'hFFD);
+    wire tile_in_bank  = ({1'b0, tile_addr[19:0]} < BANK_BYTES);
+    wire tile_is_bank0 = (tile_addr[31:20] == 12'd0) && tile_in_bank;
+    wire tile_is_hbw   = (tile_addr[31:20] >= 12'hFFD) && tile_in_bank;
     wire tile_is_valid = tile_is_bank0 || tile_is_hbw;
     wire [1:0] tile_bank_sel = tile_is_hbw ? tile_addr[21:20] : 2'd0;
 
     // ========================================================================
-    // Bank address decode — CPU port
+    // Address decode — CPU port: a bank, a forwarded window, or no memory
     // ========================================================================
-    wire cpu_is_bank0    = (cpu_addr[63:20] == 44'd0);
+    wire cpu_in_bank     = ({1'b0, cpu_addr[19:0]} < BANK_BYTES);
+    wire cpu_is_bank0    = (cpu_addr[63:20] == 44'd0) && cpu_in_bank;
     wire cpu_is_hbw      = (cpu_addr[63:32] == 32'd0) &&
-                           (cpu_addr[31:20] >= 12'hFFD);
+                           (cpu_addr[31:20] >= 12'hFFD) && cpu_in_bank;
     wire cpu_is_internal = cpu_is_bank0 || cpu_is_hbw;
+    wire cpu_is_forwarded =
+        ((cpu_addr >= EXT_BASE)  && (cpu_addr < EXT_LIMIT)) ||
+        ((cpu_addr >= VRAM_BASE) && (cpu_addr < VRAM_LIMIT));
     wire [1:0] cpu_bank_sel = cpu_is_hbw ? cpu_addr[21:20] : 2'd0;
 
     // ========================================================================
@@ -230,7 +252,9 @@ module mp64_memory #(
     wire cpu_start_internal = cpu_req && !cpu_req_seen && cpu_is_internal &&
                               (cpu_state == MEM_IDLE);
     wire cpu_start_external = cpu_req && !cpu_req_seen && !cpu_is_internal &&
-                              (cpu_state == MEM_IDLE);
+                              cpu_is_forwarded && (cpu_state == MEM_IDLE);
+    wire cpu_start_unmapped = cpu_req && !cpu_req_seen && !cpu_is_internal &&
+                              !cpu_is_forwarded && (cpu_state == MEM_IDLE);
     wire cpu_is_subword     = (cpu_size != BUS_DWORD);
 
     // CPU SRAM read data — mux from selected bank
@@ -295,6 +319,7 @@ module mp64_memory #(
             cpu_state      <= MEM_IDLE;
             cpu_req_seen   <= 1'b0;
             cpu_ack        <= 1'b0;
+            cpu_fault      <= 1'b0;
             cpu_rdata      <= 64'd0;
             cpu_bank_sel_r <= 2'd0;
             cpu_is_read_r  <= 1'b0;
@@ -305,6 +330,7 @@ module mp64_memory #(
             ext_size       <= 2'd0;
         end else begin
             cpu_ack       <= 1'b0;
+            cpu_fault     <= 1'b0;
 
             if (!cpu_req)
                 cpu_req_seen <= 1'b0;
@@ -336,6 +362,13 @@ module mp64_memory #(
                         ext_wen   <= cpu_wen;
                         ext_size  <= cpu_size;
                         cpu_state <= MEM_EXT_WAIT;
+                    end else if (cpu_start_unmapped) begin
+                        // No memory answers here: fault without touching
+                        // any bank or the external controller.
+                        cpu_req_seen <= 1'b1;
+                        cpu_ack      <= 1'b1;
+                        cpu_fault    <= 1'b1;
+                        cpu_rdata    <= 64'd0;
                     end
                 end
 

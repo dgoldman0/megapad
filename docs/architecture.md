@@ -124,6 +124,15 @@ MMIO devices live at the top of the address space.
 | `0xFF00_0000`–`0xFF3F_FFFF` | **VRAM** — 4 MiB dedicated framebuffer (double-buffered 1280×720 RGBA) |
 | `0xFFD0_0000`–`0xFFFF_FFFF` | **Banks 1–3** — 3 MiB HBW math RAM for tile/SIMD working buffers |
 
+These regions and the MMIO window below make up the memory map. Every other
+address belongs to no memory: the gaps between regions, the space past a
+build's Bank 0 or external memory size, and everything above 4 GiB below the
+MMIO window. A scalar load or store, an instruction fetch, a string
+instruction or a tile operand that touches such an address raises
+`IVEC_BUS_FAULT` with the first such byte in `TRAP_ADDR`, and moves no byte.
+The RTL, the emulator and the hosted simulator all fault it; none wraps the
+address onto another region.
+
 The BIOS sets `HERE` just past its own code.  As `kdos.f` loads through
 `FSLOAD`, it compiles the KDOS core and allocates its Bank 0 data, advancing
 HERE.  Standard autoexec then redirects `HERE` to the XMEM userland zone

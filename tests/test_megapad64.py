@@ -427,6 +427,9 @@ def test_io():
 
     captured = []
     cpu = Megapad64()
+    # A lone CPU has no MMIO devices, so port 1 drives no bridged device:
+    # its byte reaches only the port latch and the output callback.
+    cpu.port_map[1] = 0xFFFF
     cpu.on_output = lambda port, val: captured.append((port, val))
     cpu.regs[2] = 100  # R(X)
     cpu.xsel = 2
@@ -1916,6 +1919,7 @@ def test_tile_kernels():
         addi r1, 64
         addi r5, 8
         dec r0
+        cmpi r0, 0
         brne gemv_loop
         halt
     """)
@@ -2114,6 +2118,7 @@ def test_tile_kernels():
         addi r1, 64
         addi r5, 8
         dec r0
+        cmpi r0, 0
         brne loop8
         halt
     """)
