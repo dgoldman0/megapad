@@ -95,10 +95,32 @@ MULDIV_NAMES = {
 }
 
 
+class _UnmappedByte(Exception):
+    """A byte the listing reads lies outside the memory it was given."""
+
+
+def _listing_byte(mem: bytearray | bytes, mem_size: int, a: int) -> int:
+    if not 0 <= a < min(mem_size, len(mem)):
+        raise _UnmappedByte(a)
+    return mem[a]
+
+
 def disasm_one(mem: bytearray | bytes, addr: int, mem_size: int) -> tuple[str, int]:
-    """Disassemble one instruction at `addr`. Returns (text, byte_count)."""
+    """Disassemble one instruction at `addr`. Returns (text, byte_count).
+
+    `mem` holds memory from address 0 up to `mem_size`. A byte beyond it
+    lies outside the memory map as the listing sees it: an instruction that
+    needs one shows as unmapped, one byte long.
+    """
+    try:
+        return _disasm_one(mem, addr, mem_size)
+    except _UnmappedByte as unmapped:
+        return f"(unmapped at {unmapped.args[0]:#x})", 1
+
+
+def _disasm_one(mem: bytearray | bytes, addr: int, mem_size: int) -> tuple[str, int]:
     def rb(a):
-        return mem[a % mem_size] if (a % mem_size) < len(mem) else 0
+        return _listing_byte(mem, mem_size, a)
 
     b0 = rb(addr)
     f = (b0 >> 4) & 0xF
@@ -171,7 +193,7 @@ def _disasm_fp(rb, addr, rex) -> tuple[str, int]:
 
 def _disasm_core(mem, addr, mem_size, f, n) -> tuple[str, int]:
     def rb(a):
-        return mem[a % mem_size] if (a % mem_size) < len(mem) else 0
+        return _listing_byte(mem, mem_size, a)
 
     if f == 0x0:
         name = SYS_NAMES.get(n, f"SYS.{n:#x}")
@@ -787,6 +809,12 @@ class MegapadCLI(cmd.Cmd):
                 self.sys.cpu.mem_write8(addr + i, self._parse_int(tok) & 0xFF)
             print(f"  Wrote {len(parts) - 1} bytes at {addr:#x}")
 
+    def _listing_raw_byte(self, addr: int) -> str:
+        try:
+            return f"{self.sys.cpu.mem_read8(addr):02x}"
+        except TrapError:
+            return "--"
+
     def do_disasm(self, arg):
         """Disassemble: disasm [address] [count]
         Defaults to current PC, 16 instructions."""
@@ -796,8 +824,8 @@ class MegapadCLI(cmd.Cmd):
 
         for _ in range(count):
             text, size = disasm_one(self.sys.cpu.mem, addr, self.sys.cpu.mem_size)
-            # Show raw bytes
-            raw = ' '.join(f"{self.sys.cpu.mem_read8(addr + i):02x}" for i in range(size))
+            # Show raw bytes; a byte outside the memory map shows as --.
+            raw = ' '.join(self._listing_raw_byte(addr + i) for i in range(size))
             marker = ">>>" if addr == self.sys.cpu.pc else "   "
             print(f"  {marker} {addr:#010x}: {raw:<12s} {text}")
             addr += size

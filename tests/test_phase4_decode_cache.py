@@ -26,9 +26,9 @@ VARIABLE_PRIVATE_STEPS = 257
 LINE_BYTES = 16
 
 
-def _system(*, worker_count: int) -> MegapadSystem:
+def _system(*, worker_count: int, ram_size: int = 4096) -> MegapadSystem:
     system = MegapadSystem(
-        ram_size=4096,
+        ram_size=ram_size,
         num_cores=1,
         num_clusters=1,
         hbw_size=0,
@@ -304,15 +304,15 @@ def test_full_decode_identity_follows_guest_icache_and_restore() -> None:
 def _full_trailing_identity_after_eviction_signature(
     worker_count: int,
 ) -> tuple:
-    system = _system(worker_count=worker_count)
+    system = _system(worker_count=worker_count, ram_size=8192)
     address = LINE_BYTES - 2
     collision_address = 4096 + LINE_BYTES + 1
     initial = assemble("ldi r4, 0x34")
     replacement = assemble("ldi r4, 0x56")
     assert initial[:-1] == replacement[:-1]
     system.load_binary(address, initial)
-    # This physical address wraps to the same backing RAM but carries a
-    # different guest I-cache tag for the line containing the immediate.
+    # 4 KiB above the immediate's line, this address falls in the same
+    # guest I-cache line under another tag.
     system.load_binary(collision_address, assemble("nop"))
     full = system.cores[0]
     full.halted = False

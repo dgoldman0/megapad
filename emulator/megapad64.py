@@ -524,6 +524,22 @@ class Megapad64Error(Exception):
     """Base for emulator-generated traps."""
     pass
 
+def outside_map_error(operation: str, address: int, length: int,
+                      regions) -> ValueError:
+    """The error of a host operation that reaches outside the memory map.
+
+    It names the first address outside the map, the bytes left from there,
+    and the map's regions as (name, base, limit) triples.
+    """
+    bounds = ", ".join(
+        f"{name} [{base:#x}, {limit:#x})"
+        for name, base, limit in sorted(regions, key=lambda r: r[1]))
+    return ValueError(
+        f"{operation} at {address:#018x} (length {length}) lies outside "
+        f"the memory map: {bounds}"
+    )
+
+
 class TrapError(Megapad64Error):
     def __init__(self, ivec_id: int, message: str = ""):
         self.ivec_id = ivec_id
@@ -902,6 +918,20 @@ class Megapad64:
             IVEC_BUS_FAULT,
             f"Bus fault @ {a:#018x}: outside the memory map",
         )
+
+    def _map_regions(self) -> list:
+        """The memory map's regions as (name, base, limit) triples."""
+        regions = [("Bank 0", 0, self.mem_size)]
+        if self._ext_mem:
+            regions.append(("external", self._ext_mem_base,
+                            self._ext_mem_base + self._ext_mem_size))
+        if self._hbw_mem:
+            regions.append(("HBW", self._hbw_base,
+                            self._hbw_base + self._hbw_size))
+        if self._vram_mem:
+            regions.append(("VRAM", self._vram_base,
+                            self._vram_base + self._vram_size))
+        return regions
 
     def _check_addr(self, addr: int, size: int = 1):
         addr = u64(addr)
@@ -2010,15 +2040,24 @@ class Megapad64:
         self.tile_st_detail = fail_mask
         self.tile_selftest = 3 if fail_mask else 2
 
+    def _tile_st_scratch(self, addr: int) -> int:
+        """The self-test's 64-byte scratch tile, which lies in Bank 0."""
+        a = u64(addr)
+        if a + 64 > self.mem_size:
+            raise outside_map_error(
+                "tile self-test scratch", max(a, self.mem_size),
+                64 - max(0, self.mem_size - a), self._map_regions())
+        return a
+
     def _tile_st_write(self, addr: int, data: bytes):
         """Write 64 bytes to memory for tile self-test."""
-        a = addr % self.mem_size
+        a = self._tile_st_scratch(addr)
         self.mem[a:a+64] = data[:64]
         self._icache_invalidate_span(addr, 64)
 
     def _tile_st_read(self, addr: int) -> bytearray:
         """Read 64 bytes from memory for tile self-test."""
-        a = addr % self.mem_size
+        a = self._tile_st_scratch(addr)
         return bytearray(self.mem[a:a+64])
 
     def _tile_st_add(self, ta: int, tb: int) -> int:
@@ -4989,9 +5028,25 @@ class Megapad64:
     # -- Load bytes at address --
 
     def load_bytes(self, addr: int, data: bytes | bytearray):
-        """Write raw bytes into memory at the given address."""
-        for i, b in enumerate(data):
-            self.mem[(addr + i) % self.mem_size] = b
+        """Write raw bytes into memory at the given address.
+
+        The bytes may run from one region into the next.  A byte outside the
+        memory map raises ValueError, naming its address and the map's
+        regions, before any byte is written.
+        """
+        saved_trap_addr = self.trap_addr
+        targets = []
+        for i in range(len(data)):
+            try:
+                buf, offset, _ = self._resolve_addr(u64(addr + i))
+            except TrapError:
+                self.trap_addr = saved_trap_addr
+                raise outside_map_error(
+                    "load_bytes", u64(addr + i), len(data) - i,
+                    self._map_regions()) from None
+            targets.append((buf, offset))
+        for (buf, offset), b in zip(targets, data):
+            buf[offset] = b
 
     # -- Debug / introspection --
 

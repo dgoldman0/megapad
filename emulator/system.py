@@ -52,6 +52,7 @@ from .megapad64 import (
     NUM_ALL_CORES, CLUSTER_SPAD_BYTES, CLUSTER_SPAD_ADDR,
     CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT, CSR_CL_IVTBASE,
     TACC_IMAGE_BYTES, TACC_OWNER_NONE, TACC_LEGAL_EW,
+    outside_map_error,
 )
 from .devices import (
     MMIO_BASE, DeviceBus, BusError, UART, Timer, Storage, SystemInfo, NetworkDevice,
@@ -2550,6 +2551,27 @@ class MegapadSystem:
             external_events_applied=result.external_events_applied + applied,
         )
 
+    def _map_regions(self) -> list:
+        """The memory map's regions as (name, base, limit, buffer), in the
+        order the address decode tries them."""
+        regions = []
+        if self.vram_size > 0:
+            regions.append(
+                ("VRAM", self.vram_base, self.vram_end, self._vram_mem))
+        if self.hbw_size > 0:
+            regions.append(("HBW", HBW_BASE, self.hbw_end, self._hbw_mem))
+        if self.ext_mem_size > 0:
+            regions.append(("external", self.ext_mem_base, self.ext_mem_end,
+                            self._ext_mem))
+        regions.append(("RAM", 0, self.ram_size, self._shared_mem))
+        return regions
+
+    def _outside_map(self, operation: str, addr: int,
+                     length: int) -> ValueError:
+        return outside_map_error(
+            operation, addr, length,
+            [region[:3] for region in self._map_regions()])
+
     def _raw_mem_read(self, addr: int) -> int:
         addr = u64(addr)
         if self.vram_size > 0 and self.vram_base <= addr < self.vram_end:
@@ -2558,7 +2580,9 @@ class MegapadSystem:
             return self._hbw_mem[addr - HBW_BASE]
         if self.ext_mem_size > 0 and self.ext_mem_base <= addr < self.ext_mem_end:
             return self._ext_mem[addr - self.ext_mem_base]
-        return self._shared_mem[addr % self.ram_size]
+        if addr < self.ram_size:
+            return self._shared_mem[addr]
+        raise self._outside_map("raw memory read", addr, 1)
 
     def _raw_mem_window(
         self, addr: int, count: int
@@ -2624,8 +2648,10 @@ class MegapadSystem:
             self._hbw_mem[addr - HBW_BASE] = val & 0xFF
         elif self.ext_mem_size > 0 and self.ext_mem_base <= addr < self.ext_mem_end:
             self._ext_mem[addr - self.ext_mem_base] = val & 0xFF
+        elif addr < self.ram_size:
+            self._shared_mem[addr] = val & 0xFF
         else:
-            self._shared_mem[addr % self.ram_size] = val & 0xFF
+            raise self._outside_map("raw memory write", addr, 1)
 
     @property
     def worker_count(self) -> int:
@@ -2680,37 +2706,28 @@ class MegapadSystem:
     def _load_binary_locked(self, addr: int, data: bytes | bytearray):
         """Load raw bytes with slice copies across mapped memory regions.
 
-        Ordinary addresses retain the emulator's historical Bank 0 wrapping
-        semantics. HBW, external memory, and VRAM use their physical windows.
+        The bytes may run from one region into the next. A byte outside the
+        memory map raises ValueError, naming its address and the map's
+        regions, before any byte is written.
         """
         payload = memoryview(data).cast('B')
+        total = len(payload)
+        regions = self._map_regions()
+        chunks = []
         pos = 0
         target = u64(addr)
-        total = len(payload)
-
         while pos < total:
-            if (self.vram_size > 0
-                    and self.vram_base <= target < self.vram_end):
-                offset = target - self.vram_base
-                count = min(total - pos, self.vram_end - target)
-                self._vram_mem[offset:offset + count] = payload[pos:pos + count]
-            elif (self.hbw_size > 0
-                    and HBW_BASE <= target < self.hbw_end):
-                offset = target - HBW_BASE
-                count = min(total - pos, self.hbw_size - offset)
-                self._hbw_mem[offset:offset + count] = payload[pos:pos + count]
-            elif (self.ext_mem_size > 0
-                    and self.ext_mem_base <= target < self.ext_mem_end):
-                offset = target - self.ext_mem_base
-                count = min(total - pos, self.ext_mem_end - target)
-                self._ext_mem[offset:offset + count] = payload[pos:pos + count]
+            for _name, base, limit, memory in regions:
+                if base <= target < limit:
+                    break
             else:
-                offset = target % self.ram_size
-                count = min(total - pos, self.ram_size - offset)
-                self._shared_mem[offset:offset + count] = payload[pos:pos + count]
-
+                raise self._outside_map("binary load", u64(target), total - pos)
+            count = min(total - pos, limit - target)
+            chunks.append((memory, target - base, pos, count))
             pos += count
-            target = u64(target + count)
+            target += count
+        for memory, offset, start, count in chunks:
+            memory[offset:offset + count] = payload[start:start + count]
 
     def load_binary_file(self, path: str, addr: int = 0):
         """Load a binary file into RAM."""
