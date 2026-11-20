@@ -14403,11 +14403,19 @@ bus_fault_handler:
     ; Reset PSEL to R3 in case fault hit during SEP R4/R5/R6
     ldi r1, 3
     csrw 0x01, r1
-    ; Re-initialise I/O dispatch
+    ; Restore the BIOS fixed-role registers the faulting code may have left
+    ; mid-use, as an instruction fault does: UART base, SEP-dispatched I/O,
+    ; TX ring, and the NEXT and EXIT handlers the recovery runs Forth with.
     ldi64 r8, 0xFFFF_FF00_0000_0000
     ldi64 r4, emit_char
     ldi64 r5, key_char
     ldi64 r6, print_hex_byte
+    ldi64 r11, tx_ring
+    mov r19, r11
+    ldi64 r11, forth_next
+    mov r16, r11
+    ldi64 r11, forth_exit
+    mov r17, r11
     ; Print: "\n*** BUS FAULT @ "
     ldi64 r10, str_busfault
     ldi64 r11, print_str
@@ -14441,11 +14449,18 @@ bus_fault_handler:
     sep r6                       ; print low byte (port bitmap)
     ldi64 r11, print_crlf
     call.l r11
-    ; Resume REPL — also skip the 16 bytes _trap() pushed (PC + flags)
-    addi r15, 16
-    ldi64 r11, quit_loop
-    call.l r11
-    halt
+    ; Recover as an instruction fault does once it has reported, with the
+    ; interrupt enable the faulting code had: core 0 returns to the prompt
+    ; through ABORT, which resets both stacks and the EVALUATE depth and
+    ; runs the QUIT-XT! callback, with STATE back to interpreting, and a
+    ; worker core ends its job.  The trap frame is at R15 again.
+    mov r11, r15
+    addi r11, 8
+    ldn r1, r11                       ; saved flags
+    lsri r1, 6
+    andi r1, 1
+    csrw 0x09, r1                     ; IE
+    lbr fault_recover
 
 .bus_fault_checked_sha3:
     ldi r0, 6                         ; HARDWARE/PROTOCOL
@@ -14658,6 +14673,8 @@ fault_report:
     ldi64 r11, print_crlf
     call.l r11
 
+; A reported fault recovers here, the bus-fault handler's included.
+fault_recover:
     csrr r0, 0x20
     cmpi r0, 0
     lbrne .fault_worker

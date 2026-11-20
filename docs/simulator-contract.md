@@ -940,15 +940,16 @@ image may also lie in a chiplet port's window when the profile has ports, as
 the description of the ports above gives.
 
 The machine raises a bus fault for a span with no route. Its BIOS reports
-one with a line and returns to the prompt without calling the `FAULT-XT!`
-callback; this runtime has no such handler, so it fails the dispatch with
-`TACCBusFault`, a guest memory access error that carries the address the
-machine reports in `TRAP_ADDR`, as it fails any guest access outside mapped
-memory. The accumulator, guest memory and a chiplet's memory are left as the
-machine leaves them. Each TACC instruction that completes counts in
-`PERF-TILEOPS`, a losing claim included, and one that faults does not.
-External-memory images move no PHY words here, so `PERF_EXTMEM` and the
-stall count stay zero, and no cycle count is a compatibility claim.
+one with a line and returns to the prompt through `ABORT`, without calling
+the `FAULT-XT!` callback; this runtime has no such handler, so it fails the
+dispatch with `TACCBusFault`, a guest memory access error that carries the
+address the machine reports in `TRAP_ADDR`, as it fails any guest access
+outside mapped memory. The accumulator, guest memory and a chiplet's
+memory are left as the machine leaves them. Each TACC instruction that
+completes counts in `PERF-TILEOPS`, a losing claim included, and one that
+faults does not. External-memory images move no PHY words here, so
+`PERF_EXTMEM` and the stall count stay zero, and no cycle count is a
+compatibility claim.
 
 The words of borrowed tile work follow, as the BIOS appends them:
 `TAMAC-SCALAR`, `TAMAC-SCALARS`, `TACC-SEND` and `TACC-RELAY`

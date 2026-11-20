@@ -707,6 +707,23 @@ prompt. Definitions and variables survive. On a worker core the BIOS ends
 the job, so `CORE-STATUS` reports the core idle, resets the core's stacks,
 and returns it to its idle loop, ready for the next `WAKE-CORE`.
 
+A bus fault, an access outside the memory map or one a device does not
+answer, prints its own line:
+
+```
+*** BUS FAULT @ aaaaaaaa SEP=pp T=tt ERR=ee
+```
+
+The address is the low 32 bits of the faulting access, `SEP` the register
+that was the program counter, `T` the T register, and `ERR` the low byte of
+the sticky bus-error latch (CSR 0x5A), one bit per port. No `FAULT-XT!`
+callback runs for a bus fault. After the line the BIOS recovers as above: on
+core 0 it returns to the prompt through `ABORT`, so both stacks, interpret
+state and the `EVALUATE` depth are reset and the `QUIT-XT!` callback runs,
+and on a worker core it ends the job. Words that check their own accesses,
+such as `TACC-SEND` and `TACC-RELAY`, take their bus faults themselves and
+return a status without printing anything.
+
 ---
 
 ## Clocks (4 words)
