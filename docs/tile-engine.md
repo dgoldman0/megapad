@@ -523,8 +523,7 @@ and RTL implement these rules.  The software backends take their values from
 to the Python results, and the RTL replays emulator-generated golden vectors
 (`rtl/sim/tile_fp_vectors.vec`).  FP32 and FP64 element-wise operations,
 reductions, dot products, and TACC formats run in all four backends.  The
-RTL computes their
-arithmetic on two multi-format FMA units per engine
+RTL computes their arithmetic on two multi-format FMA units per engine
 (`rtl/core/mp64_fma.v`): element-wise operations take four beats, the
 canonical tree schedules its products, levels, and reserved `ACC_ACC` beats
 over the same units, and `TAMAC` gives each unit one binary64 lane per beat,

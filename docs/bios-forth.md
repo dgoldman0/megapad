@@ -925,8 +925,9 @@ service that delivers their scores into memory a chiplet lends:
 
 A kernel that keeps one feature to a tile, byte c of tile f holding feature
 f of candidate c, gets each candidate's weighted sum in its own lane from
-one `TAMAC-SCALARS` over the feature tiles and a vector of weights.  A
-second layer runs the same way over the first layer's activations.
+one `TAMAC-SCALARS` over the feature tiles and a vector of weights.  In a
+small network, one such run for each hidden unit, with that unit's weights,
+gives the unit's sums for all 64 candidates at once.
 
 `TACC-SEND` leaves the loaded image in TACC, valid and clean, with
 `TSRC0` and `TDST` holding src and dst.  The bus-fault handler recognizes

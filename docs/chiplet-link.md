@@ -6,11 +6,11 @@ emulator and the simulator model MegaPad's side (section 9). MegaPad's
 writes into memory a chiplet lends (sections 3 and 4), accepted on
 2026-11-19 for the tile engine's `TACC.STORE`, are built in MegaPad's RTL
 and modelled in the emulator and the simulator; LM1's end and the `LEND`
-entries of section 8 are not built yet. This is the specification of the link between
-MegaPad and one chiplet: the port's identity, its register window, the
-channels that cross the link, the sideband, and the queues in lent memory
-through which the two chips exchange work (section 8). The design it
-follows, with its reasons, is
+entries of section 8 are not built yet. This is the specification of the
+link between MegaPad and one chiplet: the port's identity, its register
+window, the channels that cross the link, the sideband, and the queues in
+lent memory through which the two chips exchange work (section 8). The
+design it follows, with its reasons, is
 [chiplet-interconnect-plan.md](chiplet-interconnect-plan.md). Section 10
 lists the parts of the chiplet contract that remain to be specified or
 built.

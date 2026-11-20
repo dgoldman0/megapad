@@ -937,7 +937,7 @@ must end inside it or fault at the region's end; any other span faults at
 its start. Bank 0, external memory, HBW and VRAM all serve images and
 sources, since the profile runs in supervisor mode without an MPU. A store
 image may also lie in a chiplet port's window when the profile has ports, as
-described below.
+the description of the ports above gives.
 
 The machine raises a bus fault for a span with no route. Its BIOS reports
 one with a line and returns to the prompt without calling the `FAULT-XT!`
