@@ -293,14 +293,11 @@ static constexpr int tile_float_extra_cycles(int ew, int op, int funct) {
     return 0;
 }
 
-// TACC.CLEAR, LOAD, and TAMAC formats (docs/tile-engine.md): every defined
-// format except U64.
-static constexpr bool tacc_format_is_legal(int ew) {
-    return ew == EW_U8 || ew == EW_U16 || ew == EW_U32 ||
-           ew == EW_FP16 || ew == EW_BF16 || ew == EW_FP32 || ew == EW_FP64;
-}
-
-static constexpr std::size_t TACC_IMAGE_BYTES = 256;
+// TACC.CLEAR, LOAD, and TAMAC formats and the canonical image size
+// (docs/tile-engine.md), shared with the hosted simulator's TACC.
+using mp64_tile_values::tacc_format_is_legal;
+static constexpr std::size_t TACC_IMAGE_BYTES =
+    mp64_tile_values::TACC_IMAGE_BYTES;
 static constexpr uint8_t TACC_OWNER_NONE = 31;
 
 // ---------------------------------------------------------------------------
@@ -9037,9 +9034,7 @@ static inline int native_tacc_format_signed(
 
 // Bytes of the TACC image a format uses; the rest store as zero.
 static inline std::size_t native_tacc_active_bytes(int ew) noexcept {
-    if (ew == EW_U8 || ew == EW_U16)
-        return TACC_IMAGE_BYTES;
-    return ew == EW_FP64 ? TACC_IMAGE_BYTES / 4 : TACC_IMAGE_BYTES / 2;
+    return mp64_tile_values::tacc_active_bytes(ew);
 }
 
 class NativeTaccOperation {
@@ -9371,47 +9366,6 @@ static bool native_tacc_transfer_external_beat(
             state.perf_extmem++;
     }
     return true;
-}
-
-static inline uint64_t native_tacc_image_read(
-        const std::array<uint8_t, TACC_IMAGE_BYTES>& image,
-        int lane,
-        int lane_bits) noexcept {
-    const int lane_bytes = lane_bits / 8;
-    const std::size_t offset =
-        static_cast<std::size_t>(lane * lane_bytes);
-    uint64_t value = 0;
-    for (int index = 0; index < lane_bytes; index++) {
-        value |= static_cast<uint64_t>(
-            image[offset + static_cast<std::size_t>(index)])
-            << (8 * index);
-    }
-    return value;
-}
-
-static inline void native_tacc_image_write(
-        std::array<uint8_t, TACC_IMAGE_BYTES>& image,
-        int lane,
-        int lane_bits,
-        uint64_t value) noexcept {
-    const int lane_bytes = lane_bits / 8;
-    const std::size_t offset =
-        static_cast<std::size_t>(lane * lane_bytes);
-    for (int index = 0; index < lane_bytes; index++) {
-        image[offset + static_cast<std::size_t>(index)] =
-            static_cast<uint8_t>(value >> (8 * index));
-    }
-}
-
-static inline int64_t native_tacc_sign_extend(
-        uint64_t value,
-        int bits) noexcept {
-    const uint64_t sign = 1ULL << (bits - 1);
-    if ((value & sign) == 0)
-        return static_cast<int64_t>(value);
-    return static_cast<int64_t>(
-        static_cast<__int128>(value) -
-        (static_cast<__int128>(1) << bits));
 }
 
 // A TACC.STORE whose image lies in a chiplet port's window: one write of the
@@ -9827,71 +9781,15 @@ static int exec_native_tacc_tamac(
         }
     }
 
+    // The lane arithmetic is the one the hosted simulator's TACC uses too.
     std::array<uint8_t, TACC_IMAGE_BYTES>
         staged = s.tacc;
-    const int source_bytes = source_bits / 8;
-    const int accumulator_bits =
-        floating ? lane_format.accumulation->width :
-        ew == EW_U8 ? 32 : 64;
-    const int lane_count =
-        static_cast<int>(TILE_BYTES * 8) /
-        source_bits;
-    {
-        std::optional<mp64_tile_values::ScopedFloatEnvironment> environment;
-        if (floating)
-            environment.emplace();
-        for (int lane = 0; lane < lane_count; lane++) {
-            const uint64_t a = tile_get_elem(
-                source_a,
-                lane,
-                source_bytes);
-            const uint64_t b = tile_get_elem(
-                source_b,
-                lane,
-                source_bytes);
-            const uint64_t old =
-                native_tacc_image_read(
-                    staged,
-                    lane,
-                    accumulator_bits);
-            uint64_t result = 0;
-            if (floating) {
-                result = tile_float_fma(
-                    *lane_format.accumulation, tile_float_format(ew), a, b, old);
-            } else if (signed_mode) {
-                const __int128 product =
-                    static_cast<__int128>(
-                        native_tacc_sign_extend(
-                            a,
-                            source_bits)) *
-                    static_cast<__int128>(
-                        native_tacc_sign_extend(
-                            b,
-                            source_bits));
-                result = old +
-                    static_cast<uint64_t>(product);
-            } else {
-                const __uint128_t product =
-                    static_cast<__uint128_t>(a) *
-                    static_cast<__uint128_t>(b);
-                result = old +
-                    static_cast<uint64_t>(product);
-            }
-            if (accumulator_bits == 32)
-                result &= 0xFFFF'FFFFULL;
-            native_tacc_image_write(
-                staged,
-                lane,
-                accumulator_bits,
-                result);
-        }
-    }
-    const std::size_t active =
-        native_tacc_active_bytes(ew);
-    std::fill(
-        staged.begin() + active,
-        staged.end(),
-        0);
+    mp64_tile_values::tacc_accumulate(
+        ew,
+        signed_mode != 0,
+        staged.data(),
+        source_a.data(),
+        source_b.data());
     if (operation.cancelled())
         return MEX_TACC_CANCELLED;
     s.tacc = staged;

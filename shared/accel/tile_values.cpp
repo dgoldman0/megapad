@@ -413,6 +413,44 @@ void require_view(ByteView view, std::size_t size, const char* diagnostic) {
 
 }  // namespace
 
+void tacc_accumulate(int ew, bool signed_lanes, std::uint8_t* image,
+                     const std::uint8_t* a, const std::uint8_t* b) {
+    if (!tacc_format_is_legal(ew) || !image || !a || !b)
+        throw std::invalid_argument("TAMAC needs a TACC format, its image and two rows");
+    const TileFormat& format = TILE_FORMATS[ew];
+    const int width = format.lane_bytes;
+    const int bits = format.lane_bits();
+    // An integer accumulator lane is 32 bits for U8 and 64 for U16 and U32.
+    const int accumulator = format.is_float() ? format.accumulation->width / 8
+                          : ew == 0 ? 4 : 8;
+    const ByteView left{a, 64};
+    const ByteView right{b, 64};
+    std::optional<ScopedFloatEnvironment> environment;
+    if (format.is_float())
+        environment.emplace();
+    for (int lane = 0; lane < format.lanes(); ++lane) {
+        const std::uint64_t x = read_lane(left, lane, width);
+        const std::uint64_t y = read_lane(right, lane, width);
+        std::uint8_t* at = image + static_cast<std::size_t>(lane) * accumulator;
+        std::uint64_t old = 0;
+        for (int byte = 0; byte < accumulator; ++byte)
+            old |= static_cast<std::uint64_t>(at[byte]) << (8 * byte);
+        std::uint64_t result;
+        if (format.is_float())
+            result = tile_float_fma(*format.accumulation, *format.floating, x, y, old);
+        else if (signed_lanes)
+            result = old + static_cast<std::uint64_t>(
+                static_cast<__int128>(signed_lane(x, bits)) * signed_lane(y, bits));
+        else
+            result = old + static_cast<std::uint64_t>(static_cast<__uint128_t>(x) * y);
+        // Writing the accumulator's bytes alone wraps an integer sum there.
+        for (int byte = 0; byte < accumulator; ++byte)
+            at[byte] = static_cast<std::uint8_t>(result >> (8 * byte));
+    }
+    const std::size_t active = tacc_active_bytes(ew);
+    std::memset(image + active, 0, TACC_IMAGE_BYTES - active);
+}
+
 const char* operation_name(Operation operation) noexcept {
     const auto index = static_cast<unsigned>(operation);
     return index < sizeof(names) / sizeof(names[0]) ? names[index] : nullptr;
