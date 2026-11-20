@@ -115,8 +115,10 @@ A core keeps its window's nesting depth in its own memory. An open at depth
 3. If `HELD` is clear, the window is open: set the depth to 1. If `EPOCH`
    differs from the epoch the core saw at its last open, a hold has ended
    since, and the core takes the region LM1 has left it (§8).
-4. If `HELD` is set, store `WAITING`, then load `HOLD` again. If `HELD` is
-   still set, sleep until an interrupt or a deadline. Go back to step 1.
+4. If `HELD` is set, store `WAITING` and ring the port, since the collector
+   may have read `OPEN` and be waiting on this core. Then load `HOLD` again.
+   If `HELD` is still set, sleep until an interrupt or a deadline. Go back
+   to step 1.
 
 An open at depth 1 or more only adds one to the depth, and never waits.
 
@@ -416,8 +418,8 @@ A **reference store** is a store of a reference into a tagged field or a
 handle slot. `OBJ-HANDLE` and `OBJ-SET` log every one they make. `OBJ!`
 logs every one too, except a store into an object that lies in the storing
 core's current region (§8): such an object was made since the last hold,
-the collector traces every such object whole during the next hold before it
-decides what lives, and stores into it need no entry. Stores of fixnums,
+the hold that retires the region traces it whole itself whenever that
+matters to what lives, and stores into it need no entry. Stores of fixnums,
 specials, raw words and bytes make no reference and are never logged.
 
 ### The store log
@@ -686,7 +688,8 @@ A doorbell keeps its meaning, "look at your queues", and the hold word is
 one more place to look:
 
 - a core rings the port after it puts a request on a queue, at an outermost
-  close while `HELD` is set, and when its store log is half full or full;
+  close while `HELD` is set, when it stores `WAITING`, and when its store
+  log is half full or full;
 - LM1 rings a core after it puts a reply on the core's pair, at the end of a
   hold when it finds the core `WAITING`, and when it has drained a log it
   found full.
@@ -792,7 +795,7 @@ Handles and owners:
 | `OBJ-DROP` | `( h: handle -- ior )` | Either | Release one handle |
 | `OBJ-OWNER-MARK` | `( id: u gen: u -- mark: u )` | Either | The serial the owner's next handle takes |
 | `OBJ-OWNER-RELEASE-TO` | `( mark: u id: u gen: u -- ior )` | Either | Release the owner's handles made since the mark |
-| `OBJ-OWNER-RELEASE` | `( id: u gen: u -- ior )` | Either | Release all of the owner's handles |
+| `OBJ-OWNER-RELEASE` | `( id: u gen: u -- ior )` | Outside | Release all of the owner's handles, in as many short windows as it needs |
 
 Reading, inside a window:
 
