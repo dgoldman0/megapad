@@ -1356,8 +1356,8 @@ def test_cli_and_session_server_attach_each_storage_option(tmp_path, monkeypatch
 
     monkeypatch.setattr("sys.argv", ["megapad.py", *options])
     with (
-        patch("emulator.server.MachineSession.from_bios") as from_bios,
-        patch("emulator.server.SharedMachine"),
+        patch("emulator.session.MachineSession.from_bios") as from_bios,
+        patch("emulator.shared_session.SharedMachine"),
         patch("emulator.server.SessionServer"),
         patch("emulator.server.signal.signal"),
     ):
@@ -1366,8 +1366,8 @@ def test_cli_and_session_server_attach_each_storage_option(tmp_path, monkeypatch
 
     monkeypatch.setattr("sys.argv", ["megapad.py"])
     with (
-        patch("emulator.server.MachineSession.from_bios") as from_bios,
-        patch("emulator.server.SharedMachine"),
+        patch("emulator.session.MachineSession.from_bios") as from_bios,
+        patch("emulator.shared_session.SharedMachine"),
         patch("emulator.server.SessionServer"),
         patch("emulator.server.signal.signal"),
     ):
@@ -1465,8 +1465,8 @@ def test_session_server_propagates_memory_and_lane_policy(monkeypatch):
         ["megapad.py", "--lanes", "4"],
     )
     with (
-        patch("emulator.server.MachineSession.from_bios") as from_bios,
-        patch("emulator.server.SharedMachine") as shared_machine,
+        patch("emulator.session.MachineSession.from_bios") as from_bios,
+        patch("emulator.shared_session.SharedMachine") as shared_machine,
         patch("emulator.server.SessionServer"),
         patch("emulator.server.signal.signal"),
     ):
@@ -1485,8 +1485,8 @@ def test_session_server_can_opt_into_host_profile_status(monkeypatch):
         ["megapad.py", "--host-profile"],
     )
     with (
-        patch("emulator.server.MachineSession.from_bios"),
-        patch("emulator.server.SharedMachine") as shared_machine,
+        patch("emulator.session.MachineSession.from_bios"),
+        patch("emulator.shared_session.SharedMachine") as shared_machine,
         patch("emulator.server.SessionServer"),
         patch("emulator.server.signal.signal"),
     ):
@@ -1651,8 +1651,8 @@ def test_session_server_opt_in_uses_exact_rich_terminal_policy(monkeypatch):
         ],
     )
     with (
-        patch("emulator.server.MachineSession.from_bios") as from_bios,
-        patch("emulator.server.SharedMachine"),
+        patch("emulator.session.MachineSession.from_bios") as from_bios,
+        patch("emulator.shared_session.SharedMachine"),
         patch("emulator.server.SessionServer"),
         patch("emulator.server.signal.signal"),
     ):
@@ -1705,8 +1705,8 @@ def test_session_server_carries_the_exact_retained_policy(monkeypatch):
         ],
     )
     with (
-        patch("emulator.server.MachineSession.from_bios") as from_bios,
-        patch("emulator.server.SharedMachine"),
+        patch("emulator.session.MachineSession.from_bios") as from_bios,
+        patch("emulator.shared_session.SharedMachine"),
         patch("emulator.server.SessionServer"),
         patch("emulator.server.signal.signal"),
     ):
@@ -1735,8 +1735,8 @@ def test_session_server_carries_a_terminal_link_pace(monkeypatch):
         ],
     )
     with (
-        patch("emulator.server.MachineSession.from_bios") as from_bios,
-        patch("emulator.server.SharedMachine"),
+        patch("emulator.session.MachineSession.from_bios") as from_bios,
+        patch("emulator.shared_session.SharedMachine"),
         patch("emulator.server.SessionServer"),
         patch("emulator.server.signal.signal"),
     ):
@@ -1762,7 +1762,7 @@ def test_session_server_rejects_a_link_pace_it_cannot_use(monkeypatch, arguments
         "sys.argv",
         ["megapad.py", *(policy if value == "POLICY" else value for value in arguments)],
     )
-    with patch("emulator.server.MachineSession.from_bios") as from_bios:
+    with patch("emulator.session.MachineSession.from_bios") as from_bios:
         with pytest.raises(SystemExit, match="2"):
             session_server_main()
     from_bios.assert_not_called()
@@ -1778,7 +1778,7 @@ def test_session_server_rejects_retained_policy_without_base_attachment(monkeypa
             json.dumps(retained.to_dict()),
         ],
     )
-    with patch("emulator.server.MachineSession.from_bios") as from_bios:
+    with patch("emulator.session.MachineSession.from_bios") as from_bios:
         with pytest.raises(SystemExit, match="2"):
             session_server_main()
     from_bios.assert_not_called()

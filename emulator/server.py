@@ -7,7 +7,6 @@ import argparse
 import signal
 from pathlib import Path
 
-from emulator.session import MachineSession
 from shared.session_options import (
     add_storage_options,
     link_pace,
@@ -16,7 +15,6 @@ from shared.session_options import (
     storage_image_arguments,
 )
 from shared_session import DEFAULT_SOCKET, SessionServer
-from emulator.shared_session import SharedMachine
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -132,6 +130,12 @@ def main(argv: list[str] | None = None) -> int:
                 f"TAP device {args.nic_tap!r} does not exist or is not accessible"
             )
         nic_backend = TAPBackend(tap_name=args.nic_tap)
+
+    # The machine's modules load the native extension, so they are imported
+    # only once the arguments are accepted: help and argument errors need
+    # nothing beyond the parser.
+    from emulator.session import MachineSession
+    from emulator.shared_session import SharedMachine
 
     session = MachineSession.from_bios(
         args.bios,
