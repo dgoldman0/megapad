@@ -691,19 +691,34 @@ class HostedTileService:
         self.set_source0(source0)
         self._tacc_publish(outcome, "TAMAC-SCALARS")
 
-    def tacc_send(self, source: int, destination: int) -> int:
-        """``TACC-SEND``: the image at ``source`` to ``destination`` through
-        the accumulator, by ``TACC-LOAD`` then ``TACC-STORE``.  Returns 0, or
-        6 when the store took a bus fault.  TSRC0 and TDST keep the two
-        addresses."""
+    def tacc_send(self, destination: int) -> int:
+        """``TACC-SEND``: store what the accumulator holds to
+        ``destination``, in memory or a chiplet port's window, and return a
+        status (``simulator.tacc``'s ``TACC_STATUS_*``) instead of faulting.
+        TDST takes ``destination`` once the store runs."""
 
         tacc = self._require_tacc()
-        source = self._cell(source, label="TACC-SEND source")
         destination = self._cell(destination, label="TACC-SEND destination")
-        self.set_source0(source)
-        self.set_destination(destination)
-        outcome, status = tacc.send(self._mode, source, destination)
+        outcome, status = tacc.send(destination)
+        if status in tacc_faults.TACC_STATUSES_THAT_RAN:
+            self.set_destination(destination)
         self._tacc_publish(outcome, "TACC-SEND")
+        return status
+
+    def tacc_relay(self, source: int, destination: int) -> int:
+        """``TACC-RELAY``: move the image at ``source`` into ``destination``
+        through the accumulator, by ``TACC-LOAD`` then ``TACC-STORE``, and
+        return a status instead of faulting.  TSRC0 and TDST take the two
+        addresses once the load runs."""
+
+        tacc = self._require_tacc()
+        source = self._cell(source, label="TACC-RELAY source")
+        destination = self._cell(destination, label="TACC-RELAY destination")
+        outcome, status = tacc.relay(self._mode, source, destination)
+        if status in tacc_faults.TACC_STATUSES_THAT_RAN:
+            self.set_source0(source)
+            self.set_destination(destination)
+        self._tacc_publish(outcome, "TACC-RELAY")
         return status
 
     def _require_tacc(self):

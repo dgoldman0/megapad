@@ -39,9 +39,17 @@ inline constexpr Cell image_bytes = tv::TACC_IMAGE_BYTES;
 inline constexpr Cell mmio_base = 0xFFFF'FF00'0000'0000ULL;
 inline constexpr Cell mmio_limit = 0xFFFF'FF80'0000'0000ULL;
 
-// TACC-SEND's statuses, from the BIOS's common checked namespace.
-inline constexpr Cell send_ok = 0;
-inline constexpr Cell send_hardware = 6;
+// The statuses of TACC-SEND and TACC-RELAY, the checked image words, as
+// bios.asm gives them; docs/BIOS-DICTIONARY.md describes each. Having no
+// external-memory transport, the simulator never returns 7.
+inline constexpr Cell status_ok = 0;
+inline constexpr Cell status_not_owner = 1;
+inline constexpr Cell status_invalid = 2;
+inline constexpr Cell status_format = 3;
+inline constexpr Cell status_misaligned = 4;
+inline constexpr Cell status_no_route = 5;
+inline constexpr Cell status_refused = 6;
+inline constexpr Cell status_transport = 7;
 
 enum class Fault : unsigned { none = 0, illegal = 1, alignment = 2, bus = 3 };
 
@@ -252,24 +260,54 @@ public:
         return retired(done);
     }
 
-    // --- TACC-SEND ( src dst -- status ) ------------------------------------
-    // TACC.LOAD from SOURCE in TMODE's format, then TACC.STORE to
-    // DESTINATION. A bus fault of the store becomes STATUS 6, as the BIOS's
-    // bus-fault handler makes it for the word's store; the store's other
-    // faults, and every fault of the load, stay faults.
-    Outcome send(Cell tmode, Cell source, Cell destination, Cell& status) {
-        Outcome loaded = load(tmode, source);
-        if (loaded.fault != Fault::none) return loaded;
-        Outcome stored = store(destination);
-        if (stored.fault == Fault::bus) {
-            status = send_hardware;
+    // --- The checked image words ------------------------------------------
+    // Each returns a status for every failure and never faults, checking
+    // everything before its first instruction in the order bios.asm does,
+    // so statuses 1 to 5 change nothing.
+
+    // TACC-SEND ( dst -- status ): TACC.STORE of what the bank holds.
+    Outcome send(Cell destination, Cell& status) {
+        if (!mine()) return refused_before(status, status_not_owner);
+        if (!valid_) return refused_before(status, status_invalid);
+        if (destination & (tile_bytes - 1))
+            return refused_before(status, status_misaligned);
+        const Route to = route_span(destination, image_bytes, true);
+        if (to.fault.fault != Fault::none)
+            return refused_before(status, status_no_route);
+        const Outcome stored = store(destination);
+        if (stored.fault != Fault::none) {
+            status = to.link ? status_refused : status_transport;
+            return retired(0);
+        }
+        status = status_ok;
+        return stored;
+    }
+
+    // TACC-RELAY ( src dst -- status ): TACC.LOAD from SOURCE in TMODE's
+    // format, then TACC.STORE to DESTINATION. A failed store leaves the
+    // loaded image in the bank, valid and clean.
+    Outcome relay(Cell tmode, Cell source, Cell destination, Cell& status) {
+        int ew = 0;
+        bool signed_lanes = false;
+        if (!mine()) return refused_before(status, status_not_owner);
+        if (!format_of(tmode, ew, signed_lanes))
+            return refused_before(status, status_format);
+        if ((source | destination) & (tile_bytes - 1))
+            return refused_before(status, status_misaligned);
+        if (route_span(source, image_bytes, false).fault.fault != Fault::none)
+            return refused_before(status, status_no_route);
+        const Route to = route_span(destination, image_bytes, true);
+        if (to.fault.fault != Fault::none)
+            return refused_before(status, status_no_route);
+        if (load(tmode, source).fault != Fault::none) {
+            status = status_transport;
+            return retired(0);
+        }
+        if (store(destination).fault != Fault::none) {
+            status = to.link ? status_refused : status_transport;
             return retired(1);
         }
-        if (stored.fault != Fault::none) {
-            stored.retired = 1;
-            return stored;
-        }
-        status = send_ok;
+        status = status_ok;
         return retired(2);
     }
 
@@ -373,6 +411,11 @@ private:
         Outcome outcome;
         outcome.retired = count;
         return outcome;
+    }
+    // A checked word's failure before its first instruction.
+    static Outcome refused_before(Cell& status, Cell value) noexcept {
+        status = value;
+        return retired(0);
     }
     static Outcome illegal() noexcept {
         Outcome outcome;

@@ -951,20 +951,27 @@ External-memory images move no PHY words here, so `PERF_EXTMEM` and the
 stall count stay zero, and no cycle count is a compatibility claim.
 
 The words of borrowed tile work follow, as the BIOS appends them:
-`TAMAC-SCALAR`, `TAMAC-SCALARS` and `TACC-SEND` (`docs/BIOS-DICTIONARY.md`).
-Each runs the BIOS word's steps in its order on the same accumulator.
-`TAMAC-SCALAR` consumes its cell, then runs TAMAC's broadcast form on the
-tile at `TSRC0` with the cell's low lane-width bits. `TAMAC-SCALARS` takes
-its three cells, then for each tile sets `TSRC0`, reads that tile's scalar
-at `TMODE`'s lane width (one byte for a reserved element width) and runs the
-broadcast form, so a fault leaves `TSRC0` at the tile it stopped on, with the
-tiles before it accumulated. It reads the scalars from ordinary memory
-alone; a scalar elsewhere fails the dispatch, where the BIOS's load could
-also reach a device register. `TACC-SEND` sets `TSRC0` and `TDST`, then
-loads and stores. A bus fault of its store gives status 6 instead of a
-fault, as the BIOS's bus-fault handler makes it, and leaves the loaded
-image valid and clean; its other faults are the load's and the store's,
-and src's cell stays on the stack under them, as in the BIOS.
+`TAMAC-SCALAR`, `TAMAC-SCALARS`, `TACC-SEND` and `TACC-RELAY`
+(`docs/BIOS-DICTIONARY.md`). Each runs the BIOS word's steps in its order on
+the same accumulator. `TAMAC-SCALAR` consumes its cell, then runs TAMAC's
+broadcast form on the tile at `TSRC0` with the cell's low lane-width bits.
+`TAMAC-SCALARS` takes its three cells, then for each tile sets `TSRC0`,
+reads that tile's scalar at `TMODE`'s lane width (one byte for a reserved
+element width) and runs the broadcast form, so a fault leaves `TSRC0` at
+the tile it stopped on, with the tiles before it accumulated. It reads the
+scalars from ordinary memory alone; a scalar elsewhere fails the dispatch,
+where the BIOS's load could also reach a device register.
+
+`TACC-SEND ( dst -- status )` and `TACC-RELAY ( src dst -- status )` never
+fault. They make the BIOS words' checks in the same order before their first
+instruction and return the same statuses: 1 when core 0 does not own the
+accumulator, 2 when `TACC-SEND` finds no valid image, 3 when `TMODE` names
+no TACC format for `TACC-RELAY`'s load, 4 for a misaligned address, 5 for
+an image with no route under the rules above, the window included, and 6
+when a port's window does not take the store. A failed check changes
+nothing; once the instructions run, `TDST`, and for `TACC-RELAY` `TSRC0`,
+hold the addresses. Status 7, an external-memory transport failure, never
+arises here, since the simulator moves images without that transport.
 
 The admitted AES service is one per-runtime transaction engine behind the
 virtual-MMIO router at `+0x700..+0x76F`; hosted BIOS words perform their normal

@@ -1,14 +1,17 @@
 """The BIOS words of borrowed tile work, on the emulator and the simulator.
 
-TAMAC-SCALAR runs TAMAC's broadcast form, TAMAC-SCALARS runs it over
-consecutive tiles with a vector of scalars, and TACC-SEND moves a 256-byte
-image through the accumulator into memory or a chiplet port's window,
-answering with a status where the store takes a bus fault
-(docs/BIOS-DICTIONARY.md, "Borrowed tile work"). The BIOS words run on the
-emulator's machine and the hosted simulator's words on the simulator; each
-case gives both the same Forth and requires the same reports, memory,
-tile registers and chiplet memory. Tiles, scalars and images sit in Bank 0
-at 0x40000, which neither machine's dictionary or stacks reach.
+TAMAC-SCALAR runs TAMAC's broadcast form and TAMAC-SCALARS runs it over
+consecutive tiles with a vector of scalars. TACC-SEND stores what the
+accumulator holds and TACC-RELAY moves a 256-byte image through it, each
+into memory or a chiplet port's window, and both return a status for
+every failure instead of trapping (docs/BIOS-DICTIONARY.md, "Borrowed tile
+work"). The BIOS words run on the emulator's machine and the hosted
+simulator's words on the simulator, over one memory map; each case gives
+both the same Forth and requires the same reports, memory, tile registers
+and chiplet memory. Tiles, scalars and images sit in Bank 0 at 0x40000,
+which neither machine's dictionary or stacks reach. External memory's
+transport failures, status 7, exist only on the emulator, where a case
+injects them.
 """
 
 from __future__ import annotations
@@ -27,7 +30,8 @@ from simulator.memory import EXTERNAL_BASE, MMIO_BASE
 from simulator.platform import create_one_core_address_space
 from simulator.runtime import MegaForthRuntime
 from simulator.tacc import TACCBusFault
-from system import MegapadSystem
+from megapad64 import ExternalPhyWordResponse
+from system import HBW_SIZE, MegapadSystem, VRAM_DEFAULT_SIZE
 
 
 EXT_SIZE = 0x4000
@@ -35,7 +39,7 @@ TILES = 0x40000          # sources, eight tiles
 SCALARS = 0x41000        # a packed scalar vector
 INITIAL = 0x41400        # an image TACC-LOAD starts from
 STORED = 0x41800         # where TACC-STORE puts the result
-SENT = 0x41C00           # where TACC-SEND puts its copy
+SENT = 0x41C00           # where TACC-SEND and TACC-RELAY put their copy
 IMAGE = 256
 TILE = 64
 OWNER_NONE = 31
@@ -142,8 +146,10 @@ class _Simulator:
     """The hosted simulator, with the test chiplet behind one port."""
 
     def __init__(self) -> None:
+        # The emulator's memory map: the checked image words route by it.
         memory = create_one_core_address_space(
-            bank0_size=1 << 20, external_size=EXT_SIZE, chiplet_ports=1)
+            bank0_size=1 << 20, external_size=EXT_SIZE, hbw_size=HBW_SIZE,
+            vram_size=VRAM_DEFAULT_SIZE, chiplet_ports=1)
         self.runtime = MegaForthRuntime(memory=memory)
         self.runtime.chiplet_ports.attach_test_chiplet(0)
         self.port_id = PORT_ID
@@ -230,7 +236,8 @@ def test_the_words_append_after_boot_id():
     def link(entry: str) -> int:
         return int.from_bytes(code[labels[entry]:labels[entry] + 8], "little")
 
-    assert labels["latest_entry"] == labels["d_tacc_send"]
+    assert labels["latest_entry"] == labels["d_tacc_relay"]
+    assert link("d_tacc_relay") == labels["d_tacc_send"]
     assert link("d_tacc_send") == labels["d_tamac_scalars"]
     assert link("d_tamac_scalars") == labels["d_tamac_scalar"]
     assert link("d_tamac_scalar") == labels["d_boot_id"]
@@ -238,18 +245,22 @@ def test_the_words_append_after_boot_id():
     start = labels["w_tamac_scalar"]
     expected = assemble("ldn r7, r14\naddi r14, 8\nt.amac r7\nret.l")
     assert code[start:start + len(expected)] == expected
-    # The bus-fault handler resumes TACC-SEND right after its store.
-    store = assemble("t.acc.store")
-    resume = labels[".tacc_send_store_return"]
-    assert code[resume - len(store):resume] == store
+    # The bus-fault handler resumes each checked word right after the
+    # instruction that faulted.
     handler = labels["bus_fault_handler"]
-    assert resume.to_bytes(8, "little") in code[handler:handler + 160]
+    for site, instruction in ((".tacc_send_store_return", "t.acc.store"),
+                              (".tacc_relay_load_return", "t.acc.load"),
+                              (".tacc_relay_store_return", "t.acc.store")):
+        resume = labels[site]
+        encoded = assemble(instruction)
+        assert code[resume - len(encoded):resume] == encoded
+        assert resume.to_bytes(8, "little") in code[handler:handler + 200]
 
 
 def test_simulator_words_follow_the_bios_order():
     runtime = MegaForthRuntime()
-    assert tuple(word.name for word in runtime.dictionary.words[-3:]) == (
-        b"TAMAC-SCALAR", b"TAMAC-SCALARS", b"TACC-SEND")
+    assert tuple(word.name for word in runtime.dictionary.words[-4:]) == (
+        b"TAMAC-SCALAR", b"TAMAC-SCALARS", b"TACC-SEND", b"TACC-RELAY")
 
 
 # ---------------------------------------------------------------------------
@@ -334,27 +345,111 @@ def test_a_bus_fault_stops_tamac_scalars_at_its_tile(machines):
 
 
 # ---------------------------------------------------------------------------
-#  TACC-SEND
+#  TACC-SEND and TACC-RELAY
 # ---------------------------------------------------------------------------
 
+OK, NOT_OWNER, INVALID, FORMAT, MISALIGNED, NO_ROUTE, REFUSED, TRANSPORT = range(8)
+
+
 @pytest.mark.parametrize("mode", [0x01, 0x04, 0x07], ids=["u16", "fp16", "fp64"])
-def test_tacc_send_moves_the_formats_image_between_memories(machines, mode):
-    rng = random.Random(f"send/{mode}")
+def test_tacc_relay_moves_the_formats_image_between_memories(machines, mode):
+    rng = random.Random(f"relay/{mode}")
     _write(machines, INITIAL, bytes(rng.getrandbits(8) for _ in range(IMAGE)))
     _write(machines, SENT, bytes([0xA5]) * IMAGE)
     reports = _both(machines, [
         FREE,
         f"TACC-CLAIM? DROP {mode} TMODE! TACC-CLEAR",
-        f"{INITIAL} {SENT} TACC-SEND REPORT DEPTH REPORT",
+        f"{INITIAL} {SENT} TACC-RELAY REPORT DEPTH REPORT",
         "TACC-STATUS@ REPORT TACC-RELEASE",
     ])
-    assert reports[:2] == [0, 0]
+    assert reports[:2] == [OK, 0]
     sent = _same_memory(machines, SENT)
     active = {1: 256, 4: 128, 7: 64}[mode & 0xF]
     initial = _same_memory(machines, INITIAL)
     assert sent == initial[:active] + bytes(IMAGE - active)
     emulator, simulator = machines
     assert simulator.registers() == emulator.registers() == (INITIAL, SENT)
+
+
+def test_tacc_send_stores_what_tacc_holds(machines):
+    rng = random.Random("send")
+    _write(machines, TILES, bytes(rng.getrandbits(8) for _ in range(4 * TILE)))
+    _write(machines, SCALARS, bytes([3, 5, 7, 9]))
+    _write(machines, SENT, bytes([0xA5]) * IMAGE)
+    reports = _both(machines, [
+        FREE,
+        f"TACC-CLAIM? DROP 0x10 TMODE! TACC-CLEAR {TILES} {SCALARS} 4 TAMAC-SCALARS",
+        f"{STORED} TDST! TACC-STORE {TILES} TDST!",
+        f"{SENT} TACC-SEND REPORT DEPTH REPORT TACC-STATUS@ REPORT",
+        "TACC-RELEASE",
+    ])
+    # SEND stores what STORE stores and, like it, leaves TACC clean.
+    assert reports == [OK, 0, 0b111 | (0 << 5) | (1 << 9)]
+    assert _same_memory(machines, SENT) == _same_memory(machines, STORED)
+    emulator, simulator = machines
+    assert simulator.registers()[1] == emulator.registers()[1] == SENT
+
+
+def test_every_failure_before_the_instructions_is_a_status_that_changes_nothing(
+        machines):
+    emulator, simulator = machines
+    _write(machines, INITIAL, bytes(range(IMAGE)))
+    _write(machines, SENT, bytes([0x5A]) * IMAGE)
+    _both(machines, [FREE])
+    window = WINDOW + LENT
+    cases = [
+        # Nobody owns TACC yet.
+        (f"{SENT} TACC-SEND", NOT_OWNER),
+        (f"{INITIAL} {SENT} TACC-RELAY", NOT_OWNER),
+        ("TACC-CLAIM? DROP 0 TMODE!", None),
+        # Owned, but holding no image.
+        (f"{SENT} TACC-SEND", INVALID),
+        # A TMODE that names no TACC format: U64 and a reserved code.
+        (f"3 TMODE! {INITIAL} {SENT} TACC-RELAY 0 TMODE!", FORMAT),
+        (f"0x4B TMODE! {INITIAL} {SENT} TACC-RELAY 0 TMODE!", FORMAT),
+        (f"{INITIAL} TSRC0! TACC-LOAD", None),
+        (f"{SENT + 8} TACC-SEND", MISALIGNED),
+        (f"{INITIAL + 0x20} {SENT} TACC-RELAY", MISALIGNED),
+        (f"{INITIAL} {SENT + 0x10} TACC-RELAY", MISALIGNED),
+        # Alignment is checked before any route.
+        (f"{INITIAL} {0x0020_0001} TACC-RELAY", MISALIGNED),
+        # No route: past external memory, across Bank 0's end, into the
+        # device window, past the end of the address space, a source in a
+        # window, a store past its window or beyond the ports built.
+        (f"{0x0020_0000} TACC-SEND", NO_ROUTE),
+        (f"{(1 << 20) - 0xC0} TACC-SEND", NO_ROUTE),
+        (f"0x{MMIO_BASE + 0x300:X} TACC-SEND", NO_ROUTE),
+        ("0xFFFFFFFFFFFFFFC0 TACC-SEND", NO_ROUTE),
+        (f"{window} {SENT} TACC-RELAY", NO_ROUTE),
+        (f"{INITIAL} {WINDOW + (1 << 48) - 0x80} TACC-RELAY", NO_ROUTE),
+        (f"{0x0020_0000} {SENT} TACC-RELAY", NO_ROUTE),
+        (f"{INITIAL} {WINDOW + (2 << 48) + LENT} TACC-RELAY", NO_ROUTE),
+    ]
+    for line, expected in cases:
+        if expected is None:
+            _both(machines, [line])
+            continue
+        before = _both(machines, ["TACC-STATUS@ REPORT"])
+        registers = emulator.registers()
+        reports = _both(machines, [f"{line} REPORT DEPTH REPORT",
+                                   "TACC-STATUS@ REPORT"])
+        assert reports == [expected, 0, before[0]], line
+        assert simulator.registers() == emulator.registers() == registers, line
+        assert _same_memory(machines, SENT) == bytes([0x5A]) * IMAGE, line
+    _both(machines, ["TACC-RELEASE"])
+
+
+def test_the_checked_words_count_only_the_instructions_they_ran(machines):
+    _write(machines, INITIAL, bytes(range(IMAGE)))
+    reports = _both(machines, [
+        FREE,
+        "TACC-CLAIM? DROP 0 TMODE! TACC-CLEAR PERF-TILEOPS",
+        f"{SENT} TACC-SEND DROP {INITIAL} {SENT} TACC-RELAY DROP",
+        f"{SENT + 1} TACC-SEND DROP {0x0020_0000} {SENT} TACC-RELAY DROP",
+        "PERF-TILEOPS SWAP - REPORT TACC-RELEASE",
+    ])
+    # A store, then a load and a store; the two failures ran nothing.
+    assert reports == [3]
 
 
 def _bring_up(machines, ctrl: int) -> None:
@@ -397,55 +492,73 @@ def linked():
 
 
 @pytest.mark.parametrize("mode", [0x00, 0x07], ids=["u8-four-units", "fp64-one-unit"])
-def test_tacc_send_stores_into_a_chiplets_memory(linked, mode):
+def test_the_checked_words_store_into_a_chiplets_memory(linked, mode):
     rng = random.Random(f"window/{mode}")
     image = bytes(rng.getrandbits(8) for _ in range(IMAGE))
     _write(linked, INITIAL, image)
-    reports = _both(linked, [
-        FREE,
-        f"TACC-CLAIM? DROP {mode} TMODE! TACC-CLEAR",
-        f"{INITIAL} {WINDOW + LENT} TACC-SEND REPORT",
-        "TACC-STATUS@ REPORT TACC-RELEASE",
-    ])
-    assert reports[0] == 0
     active = 64 if mode == 0x07 else IMAGE
     expected = image[:active] + bytes(IMAGE - active)
     emulator, simulator = linked
+    reports = _both(linked, [
+        FREE,
+        f"TACC-CLAIM? DROP {mode} TMODE! TACC-CLEAR",
+        f"{INITIAL} {WINDOW + LENT} TACC-RELAY REPORT",
+    ])
+    assert reports == [OK]
     assert _lent(emulator) == _lent(simulator) == expected
+    # TACC-SEND stores the same image, now in TACC, a unit further on.
+    reports = _both(linked, [f"{WINDOW + LENT + 0x100} TACC-SEND REPORT",
+                             "TACC-RELEASE"])
+    assert reports == [OK]
+    assert _lent(emulator, 64)[256:] == _lent(simulator, 64)[256:] == expected
 
 
-def test_a_store_the_window_does_not_take_returns_status_6(linked):
-    emulator, simulator = linked
+def test_a_window_that_does_not_take_the_store_gives_status_6(linked):
     _write(linked, INITIAL, bytes(range(IMAGE)))
+    _write(linked, STORED, bytes([0xC3]) * IMAGE)
     reports = _both(linked, [
         FREE,
-        "TACC-CLAIM? DROP 0 TMODE! TACC-CLEAR",
-        # Past the ports built: the store has no route.
-        f"{INITIAL} {WINDOW + (2 << 48) + LENT} TACC-SEND REPORT",
+        "TACC-CLAIM? DROP 0x10 TMODE! TACC-CLEAR",
         # Outside the 4 KiB the test chiplet lends: it refuses the write.
-        f"{INITIAL} {WINDOW + 0x8000} TACC-SEND REPORT",
-        # Close the port to MegaPad's writes: the bridge refuses.
+        f"{WINDOW + 0x8000} TACC-SEND REPORT",
+        f"{INITIAL} {WINDOW + 0x8000} TACC-RELAY REPORT",
+        # The relay loaded before its store failed: TACC holds that image,
+        # valid and clean.
+        f"TACC-STATUS@ REPORT {STORED} TACC-SEND REPORT",
+        # A port closed to MegaPad's writes: its bridge refuses.
         f"{ENABLE | DOORBELL_EN} 0x80 CP!",
-        f"{INITIAL} {WINDOW + LENT} TACC-SEND REPORT DEPTH REPORT",
-        "TACC-STATUS@ REPORT",
-        f"{ENABLE | DOORBELL_EN | BORROW_EN} 0x80 CP! TACC-RELEASE",
+        f"{WINDOW + LENT} TACC-SEND REPORT {INITIAL} {WINDOW + LENT} TACC-RELAY REPORT",
+        f"{ENABLE | DOORBELL_EN | BORROW_EN} 0x80 CP! DEPTH REPORT TACC-RELEASE",
     ])
-    # The accumulator keeps the loaded image, valid and clean.
-    assert reports[:4] == [6, 6, 6, 0]
-    assert reports[4] == 0b111
+    assert reports == [REFUSED, REFUSED, 0b111 | (1 << 9), OK, REFUSED,
+                       REFUSED, 0]
+    initial = _same_memory(linked, INITIAL)
+    assert _same_memory(linked, STORED) == initial
 
 
-def test_send_faults_other_than_the_store_stay_faults(linked):
-    reports = _both(linked, [
-        FREE,
-        "0 KEPT ! ' KEEP FAULT-XT!",
-        f"{INITIAL} {SENT} TACC-SEND REPORT",
-        "KEPT @ REPORT  0 KEPT !",
-        f"TACC-CLAIM? DROP 0 TMODE! {INITIAL} {SENT + 8} TACC-SEND REPORT",
-        "KEPT @ REPORT  0 KEPT !",
-        f"{INITIAL + 0x20} {SENT} TACC-SEND REPORT",
-        "KEPT @ REPORT  0 FAULT-XT! TACC-RELEASE",
-    ])
-    # The unowned load is illegal, and a misaligned store or load image an
-    # alignment fault; none reports a status.
-    assert reports == [-21, -23, -23]
+def test_external_memory_failures_give_status_7_on_the_emulator(machines):
+    """The simulator has no external-memory transport, so only the emulator,
+    with an injected failure, reaches status 7."""
+
+    emulator, simulator = machines
+    external = EXTERNAL_BASE + 0x2000
+    _write(machines, external, bytes(range(IMAGE)))
+    _write(machines, INITIAL, bytes([0x11]) * IMAGE)
+    _both(machines, [FREE, f"TACC-CLAIM? DROP 0 TMODE! {INITIAL} TSRC0! TACC-LOAD"])
+    lines = [
+        # The load fails: TACC keeps the image it held.
+        f"{external} {SENT} TACC-RELAY REPORT TACC-STATUS@ REPORT",
+        # The store fails, after the relay's load of a Bank 0 image.
+        f"{INITIAL} {external} TACC-RELAY REPORT",
+        f"{external + 0x100} TACC-SEND REPORT DEPTH REPORT",
+    ]
+    emulator.system.cpu.set_external_phy_response_plan(
+        lambda request: ExternalPhyWordResponse(error=True))
+    try:
+        reports = emulator.run(lines)
+    finally:
+        emulator.system.cpu.set_external_phy_response_plan(None)
+    assert reports == [TRANSPORT, 0b111, TRANSPORT, TRANSPORT, 0]
+    # Without that failure the simulator's external memory takes them.
+    assert simulator.run(lines) == [OK, 0b111, OK, OK, 0]
+    _both(machines, ["TACC-RELEASE"])

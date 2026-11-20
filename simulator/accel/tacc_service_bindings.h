@@ -5,7 +5,7 @@
 // an operation reports (simulator/tacc.py). Each operation returns its
 // outcome as (fault, cause, address, length, retired, answer), with the values of
 // tacc_service.h's Fault and Cause, followed by what the operation gives
-// back: TSRC0 for tamac_scalars and the status for send.
+// back: TSRC0 for tamac_scalars and the status for send and relay.
 #include <pybind11/pybind11.h>
 
 #include <string>
@@ -76,9 +76,16 @@ inline void register_bindings(py::module_& module) {
              py::arg("tmode"), py::arg("tiles"), py::arg("scalars"), py::arg("count"),
              py::arg("source0"))
         .def("send",
+             [](Service& service, Cell destination) {
+                 Cell status = status_ok;
+                 const Outcome outcome = service.send(destination, status);
+                 return py::make_tuple(outcome_tuple(outcome), status);
+             },
+             py::arg("destination"))
+        .def("relay",
              [](Service& service, Cell tmode, Cell source, Cell destination) {
-                 Cell status = send_ok;
-                 const Outcome outcome = service.send(tmode, source, destination, status);
+                 Cell status = status_ok;
+                 const Outcome outcome = service.relay(tmode, source, destination, status);
                  return py::make_tuple(outcome_tuple(outcome), status);
              },
              py::arg("tmode"), py::arg("source"), py::arg("destination"));

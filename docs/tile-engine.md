@@ -840,7 +840,8 @@ These emit the corresponding MEX instruction or CSR access inline.
 | `TACC-LOAD` | `( -- )` | Load the 256-byte image at `TSRC0` |
 | `TACC-STORE` | `( -- )` | Store the 256-byte image at `TDST` |
 | `TACC-RELEASE` | `( -- )` | Zeroize and release owned TACC |
-| `TACC-SEND` | `( src dst -- status )` | Load the image at src and store it to dst, which may be a chiplet port's window; 6 when the store took a bus fault |
+| `TACC-SEND` | `( dst -- status )` | Store the image TACC holds to dst, which may be a chiplet port's window; a status, never a trap |
+| `TACC-RELAY` | `( src dst -- status )` | Load the image at src and store it to dst, which may be a chiplet port's window; a status, never a trap |
 
 The convenience word does not hide a spin.  Software chooses whether and how
 long to retry:
@@ -1110,8 +1111,10 @@ TACC-RELEASE
 
 `TAMAC-SCALARS` reads the weights at the lane width of the format, one byte
 each here, and leaves `TSRC0` at the last feature tile.  A service that
-delivers scores into memory a chiplet lends moves each image with
-`TACC-SEND`, whose status 6 reports a store the chiplet did not take.
+delivers scores into memory a chiplet lends stores them with `TACC-SEND`
+when they are in TACC, or moves an image of them with `TACC-RELAY`.  Both
+return a status instead of trapping, 6 for a store the chiplet did not
+take (`docs/BIOS-DICTIONARY.md`).
 
 ---
 

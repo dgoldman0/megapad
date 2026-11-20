@@ -5935,6 +5935,7 @@ class TestBIOSTACC(unittest.TestCase):
         append after the unchanged full-TACC dictionary tail."""
         labels = self._labels
         chain = (
+            ("d_tacc_relay", "d_tacc_send"),
             ("d_tacc_send", "d_tamac_scalars"),
             ("d_tamac_scalars", "d_tamac_scalar"),
             ("d_tamac_scalar", "d_boot_id"),
@@ -5980,7 +5981,7 @@ class TestBIOSTACC(unittest.TestCase):
             ("d_caller_span_status", "d_entropy_ready"),
         )
         self.assertEqual(
-            labels["latest_entry"], labels["d_tacc_send"])
+            labels["latest_entry"], labels["d_tacc_relay"])
         for current, previous in chain:
             link = int.from_bytes(
                 self._code[labels[current]:labels[current] + 8],
@@ -5997,7 +5998,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 566)
+        self.assertEqual(len(seen), 567)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -17005,7 +17006,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 566)
+        self.assertEqual(len(seen), 567)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -18634,8 +18635,9 @@ class TestBIOSEntropyFill(unittest.TestCase):
         changing any older dictionary link."""
         labels = self._bios_labels
         self.assertEqual(
-            labels["latest_entry"], labels["d_tacc_send"])
+            labels["latest_entry"], labels["d_tacc_relay"])
         for current, previous in (
+            ("d_tacc_relay", "d_tacc_send"),
             ("d_tacc_send", "d_tamac_scalars"),
             ("d_tamac_scalars", "d_tamac_scalar"),
             ("d_tamac_scalar", "d_boot_id"),

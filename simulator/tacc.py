@@ -16,8 +16,8 @@ fault an operation reports into the one the runtime routes:
   machine's BIOS reports a bus fault and returns to its prompt without the
   callback; the simulator fails the dispatch, as it does for every guest
   access outside mapped memory, with the address the machine reports.
-  ``TACC-SEND`` turns its store's bus fault into status 6 instead, as the
-  BIOS's bus-fault handler does for that one store.
+  ``TACC-SEND`` and ``TACC-RELAY`` return a status for every failure
+  instead, as the BIOS's checked image words do.
 """
 
 from __future__ import annotations
@@ -34,9 +34,22 @@ FAULT_BUS = 3
 TACC_IMAGE_BYTES = 256
 TACC_OWNER_NONE = 31
 
-# TACC-SEND's statuses, from the BIOS's common checked namespace.
-TACC_SEND_OK = 0
-TACC_SEND_HARDWARE = 6
+# The statuses of TACC-SEND and TACC-RELAY, the checked image words, as
+# bios.asm gives them (docs/BIOS-DICTIONARY.md).  Every check runs before
+# the first instruction, so 1 to 5 change nothing; with 0, 6 and 7 the
+# instructions ran.  The simulator has no external-memory transport and so
+# never returns 7.
+TACC_STATUS_OK = 0
+TACC_STATUS_NOT_OWNER = 1
+TACC_STATUS_INVALID = 2
+TACC_STATUS_FORMAT = 3
+TACC_STATUS_MISALIGNED = 4
+TACC_STATUS_NO_ROUTE = 5
+TACC_STATUS_REFUSED = 6
+TACC_STATUS_TRANSPORT = 7
+TACC_STATUSES_THAT_RAN = frozenset(
+    (TACC_STATUS_OK, TACC_STATUS_REFUSED, TACC_STATUS_TRANSPORT)
+)
 
 # What made a bus fault, by tacc_service.h's Cause.
 _CAUSES = {
@@ -118,7 +131,14 @@ __all__ = [
     "TACCBusFault",
     "TACC_IMAGE_BYTES",
     "TACC_OWNER_NONE",
-    "TACC_SEND_HARDWARE",
-    "TACC_SEND_OK",
+    "TACC_STATUSES_THAT_RAN",
+    "TACC_STATUS_FORMAT",
+    "TACC_STATUS_INVALID",
+    "TACC_STATUS_MISALIGNED",
+    "TACC_STATUS_NOT_OWNER",
+    "TACC_STATUS_NO_ROUTE",
+    "TACC_STATUS_OK",
+    "TACC_STATUS_REFUSED",
+    "TACC_STATUS_TRANSPORT",
     "raise_fault",
 ]

@@ -914,14 +914,15 @@ FP16 pairs `1.0 * 2.0` and `0.5 * 4.0` produce binary32 `4.0`
 
 ### Borrowed tile work
 
-Three words serve kernels that score many candidates at once and the
+Four words serve kernels that score many candidates at once and the
 service that delivers their scores into memory a chiplet lends:
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `TAMAC-SCALAR` | `( x -- )` | TAMAC's broadcast form: accumulate each lane of the tile at `TSRC0` times the low lane-width bits of x. |
 | `TAMAC-SCALARS` | `( tiles xs n -- )` | `TAMAC-SCALAR` over n consecutive tiles from tiles, tile i times scalar i of the vector at xs, packed at `TMODE`'s lane width.  `TSRC0` is left at the last tile reached. |
-| `TACC-SEND` | `( src dst -- status )` | `TACC-LOAD` the image at src, then `TACC-STORE` it to dst, in memory or a chiplet port's window.  Status 0, or 6 when the store took a bus fault. |
+| `TACC-SEND` | `( dst -- status )` | Store what TACC holds to dst, in memory or a chiplet port's window. |
+| `TACC-RELAY` | `( src dst -- status )` | `TACC-LOAD` the image at src, then store it to dst, in memory or a chiplet port's window. |
 
 A kernel that keeps one feature to a tile, byte c of tile f holding feature
 f of candidate c, gets each candidate's weighted sum in its own lane from
@@ -929,12 +930,16 @@ one `TAMAC-SCALARS` over the feature tiles and a vector of weights.  In a
 small network, one such run for each hidden unit, with that unit's weights,
 gives the unit's sums for all 64 candidates at once.
 
-`TACC-SEND` leaves the loaded image in TACC, valid and clean, with
-`TSRC0` and `TDST` holding src and dst.  The bus-fault handler recognizes
-its store, so a window the chiplet does not let MegaPad write, or a write
-the chiplet refuses, fails or leaves unanswered, comes back as status 6
-rather than the bus-fault report.  The load's faults and a misaligned dst
-remain ordinary faults.
+`TACC-SEND` and `TACC-RELAY` never trap.  They check ownership, the
+accumulator's state or `TMODE`'s format, alignment and each image's route
+before their first instruction, and return a status for each failure: 0
+OK, 1 NOT-OWNER, 2 INVALID, 3 FORMAT, 4 MISALIGNED, 5 NO-ROUTE, 6 REFUSED
+for a window that did not take the store, and 7 TRANSPORT for external
+memory that failed.  A failure from 1 to 5 changes nothing.  The
+bus-fault handler recognizes the words' load and stores and returns to
+them, so a chiplet that refuses, fails or leaves a write unanswered comes
+back as status 6 rather than the bus-fault report.  `BIOS-DICTIONARY.md`
+gives each status's conditions.
 
 ---
 

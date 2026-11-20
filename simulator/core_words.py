@@ -3294,8 +3294,8 @@ def install_core(runtime: MegaForthRuntime) -> None:
         runtime.define_primitive(name, callback)
 
     # The words of borrowed tile work follow, as the BIOS appends them:
-    # TAMAC's broadcast form, that form over consecutive tiles, and the
-    # checked move of an image through the accumulator.
+    # TAMAC's broadcast form, that form over consecutive tiles, and the two
+    # checked image words, which return a status for every failure.
     runtime.define_primitive(
         b"TAMAC-SCALAR",
         lambda context: runtime.tile.tamac_scalar(context.data.pop()),
@@ -3306,7 +3306,13 @@ def install_core(runtime: MegaForthRuntime) -> None:
     )
     runtime.define_primitive(
         b"TACC-SEND",
-        lambda context: _tacc_send(runtime, context),
+        lambda context: context.data.replace_top(
+            runtime.tile.tacc_send(context.data.peek())
+        ),
+    )
+    runtime.define_primitive(
+        b"TACC-RELAY",
+        lambda context: _tacc_relay(runtime, context),
     )
 
 
@@ -3320,14 +3326,13 @@ def _tamac_scalars(runtime, context) -> None:
     runtime.tile.tamac_scalars(tiles, scalars, count)
 
 
-def _tacc_send(runtime, context) -> None:
-    """``TACC-SEND ( src dst -- status )``: as in the BIOS, ``src``'s cell
-    stays on the stack until the status replaces it, so a fault leaves it
-    there."""
+def _tacc_relay(runtime, context) -> None:
+    """``TACC-RELAY ( src dst -- status )``: as in the BIOS, the status takes
+    ``src``'s cell."""
 
     destination = context.data.pop()
     source = context.data.peek()
-    context.data.replace_top(runtime.tile.tacc_send(source, destination))
+    context.data.replace_top(runtime.tile.tacc_relay(source, destination))
 
 
 def _scalar_float_word(service, shape: str, op: int | None):

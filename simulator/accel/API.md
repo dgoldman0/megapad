@@ -464,8 +464,9 @@ returns `(fault, cause, address, length, retired, answer)`: the fault the
 machine would raise (none, illegal, alignment or bus), what made a bus
 fault, the address the machine reports, the span that faulted, the TACC
 instructions completed and a refusing chiplet's answer. `tamac_scalars`
-adds the TSRC0 it leaves and `send` the status it gives. The Python words
-raise the fault and count the retired instructions. The program has no TACC
+adds the TSRC0 it leaves, and `send` and `relay`, the checked image words,
+add the status they give in place of a fault. The Python words raise the
+fault and count the retired instructions. The program has no TACC
 operations: every TACC word is a Python primitive that calls this service.
 
 ## Ownership and collection

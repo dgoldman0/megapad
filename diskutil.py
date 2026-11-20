@@ -1215,8 +1215,9 @@ TACC LIFECYCLE
   TACC-STORE     Store 256 bytes to TDST
   TACC-RELEASE   Zeroize and release
   TACC-STATUS@   Read visible ownership/state
-  TACC-SEND      Load src, store to dst or a
-                 chiplet window; status 0 or 6
+  TACC-SEND      Store TACC to dst or a chiplet
+                 window; a status, never a trap
+  TACC-RELAY     Load src, then as TACC-SEND
 
 There are seven physical TACC ownership domains:
 one private engine for each of four full cores,
