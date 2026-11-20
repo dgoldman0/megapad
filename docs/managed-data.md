@@ -558,7 +558,7 @@ window protocol.
 |--------|------------|-----------------|
 | Control block, core records, store logs, handle directory, shape descriptions | MegaPad | Reading |
 | LM1's block | LM1 | Reading and writing |
-| Handle table segments | Both: MegaPad inside windows, LM1 during holds | Reading and writing |
+| Handle table segments | Both: MegaPad inside windows, LM1 during holds and into a task's result slot (§4) | Reading and writing |
 | Shared heap blocks | Both | Reading and writing |
 | Queue pairs | As chiplet-link.md §8 says | As it says |
 
