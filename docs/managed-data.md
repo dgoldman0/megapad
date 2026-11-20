@@ -316,6 +316,12 @@ each owner the list of its handles, newest first.
 Releasing a handle drops a root and frees nothing. The object goes once
 nothing else uses it.
 
+Every core shares the table's free list, the owner table and the owners'
+lists, so the library guards them with one of KDOS's locks. It takes the
+lock only for the few accesses a handle word makes, never across a wait,
+so a core inside a window that waits for the lock waits only for another
+core's short update.
+
 ### Stale handles
 
 A handle is **stale** when its index lies beyond the table, its slot is
