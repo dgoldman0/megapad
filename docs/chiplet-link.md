@@ -210,6 +210,13 @@ the unit does not. The tile engine's `TACC.STORE` is the one writer
 units its format fills, four, two or one, with `zeros` covering the rest of
 the 256 bytes.
 
+The chiplet writes the zero units after it takes the last data unit, inside
+the answer's 255-cycle bound (below). A chiplet that writes its memory 8
+bytes a cycle takes 8 cycles a unit, so it cannot write more than about 30
+units of zeros and answer in time, although the 8-bit field allows 255. A
+writer keeps its zeros within what its chiplets can write inside the bound;
+`TACC.STORE` asks for at most 3, for FP64.
+
 ### Write answer (chiplet to MegaPad)
 
 | Field | Width | Meaning |
@@ -228,6 +235,13 @@ missing that long, the store that made the write takes a fault, and the
 bridge holds `cancel` and sends nothing more until the answer arrives or
 the port is reset. A chiplet returned to reset answers nothing, so the
 bridge ends a write then outstanding with a fault for its store.
+
+A chiplet therefore answers every write MegaPad has begun, a cancelled one
+included, even when the cancel arrives before the chiplet has taken the
+write's first message. While a cancelled or timed-out write awaits its
+answer, the bridge refuses every later write, and each store into the
+window faults at once, so a chiplet that drops that answer loses all of
+MegaPad's writes until the port is reset.
 
 A write is complete when its answer returns, so a doorbell MegaPad rings
 after it follows the data, as in the other direction.
