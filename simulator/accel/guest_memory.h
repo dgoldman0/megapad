@@ -12,6 +12,7 @@
 #include <cstring>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -130,6 +131,19 @@ public:
 
     bool contains(Cell address, Cell length) const {
         return find(address, length) != nullptr;
+    }
+
+    // The ordinary region that holds ADDRESS, as its base and size; false
+    // when ADDRESS lies in none.
+    bool region_at(Cell address, Cell& base, Cell& size) const {
+        for (const Region& region : regions_) {
+            if (address >= region.base && address - region.base < region.size) {
+                base = region.base;
+                size = region.size;
+                return true;
+            }
+        }
+        return false;
     }
 
     void read(Cell address, uint8_t* out, Cell length) {
@@ -259,5 +273,16 @@ private:
     Cell page_size_ = 1;
     unsigned page_shift_ = 0;
 };
+
+// MEMORY, a SparseAddressSpace, as native code reaches its regions. ROLE
+// names the memory in the error a caller's other object gets.
+inline GuestMemory address_space_memory(py::handle memory, const char* role) {
+    py::module_ module = py::module_::import("simulator.memory");
+    if (!py::isinstance(memory, module.attr("SparseAddressSpace")))
+        throw py::type_error(std::string(role) + " must be a SparseAddressSpace");
+    py::tuple descriptors = module.attr("native_region_descriptors")(memory);
+    const Cell page_size = memory.attr("page_size").cast<Cell>();
+    return GuestMemory(build_regions(descriptors[0], page_size, descriptors[1]), page_size);
+}
 
 }  // namespace megapad::guest

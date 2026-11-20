@@ -97,6 +97,7 @@ from simulator.sha3 import HostedSHA3Service
 from simulator.tile import HostedTileService
 from simulator.spinlocks import HostedSpinlockBank
 from simulator import storage as storage_service
+from simulator import tacc as tacc_service
 from simulator.source import (
     ASCII_SPACE,
     SourceBuffer,
@@ -859,10 +860,17 @@ class MegaForthRuntime:
             self.system_storage,
             self.user_storage,
         ) = self.storage_units
+        # Core 0's full-width tile accumulator. A store image goes into a
+        # chiplet port's window when the profile has ports.
+        chiplet_ports = self.chiplet_ports
         self.tile = HostedTileService(
             self.memory,
             self.field,
             account_operation=self.diagnostics.account_tile_operation,
+            tacc=tacc_service.HostedTACCService(
+                self.memory,
+                None if chiplet_ports is None else chiplet_ports.link,
+            ),
         )
         self.scalar_float = HostedScalarFloatService()
         self._runtime_token = object()

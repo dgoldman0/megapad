@@ -85,14 +85,7 @@ inline py::object path_object(py::handle path) {
 
 // MEMORY, a SparseAddressSpace, as native code reaches its regions.
 inline megapad::guest::GuestMemory guest_memory_of(py::handle memory) {
-    py::module_ module = py::module_::import("simulator.memory");
-    if (!py::isinstance(memory, module.attr("SparseAddressSpace")))
-        throw py::type_error("storage DMA memory must be a SparseAddressSpace");
-    py::tuple descriptors = module.attr("native_region_descriptors")(memory);
-    const Cell page_size = memory.attr("page_size").cast<Cell>();
-    return megapad::guest::GuestMemory(
-        megapad::guest::build_regions(descriptors[0], page_size, descriptors[1]),
-        page_size);
+    return megapad::guest::address_space_memory(memory, "storage DMA memory");
 }
 
 // A transfer for the Python words: through the memory the service is bound

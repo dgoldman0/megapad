@@ -5,8 +5,8 @@ Status: MegaPad's side is implemented in RTL and simulated, LM1's end
 emulator and the simulator model MegaPad's side (section 9). MegaPad's
 writes into memory a chiplet lends (sections 3 and 4), accepted on
 2026-11-19 for the tile engine's `TACC.STORE`, are built in MegaPad's RTL
-and modelled in the emulator; LM1's end and the `LEND` entries of section
-8 are not built yet. This is the specification of the link between
+and modelled in the emulator and the simulator; LM1's end and the `LEND`
+entries of section 8 are not built yet. This is the specification of the link between
 MegaPad and one chiplet: the port's identity, its register window, the
 channels that cross the link, the sideband, and the queues in lent memory
 through which the two chips exchange work (section 8). The design it
@@ -486,9 +486,8 @@ clock.
   emulator's batched and strict-cycle schedulers alike. In the strict one
   the store holds the image stage from its grant until the answer, and the
   chiplet takes the write in the answer's cycle. The Python oracle routes a
-  window store through the same C++ port model. The simulator has no tile
-  engine, so its windows exist in `PORT_COUNT` and the `WINDOW` register
-  alone.
+  window store through the same C++ port model, and so does the hosted
+  simulator's `TACC-STORE`, which completes inside its word.
 - In the emulator a chiplet steps between scheduler rounds, and at each
   scheduling frontier of the cycle-exact batch. A step does a fixed budget
   of the chiplet's own units, set per port. While every core sleeps or is
@@ -544,9 +543,10 @@ that memory into its reply when a command asks it to.
 - **IDs above 63.** The 64-bit pending mask covers IDs 0 to 63: the 16
   cores and 48 ports. A die with more ports needs a wider mask.
 - **The rest of MegaPad's writes into a chiplet.** Sections 3 and 4
-  specify them for the tile engine's `TACC.STORE`, and MegaPad's RTL and
-  the emulator build them. LM1's end, whose cluster has no write path from
-  outside yet, and the `LEND` entries of section 8 are still to build.
+  specify them for the tile engine's `TACC.STORE`, and MegaPad's RTL, the
+  emulator and the simulator build them. LM1's end, whose cluster has no
+  write path from outside yet, and the `LEND` entries of section 8 are
+  still to build.
   Reads of memory a chiplet lends, by the cores or the tile engine, are
   still to specify.
 - **The physical layer.** The channels are logical; framing them onto UCIe's

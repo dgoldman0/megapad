@@ -3271,6 +3271,28 @@ def install_core(runtime: MegaForthRuntime) -> None:
         lambda context: context.data.push(runtime.boot_identity()),
     )
 
+    # The full-width TACC words follow, in the BIOS's order.  They run on
+    # the tile service's native accumulator (simulator/tacc.py).
+    for name, callback in (
+        (b"TAMAC", lambda _context: runtime.tile.tamac()),
+        (b"TACC-TRY", lambda _context: runtime.tile.tacc_try()),
+        (b"TACC-CLEAR", lambda _context: runtime.tile.tacc_clear()),
+        (b"TACC-LOAD", lambda _context: runtime.tile.tacc_load()),
+        (b"TACC-STORE", lambda _context: runtime.tile.tacc_store()),
+        (b"TACC-RELEASE", lambda _context: runtime.tile.tacc_release()),
+        (
+            b"TACC-STATUS@",
+            lambda context: context.data.push(runtime.tile.tacc_status()),
+        ),
+        (
+            b"TACC-CLAIM?",
+            lambda context: context.data.push(
+                forth_flag(runtime.tile.tacc_claim())
+            ),
+        ),
+    ):
+        runtime.define_primitive(name, callback)
+
 
 def _scalar_float_word(service, shape: str, op: int | None):
     """Bind one BIOS-shaped scalar FP word to the hosted service."""

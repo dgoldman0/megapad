@@ -30,9 +30,9 @@ from simulator.memory import AddressClass, SparseAddressSpace
 CHIPLET_OFFSET = 0xE00
 CHIPLET_LIMIT = 0xF00
 CHIPLET_RANGES = 8
-# W: each port's window into memory its chiplet lends is 2^W bytes. The
-# hosted profile has no tile engine to write into a window, but PORT_COUNT
-# reports W as the model's register does.
+# W: each port's window into memory its chiplet lends is 2^W bytes, from
+# 0x0100_0000_0000_0000. The tile accumulator's TACC-STORE writes there
+# (simulator/tacc.py), and PORT_COUNT reports W as the model's register does.
 CHIPLET_WINDOW_BITS = 48
 
 MAILBOX_OFFSET = 0x500
@@ -165,6 +165,13 @@ class HostedChipletPorts:
                 "the chiplet ports are not bound to an address space"
             )
         return link
+
+    @property
+    def link(self):
+        """The native model of the ports, through whose windows the tile
+        accumulator's stores reach memory the chiplets lend."""
+
+        return self._require_bound()
 
     # -- chiplets ---------------------------------------------------------
 

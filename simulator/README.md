@@ -96,6 +96,11 @@ The implemented slices provide:
   index, widening, multiply-accumulate, and transpose operations, low-byte
   control registers, completed-operation accounting, and the ACC/TSRC0/TDST
   state shared with the hosted Field ALU;
+- core 0's full-width tile accumulator, native code behind the eight TACC
+  words, with the machine's ownership, format, image, alignment and routing
+  rules in every TACC format, TAMAC's lanes computed by the arithmetic the
+  emulator's native engine uses, and `TACC-STORE`'s route into a chiplet
+  port's window through the shared port model;
 - a routed per-runtime AES-128/256-GCM service shared by BIOS words and direct
   virtual MMIO, backed by a portable AES/GHASH value model and exact native
   command, status, fault, and incremental guest-transfer semantics;
@@ -890,6 +895,18 @@ loads. This runtime has no BIOS image, so it gives the cell of the BIOS that
 BIOS's boot file (`shared/boot_identity.py`). A runtime that evaluates KDOS
 without an image boot gives the BIOS's own cell, as the BIOS does before it
 has loaded a file.
+
+The eight full-width TACC words follow `BOOT-ID`, in the BIOS's order:
+`TAMAC`, `TACC-TRY`, `TACC-CLEAR`, `TACC-LOAD`, `TACC-STORE`,
+`TACC-RELEASE`, `TACC-STATUS@` and `TACC-CLAIM?`. The tile service passes
+its registers to core 0's accumulator, `simulator/accel/tacc_service.h`,
+which checks ownership, state, format, alignment and the route in the
+machine's order before it changes anything. An illegal operation or a
+misaligned image reaches the `FAULT-XT!` callback with -21 or -23, and a
+span with no route fails the dispatch with `TACCBusFault` at the address
+the machine reports (`docs/simulator-contract.md`, section 6).
+`tests/simulator/test_tacc_words.py` runs each case on the Python emulator
+too and requires the same image, status, memory and fault.
 
 ### Semantic evaluator and checked source
 

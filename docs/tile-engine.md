@@ -522,8 +522,8 @@ and RTL implement these rules.  The software backends take their values from
 `shared/ieee_fp.py`, a seeded differential test holds the native accelerator
 to the Python results, and the RTL replays emulator-generated golden vectors
 (`rtl/sim/tile_fp_vectors.vec`).  FP32 and FP64 element-wise operations,
-reductions, and dot products run in all four backends, and their TACC
-formats in the three that implement TACC.  The RTL computes their
+reductions, dot products, and TACC formats run in all four backends.  The
+RTL computes their
 arithmetic on two multi-format FMA units per engine
 (`rtl/core/mp64_fma.v`): element-wise operations take four beats, the
 canonical tree schedules its products, levels, and reserved `ACC_ACC` beats
@@ -540,11 +540,14 @@ shared with the scalar engine) at the §10 cost.
 ## Full-Width Tile Accumulator (TACC)
 
 > **Implementation status:** the Python oracle, the native accelerator, the
-> strict-cycle system model and the RTL implement this contract, every
-> format included; the hosted simulator does not implement TACC. A store
-> into memory a chiplet lends (below) is built in the RTL, the native
-> accelerator, the strict-cycle model and the Python oracle, which hands it
-> to the shared C++ port model.
+> strict-cycle system model, the RTL and the hosted simulator implement this
+> contract, every format included. The simulator's accumulator is native
+> code over the lane arithmetic the native accelerator uses, and it reports
+> a bus fault by failing the dispatch rather than through a BIOS handler
+> (`docs/simulator-contract.md`). A store into memory a chiplet lends
+> (below) is built in the RTL, the native accelerator, the strict-cycle
+> model, the simulator and the Python oracle, which hands it to the shared
+> C++ port model.
 
 Each physical tile engine owns one 2,048-bit TACC bank plus owner, valid,
 dirty, format, busy, force-pending, and cancellation metadata.  Software

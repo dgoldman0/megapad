@@ -223,16 +223,17 @@ result-or-trap contract. The qualified positive-divisor domain of KDOS
 
 A word whose operation traps on the machine routes the fault as the BIOS
 instruction-fault handlers do (`docs/bios-forth.md`, Instruction faults).
-Hosted words raise two of the three kinds: an illegal instruction (a
-floating-point operation under a reserved `FPCSR.RM`, or a tile operation the
-format does not admit) and a divide by zero (`/`, `MOD`, or `/MOD` by zero,
-and signed division overflow). The callback installed with `FAULT-XT!`
-receives the throw code, -21 or -10, so KDOS's `_KDOS-FAULT` throws it to
-the innermost `CATCH`. With no callback, or when it returns, the runtime
-prints the BIOS report line without its `PC=` field, since the simulator has
-no machine PC (for example `*** DIVIDE BY ZERO CORE=00`), and aborts with
-clean stacks. The simulator has no alignment fault: it does not implement
-the `TACC` words that raise one.
+Hosted words raise all three kinds: an illegal instruction (a floating-point
+operation under a reserved `FPCSR.RM`, a tile operation the format does not
+admit, or a TACC operation its owner, state or format forbids), an alignment
+fault (a TACC image or source row that is not 64-byte aligned), and a divide
+by zero (`/`, `MOD`, or `/MOD` by zero, and signed division overflow). The
+callback installed with `FAULT-XT!` receives the throw code, -21, -23 or
+-10, so KDOS's `_KDOS-FAULT` throws it to the innermost `CATCH`. With no
+callback, or when it returns, the runtime prints the BIOS report line without
+its `PC=` field, since the simulator has no machine PC (for example
+`*** DIVIDE BY ZERO CORE=00`, or `*** ALIGNMENT FAULT @ 0000000000040008
+CORE=00` with the misaligned address), and aborts with clean stacks.
 
 That abort, the `ABORT` word and both forms of `ABORT"` clear the task's
 stacks and then run the callback installed with `QUIT-XT!`, as BIOS `QUIT`
@@ -747,6 +748,21 @@ signal reaches the guest through `MBOX_STATUS`; its delivery as an interrupt
 or through a flag branch belongs to the simulator's multicore work, and
 `IPI-SEND` keeps the behaviour described above.
 
+Each port also has a window into memory its chiplet lends: port `p`'s is the
+2^48 bytes at `0x0100_0000_0000_0000 + p × 2^48`. `TACC-STORE` sends an
+image that lies wholly inside one of them to that port through the same
+model, as one write of the format's active 64-byte units with units of zeros
+for the rest of the 256 bytes: four units for U8 and U16, two for U32, FP16,
+BF16 and FP32, and one for FP64. The chiplet answers inside the call, and
+the store completes on an `OK` and clears `DIRTY`. Any other answer, a port
+whose `BORROW_EN` is clear or whose chiplet is absent or held in reset, and
+an image that runs past its window's end are bus faults that leave the
+accumulator as it was, at the image base or at the first byte beyond the
+window. A `TACC-LOAD` image or a `TAMAC` source in a window has no route and
+faults at its start, as does a store image beyond the ports built. What the
+chiplet is sent, the answer's effect and the fault addresses are
+compatibility claims; the link's 255-cycle bounds never expire here.
+
 It also has no micro-core cluster. `CLUSTER-EN@` returns zero, and
 `CLUSTER-EN!` accepts only zero as an idempotent disable; a nonzero mask fails
 before it is consumed. This semantic BIOS substitution is coherent with the
@@ -853,7 +869,7 @@ raw-bit, lane-selection, accumulator, two-tile widening, and 8-by-8
 byte-transpose semantics; focused differential vectors define their detailed
 integer, FP16, BF16, FP32, FP64, NaN, alias, and control behavior. Reserved
 EW codes, operations a format does not admit, and all remaining unbound
-tile/TACC words fail rather than silently aliasing another format.
+tile words fail rather than silently aliasing another format.
 
 Each used operand is the exact addressed 64-byte span and must fit one ordinary
 mapped region; MMIO and crossing or wrapping spans are rejected before
@@ -892,6 +908,47 @@ a reserved `FPCSR.RM`, raises an illegal-instruction fault (§3) after taking
 its operands, as the BIOS word does, without changing `FPCSR` or pushing a
 result. `TDIV` and `TSQRT` follow them; `TSQRT` reads only `TSRC0`, and both
 fail closed in integer formats. `FAULT-XT!` follows at the frontier.
+
+The full-width TACC words follow `BOOT-ID` at the frontier, in the BIOS's
+order: `TAMAC`, `TACC-TRY`, `TACC-CLEAR`, `TACC-LOAD`, `TACC-STORE`,
+`TACC-RELEASE`, `TACC-STATUS@` and `TACC-CLAIM?`. They run on core 0's
+private accumulator, a native service (`simulator/accel/tacc_service.h`)
+that the tile service owns and hands `TMODE`, `TSRC0`, `TSRC1` and `TDST`.
+The service keeps the 256-byte bank with its owner, valid and dirty state
+and latched format, and follows `docs/tile-engine.md` in every format:
+`CLEAR` and `LOAD` latch `TMODE`'s element width and integer signedness,
+`TAMAC` must match them, saturation and rounding are no part of the format,
+`LOAD` takes the bytes past the format's active image as zeros and `STORE`
+writes zeros there. TAMAC's lanes come from `shared/accel/tile_values.cpp`,
+the code the emulator's native engine runs. `TACC_STATUS` reads as the
+machine's, with `MINE` for core 0; `BUSY` and `FORCE_PENDING` read zero,
+because every operation completes inside its word, and no word reaches
+`TACC_CTL`. Focused differential cases hold the service to the Python
+emulator in every format, fault and route.
+
+Every check precedes any change, in the machine's order: ownership, valid
+state, the format, the alignment of every source before any route, then the
+route. An image or source row that is not 64-byte aligned is an alignment
+fault at its address. A span then routes as the machine's TACC memory port
+routes it. One that runs past the end of the address space faults at
+address zero, one that meets the device window faults at the window's start
+or its own, whichever is later, and one that starts in an ordinary region
+must end inside it or fault at the region's end; any other span faults at
+its start. Bank 0, external memory, HBW and VRAM all serve images and
+sources, since the profile runs in supervisor mode without an MPU. A store
+image may also lie in a chiplet port's window when the profile has ports, as
+described below.
+
+The machine raises a bus fault for a span with no route. Its BIOS reports
+one with a line and returns to the prompt without calling the `FAULT-XT!`
+callback; this runtime has no such handler, so it fails the dispatch with
+`TACCBusFault`, a guest memory access error that carries the address the
+machine reports in `TRAP_ADDR`, as it fails any guest access outside mapped
+memory. The accumulator, guest memory and a chiplet's memory are left as the
+machine leaves them. Each TACC instruction that completes counts in
+`PERF-TILEOPS`, a losing claim included, and one that faults does not.
+External-memory images move no PHY words here, so `PERF_EXTMEM` and the
+stall count stay zero, and no cycle count is a compatibility claim.
 
 The admitted AES service is one per-runtime transaction engine behind the
 virtual-MMIO router at `+0x700..+0x76F`; hosted BIOS words perform their normal
