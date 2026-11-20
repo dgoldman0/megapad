@@ -309,7 +309,9 @@ each owner the list of its handles, newest first.
 - `OBJ-OWNER-RELEASE` releases every handle the owner holds. Desk calls it
   when an owner closes, as `_DESK-HOST-RELEASE` calls
   `SBOX-CAPABILITY-OWNER-DRAIN` for a closing applet's jobs, while the
-  token still names that owner and before the token can be reused.
+  token still names that owner and before the token can be reused. It
+  calls it after that drain, because a task's handles stay lent until the
+  task's reply (below).
 
 Releasing a handle drops a root and frees nothing. The object goes once
 nothing else uses it.
@@ -361,6 +363,12 @@ headers.
 A record's raw words hold numbers whole, such as 64-bit counts, hashes and
 times. The collector never reads a raw word as a reference, nor any byte of
 a bytevector, so any bit pattern is safe in either.
+
+A header's size field holds up to 65,535 fields, 512 KiB. LM1's object
+model gives larger objects an extended header, subtype `11111`, whose next
+word holds the size and the subtype, but it does not yet fix that word's
+layout. Until it does, MegaPad makes no object larger than 65,535 fields,
+and a constructor asked for one fails with `OBJ-E-RANGE` (§16).
 
 ## 6. Reading
 
@@ -1020,5 +1028,8 @@ would.
   §10).
 - **Recovery.** Whether a restarted chiplet, or MegaPad's own engine, could
   adopt the shared heap after a failure instead of losing it.
+- **Large objects.** The layout of LM1's extended header, which objects of
+  more than 65,535 fields need (§5), so that a long string or vector can be
+  made at production size.
 - **The bounds.** The values of §3's three times, which the chiplet module
   measures.
