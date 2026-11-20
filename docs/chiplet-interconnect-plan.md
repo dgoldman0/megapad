@@ -16,8 +16,8 @@ memory, was proposed on 2026-11-20; none of it is built. This note records
 how chiplets attach to MegaPad in Leviathan: the contract every chiplet
 meets, how the chips share memory, how they signal and exchange work, and
 how LM1, the first chiplet, runs sandbox jobs, managed data and borrowed
-tile work over the link. It schedules no work. The release plan's side is decision 37
-and Parts 3d, 8 and 9 of `dev/PLAN.md` in fantasy-engine.
+tile work over the link. It schedules no work. The release plan's side is
+decision 37 and Parts 3d, 8 and 9 of `dev/PLAN.md` in fantasy-engine.
 
 ## 1. A chiplet works on memory lent to it
 
@@ -331,11 +331,12 @@ solver, four cores ran only 1.26 to 1.44 times faster than one because they
 waited for the bus. Between groups the service therefore reads Desk's
 frame flag and waits while Desk builds a frame, so one group bounds how
 long Desk waits for the bus: by estimate about 20,000 cycles for a
-two-layer network of 64 inputs and 32 hidden units. The flag is the pause flag Akashic
-proposes for background work (`docs/concurrency/microcore-kernels.md` §4 in
-akashic), which is not built. LM1's writes of features pass the port's
-weight and per-epoch limit at the external-memory controller (chiplet-link.md
-§5), which bound what tile work takes from Desk's memory.
+two-layer network of 64 inputs and 32 hidden units. The flag is the pause
+flag Akashic proposes for background work
+(`docs/concurrency/microcore-kernels.md` §4 in akashic), which is not
+built. LM1's writes of features pass the port's weight and per-epoch limit
+at the external-memory controller (chiplet-link.md §5), which bound what
+tile work takes from Desk's memory.
 
 **Batching and cost.** These figures are estimates from the timing in §3
 and §8. A request costs the hand-off of §8, about 180 to 250 clocks with
