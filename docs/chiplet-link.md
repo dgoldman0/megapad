@@ -452,7 +452,10 @@ states what it granted. A chiplet that later needs more sends another
 `OFFER` for the class, and each grant stands beside the earlier ones. KDOS
 registers a granted function under its class, and software asks for a class
 and is given whichever chiplet provides it. Class 0 is reserved, and class
-numbers are assigned in this section as functions are specified.
+numbers are assigned in this section as functions are specified. The first
+function specified, managed data, has its operations and statuses in
+[managed-data.md](managed-data.md), a proposal; its class number is assigned
+here once that is accepted.
 
 ### Ranges a chiplet lends
 
@@ -538,7 +541,9 @@ that memory into its reply when a command asks it to.
   queues comes with the module; the present one takes its addresses from
   its boot image.
 - **Classes.** Each function's class number, operations and statuses are
-  assigned with the function, LM1's with LM1's layer.
+  assigned with the function, LM1's with LM1's layer. The managed-data part
+  of that layer is [managed-data.md](managed-data.md), proposed; sandbox
+  jobs and borrowed tile work are still to specify.
 - **Taking a grant back.** How MegaPad withdraws a function's queues and
   memory from a running chiplet.
 - **A CSR path for small cores.** A port's signal reaches a small core as
