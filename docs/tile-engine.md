@@ -829,6 +829,8 @@ These emit the corresponding MEX instruction or CSR access inline.
 | `TFMA` | `( -- )` | Fused multiply-add: `a×b + dst` → `[TDST]` |
 | `TDOTACC` | `( -- )` | 4-way chunked dot product → ACC0–ACC3 |
 | `TAMAC` | `( -- )` | Accumulate widened `[TSRC0] × [TSRC1]` products into TACC |
+| `TAMAC-SCALAR` | `( x -- )` | TAMAC's broadcast form: accumulate `[TSRC0] × x` into TACC |
+| `TAMAC-SCALARS` | `( tiles xs n -- )` | `TAMAC-SCALAR` over n tiles from tiles, tile i times scalar i of the vector at xs |
 
 ### TACC Lifecycle
 
@@ -839,6 +841,7 @@ These emit the corresponding MEX instruction or CSR access inline.
 | `TACC-LOAD` | `( -- )` | Load the 256-byte image at `TSRC0` |
 | `TACC-STORE` | `( -- )` | Store the 256-byte image at `TDST` |
 | `TACC-RELEASE` | `( -- )` | Zeroize and release owned TACC |
+| `TACC-SEND` | `( src dst -- status )` | Load the image at src and store it to dst, which may be a chiplet port's window; 6 when the store took a bus fault |
 
 The convenience word does not hide a spin.  Software chooses whether and how
 long to retry:
@@ -1093,6 +1096,23 @@ TACC-RELEASE
 Both examples avoid the destination-tile load/add/store traffic required by
 legacy `TMAC`/`TFMA` accumulation.  The stored result remains the canonical
 256-byte TACC image rather than a silently narrowed tile.
+
+The broadcast form scores many candidates at once.  With one feature to a
+tile, byte c of tile f holding feature f of candidate c, a vector of one
+weight per feature gives each candidate's weighted sum in its own lane:
+
+```forth
+TACC-ACQUIRE
+0 TMODE!  TACC-CLEAR                \ 64 candidates, 32-bit sums
+features weights 16 TAMAC-SCALARS   \ lane c += weight f × feature f of c
+scores TDST!  TACC-STORE            \ 64 U32 scores
+TACC-RELEASE
+```
+
+`TAMAC-SCALARS` reads the weights at the lane width of the format, one byte
+each here, and leaves `TSRC0` at the last feature tile.  A service that
+delivers scores into memory a chiplet lends moves each image with
+`TACC-SEND`, whose status 6 reports a store the chiplet did not take.
 
 ---
 

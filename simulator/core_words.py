@@ -3293,6 +3293,42 @@ def install_core(runtime: MegaForthRuntime) -> None:
     ):
         runtime.define_primitive(name, callback)
 
+    # The words of borrowed tile work follow, as the BIOS appends them:
+    # TAMAC's broadcast form, that form over consecutive tiles, and the
+    # checked move of an image through the accumulator.
+    runtime.define_primitive(
+        b"TAMAC-SCALAR",
+        lambda context: runtime.tile.tamac_scalar(context.data.pop()),
+    )
+    runtime.define_primitive(
+        b"TAMAC-SCALARS",
+        lambda context: _tamac_scalars(runtime, context),
+    )
+    runtime.define_primitive(
+        b"TACC-SEND",
+        lambda context: _tacc_send(runtime, context),
+    )
+
+
+def _tamac_scalars(runtime, context) -> None:
+    """``TAMAC-SCALARS ( tiles xs n -- )``: the BIOS takes all three cells
+    before the first tile."""
+
+    count = context.data.pop()
+    scalars = context.data.pop()
+    tiles = context.data.pop()
+    runtime.tile.tamac_scalars(tiles, scalars, count)
+
+
+def _tacc_send(runtime, context) -> None:
+    """``TACC-SEND ( src dst -- status )``: as in the BIOS, ``src``'s cell
+    stays on the stack until the status replaces it, so a fault leaves it
+    there."""
+
+    destination = context.data.pop()
+    source = context.data.peek()
+    context.data.replace_top(runtime.tile.tacc_send(source, destination))
+
 
 def _scalar_float_word(service, shape: str, op: int | None):
     """Bind one BIOS-shaped scalar FP word to the hosted service."""

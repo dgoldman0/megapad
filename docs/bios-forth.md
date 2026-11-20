@@ -912,6 +912,29 @@ the first 128 output bytes:
 FP16 pairs `1.0 * 2.0` and `0.5 * 4.0` produce binary32 `4.0`
 (`0x40800000`) in every active lane; the upper 128 image bytes are zero.
 
+### Borrowed tile work
+
+Three words serve kernels that score many candidates at once and the
+service that delivers their scores into memory a chiplet lends:
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `TAMAC-SCALAR` | `( x -- )` | TAMAC's broadcast form: accumulate each lane of the tile at `TSRC0` times the low lane-width bits of x. |
+| `TAMAC-SCALARS` | `( tiles xs n -- )` | `TAMAC-SCALAR` over n consecutive tiles from tiles, tile i times scalar i of the vector at xs, packed at `TMODE`'s lane width.  `TSRC0` is left at the last tile reached. |
+| `TACC-SEND` | `( src dst -- status )` | `TACC-LOAD` the image at src, then `TACC-STORE` it to dst, in memory or a chiplet port's window.  Status 0, or 6 when the store took a bus fault. |
+
+A kernel that keeps one feature to a tile, byte c of tile f holding feature
+f of candidate c, gets each candidate's weighted sum in its own lane from
+one `TAMAC-SCALARS` over the feature tiles and a vector of weights.  A
+second layer runs the same way over the first layer's activations.
+
+`TACC-SEND` leaves the loaded image in TACC, valid and clean, with
+`TSRC0` and `TDST` holding src and dst.  The bus-fault handler recognizes
+its store, so a window the chiplet does not let MegaPad write, or a write
+the chiplet refuses, fails or leaves unanswered, comes back as status 6
+rather than the bus-fault report.  The load's faults and a misaligned dst
+remain ordinary faults.
+
 ---
 
 ## NIC / Networking (4 words)

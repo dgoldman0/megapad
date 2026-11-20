@@ -5931,10 +5931,13 @@ class TestBIOSTACC(unittest.TestCase):
     def test_tacc_dictionary_tail_chain(self):
         """WOTS, AES's block-mode words, SHA-384, the storage unit words, the
         QUIT callback, the string scan, the dictionary's code kind, the token
-        replay and the boot's identity append after the unchanged full-TACC
-        dictionary tail."""
+        replay, the boot's identity and the words of borrowed tile work
+        append after the unchanged full-TACC dictionary tail."""
         labels = self._labels
         chain = (
+            ("d_tacc_send", "d_tamac_scalars"),
+            ("d_tamac_scalars", "d_tamac_scalar"),
+            ("d_tamac_scalar", "d_boot_id"),
             ("d_boot_id", "d_token_replay"),
             ("d_token_replay", "d_dict_machine_code_q"),
             ("d_dict_machine_code_q", "d_scan"),
@@ -5977,7 +5980,7 @@ class TestBIOSTACC(unittest.TestCase):
             ("d_caller_span_status", "d_entropy_ready"),
         )
         self.assertEqual(
-            labels["latest_entry"], labels["d_boot_id"])
+            labels["latest_entry"], labels["d_tacc_send"])
         for current, previous in chain:
             link = int.from_bytes(
                 self._code[labels[current]:labels[current] + 8],
@@ -5994,7 +5997,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 563)
+        self.assertEqual(len(seen), 566)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -17002,7 +17005,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 563)
+        self.assertEqual(len(seen), 566)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -18627,11 +18630,15 @@ class TestBIOSEntropyFill(unittest.TestCase):
         """WOTS, then AES's block-mode words, then SHA-384, then the storage
         unit words, then the QUIT callback, then the string scan, then the
         dictionary's code kind, then the token replay, then the boot's
-        identity append without changing any older dictionary link."""
+        identity, then the words of borrowed tile work append without
+        changing any older dictionary link."""
         labels = self._bios_labels
         self.assertEqual(
-            labels["latest_entry"], labels["d_boot_id"])
+            labels["latest_entry"], labels["d_tacc_send"])
         for current, previous in (
+            ("d_tacc_send", "d_tamac_scalars"),
+            ("d_tamac_scalars", "d_tamac_scalar"),
+            ("d_tamac_scalar", "d_boot_id"),
             ("d_boot_id", "d_token_replay"),
             ("d_token_replay", "d_dict_machine_code_q"),
             ("d_dict_machine_code_q", "d_scan"),

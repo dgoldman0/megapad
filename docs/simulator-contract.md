@@ -950,6 +950,22 @@ machine leaves them. Each TACC instruction that completes counts in
 External-memory images move no PHY words here, so `PERF_EXTMEM` and the
 stall count stay zero, and no cycle count is a compatibility claim.
 
+The words of borrowed tile work follow, as the BIOS appends them:
+`TAMAC-SCALAR`, `TAMAC-SCALARS` and `TACC-SEND` (`docs/BIOS-DICTIONARY.md`).
+Each runs the BIOS word's steps in its order on the same accumulator.
+`TAMAC-SCALAR` consumes its cell, then runs TAMAC's broadcast form on the
+tile at `TSRC0` with the cell's low lane-width bits. `TAMAC-SCALARS` takes
+its three cells, then for each tile sets `TSRC0`, reads that tile's scalar
+at `TMODE`'s lane width (one byte for a reserved element width) and runs the
+broadcast form, so a fault leaves `TSRC0` at the tile it stopped on, with the
+tiles before it accumulated. It reads the scalars from ordinary memory
+alone; a scalar elsewhere fails the dispatch, where the BIOS's load could
+also reach a device register. `TACC-SEND` sets `TSRC0` and `TDST`, then
+loads and stores. A bus fault of its store gives status 6 instead of a
+fault, as the BIOS's bus-fault handler makes it, and leaves the loaded
+image valid and clean; its other faults are the load's and the store's,
+and src's cell stays on the stack under them, as in the BIOS.
+
 The admitted AES service is one per-runtime transaction engine behind the
 virtual-MMIO router at `+0x700..+0x76F`; hosted BIOS words perform their normal
 byte/word accesses against that same object. It implements AES-128/256 block

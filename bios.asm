@@ -4469,6 +4469,94 @@ w_tacc_claim_q:
     str r14, r0
     ret.l
 
+; TAMAC-SCALAR ( x -- ) TAMAC's broadcast form (E5 06 Rn): each lane of the
+; tile at TSRC0 times the low lane-width bits of x, accumulated into the
+; owned TACC.  x is consumed before the instruction runs.
+w_tamac_scalar:
+    ldn r7, r14
+    addi r14, 8
+    t.amac r7
+    ret.l
+
+; TAMAC-SCALARS ( tiles xs n -- ) TAMAC's broadcast form over n consecutive
+; 64-byte tiles from tiles: tile i times scalar i of the vector at xs, whose
+; scalars are packed little-endian at the lane width of TMODE's format.
+; Each step sets TSRC0 to its tile, reads its scalar, then accumulates, so
+; TSRC0 is left at the last tile reached and a fault stops the run there.
+; The hosted simulator runs the same steps (simulator/accel/tacc_service.h).
+w_tamac_scalars:
+    ldn r12, r14              ; n
+    mov r11, r14
+    addi r11, 8
+    ldn r9, r11               ; xs
+    addi r11, 8
+    ldn r13, r11              ; tiles
+    addi r14, 24
+    cmpi r12, 0
+    breq .tamac_scalars_done
+    csrr r0, 0x14             ; TMODE
+    andi r0, 0x0F             ; its element width
+    ldi64 r11, tamac_scalar_widths
+    add r11, r0
+    ld.b r11, r11             ; one scalar's bytes
+.tamac_scalars_loop:
+    mov r0, r13
+    csrw 0x16, r0             ; TSRC0 = this tile
+    cmpi r11, 1
+    brne .tamac_scalars_half
+    ld.b r7, r9
+    br .tamac_scalars_accumulate
+.tamac_scalars_half:
+    cmpi r11, 2
+    brne .tamac_scalars_word
+    ld.h r7, r9
+    br .tamac_scalars_accumulate
+.tamac_scalars_word:
+    cmpi r11, 4
+    brne .tamac_scalars_cell
+    ld.w r7, r9
+    br .tamac_scalars_accumulate
+.tamac_scalars_cell:
+    ldn r7, r9
+.tamac_scalars_accumulate:
+    t.amac r7
+    addi r13, 64
+    add r9, r11
+    dec r12
+    cmpi r12, 0
+    brne .tamac_scalars_loop
+.tamac_scalars_done:
+    ret.l
+
+; One TAMAC-SCALARS scalar's bytes for each TMODE element width: the lane
+; width of each defined format, and one byte for a reserved code, whose
+; TAMAC traps once that byte is read.
+tamac_scalar_widths:
+    .db 1, 2, 4, 8, 2, 2, 4, 8, 1, 1, 1, 1, 1, 1, 1, 1
+
+; TACC-SEND ( src dst -- status ) moves the 256-byte image at src to dst
+; through the owned TACC: TACC-LOAD from src in TMODE's format, then
+; TACC-STORE to dst, which may lie in a chiplet port's window.  TSRC0 and
+; TDST keep src and dst.  Status 0: the image arrived.  Status 6
+; (HARDWARE/PROTOCOL): the store took a bus fault, as a window store does
+; when the port does not admit MegaPad's writes or the chiplet refuses,
+; fails or leaves the write unanswered.  The bus-fault handler returns that
+; status at .tacc_send_store_return; every other fault stays a fault.
+w_tacc_send:
+    ldn r1, r14               ; dst
+    addi r14, 8
+    ldn r0, r14               ; src, whose cell takes the status
+    csrw 0x16, r0             ; TSRC0
+    csrw 0x18, r1             ; TDST
+    t.acc.load
+    ; The zero status is installed before the store, so its completion
+    ; falls through the label the bus-fault handler resumes at.
+    ldi r0, 0
+    t.acc.store
+.tacc_send_store_return:
+    str r14, r0
+    ret.l
+
 ; TMODE@ ( -- n ) read current tile mode
 w_tmode_fetch:
     csrr r0, 0x14
@@ -14047,13 +14135,13 @@ w_quit:
 ;  Bus Fault Handler
 ; =====================================================================
 bus_fault_handler:
-    ; Checked SHA3/Keccak/WOTS accesses use two private byte helpers, and the
-    ; checked entropy publisher has one private RAND8 site.  A fault saves the
-    ; architectural end-of-instruction PC, so recognize only the instruction
-    ; immediately following one of those accesses.  Returning with a checked
-    ; status skips the faulting access exactly once and leaves every unrelated
-    ; bus fault on the diagnostic path below.  No mutable recovery flag is
-    ; shared between cores.
+    ; Checked SHA3/Keccak/WOTS accesses use two private byte helpers, the
+    ; checked entropy publisher has one private RAND8 site, and TACC-SEND
+    ; has one store.  A fault saves the architectural end-of-instruction PC,
+    ; so recognize only the instruction immediately following one of those
+    ; accesses.  Returning with a checked status skips the faulting access
+    ; exactly once and leaves every unrelated bus fault on the diagnostic
+    ; path below.  No mutable recovery flag is shared between cores.
     ldn r0, r15                       ; saved end PC
     ldi64 r1, .sha3_mmio_read8_return
     cmp r0, r1
@@ -14064,6 +14152,9 @@ bus_fault_handler:
     ldi64 r1, .entropy_fill_rand8_return
     cmp r0, r1
     lbreq .bus_fault_checked_entropy
+    ldi64 r1, .tacc_send_store_return
+    cmp r0, r1
+    lbreq .bus_fault_checked_tacc_send
 
     ; ---- Phase 9: capture diagnostics into stack before any calls ----
     ; Push order: addr (top), PSEL, T (bottom).  Print order: addr, PSEL, T.
@@ -14130,6 +14221,10 @@ bus_fault_handler:
 
 .bus_fault_checked_entropy:
     ldi r0, 1                         ; UNAVAILABLE
+    rti
+
+.bus_fault_checked_tacc_send:
+    ldi r0, 6                         ; HARDWARE/PROTOCOL
     rti
 
 ; =====================================================================
@@ -25369,12 +25464,41 @@ d_token_replay:
 
 ; The identity of what booted appends after it.
 ; === BOOT-ID ===
-latest_entry:
 d_boot_id:
     .dq d_token_replay
     .db 7
     .ascii "BOOT-ID"
     ldi64 r11, w_boot_id
+    call.l r11
+    ret.l
+
+; The words of borrowed tile work append after it: TAMAC's broadcast form,
+; that form over consecutive tiles, and a checked image move through TACC.
+; === TAMAC-SCALAR ===
+d_tamac_scalar:
+    .dq d_boot_id
+    .db 12
+    .ascii "TAMAC-SCALAR"
+    ldi64 r11, w_tamac_scalar
+    call.l r11
+    ret.l
+
+; === TAMAC-SCALARS ===
+d_tamac_scalars:
+    .dq d_tamac_scalar
+    .db 13
+    .ascii "TAMAC-SCALARS"
+    ldi64 r11, w_tamac_scalars
+    call.l r11
+    ret.l
+
+; === TACC-SEND ===
+latest_entry:
+d_tacc_send:
+    .dq d_tamac_scalars
+    .db 9
+    .ascii "TACC-SEND"
+    ldi64 r11, w_tacc_send
     call.l r11
     ret.l
 

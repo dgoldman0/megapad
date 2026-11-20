@@ -1123,6 +1123,45 @@ secret-boundary qualifications are recorded in
 | 470 | `TACC-STATUS@` | `( -- status )` | | Read caller-relative TACC status CSR `0x1D` (`D0 1D`) |
 | 471 | `TACC-CLAIM?` | `( -- flag )` | | Execute `TACC-TRY`, then return canonical true exactly when `TACC_STATUS.MINE` is set; never spins |
 
+### Borrowed tile work (3 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 562 | `TAMAC-SCALAR` | `( x -- )` | | TAMAC's broadcast form (`t.amac r7`, `E5 06 07`): accumulate each lane of the tile at `TSRC0` times the low lane-width bits of x into owned, valid TACC |
+| 563 | `TAMAC-SCALARS` | `( tiles xs n -- )` | | Run `TAMAC-SCALAR` over n consecutive 64-byte tiles from tiles, tile i times scalar i of the vector at xs; leave `TSRC0` at the last tile reached |
+| 564 | `TACC-SEND` | `( src dst -- status )` | | `TACC-LOAD` the 256-byte image at src in the current `TMODE` format, then `TACC-STORE` it to dst, in memory or a chiplet port's window; status 0, or 6 when the store took a bus fault. `TSRC0` and `TDST` keep src and dst |
+
+These words serve a tile kernel that scores many candidates at once, such
+as one layer of a small network or a weighted sum of features, and the
+service that delivers its results into memory a chiplet lends
+(`docs/chiplet-interconnect-plan.md`). With one feature to a tile, the 64
+lanes of a U8 tile hold one feature of 64 candidates, and `TAMAC-SCALARS`
+over the feature tiles with a vector of weights leaves each candidate's
+weighted sum in its TACC lane.
+
+The vector at xs packs its scalars little-endian at the lane width of
+`TMODE`'s format: one byte for U8, two for U16, FP16 and BF16, four for U32
+and FP32, and eight for FP64. Each step sets `TSRC0` to its tile, reads its
+scalar, then runs the broadcast form, so a fault stops the run at that tile
+with the tiles before it accumulated. With n zero the word does nothing,
+not even the ownership check.
+
+`TACC-SEND` replaces the accumulator's contents with the image, which it
+trims to the format's canonical image: the store sends the format's active
+64-byte units and the bytes past them arrive as zeros, whether dst is
+memory or a window. A store into a window takes a bus fault when the port
+does not admit MegaPad's writes, or when the chiplet refuses the write,
+fails it or leaves it unanswered (`docs/chiplet-link.md`, sections 3 and
+4). The BIOS's bus-fault handler recognizes the word's one store and
+returns status 6 (HARDWARE/PROTOCOL) from it, so a caller can end its own
+request instead of losing the line to the bus-fault report. The
+accumulator then holds the loaded image, valid and clean. A fault of the
+load, and a misaligned dst, stay the faults `TACC-LOAD` and `TACC-STORE`
+raise, and src's cell is left on the stack under them. The hosted
+simulator gives the same results, statuses included; where the BIOS
+reports any other bus fault and returns to its prompt, the simulator fails
+the dispatch (`docs/simulator-contract.md`).
+
 ### Dictionary Bounds and Fault Control (5 words)
 
 | # | Word | Stack Effect | Imm | Description |
@@ -1221,10 +1260,11 @@ machine reset.
 | KEM Engine | 7 |
 | Cooperative Multitasking | 9 |
 | Full-width TACC | 8 |
+| Borrowed tile work | 3 |
 | Dictionary Bounds and Fault Control | 5 |
 | Dictionary Acceleration Control | 4 |
 | Checked WOTS Chain | 1 |
-| **Catalogued subtotal** | **400** |
+| **Catalogued subtotal** | **403** |
 
 ### All Immediate Words (34)
 
@@ -1233,12 +1273,13 @@ machine reset.
 ### Newest Dictionary Chain Segment (last → earlier)
 
 The complete authoritative link chain is the `.dq` chain in `bios.asm`.
-`BOOT-ID` closes the newest appended segment, after the token replay, the
-dictionary's code kind, the string scan, the QUIT callback and the storage
-unit words:
+`TACC-SEND` closes the newest appended segment, after the other words of
+borrowed tile work, the boot's identity, the token replay, the dictionary's
+code kind, the string scan, the QUIT callback and the storage unit words:
 
 ```
-BOOT-ID → TOKEN-REPLAY → DICT-MACHINE-CODE? → SCAN → QUIT-XT!
+TACC-SEND → TAMAC-SCALARS → TAMAC-SCALAR
+→ BOOT-ID → TOKEN-REPLAY → DICT-MACHINE-CODE? → SCAN → QUIT-XT!
 → UNIT-DISK-FLUSH-GEN-CHECKED → UNIT-DISK-WRITE-GEN-CHECKED
 → UNIT-DISK-READ-GEN-CHECKED → UNIT-DISK-CAPS → UNIT-DISK-MEDIA-GEN
 → UNIT-DISK-SECTORS → UNIT-DISK@ → DISK-UNITS

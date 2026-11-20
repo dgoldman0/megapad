@@ -908,6 +908,14 @@ the machine reports (`docs/simulator-contract.md`, section 6).
 `tests/simulator/test_tacc_words.py` runs each case on the Python emulator
 too and requires the same image, status, memory and fault.
 
+The three words of borrowed tile work follow them: `TAMAC-SCALAR`, TAMAC's
+broadcast form; `TAMAC-SCALARS`, that form over consecutive tiles with a
+vector of scalars; and `TACC-SEND`, which moves an image through the
+accumulator into memory or a chiplet port's window and returns status 6
+where its store takes a bus fault. They take the BIOS words' steps in the
+BIOS's order, and `tests/test_tile_borrowing_words.py` runs the same Forth
+on the emulator's BIOS and here, a chiplet's window included.
+
 ### Semantic evaluator and checked source
 
 The hosted BIOS now exposes `EVALUATE`, the early `EVALUATE-CHECKED`,
