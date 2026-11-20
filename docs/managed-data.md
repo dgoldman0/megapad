@@ -266,10 +266,12 @@ up.
 ### The table
 
 The **handle table** is an array of 8-byte slots in memory MegaPad lends.
-A slot holds a reference while its handle is live, and 0 while it is free.
+A slot holds a reference while its handle names an object, nil while its
+handle is live but names none yet, and 0 while it is free.
 The collector treats every slot that holds a reference as a root, and
 rewrites it during a hold when the object moves. MegaPad writes slots only
-inside a window, so the two chips never write a slot at once.
+inside a window, and LM1 only during a hold or in the one case below, so
+the two chips never write a slot at once.
 
 The table grows in segments and never moves. Segment k holds `FIRST` × 2^k
 slots, where `FIRST` is a power of two the module chooses, and its first
@@ -316,6 +318,19 @@ A handle is **stale** when its index lies beyond the table, its slot is
 free, or its generation is not the slot's. Every word that takes a handle
 checks it, and returns `OBJ-E-STALE` for a stale one without touching the
 table. Once the function has failed (§11), every handle is stale.
+
+### Handles and tasks
+
+Objects reach a task through handles. A request that starts a task names
+its inputs by their handles, and names a handle made for nil whose slot
+will receive the result. MegaPad lends these handles with the request until
+its reply, as the sender of any request lends the memory it names
+([chiplet-link.md](chiplet-link.md) §8), and neither re-points nor releases
+them meanwhile, a cancelled request's included. LM1's runtime reads the
+input slots when the task starts, and stores the result's reference in the
+result slot before it replies; this is the one slot LM1 writes outside a
+hold (LM1's `spec/06-runtime.md` §3.5). The rest of the protocol for tasks
+belongs to the link's layer for jobs, which is still to specify.
 
 ## 5. Objects MegaPad reads and makes
 
@@ -771,8 +786,8 @@ Handles and owners:
 
 | Word | Effect | Window | Does |
 |------|--------|--------|------|
-| `OBJ-HANDLE` | `( r: ref id: u gen: u -- h: handle ior )` | Inside | Make a handle owned by the token |
-| `OBJ-GET` | `( h: handle -- r: ref ior )` | Inside | The object the handle names |
+| `OBJ-HANDLE` | `( t: tagged id: u gen: u -- h: handle ior )` | Inside | Make a handle owned by the token, for a reference or for nil |
+| `OBJ-GET` | `( h: handle -- r: ref ior )` | Inside | The object the handle names; `OBJ-E-KIND` while it names none |
 | `OBJ-SET` | `( r: ref h: handle -- ior )` | Inside | Make the handle name another object |
 | `OBJ-DROP` | `( h: handle -- ior )` | Either | Release one handle |
 | `OBJ-OWNER-MARK` | `( id: u gen: u -- mark: u )` | Either | The serial the owner's next handle takes |
@@ -990,6 +1005,9 @@ would.
 ## 16. Still open
 
 - **The class number**, assigned in chiplet-link.md §8.
+- **Tasks.** The requests that start a task and return its result, of
+  which §4 fixes only how they name objects, belong to the link's layer for
+  jobs, which is still to specify.
 - **A collector for MegaPad.** Whether the release builds one (§13). Every
   release configuration has LM1, and decision 32's comparison of one engine
   with two concerns tasks, whose heaps need no collector.
