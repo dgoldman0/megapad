@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The `bios.asm` dictionary link chain contains **563** entries.  The numbered
+The `bios.asm` dictionary link chain contains **567** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -510,7 +510,7 @@ with `bench_jit_prims.py`).  Compilation overhead during KDOS load is
 folds, ~38 peephole bigrams, and ~5100 primitive inlines, saving ~50 KB
 of compiled code.
 
-### Miscellaneous / System (9 words)
+### Miscellaneous / System (8 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
@@ -1247,24 +1247,29 @@ machine reset.
 
 ## Summary Statistics
 
+Each row counts the words its section of the catalogue lists, in the
+catalogue's order.
+
 | Category | Count |
 |----------|-------|
 | Stack Manipulation | 17 |
 | Arithmetic | 17 |
-| Logic & Bitwise | 6 |
+| Logic & Bitwise | 11 |
 | Comparison | 13 |
 | Memory | 18 |
-| I/O & Display | 17 |
-| String & Parsing | 8 |
+| I/O & Display | 18 |
+| String & Parsing | 9 |
 | Control Flow | 15 |
-| Compilation & Defining | 21 |
+| Compilation & Defining | 24 |
 | Return Stack | 6 |
-| Input Source & Interpreter | 5 |
+| Input Source & Interpreter | 16 |
 | Comments | 2 |
-| Miscellaneous / System | 9 |
+| JIT Compiler | 4 |
+| Miscellaneous / System | 8 |
 | Tile Engine | 39 |
-| NIC | 4 |
-| Disk / Storage | 17 |
+| NIC — Network Interface | 10 |
+| Pool Allocator | 3 |
+| Disk / Storage | 25 |
 | Timer & Interrupts | 9 |
 | RTC / System Clock | 9 |
 | Multicore | 11 |
@@ -1273,25 +1278,33 @@ machine reset.
 | Memory BIST | 5 |
 | Tile Self-Test | 3 |
 | Stride / 2D Addressing | 6 |
-| FP16 / BF16 Modes | 2 |
+| Floating-Point Tile Words | 9 |
+| Scalar Floating-Point | 52 |
 | Instruction Cache | 5 |
 | AES-256/128 Engine, GCM and CBC | 13 |
 | Checked SHA-3 / SHAKE / raw Keccak | 9 |
 | SHA-256 Streaming | 4 |
 | SHA-512 and SHA-384 Streaming | 6 |
-| TRNG | 3 |
-| Checked Entropy Boundaries | 2 |
-| Caller Span Boundary | 1 |
+| Shared SHA-2 span qualification | 1 |
+| TRNG | 5 |
+| Caller-managed span qualification | 1 |
+| X25519 | 6 |
 | Field ALU | 15 |
 | NTT Engine | 10 |
-| KEM Engine | 7 |
+| KEM Engine — ML-KEM-512 | 7 |
 | Cooperative Multitasking | 9 |
 | Full-width TACC | 8 |
 | Borrowed tile work | 4 |
 | Dictionary Bounds and Fault Control | 5 |
-| Dictionary Acceleration Control | 4 |
+| Dictionary Acceleration Control | 5 |
+| Dictionary Code Kind | 1 |
+| Token Replay | 1 |
+| Boot Identity | 1 |
 | Checked WOTS Chain | 1 |
-| **Catalogued subtotal** | **403** |
+| **Catalogued subtotal** | **490** |
+
+The catalogue lists 490 of the 567 entries in the link chain; the chain in
+`bios.asm` holds the rest.
 
 ### All Immediate Words (34)
 
