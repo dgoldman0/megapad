@@ -3100,8 +3100,8 @@ VARIABLE AB-DESC    \ scratch: descriptor address
     DUP B.DATA                ( desc addr )
     SWAP B.TILES              ( addr ntiles )
     DUP 0= IF 2DROP 0 ELSE
-        0 DO                  ( addr )
-            DUP TSRC0!
+        0 DO                  ( addr | addr min )
+            I IF OVER ELSE DUP THEN TSRC0!   \ this tile's address
             2 TCTRL!          \ zero ACC each time (we want per-tile min)
             TMIN
             I 0= IF
@@ -3121,8 +3121,8 @@ VARIABLE AB-DESC    \ scratch: descriptor address
     DUP B.DATA                ( desc addr )
     SWAP B.TILES              ( addr ntiles )
     DUP 0= IF 2DROP 0 ELSE
-        0 DO                  ( addr )
-            DUP TSRC0!
+        0 DO                  ( addr | addr max )
+            I IF OVER ELSE DUP THEN TSRC0!   \ this tile's address
             2 TCTRL!
             TMAX
             I 0= IF
@@ -6923,12 +6923,12 @@ VARIABLE DOC-LINES              \ newline counter for pagination
 
 \ DOC ( "name" -- )  page through a documentation file
 : DOC  ( "name" -- )
-    OPEN DUP 0= IF EXIT THEN
+    OPEN ?DUP 0= IF EXIT THEN
     DUP >R CR SHOW-FILE CR R> FCLOSE ;
 
 \ TUTORIAL ( "name" -- )  walk through a tutorial file
 : TUTORIAL  ( "name" -- )
-    OPEN DUP 0= IF EXIT THEN
+    OPEN ?DUP 0= IF EXIT THEN
     DUP >R CR SHOW-FILE CR R> FCLOSE ;
 
 \ OPEN-BY-SLOT ( slot -- fdesc | 0 )  open a file by directory slot
@@ -6965,7 +6965,7 @@ VARIABLE DOC-LINES              \ newline counter for pagination
         ."  Use TOPICS to list available documentation."  CR
         EXIT
     THEN
-    OPEN-BY-SLOT DUP 0= IF EXIT THEN
+    OPEN-BY-SLOT ?DUP 0= IF EXIT THEN
     DUP >R CR SHOW-FILE CR R> FCLOSE ;
 
 \ =====================================================================
@@ -7456,8 +7456,8 @@ VARIABLE PAR-N          \ next core to use
 \ -- P.BENCH-PAR ( pipe -- )  benchmark parallel pipeline --
 : P.BENCH-PAR  ( pipe -- )
     ."  Parallel pipeline (" DUP P.COUNT . ."  steps, "
-    NCORES . ."  cores):" CR
-    DUP
+    NCORES .
+    ."  cores):" CR
     CYCLES >R
     P.RUN-PAR
     CYCLES R> -

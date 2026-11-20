@@ -35,11 +35,11 @@ FIXTURE = (
 
 FIRST_LINE = 7302
 LAST_LINE = 7465
-SLICE_BYTES = 5_713
+SLICE_BYTES = 5_709
 SLICE_SHA256 = (
-    "03dc68d356a186f11b63fedd818863e75da51886d6290b38ba2c769325ffa90f"
+    "2ee729d76154212656586916c4ebca88f634a1d7a6a0bcbcc1ba79a9b68f9d0a"
 )
-SLICE_GIT_BLOB = "c919439c3c81cf5e35a270f47b7b122867df6a89"
+SLICE_GIT_BLOB = "1a5d411f178fb60788092d6dc255a395b6ab7062"
 HOSTED_DICTIONARY_GROWTH = 415
 HOSTED_WORD_FIXED_BYTES = 17
 VARIABLE_BODY_BYTES = 8
@@ -285,7 +285,7 @@ def test_parallel_pipeline_words_are_sequential_fallbacks_without_speedup() -> N
     assert _variable(runtime, "PAR-TRACE") == 0
 
     _store_variable(runtime, "PAR-TRACE", 0)
-    assert _execute(runtime, "P.BENCH-PAR", pipeline) == (pipeline,)
+    assert _execute(runtime, "P.BENCH-PAR", pipeline) == ()
     assert _variable(runtime, "PAR-TRACE") == 12
     assert re.fullmatch(
         rb" Parallel pipeline \(2  steps, 1  cores\):\r\n"
