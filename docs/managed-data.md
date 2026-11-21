@@ -614,8 +614,8 @@ MegaPad names it in its `ATTACH` request (§10).
 The control block is 128 bytes. `STATE` reads 0, `LM1`, while LM1 serves
 the heap; 1, `STAND-IN`, while MegaPad's stand-in serves it in LM1's place
 (§13); and 2, `LOST`, once the heap is lost (§11). MegaPad writes 0 before
-`ATTACH`, and each later value once the change it names is complete, so a
-restarted LM1 reads a settled state. `CAUSE` names the end of LM1's last
+an `ATTACH` that starts the function afresh, and each later value once the
+change it names is complete, so a restarted LM1 reads a settled state. `CAUSE` names the end of LM1's last
 service: 1 LM1 set `FAILED`; 2 a check of LM1's words failed (below); 3 a
 queue broke; 4 a hold was overdue; 5 a full log or a request outlived its
 deadline; and 6 a reset for any other reason, another function's missed
@@ -678,7 +678,9 @@ in the order LM1's `spec/05-memory-gc.md` §12.3 fixes (stage 0):
 | 2:0 | `PHASE` | 0 `NONE`: no hold has moved objects since the function started; 1 `FLIPPING`: the hold has begun writing forwarding pointers; 2 `FIXED`: it has rewritten every reference to the objects it moved |
 | 63:3 | `EPOCH` | The epoch of that hold: `HOLD`'s `EPOCH` while it ran |
 
-LM1 writes the word as 0 at `ATTACH`. Phases 3 to 7 are undefined.
+LM1 writes the word as 0 at an `ATTACH` that starts the function afresh,
+and keeps it as recorded when it takes a heap back. Phases 3 to 7 are
+undefined.
 
 The **move set** lists a moving hold's source and destination ranges. LM1
 writes it in the shared heap's space before the hold flips:
