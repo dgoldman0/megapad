@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The `bios.asm` dictionary link chain contains **567** entries.  The numbered
+The `bios.asm` dictionary link chain contains **568** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -105,7 +105,7 @@ dominant even with an almost ideal positive cache.
    and scrub `NUM_CORES × 16` bytes above `dict_free` for CRC owner records,
    reset the full-width SHA/Keccak/WOTS software owner fields, set `HERE` to the
    resulting kernel-data end, and set `LATEST` = `latest_entry`
-   (`WOTS-CHAIN`). Hardware spinlock 8 resets independently.
+   (`_RELOC-CAP`). Hardware spinlock 8 resets independently.
 4. **Banner**: Prints `"Megapad-64 Forth BIOS v1.0"`, RAM size in hex, `" ok"`.
 5. **Auto-boot**: Checks disk present bit (MMIO STATUS bit 7). If set, reads directory, finds first Forth-type file (type=3), and loads it via FSLOAD.
 6. **QUIT**: Falls into the outer interpreter loop.
@@ -509,6 +509,33 @@ with `bench_jit_prims.py`).  Compilation overhead during KDOS load is
 +0.8% (~2.5M extra steps out of 310M).  KDOS load fires ~512 literal
 folds, ~38 peephole bigrams, and ~5100 primitive inlines, saving ~50 KB
 of compiled code.
+
+### Relocation Tracking (4 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 566 | `_RELOC-ACTIVE` | `( -- addr )` | | Cell: zero turns tracking off, any other value turns it on |
+| 567 | `_RELOC-COUNT` | `( -- addr )` | | Cell: the address-carrying immediates compiled while tracking was on, kept or not |
+| 568 | `_RELOC-BUF` | `( -- addr )` | | Cell: the address of the caller's buffer of 8-byte entries |
+| 569 | `_RELOC-CAP` | `( -- addr )` | | Cell: the number of entries that buffer holds |
+
+While `_RELOC-ACTIVE` is nonzero, the compiler records the address of each
+64-bit immediate that carries a dictionary address: the inline XT of every
+compiled call, the XT that `[']` compiles, the data-field address in the code
+of `CREATE` and `VARIABLE`, and the address `DOES>` patches in. Numeric
+literals are not recorded. Entry *i* is stored at `_RELOC-BUF` + 8*i* only
+while `_RELOC-COUNT` is below `_RELOC-CAP`, compared as unsigned cells, so the
+compiler never writes past the caller's buffer however much code it compiles.
+That matters because Akashic's `binimg` places the code it tracks directly
+after its buffer.
+
+`_RELOC-COUNT` counts every immediate, stored or not. A count above the
+capacity means the buffer was too small: the caller needed `_RELOC-COUNT`
+entries and holds the first `_RELOC-CAP` of them, and `binimg` reports the
+build as `IMG-E-CAPACITY`. All four cells are zero after boot, so a caller
+states its buffer and its capacity before it sets `_RELOC-ACTIVE`. The hosted
+simulator provides the four cells so that source naming them loads, and its
+compiler records nothing into them.
 
 ### Miscellaneous / System (8 words)
 
@@ -1265,6 +1292,7 @@ catalogue's order.
 | Input Source & Interpreter | 16 |
 | Comments | 2 |
 | JIT Compiler | 4 |
+| Relocation Tracking | 4 |
 | Miscellaneous / System | 8 |
 | Tile Engine | 39 |
 | NIC — Network Interface | 10 |
@@ -1301,9 +1329,9 @@ catalogue's order.
 | Token Replay | 1 |
 | Boot Identity | 1 |
 | Checked WOTS Chain | 1 |
-| **Catalogued subtotal** | **490** |
+| **Catalogued subtotal** | **494** |
 
-The catalogue lists 490 of the 567 entries in the link chain; the chain in
+The catalogue lists 494 of the 568 entries in the link chain; the chain in
 `bios.asm` holds the rest.
 
 ### All Immediate Words (34)
@@ -1313,12 +1341,12 @@ The catalogue lists 490 of the 567 entries in the link chain; the chain in
 ### Newest Dictionary Chain Segment (last → earlier)
 
 The complete authoritative link chain is the `.dq` chain in `bios.asm`.
-`TACC-RELAY` closes the newest appended segment, after the other words of
-borrowed tile work, the boot's identity, the token replay, the dictionary's
-code kind, the string scan, the QUIT callback and the storage unit words:
+`_RELOC-CAP` closes the newest appended segment, after the words of borrowed
+tile work, the boot's identity, the token replay, the dictionary's code kind,
+the string scan, the QUIT callback and the storage unit words:
 
 ```
-TACC-RELAY → TACC-SEND → TAMAC-SCALARS → TAMAC-SCALAR
+_RELOC-CAP → TACC-RELAY → TACC-SEND → TAMAC-SCALARS → TAMAC-SCALAR
 → BOOT-ID → TOKEN-REPLAY → DICT-MACHINE-CODE? → SCAN → QUIT-XT!
 → UNIT-DISK-FLUSH-GEN-CHECKED → UNIT-DISK-WRITE-GEN-CHECKED
 → UNIT-DISK-READ-GEN-CHECKED → UNIT-DISK-CAPS → UNIT-DISK-MEDIA-GEN

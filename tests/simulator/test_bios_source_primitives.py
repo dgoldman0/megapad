@@ -48,13 +48,13 @@ def test_on_and_double_cell_words_match_the_bios_pair_layout() -> None:
 def test_relocation_cells_are_distinct_mutable_zeroed_storage() -> None:
     runtime = MegaForthRuntime()
     addresses: list[int] = []
-    for name in ("_RELOC-ACTIVE", "_RELOC-COUNT", "_RELOC-BUF"):
+    for name in ("_RELOC-ACTIVE", "_RELOC-COUNT", "_RELOC-BUF", "_RELOC-CAP"):
         runtime.execute(name)
         address = runtime.main_context.data.pop()
         addresses.append(address)
         assert runtime.memory.read64(address) == 0
 
-    assert len(set(addresses)) == 3
+    assert len(set(addresses)) == 4
     runtime.memory.write64(addresses[1], 17)
     assert runtime.memory.read64(addresses[1]) == 17
 

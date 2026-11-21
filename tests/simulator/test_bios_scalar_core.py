@@ -59,6 +59,7 @@ def test_rich_terminal_and_geometry_words_extend_the_core_append_only() -> None:
         b"TAMAC-SCALARS",
         b"TACC-SEND",
         b"TACC-RELAY",
+        b"_RELOC-CAP",
     )
     assert len(runtime.dictionary.words) == 380 + len(frontier)
     words = runtime.dictionary.words[:-len(frontier)]

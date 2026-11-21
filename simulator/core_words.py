@@ -3315,6 +3315,10 @@ def install_core(runtime: MegaForthRuntime) -> None:
         lambda context: _tacc_relay(runtime, context),
     )
 
+    # The relocation buffer's capacity follows, as the BIOS appends it. Like
+    # the three relocation cells, it exists so that source naming it loads.
+    runtime.define_created(b"_RELOC-CAP", initial_body=bytes(CELL_BYTES))
+
 
 def _tamac_scalars(runtime, context) -> None:
     """``TAMAC-SCALARS ( tiles xs n -- )``: the BIOS takes all three cells

@@ -3897,10 +3897,13 @@ and Pad and Desk show it in words. The word is asked when code runs. No source
 is compiled differently for it, so one source text serves every backend, and
 so does any compiled form of that text.
 
-The cells `_RELOC-ACTIVE`, `_RELOC-COUNT` and `_RELOC-BUF` exist here so that
-source which names them loads. The hosted compiler records nothing into them,
-and with the refusal in place nothing arms them either. `LATEST!` still refuses
-a header chain that has no hosted definitions, as described in section 11.
+The cells `_RELOC-ACTIVE`, `_RELOC-COUNT`, `_RELOC-BUF` and `_RELOC-CAP` exist
+here so that source which names them loads. `_RELOC-CAP`, the number of entries
+the buffer holds, follows the words of borrowed tile work in the hosted core, as
+the BIOS appends it after them. The hosted compiler records nothing into the
+cells, and with the refusal in place nothing arms them either. `LATEST!` still
+refuses a header chain that has no hosted definitions, as described in section
+11.
 
 A module may also be loaded from its token form, a record of the
 interpreter's work on the module's source that `TOKEN-REPLAY` runs through

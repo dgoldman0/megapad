@@ -917,6 +917,11 @@ failure instead of faulting. They take the BIOS words' steps in the BIOS's
 order, and `tests/test_tile_borrowing_words.py` runs the same Forth on the
 emulator's BIOS and here, a chiplet's window and every status included.
 
+`_RELOC-CAP` follows them, as the BIOS appends it after them: the number of
+entries in the buffer at `_RELOC-BUF`. It is a zeroed cell like the three
+relocation cells, so that Akashic's `binimg` loads here, and the hosted
+compiler records nothing into any of them.
+
 ### Semantic evaluator and checked source
 
 The hosted BIOS now exposes `EVALUATE`, the early `EVALUATE-CHECKED`,
