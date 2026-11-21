@@ -8557,14 +8557,16 @@ dqrt_scan:
     ret.l
 
 ; ACCEPT ( addr max -- n ) read up to max chars into addr, return count
+;   The count lives in R10: key_char returns its byte in R1 and uses R11
+;   and R13 for the UART, and emit_char changes no register.
 w_accept:
     ldn r12, r14              ; max
     addi r14, 8
     ldn r9, r14               ; addr
     addi r14, 8
-    ldi r13, 0                ; count
+    ldi r10, 0                ; count
 w_accept_loop:
-    cmp r13, r12
+    cmp r10, r12
     breq w_accept_done
     sep  r5                 ; key -> R1
     cmpi r1, 0x0D
@@ -8572,16 +8574,16 @@ w_accept_loop:
     cmpi r1, 0x0A
     breq w_accept_done
     mov r7, r9
-    add r7, r13
+    add r7, r10
     st.b r7, r1
-    inc r13
+    inc r10
     sep  r4                 ; echo
     br w_accept_loop
 w_accept_done:
     ldi64 r11, print_crlf
     call.l r11
     subi r14, 8
-    str r14, r13              ; push count
+    str r14, r10              ; push count
     ret.l
 
 ; =====================================================================

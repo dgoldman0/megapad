@@ -2018,6 +2018,27 @@ class TestBIOS(unittest.TestCase):
         text = self._run_forth(sys, buf, ["65 EMIT"])
         self.assertIn("A", text)
 
+    def test_accept_reads_and_echoes_a_line(self):
+        """ACCEPT stores and echoes each byte KEY returns, keeping its count
+        across the key routine, which uses R13 for the UART."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "CREATE ABUF 16 ALLOT",
+            "60 EMIT ABUF 10 ACCEPT 124 EMIT . 62 EMIT",
+            "hello",
+            "60 EMIT ABUF 3 ACCEPT 124 EMIT . 62 EMIT",
+            "abc",
+            "60 EMIT ABUF 0 ACCEPT 124 EMIT . 62 EMIT",
+            "40 EMIT ABUF 5 TYPE 41 EMIT",
+        ])
+        self.assertNotIn("BUS FAULT", text)
+        self.assertIn("<hello\r\n|5 >", text)
+        # Three bytes fill the buffer; the line's LF is left to the
+        # interpreter as an empty line.
+        self.assertIn("<abc\r\n|3 >", text)
+        self.assertIn("<\r\n|0 >", text)
+        self.assertIn("(abclo)", text)
+
     def test_all_bios_byte_writers_use_direct_uart_fallback(self):
         sys, buf = self._boot_bios()
         caps_addr = self.__class__._bios_labels["var_uart_caps"]
