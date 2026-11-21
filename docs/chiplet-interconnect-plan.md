@@ -14,7 +14,9 @@ not built yet. Borrowed tile work, LM1's third use of the link (§7), in
 which LM1 has MegaPad's tile engines do its number work and the results land
 in its own memory, was proposed on 2026-11-20. The BIOS words it runs on are
 built, in the emulator and the simulator alike; the service, its operation
-and LM1's side are not. This note records how chiplets attach to MegaPad in
+and LM1's side are not. Managed data, LM1's second use, was specified as a
+proposal the same day in [managed-data.md](managed-data.md), and none of it
+is built. This note records how chiplets attach to MegaPad in
 Leviathan: the contract every chiplet meets, how the chips share memory, how
 they signal and exchange work, and how LM1, the first chiplet, runs sandbox
 jobs, managed data and borrowed tile work over the link. It schedules no
@@ -231,13 +233,16 @@ same way.
 
 Managed data (Part 9d of the release plan) is LM1 objects stored in lent
 memory, which Forth reads at the cost of any external-memory read. A handle
-is a slot in a table that LM1 registers as a root region and rewrites when
-an object moves. A write through the library stores the value and appends
-the slot's address to a log in lent memory, which LM1's collector replays
-through its own barrier, so the barrier's rules exist once, on LM1. A core
-opens a window by storing its flag and then loading the collector's hold
-flag, and the collector moves shared objects only while it holds every core
-out.
+names a slot in a table that MegaPad keeps in lent memory, which LM1 treats
+as roots and rewrites when an object moves. A store of a reference through
+the library writes the value and appends the slot's address to a log in
+lent memory, which LM1's collector replays through its own barrier, so the
+barrier's rules exist once, on LM1. A core opens a window by storing its
+flag and then loading the collector's hold flag, and the collector moves or
+frees shared objects only while it holds every core out.
+[managed-data.md](managed-data.md) specifies all of this, as a proposal of
+2026-11-20, with the words MegaPad code uses and the requests that cross the
+queues.
 
 Beyond what a simpler chiplet needs, these uses rely on the strict ordering
 of §3, on one set of addresses for both chips, and on a request path quick
@@ -432,7 +437,8 @@ limit at the controller bound what a chiplet takes from Desk.
   stores return a status for every failure and never trap.
 - **KDOS:** the system module for chiplets, and an allocator for lendable
   memory. For borrowed tile work, the service's loop, its queue handling
-  and the registry of kernels.
+  and the registry of kernels. For managed data, the words, records and
+  queue handling of [managed-data.md](managed-data.md).
 - **The emulator and the simulator:** a model of the ports and an interface
   for a chiplet's model. The simulator, on which the release runs, also has
   the TACC family and its route into a chiplet's window, with the
@@ -510,7 +516,10 @@ and the queues and offers are specified.
   groups, is proposed in Akashic and not built.
 - **Lendable memory in Akashic.** Zero-copy depends on the data handed to a
   job being created in lendable memory, and the job service's allocation has
-  yet to be read with that in mind.
+  yet to be read with that in mind. Managed data adds the shared heap's
+  blocks, which grow as LM1 asks, and a handle table that grows by segments;
+  the allocator keeps them within the port's lent ranges
+  ([managed-data.md](managed-data.md) §16).
 - **A data cache on a production core.** Reads of lent memory would have to
   go around it.
 - **How often each chip touches shared data.** The sizing study for D8
