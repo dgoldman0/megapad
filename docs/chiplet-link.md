@@ -481,6 +481,12 @@ after that reply.
 - MegaPad gives each of its requests a deadline. It cancels a request that
   misses its deadline, and resets the port when the cancel goes unanswered
   too.
+- A port that serves managed data is asked to stop before any reset,
+  whatever the reset's cause: MegaPad sets `STOP_REQ`, waits for `STOPPED`
+  for at most a request's deadline, and then cancels and resets as above.
+  Managed data's records outlive the chiplet, and MegaPad reads them once
+  the chiplet can write no more ([managed-data.md](managed-data.md) §11,
+  from stage 1 of its recovery).
 
 ## 9. The emulator and the simulator
 
