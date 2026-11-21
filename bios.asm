@@ -4469,6 +4469,318 @@ w_tacc_claim_q:
     str r14, r0
     ret.l
 
+; TAMAC-SCALAR ( x -- ) TAMAC's broadcast form (E5 06 Rn): each lane of the
+; tile at TSRC0 times the low lane-width bits of x, accumulated into the
+; owned TACC.  x is consumed before the instruction runs.
+w_tamac_scalar:
+    ldn r7, r14
+    addi r14, 8
+    t.amac r7
+    ret.l
+
+; TAMAC-SCALARS ( tiles xs n -- ) TAMAC's broadcast form over n consecutive
+; 64-byte tiles from tiles: tile i times scalar i of the vector at xs, whose
+; scalars are packed little-endian at the lane width of TMODE's format.
+; Each step sets TSRC0 to its tile, reads its scalar, then accumulates, so
+; TSRC0 is left at the last tile reached and a fault stops the run there.
+; The hosted simulator runs the same steps (simulator/accel/tacc_service.h).
+w_tamac_scalars:
+    ldn r12, r14              ; n
+    mov r11, r14
+    addi r11, 8
+    ldn r9, r11               ; xs
+    addi r11, 8
+    ldn r13, r11              ; tiles
+    addi r14, 24
+    cmpi r12, 0
+    breq .tamac_scalars_done
+    csrr r0, 0x14             ; TMODE
+    andi r0, 0x0F             ; its element width
+    ldi64 r11, tamac_scalar_widths
+    add r11, r0
+    ld.b r11, r11             ; one scalar's bytes
+.tamac_scalars_loop:
+    mov r0, r13
+    csrw 0x16, r0             ; TSRC0 = this tile
+    cmpi r11, 1
+    brne .tamac_scalars_half
+    ld.b r7, r9
+    br .tamac_scalars_accumulate
+.tamac_scalars_half:
+    cmpi r11, 2
+    brne .tamac_scalars_word
+    ld.h r7, r9
+    br .tamac_scalars_accumulate
+.tamac_scalars_word:
+    cmpi r11, 4
+    brne .tamac_scalars_cell
+    ld.w r7, r9
+    br .tamac_scalars_accumulate
+.tamac_scalars_cell:
+    ldn r7, r9
+.tamac_scalars_accumulate:
+    t.amac r7
+    addi r13, 64
+    add r9, r11
+    dec r12
+    cmpi r12, 0
+    brne .tamac_scalars_loop
+.tamac_scalars_done:
+    ret.l
+
+; One TAMAC-SCALARS scalar's bytes for each TMODE element width: the lane
+; width of each defined format, and one byte for a reserved code, whose
+; TAMAC traps once that byte is read.
+tamac_scalar_widths:
+    .db 1, 2, 4, 8, 2, 2, 4, 8, 1, 1, 1, 1, 1, 1, 1, 1
+
+; TACC-SEND and TACC-RELAY are the checked image words: they return a
+; status for every failure and never trap.  Each failure has its own:
+;   0 OK          the image arrived
+;   1 NOT-OWNER   the caller does not own TACC
+;   2 INVALID     TACC holds no image (TACC-SEND)
+;   3 FORMAT      TMODE names no TACC format (TACC-RELAY)
+;   4 MISALIGNED  an image address is not 64-byte aligned
+;   5 NO-ROUTE    an image has no route: it leaves the memory region it
+;                 starts in, starts in none, or, for a source, lies in a
+;                 chiplet port's window, or, for a destination, runs past
+;                 its port's window
+;   6 REFUSED     a chiplet port's window did not take the store: the port
+;                 does not admit MegaPad's writes, or the chiplet refused,
+;                 failed or left the write unanswered
+;   7 TRANSPORT   external memory failed or left a word unanswered
+; Every check runs before the first instruction, so statuses 1 to 5 change
+; nothing.  The instructions' bus faults come back through the bus-fault
+; handler, which recognizes the three sites below and resumes each with
+; R0 = 1.  The hosted simulator returns the same statuses
+; (simulator/accel/tacc_service.h); having no external-memory transport, it
+; never returns 7.
+
+; _tacc_span_inside: R0 = 1 when the 256 bytes at R1 lie wholly inside the
+; region of base R0 and size R7, else 0.  Clobbers R7 and R11.
+_tacc_span_inside:
+    ldi64 r11, 256
+    cmp r7, r11
+    brcc .tacc_inside_no          ; the region is smaller than an image
+    sub r7, r11                   ; the last offset at which one fits
+    cmp r1, r0
+    brcc .tacc_inside_no          ; the image starts below the region
+    mov r11, r1
+    sub r11, r0                   ; its offset in the region
+    cmp r11, r7
+    brgt .tacc_inside_no
+    ldi r0, 1
+    ret.l
+.tacc_inside_no:
+    ldi r0, 0
+    ret.l
+
+; _tacc_image_route: where the TACC memory port takes the 256-byte image at
+; the 64-byte-aligned address R1.  R0 = 0 when it lies wholly inside one
+; memory region System Info reports (Bank 0, HBW, external memory or VRAM),
+; 1 when R12 is nonzero and it lies wholly inside one built chiplet port's
+; window (docs/chiplet-link.md, section 3), and 5 (NO-ROUTE) otherwise.
+; These are the port's own routing rules: no region or window meets the
+; device window, so a span that reaches it routes nowhere.  Preserves R1,
+; R9, R12 and R13; clobbers R7, R10 and R11.
+_tacc_image_route:
+    ldi r0, 0                           ; Bank 0 starts at zero
+    ldi64 r11, 0xFFFF_FF00_0000_0308    ; BANK0_SIZE
+    ldn r7, r11
+    ldi64 r11, _tacc_span_inside
+    call.l r11
+    cmpi r0, 0
+    lbrne .tacc_route_memory
+    ldi64 r11, 0xFFFF_FF00_0000_0320    ; HBW_BASE, then HBW_SIZE
+    ldn r0, r11
+    addi r11, 8
+    ldn r7, r11
+    ldi64 r11, _tacc_span_inside
+    call.l r11
+    cmpi r0, 0
+    lbrne .tacc_route_memory
+    ldi64 r11, 0xFFFF_FF00_0000_0338    ; EXT_MEM_BASE, then EXT_MEM_SIZE
+    ldn r0, r11
+    addi r11, 8
+    ldn r7, r11
+    ldi64 r11, _tacc_span_inside
+    call.l r11
+    cmpi r0, 0
+    lbrne .tacc_route_memory
+    ldi64 r11, 0xFFFF_FF00_0000_0350    ; VRAM_BASE, then VRAM_SIZE
+    ldn r0, r11
+    addi r11, 8
+    ldn r7, r11
+    ldi64 r11, _tacc_span_inside
+    call.l r11
+    cmpi r0, 0
+    lbrne .tacc_route_memory
+    ; A store image may lie in a port's window: port p's is the 2^W bytes
+    ; at 0x0100_0000_0000_0000 + p * 2^W, CHIPLET_PORTS giving W and the
+    ; ports built.
+    cmpi r12, 0
+    lbreq .tacc_route_none
+    ldi64 r11, 0xFFFF_FF00_0000_0370    ; CHIPLET_PORTS
+    ldn r7, r11
+    mov r0, r7
+    lsri r0, 8
+    lsri r0, 8
+    lsri r0, 8
+    andi r0, 0xFF                       ; W
+    andi r7, 0xFF                       ; the ports built
+    ldi64 r10, 0x0100_0000_0000_0000
+    cmp r1, r10
+    lbrcc .tacc_route_none              ; below the first window
+    mov r11, r1
+    sub r11, r10                        ; the offset from the first window
+    mov r10, r11
+    shr r10, r0                         ; the port whose window that is
+    cmp r10, r7
+    lbrcs .tacc_route_none              ; beyond the ports built
+    ldi r7, 1
+    shl r7, r0
+    subi r7, 1                          ; a window's last offset
+    and r11, r7                         ; the offset inside the window
+    sub r7, r11
+    ldi r10, 255
+    cmp r7, r10
+    lbrcc .tacc_route_none              ; the image runs past the window
+    ldi r0, 1
+    ret.l
+.tacc_route_memory:
+    ldi r0, 0
+    ret.l
+.tacc_route_none:
+    ldi r0, 5
+    ret.l
+
+; TACC-SEND ( dst -- status ) stores what the owned TACC holds to dst, in
+; memory or a chiplet port's window, as TACC-STORE stores it: the canonical
+; image of its format.  Checks run in this order: 1 NOT-OWNER, 2 INVALID,
+; 4 MISALIGNED, 5 NO-ROUTE.  A store that faults gives 6 REFUSED for a
+; window and 7 TRANSPORT for memory, with TACC as it was.  TDST holds dst
+; once the store runs.
+w_tacc_send:
+    ldn r13, r14              ; dst, whose cell takes the status
+    csrr r0, 0x1D             ; TACC_STATUS
+    mov r7, r0
+    andi r0, 0x02             ; MINE
+    cmpi r0, 0
+    lbreq .tacc_send_not_owner
+    andi r7, 0x04             ; VALID
+    cmpi r7, 0
+    lbreq .tacc_send_invalid
+    mov r0, r13
+    andi r0, 0x3F
+    cmpi r0, 0
+    lbrne .tacc_send_misaligned
+    mov r1, r13
+    ldi r12, 1                ; a window may hold a store image
+    ldi64 r11, _tacc_image_route
+    call.l r11
+    cmpi r0, 5
+    lbreq .tacc_send_publish
+    mov r12, r0               ; 1 when the image goes to a window
+    mov r0, r13
+    csrw 0x18, r0             ; TDST
+    ; The zero status is in place before the store, so its completion
+    ; falls through the label the bus-fault handler resumes at.
+    ldi r0, 0
+    t.acc.store
+.tacc_send_store_return:
+    cmpi r0, 0
+    lbreq .tacc_send_publish
+    ldi r0, 7                 ; TRANSPORT
+    cmpi r12, 0
+    lbreq .tacc_send_publish
+    ldi r0, 6                 ; REFUSED
+    lbr .tacc_send_publish
+.tacc_send_not_owner:
+    ldi r0, 1
+    lbr .tacc_send_publish
+.tacc_send_invalid:
+    ldi r0, 2
+    lbr .tacc_send_publish
+.tacc_send_misaligned:
+    ldi r0, 4
+.tacc_send_publish:
+    str r14, r0
+    ret.l
+
+; TACC-RELAY ( src dst -- status ) moves the 256-byte image at src into dst
+; through the owned TACC: TACC-LOAD from src in TMODE's format, then
+; TACC-STORE to dst, in memory or a chiplet port's window.  Checks run
+; before the load, in this order: 1 NOT-OWNER, 3 FORMAT, 4 MISALIGNED
+; (either address), 5 NO-ROUTE (src, then dst; src may not be a window).
+; Once the load runs, TSRC0 and TDST hold src and dst.  A load that faults
+; gives 7 TRANSPORT with TACC as it was; a store that faults gives 6
+; REFUSED for a window and 7 TRANSPORT for memory, with TACC holding the
+; loaded image, valid and clean.
+w_tacc_relay:
+    ldn r13, r14              ; dst
+    addi r14, 8
+    ldn r9, r14               ; src, whose cell takes the status
+    csrr r0, 0x1D             ; TACC_STATUS
+    andi r0, 0x02             ; MINE
+    cmpi r0, 0
+    lbreq .tacc_relay_not_owner
+    csrr r0, 0x14             ; TMODE
+    andi r0, 0x0F             ; its element width
+    cmpi r0, 3
+    lbreq .tacc_relay_format  ; U64
+    cmpi r0, 8
+    lbrcs .tacc_relay_format  ; a reserved code
+    mov r0, r9
+    or r0, r13
+    andi r0, 0x3F
+    cmpi r0, 0
+    lbrne .tacc_relay_misaligned
+    mov r1, r9
+    ldi r12, 0                ; a load image may not lie in a window
+    ldi64 r11, _tacc_image_route
+    call.l r11
+    cmpi r0, 0
+    lbrne .tacc_relay_publish ; 5 NO-ROUTE
+    mov r1, r13
+    ldi r12, 1
+    ldi64 r11, _tacc_image_route
+    call.l r11
+    cmpi r0, 5
+    lbreq .tacc_relay_publish
+    mov r12, r0               ; 1 when the image goes to a window
+    mov r0, r9
+    csrw 0x16, r0             ; TSRC0
+    mov r0, r13
+    csrw 0x18, r0             ; TDST
+    ldi r0, 0
+    t.acc.load
+.tacc_relay_load_return:
+    cmpi r0, 0
+    lbreq .tacc_relay_store
+    ldi r0, 7                 ; TRANSPORT
+    lbr .tacc_relay_publish
+.tacc_relay_store:
+    t.acc.store               ; R0 is still zero
+.tacc_relay_store_return:
+    cmpi r0, 0
+    lbreq .tacc_relay_publish
+    ldi r0, 7                 ; TRANSPORT
+    cmpi r12, 0
+    lbreq .tacc_relay_publish
+    ldi r0, 6                 ; REFUSED
+    lbr .tacc_relay_publish
+.tacc_relay_not_owner:
+    ldi r0, 1
+    lbr .tacc_relay_publish
+.tacc_relay_format:
+    ldi r0, 3
+    lbr .tacc_relay_publish
+.tacc_relay_misaligned:
+    ldi r0, 4
+.tacc_relay_publish:
+    str r14, r0
+    ret.l
+
 ; TMODE@ ( -- n ) read current tile mode
 w_tmode_fetch:
     csrr r0, 0x14
@@ -14047,13 +14359,15 @@ w_quit:
 ;  Bus Fault Handler
 ; =====================================================================
 bus_fault_handler:
-    ; Checked SHA3/Keccak/WOTS accesses use two private byte helpers, and the
-    ; checked entropy publisher has one private RAND8 site.  A fault saves the
-    ; architectural end-of-instruction PC, so recognize only the instruction
-    ; immediately following one of those accesses.  Returning with a checked
-    ; status skips the faulting access exactly once and leaves every unrelated
-    ; bus fault on the diagnostic path below.  No mutable recovery flag is
-    ; shared between cores.
+    ; Checked SHA3/Keccak/WOTS accesses use two private byte helpers, the
+    ; checked entropy publisher has one private RAND8 site, and the checked
+    ; image words have three TACC sites: TACC-SEND's store and TACC-RELAY's
+    ; load and store.  A fault saves the architectural end-of-instruction
+    ; PC, so recognize only the instruction immediately following one of
+    ; those accesses.  Returning with a checked status skips the faulting
+    ; access exactly once and leaves every unrelated bus fault on the
+    ; diagnostic path below.  No mutable recovery flag is shared between
+    ; cores.
     ldn r0, r15                       ; saved end PC
     ldi64 r1, .sha3_mmio_read8_return
     cmp r0, r1
@@ -14064,6 +14378,15 @@ bus_fault_handler:
     ldi64 r1, .entropy_fill_rand8_return
     cmp r0, r1
     lbreq .bus_fault_checked_entropy
+    ldi64 r1, .tacc_send_store_return
+    cmp r0, r1
+    lbreq .bus_fault_checked_tacc
+    ldi64 r1, .tacc_relay_load_return
+    cmp r0, r1
+    lbreq .bus_fault_checked_tacc
+    ldi64 r1, .tacc_relay_store_return
+    cmp r0, r1
+    lbreq .bus_fault_checked_tacc
 
     ; ---- Phase 9: capture diagnostics into stack before any calls ----
     ; Push order: addr (top), PSEL, T (bottom).  Print order: addr, PSEL, T.
@@ -14080,11 +14403,19 @@ bus_fault_handler:
     ; Reset PSEL to R3 in case fault hit during SEP R4/R5/R6
     ldi r1, 3
     csrw 0x01, r1
-    ; Re-initialise I/O dispatch
+    ; Restore the BIOS fixed-role registers the faulting code may have left
+    ; mid-use, as an instruction fault does: UART base, SEP-dispatched I/O,
+    ; TX ring, and the NEXT and EXIT handlers the recovery runs Forth with.
     ldi64 r8, 0xFFFF_FF00_0000_0000
     ldi64 r4, emit_char
     ldi64 r5, key_char
     ldi64 r6, print_hex_byte
+    ldi64 r11, tx_ring
+    mov r19, r11
+    ldi64 r11, forth_next
+    mov r16, r11
+    ldi64 r11, forth_exit
+    mov r17, r11
     ; Print: "\n*** BUS FAULT @ "
     ldi64 r10, str_busfault
     ldi64 r11, print_str
@@ -14118,11 +14449,18 @@ bus_fault_handler:
     sep r6                       ; print low byte (port bitmap)
     ldi64 r11, print_crlf
     call.l r11
-    ; Resume REPL — also skip the 16 bytes _trap() pushed (PC + flags)
-    addi r15, 16
-    ldi64 r11, quit_loop
-    call.l r11
-    halt
+    ; Recover as an instruction fault does once it has reported, with the
+    ; interrupt enable the faulting code had: core 0 returns to the prompt
+    ; through ABORT, which resets both stacks and the EVALUATE depth and
+    ; runs the QUIT-XT! callback, with STATE back to interpreting, and a
+    ; worker core ends its job.  The trap frame is at R15 again.
+    mov r11, r15
+    addi r11, 8
+    ldn r1, r11                       ; saved flags
+    lsri r1, 6
+    andi r1, 1
+    csrw 0x09, r1                     ; IE
+    lbr fault_recover
 
 .bus_fault_checked_sha3:
     ldi r0, 6                         ; HARDWARE/PROTOCOL
@@ -14130,6 +14468,10 @@ bus_fault_handler:
 
 .bus_fault_checked_entropy:
     ldi r0, 1                         ; UNAVAILABLE
+    rti
+
+.bus_fault_checked_tacc:
+    ldi r0, 1                         ; the access faulted; the word decides
     rti
 
 ; =====================================================================
@@ -14331,6 +14673,8 @@ fault_report:
     ldi64 r11, print_crlf
     call.l r11
 
+; A reported fault recovers here, the bus-fault handler's included.
+fault_recover:
     csrr r0, 0x20
     cmpi r0, 0
     lbrne .fault_worker
@@ -25369,12 +25713,51 @@ d_token_replay:
 
 ; The identity of what booted appends after it.
 ; === BOOT-ID ===
-latest_entry:
 d_boot_id:
     .dq d_token_replay
     .db 7
     .ascii "BOOT-ID"
     ldi64 r11, w_boot_id
+    call.l r11
+    ret.l
+
+; The words of borrowed tile work append after it: TAMAC's broadcast form,
+; that form over consecutive tiles, a checked store of what TACC holds, and
+; a checked move of an image through TACC.
+; === TAMAC-SCALAR ===
+d_tamac_scalar:
+    .dq d_boot_id
+    .db 12
+    .ascii "TAMAC-SCALAR"
+    ldi64 r11, w_tamac_scalar
+    call.l r11
+    ret.l
+
+; === TAMAC-SCALARS ===
+d_tamac_scalars:
+    .dq d_tamac_scalar
+    .db 13
+    .ascii "TAMAC-SCALARS"
+    ldi64 r11, w_tamac_scalars
+    call.l r11
+    ret.l
+
+; === TACC-SEND ===
+d_tacc_send:
+    .dq d_tamac_scalars
+    .db 9
+    .ascii "TACC-SEND"
+    ldi64 r11, w_tacc_send
+    call.l r11
+    ret.l
+
+; === TACC-RELAY ===
+latest_entry:
+d_tacc_relay:
+    .dq d_tacc_send
+    .db 10
+    .ascii "TACC-RELAY"
+    ldi64 r11, w_tacc_relay
     call.l r11
     ret.l
 

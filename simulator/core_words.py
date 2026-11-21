@@ -3271,6 +3271,69 @@ def install_core(runtime: MegaForthRuntime) -> None:
         lambda context: context.data.push(runtime.boot_identity()),
     )
 
+    # The full-width TACC words follow, in the BIOS's order.  They run on
+    # the tile service's native accumulator (simulator/tacc.py).
+    for name, callback in (
+        (b"TAMAC", lambda _context: runtime.tile.tamac()),
+        (b"TACC-TRY", lambda _context: runtime.tile.tacc_try()),
+        (b"TACC-CLEAR", lambda _context: runtime.tile.tacc_clear()),
+        (b"TACC-LOAD", lambda _context: runtime.tile.tacc_load()),
+        (b"TACC-STORE", lambda _context: runtime.tile.tacc_store()),
+        (b"TACC-RELEASE", lambda _context: runtime.tile.tacc_release()),
+        (
+            b"TACC-STATUS@",
+            lambda context: context.data.push(runtime.tile.tacc_status()),
+        ),
+        (
+            b"TACC-CLAIM?",
+            lambda context: context.data.push(
+                forth_flag(runtime.tile.tacc_claim())
+            ),
+        ),
+    ):
+        runtime.define_primitive(name, callback)
+
+    # The words of borrowed tile work follow, as the BIOS appends them:
+    # TAMAC's broadcast form, that form over consecutive tiles, and the two
+    # checked image words, which return a status for every failure.
+    runtime.define_primitive(
+        b"TAMAC-SCALAR",
+        lambda context: runtime.tile.tamac_scalar(context.data.pop()),
+    )
+    runtime.define_primitive(
+        b"TAMAC-SCALARS",
+        lambda context: _tamac_scalars(runtime, context),
+    )
+    runtime.define_primitive(
+        b"TACC-SEND",
+        lambda context: context.data.replace_top(
+            runtime.tile.tacc_send(context.data.peek())
+        ),
+    )
+    runtime.define_primitive(
+        b"TACC-RELAY",
+        lambda context: _tacc_relay(runtime, context),
+    )
+
+
+def _tamac_scalars(runtime, context) -> None:
+    """``TAMAC-SCALARS ( tiles xs n -- )``: the BIOS takes all three cells
+    before the first tile."""
+
+    count = context.data.pop()
+    scalars = context.data.pop()
+    tiles = context.data.pop()
+    runtime.tile.tamac_scalars(tiles, scalars, count)
+
+
+def _tacc_relay(runtime, context) -> None:
+    """``TACC-RELAY ( src dst -- status )``: as in the BIOS, the status takes
+    ``src``'s cell."""
+
+    destination = context.data.pop()
+    source = context.data.peek()
+    context.data.replace_top(runtime.tile.tacc_relay(source, destination))
+
 
 def _scalar_float_word(service, shape: str, op: int | None):
     """Bind one BIOS-shaped scalar FP word to the hosted service."""

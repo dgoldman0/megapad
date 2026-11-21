@@ -12,11 +12,15 @@ from tests.simulator.test_native_direct_path import BOUND, _agree, _direct_steps
 
 # Field accessors, a counter, a deferred word and a table, each a child of a
 # defining word, used the way component state and dispatch tables use them.
+# Their bodies start on a fresh 4 KiB page, so that every body the loop reads
+# shares the one ordinary page the sparse engine's direct path holds at a
+# time, wherever the dictionary before them ends.
 DOES_SOURCE = b" ".join((
     b": FIELD: ( offset -- ) CREATE , DOES> ( base -- address ) @ + ;",
     b": COUNTER: ( start -- ) CREATE , DOES> ( -- n ) DUP @ 1 ROT +! ;",
     b": VECTOR: ( -- ) CREATE 0 , DOES> ( i*x -- j*x ) @ EXECUTE ;",
     b": TABLE: ( n -- ) CREATE CELLS ALLOT DOES> ( index -- address ) SWAP CELLS + ;",
+    b"HERE 4095 + 4095 INVERT AND HERE - ALLOT",
     b"8 FIELD: >SECOND  24 FIELD: >FOURTH  100 COUNTER: TICKET  VECTOR: HOOK",
     b"4 TABLE: SLOTS  CREATE RECORD 64 ALLOT",
     b": TRIPLE ( n -- n' ) 3 * ;  ' TRIPLE ' HOOK >BODY !",

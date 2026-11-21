@@ -1202,6 +1202,7 @@ TILE OPERATIONS (via buffers)
 BIOS TILE WORDS
   TADD TSUB TAND TOR TXOR TMIN TMAX TABS
   TMUL TDOT TMAC TFMA TAMAC
+  TAMAC-SCALAR TAMAC-SCALARS
   TSUM TEMIN TEMAX TPOPCNT TL1
   TTRANS TZERO TLOADC TMOVBANK
 
@@ -1214,6 +1215,9 @@ TACC LIFECYCLE
   TACC-STORE     Store 256 bytes to TDST
   TACC-RELEASE   Zeroize and release
   TACC-STATUS@   Read visible ownership/state
+  TACC-SEND      Store TACC to dst or a chiplet
+                 window; a status, never a trap
+  TACC-RELAY     Load src, then as TACC-SEND
 
 There are seven physical TACC ownership domains:
 one private engine for each of four full cores,

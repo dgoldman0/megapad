@@ -707,6 +707,23 @@ prompt. Definitions and variables survive. On a worker core the BIOS ends
 the job, so `CORE-STATUS` reports the core idle, resets the core's stacks,
 and returns it to its idle loop, ready for the next `WAKE-CORE`.
 
+A bus fault, an access outside the memory map or one a device does not
+answer, prints its own line:
+
+```
+*** BUS FAULT @ aaaaaaaa SEP=pp T=tt ERR=ee
+```
+
+The address is the low 32 bits of the faulting access, `SEP` the register
+that was the program counter, `T` the T register, and `ERR` the low byte of
+the sticky bus-error latch (CSR 0x5A), one bit per port. No `FAULT-XT!`
+callback runs for a bus fault. After the line the BIOS recovers as above: on
+core 0 it returns to the prompt through `ABORT`, so both stacks, interpret
+state and the `EVALUATE` depth are reset and the `QUIT-XT!` callback runs,
+and on a worker core it ends the job. Words that check their own accesses,
+such as `TACC-SEND` and `TACC-RELAY`, take their bus faults themselves and
+return a status without printing anything.
+
 ---
 
 ## Clocks (4 words)
@@ -911,6 +928,35 @@ the first 128 output bytes:
 
 FP16 pairs `1.0 * 2.0` and `0.5 * 4.0` produce binary32 `4.0`
 (`0x40800000`) in every active lane; the upper 128 image bytes are zero.
+
+### Borrowed tile work
+
+Four words serve kernels that score many candidates at once and the
+service that delivers their scores into memory a chiplet lends:
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `TAMAC-SCALAR` | `( x -- )` | TAMAC's broadcast form: accumulate each lane of the tile at `TSRC0` times the low lane-width bits of x. |
+| `TAMAC-SCALARS` | `( tiles xs n -- )` | `TAMAC-SCALAR` over n consecutive tiles from tiles, tile i times scalar i of the vector at xs, packed at `TMODE`'s lane width.  `TSRC0` is left at the last tile reached. |
+| `TACC-SEND` | `( dst -- status )` | Store what TACC holds to dst, in memory or a chiplet port's window. |
+| `TACC-RELAY` | `( src dst -- status )` | `TACC-LOAD` the image at src, then store it to dst, in memory or a chiplet port's window. |
+
+A kernel that keeps one feature to a tile, byte c of tile f holding feature
+f of candidate c, gets each candidate's weighted sum in its own lane from
+one `TAMAC-SCALARS` over the feature tiles and a vector of weights.  In a
+small network, one such run for each hidden unit, with that unit's weights,
+gives the unit's sums for all 64 candidates at once.
+
+`TACC-SEND` and `TACC-RELAY` never trap.  They check ownership, the
+accumulator's state or `TMODE`'s format, alignment and each image's route
+before their first instruction, and return a status for each failure: 0
+OK, 1 NOT-OWNER, 2 INVALID, 3 FORMAT, 4 MISALIGNED, 5 NO-ROUTE, 6 REFUSED
+for a window that did not take the store, and 7 TRANSPORT for external
+memory that failed.  A failure from 1 to 5 changes nothing.  The
+bus-fault handler recognizes the words' load and stores and returns to
+them, so a chiplet that refuses, fails or leaves a write unanswered comes
+back as status 6 rather than the bus-fault report.  `BIOS-DICTIONARY.md`
+gives each status's conditions.
 
 ---
 

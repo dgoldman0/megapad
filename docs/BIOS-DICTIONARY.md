@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The `bios.asm` dictionary link chain contains **563** entries.  The numbered
+The `bios.asm` dictionary link chain contains **567** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -510,7 +510,7 @@ with `bench_jit_prims.py`).  Compilation overhead during KDOS load is
 folds, ~38 peephole bigrams, and ~5100 primitive inlines, saving ~50 KB
 of compiled code.
 
-### Miscellaneous / System (9 words)
+### Miscellaneous / System (8 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
@@ -1123,6 +1123,72 @@ secret-boundary qualifications are recorded in
 | 470 | `TACC-STATUS@` | `( -- status )` | | Read caller-relative TACC status CSR `0x1D` (`D0 1D`) |
 | 471 | `TACC-CLAIM?` | `( -- flag )` | | Execute `TACC-TRY`, then return canonical true exactly when `TACC_STATUS.MINE` is set; never spins |
 
+### Borrowed tile work (4 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 562 | `TAMAC-SCALAR` | `( x -- )` | | TAMAC's broadcast form (`t.amac r7`, `E5 06 07`): accumulate each lane of the tile at `TSRC0` times the low lane-width bits of x into owned, valid TACC |
+| 563 | `TAMAC-SCALARS` | `( tiles xs n -- )` | | Run `TAMAC-SCALAR` over n consecutive 64-byte tiles from tiles, tile i times scalar i of the vector at xs; leave `TSRC0` at the last tile reached |
+| 564 | `TACC-SEND` | `( dst -- status )` | | Store what the owned TACC holds to dst, in memory or a chiplet port's window, as `TACC-STORE` stores it; return a status for every failure, never trapping |
+| 565 | `TACC-RELAY` | `( src dst -- status )` | | `TACC-LOAD` the 256-byte image at src in the current `TMODE` format, then store it to dst, in memory or a chiplet port's window; return a status for every failure, never trapping |
+
+These words serve a tile kernel that scores many candidates at once, such
+as one layer of a small network or a weighted sum of features, and the
+service that delivers its results into memory a chiplet lends
+(`docs/chiplet-interconnect-plan.md`). With one feature to a tile, the 64
+lanes of a U8 tile hold one feature of 64 candidates, and `TAMAC-SCALARS`
+over the feature tiles with a vector of weights leaves each candidate's
+weighted sum in its TACC lane.
+
+The vector at xs packs its scalars little-endian at the lane width of
+`TMODE`'s format: one byte for U8, two for U16, FP16 and BF16, four for U32
+and FP32, and eight for FP64. Each step sets `TSRC0` to its tile, reads its
+scalar, then runs the broadcast form, so a fault stops the run at that tile
+with the tiles before it accumulated. With n zero the word does nothing,
+not even the ownership check.
+
+`TACC-SEND` and `TACC-RELAY` are the checked image words. A kernel that
+leaves its scores in TACC delivers them with `TACC-SEND`; one that writes
+them as an image in internal memory moves it with `TACC-RELAY`. Both store
+the canonical image of the format, its active 64-byte units with zeros past
+them, whether dst is memory or a window. They check everything before their
+first instruction and return the first status that applies, so statuses 1
+to 5 change nothing, not even `TSRC0` or `TDST`:
+
+| Status | Name | Meaning |
+|---:|---|---|
+| 0 | OK | The image arrived |
+| 1 | NOT-OWNER | The caller does not own TACC |
+| 2 | INVALID | TACC holds no image (`TACC-SEND`) |
+| 3 | FORMAT | `TMODE` names no TACC format (`TACC-RELAY`) |
+| 4 | MISALIGNED | src or dst is not 64-byte aligned |
+| 5 | NO-ROUTE | src or dst has no route: the image leaves the memory region it starts in or starts in none; src lies in a chiplet port's window; or dst runs past its port's window or lies beyond the ports built |
+| 6 | REFUSED | dst's window did not take the store: the port does not admit MegaPad's writes, or the chiplet refused the write, failed it or left it unanswered |
+| 7 | TRANSPORT | External memory failed or left a word unanswered, for the load or the store |
+
+`TACC-SEND` checks in the order 1, 2, 4, 5 and `TACC-RELAY` in the order 1,
+3, 4, 5, alignment of both addresses before either route. The routes are
+the TACC memory port's: an image must lie wholly inside one memory region
+System Info reports, Bank 0, HBW, external memory or VRAM, or, as a store,
+wholly inside one built port's window (`docs/chiplet-link.md`, section 3).
+Once the instructions run, `TDST` holds dst, and `TSRC0` holds src for
+`TACC-RELAY`. A store that fails gives 6 for a window and 7 for memory and
+leaves TACC as it was, which for `TACC-RELAY` is the loaded image, valid and
+clean; a failed `TACC-RELAY` load gives 7 and leaves TACC unchanged. The
+BIOS's bus-fault handler recognizes the words' three instructions and
+returns to each, so their faults never reach the bus-fault report. A
+refused write leaves the chiplet's memory untouched; a failed or
+unanswered one may leave some units written (`docs/chiplet-link.md`,
+section 4).
+
+The words run in supervisor mode, as every BIOS word does. A sibling
+microcore's force-release of a shared cluster engine between a word's
+checks and its instruction would still trap; no shared-engine caller runs
+these words today. The hosted simulator returns the same statuses. It has
+no external-memory transport, so it never returns 7, and the other words
+of this section report a bus fault by failing the dispatch where the BIOS
+reports it and returns to its prompt (`docs/simulator-contract.md`).
+
 ### Dictionary Bounds and Fault Control (5 words)
 
 | # | Word | Stack Effect | Imm | Description |
@@ -1181,24 +1247,29 @@ machine reset.
 
 ## Summary Statistics
 
+Each row counts the words its section of the catalogue lists, in the
+catalogue's order.
+
 | Category | Count |
 |----------|-------|
 | Stack Manipulation | 17 |
 | Arithmetic | 17 |
-| Logic & Bitwise | 6 |
+| Logic & Bitwise | 11 |
 | Comparison | 13 |
 | Memory | 18 |
-| I/O & Display | 17 |
-| String & Parsing | 8 |
+| I/O & Display | 18 |
+| String & Parsing | 9 |
 | Control Flow | 15 |
-| Compilation & Defining | 21 |
+| Compilation & Defining | 24 |
 | Return Stack | 6 |
-| Input Source & Interpreter | 5 |
+| Input Source & Interpreter | 16 |
 | Comments | 2 |
-| Miscellaneous / System | 9 |
+| JIT Compiler | 4 |
+| Miscellaneous / System | 8 |
 | Tile Engine | 39 |
-| NIC | 4 |
-| Disk / Storage | 17 |
+| NIC — Network Interface | 10 |
+| Pool Allocator | 3 |
+| Disk / Storage | 25 |
 | Timer & Interrupts | 9 |
 | RTC / System Clock | 9 |
 | Multicore | 11 |
@@ -1207,24 +1278,33 @@ machine reset.
 | Memory BIST | 5 |
 | Tile Self-Test | 3 |
 | Stride / 2D Addressing | 6 |
-| FP16 / BF16 Modes | 2 |
+| Floating-Point Tile Words | 9 |
+| Scalar Floating-Point | 52 |
 | Instruction Cache | 5 |
 | AES-256/128 Engine, GCM and CBC | 13 |
 | Checked SHA-3 / SHAKE / raw Keccak | 9 |
 | SHA-256 Streaming | 4 |
 | SHA-512 and SHA-384 Streaming | 6 |
-| TRNG | 3 |
-| Checked Entropy Boundaries | 2 |
-| Caller Span Boundary | 1 |
+| Shared SHA-2 span qualification | 1 |
+| TRNG | 5 |
+| Caller-managed span qualification | 1 |
+| X25519 | 6 |
 | Field ALU | 15 |
 | NTT Engine | 10 |
-| KEM Engine | 7 |
+| KEM Engine — ML-KEM-512 | 7 |
 | Cooperative Multitasking | 9 |
 | Full-width TACC | 8 |
+| Borrowed tile work | 4 |
 | Dictionary Bounds and Fault Control | 5 |
-| Dictionary Acceleration Control | 4 |
+| Dictionary Acceleration Control | 5 |
+| Dictionary Code Kind | 1 |
+| Token Replay | 1 |
+| Boot Identity | 1 |
 | Checked WOTS Chain | 1 |
-| **Catalogued subtotal** | **400** |
+| **Catalogued subtotal** | **490** |
+
+The catalogue lists 490 of the 567 entries in the link chain; the chain in
+`bios.asm` holds the rest.
 
 ### All Immediate Words (34)
 
@@ -1233,12 +1313,13 @@ machine reset.
 ### Newest Dictionary Chain Segment (last → earlier)
 
 The complete authoritative link chain is the `.dq` chain in `bios.asm`.
-`BOOT-ID` closes the newest appended segment, after the token replay, the
-dictionary's code kind, the string scan, the QUIT callback and the storage
-unit words:
+`TACC-RELAY` closes the newest appended segment, after the other words of
+borrowed tile work, the boot's identity, the token replay, the dictionary's
+code kind, the string scan, the QUIT callback and the storage unit words:
 
 ```
-BOOT-ID → TOKEN-REPLAY → DICT-MACHINE-CODE? → SCAN → QUIT-XT!
+TACC-RELAY → TACC-SEND → TAMAC-SCALARS → TAMAC-SCALAR
+→ BOOT-ID → TOKEN-REPLAY → DICT-MACHINE-CODE? → SCAN → QUIT-XT!
 → UNIT-DISK-FLUSH-GEN-CHECKED → UNIT-DISK-WRITE-GEN-CHECKED
 → UNIT-DISK-READ-GEN-CHECKED → UNIT-DISK-CAPS → UNIT-DISK-MEDIA-GEN
 → UNIT-DISK-SECTORS → UNIT-DISK@ → DISK-UNITS

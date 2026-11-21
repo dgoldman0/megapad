@@ -8,16 +8,18 @@ the simulator model MegaPad's side, and a chiplet's model attaches to it
 through a C interface. The wiring of LM1's end into its cluster, LM1's own
 model and the software are still to come. The second direction of lending in
 §3, in which the tile engine stores its accumulator into memory a chiplet
-lends, was accepted on 2026-11-19 for `TACC.STORE`. MegaPad's RTL and the
-emulator build it; LM1's end of it and its software are not built yet.
-Borrowed tile work, LM1's third use of the link (§7), in which LM1 has
-MegaPad's tile engines do its number work and the results land in its own
-memory, was proposed on 2026-11-20; none of it is built. This note records
-how chiplets attach to MegaPad in Leviathan: the contract every chiplet
-meets, how the chips share memory, how they signal and exchange work, and
-how LM1, the first chiplet, runs sandbox jobs, managed data and borrowed
-tile work over the link. It schedules no work. The release plan's side is
-decision 37 and Parts 3d, 8 and 9 of `dev/PLAN.md` in fantasy-engine.
+lends, was accepted on 2026-11-19 for `TACC.STORE`. MegaPad's RTL, the
+emulator and the simulator build it; LM1's end of it and its software are
+not built yet. Borrowed tile work, LM1's third use of the link (§7), in
+which LM1 has MegaPad's tile engines do its number work and the results land
+in its own memory, was proposed on 2026-11-20. The BIOS words it runs on are
+built, in the emulator and the simulator alike; the service, its operation
+and LM1's side are not. This note records how chiplets attach to MegaPad in
+Leviathan: the contract every chiplet meets, how the chips share memory, how
+they signal and exchange work, and how LM1, the first chiplet, runs sandbox
+jobs, managed data and borrowed tile work over the link. It schedules no
+work. The release plan's side is decision 37 and Parts 3d, 8 and 9 of
+`dev/PLAN.md` in fantasy-engine.
 
 ## 1. A chiplet works on memory lent to it
 
@@ -248,7 +250,11 @@ memory.
 
 ### Borrowed tile work
 
-Proposed on 2026-11-20; nothing here is built. LM1 carries no numeric units
+Proposed on 2026-11-20. The BIOS words the service runs on are built:
+`TAMAC-SCALAR` and `TAMAC-SCALARS` for `TAMAC`'s broadcast form, and
+`TACC-SEND` and `TACC-RELAY`, which store into a window and return a status
+for every failure (`docs/BIOS-DICTIONARY.md`, "Borrowed tile work"). The
+service, `ASK` and LM1's side are not built. LM1 carries no numeric units
 of its own: its spec drops the SIMD sidekick tiles it once described, and
 LM1 has MegaPad's seven tile engines do its number work instead. The first
 use is score-guided search, in which LM1 walks a tree of options, as a
@@ -419,16 +425,18 @@ limit at the controller bound what a chiplet takes from Desk.
   mask indexed by ID), the external-flag wiring, System Info, the new port
   bridge, and the tile engine's route into a chiplet's window (§3).
 - **BIOS:** bringing the link up, and the doorbell interrupt. For borrowed
-  tile work (§7), a word for `TAMAC`'s broadcast form, which today has
-  none, a word that runs it over consecutive tiles, and one that moves a
-  256-byte image from internal memory into a window through TACC.
+  tile work (§7), four words, which are built: `TAMAC-SCALAR` runs `TAMAC`'s
+  broadcast form, `TAMAC-SCALARS` runs it over consecutive tiles,
+  `TACC-SEND` stores what TACC holds into a window, and `TACC-RELAY` moves
+  a 256-byte image from internal memory into one through TACC. The two
+  stores return a status for every failure and never trap.
 - **KDOS:** the system module for chiplets, and an allocator for lendable
   memory. For borrowed tile work, the service's loop, its queue handling
   and the registry of kernels.
 - **The emulator and the simulator:** a model of the ports and an interface
-  for a chiplet's model. The simulator also needs the TACC family and its
-  route into a chiplet's window, which it does not implement today, since
-  the release runs on it.
+  for a chiplet's model. The simulator, on which the release runs, also has
+  the TACC family and its route into a chiplet's window, with the
+  emulator's results in every format.
 
 The software has two layers in one BIOS, accepted on 2026-11-11. A
 Leviathan BIOS of its own would be a second BIOS to keep in step with the
@@ -471,8 +479,8 @@ Of the RTL items, the port bridge, the client arbiter with its weights and
 limits, the mailbox's ports, its register path, the external-flag wiring,
 System Info's field, and the tile engine's route into a chiplet's window
 with the bridge's writer are built. The models of the emulator and the
-simulator are built too, the emulator's with the same route and writer, and
-the queues and offers are specified.
+simulator are built too, each with the tile engine's route into a window,
+and the queues and offers are specified.
 [chiplet-link.md](chiplet-link.md) §10 lists what is left for later.
 
 ## 10. Open
@@ -500,9 +508,6 @@ the queues and offers are specified.
   core other than its own, and the three cluster engines wait for
   microcore kernels. Desk's frame flag, on which the service waits between
   groups, is proposed in Akashic and not built.
-- **The simulator's tile engine.** The release runs on the simulator, which
-  implements no TACC, so borrowed tile work needs the TACC family and its
-  route into a chiplet's window there.
 - **Lendable memory in Akashic.** Zero-copy depends on the data handed to a
   job being created in lendable memory, and the job service's allocation has
   yet to be read with that in mind.

@@ -8,6 +8,7 @@
 #include "../../shared/accel/storage_faults_bindings.h"
 #include "crc_service_bindings.h"
 #include "storage_service_bindings.h"
+#include "tacc_service_bindings.h"
 #include "../../shared/accel/routine_call.h"
 #include "collected.h"
 #include "guest_memory.h"
@@ -2619,6 +2620,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
     megapad::storage::register_bindings(module);
     megapad::crc_service::register_bindings(module);
     megapad::storage_service::register_bindings(module);
+    megapad::tacc_service::register_bindings(module);
     megapad::dictionary::register_bindings(module);
     megapad::walker::register_bindings(module);
     module.attr("SEMANTIC_API_VERSION") = 13;

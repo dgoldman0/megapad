@@ -452,10 +452,28 @@ the run then forgets the pages it found absent; a page that exists keeps
 its bytes where they are. A subclass of the service or of the spinlock bank
 runs its own Python, so the executor leaves those words to Python.
 
+## TACC words
+
+The full-width tile accumulator, `TACCService` (`tacc_service.h`), is
+native: core 0's bank, its owner, valid and dirty state and latched format,
+over the runtime's memory and, when the profile has chiplet ports, the
+`ChipletLink` whose windows take store images. `simulator/tacc.py` exports
+it as `HostedTACCService`, and the hosted tile service holds the runtime's
+instance. Each operation takes the tile registers it reads as arguments and
+returns `(fault, cause, address, length, retired, answer)`: the fault the
+machine would raise (none, illegal, alignment or bus), what made a bus
+fault, the address the machine reports, the span that faulted, the TACC
+instructions completed and a refusing chiplet's answer. `tamac_scalars`
+adds the TSRC0 it leaves, and `send` and `relay`, the checked image words,
+add the status they give in place of a fault. The Python words raise the
+fault and count the retired instructions. The program has no TACC
+operations: every TACC word is a Python primitive that calls this service.
+
 ## Ownership and collection
 
-`NativeProgram`, `NativeDictionary` and `NativeLineWalker` take part in
-Python's cycle collection, through the one type setup in `collected.h`. A
+`NativeProgram`, `NativeDictionary`, `NativeLineWalker`, `StorageService`
+and `TACCService` take part in Python's cycle collection, through the one
+type setup in `collected.h`. A
 machine is a cycle through its dictionary: the runtime owns the dictionary,
 and the dictionary owns every definition's implementation and cached view,
 which lead back to the runtime. A line walker owns the dictionary as well,
@@ -468,6 +486,7 @@ its memory with it.
 |---|---|
 | `NativeProgram` | the continuation type, the tile guard, the routine capsule, the CRC service, the storage services, the memory they are bound to and the spinlock owner list, each sparse region's page dictionary, each dense region's lease |
 | `StorageService` | the medium, the host file, the observer and its hook, the memory it is bound to, that memory's page dictionaries and dense leases |
+| `TACCService` | the memory it was made over, that memory's page dictionaries and dense leases, the chiplet link |
 | `NativeDictionary` | `memory`, each record's implementation and cached view, its own reference to each page dictionary and its own dense leases |
 | `NativeLineWalker` | the dictionary, the open definition's location, the state of a failed walk |
 

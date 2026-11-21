@@ -63,6 +63,23 @@ class DivideByZeroFault(InstructionFault):
     throw_code = -10  # division by zero
 
 
+class AlignmentFault(InstructionFault):
+    """The machine raises ``IVEC_ALIGN_FAULT`` at ``address``.
+
+    The TACC words raise it for an image or source row that is not 64-byte
+    aligned; its report names the address, as the BIOS's does.
+    """
+
+    throw_code = -23  # address alignment exception
+
+    def __init__(self, address: int, message: str) -> None:
+        self.address = address
+        self.report = (
+            f"\r\n*** ALIGNMENT FAULT @ {address:016X} CORE=00\r\n".encode()
+        )
+        super().__init__(message)
+
+
 class ForthAbort(ExecutionError):
     """The nonreturning BIOS ``ABORT`` word cleared one active task."""
 
@@ -96,6 +113,7 @@ class StepBudgetExceeded(ExecutionError):
 
 
 __all__ = [
+    "AlignmentFault",
     "DivideByZeroFault",
     "ExecutionError",
     "ExecutionBlocked",

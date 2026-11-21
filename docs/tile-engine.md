@@ -522,9 +522,8 @@ and RTL implement these rules.  The software backends take their values from
 `shared/ieee_fp.py`, a seeded differential test holds the native accelerator
 to the Python results, and the RTL replays emulator-generated golden vectors
 (`rtl/sim/tile_fp_vectors.vec`).  FP32 and FP64 element-wise operations,
-reductions, and dot products run in all four backends, and their TACC
-formats in the three that implement TACC.  The RTL computes their
-arithmetic on two multi-format FMA units per engine
+reductions, dot products, and TACC formats run in all four backends.  The
+RTL computes their arithmetic on two multi-format FMA units per engine
 (`rtl/core/mp64_fma.v`): element-wise operations take four beats, the
 canonical tree schedules its products, levels, and reserved `ACC_ACC` beats
 over the same units, and `TAMAC` gives each unit one binary64 lane per beat,
@@ -540,11 +539,14 @@ shared with the scalar engine) at the §10 cost.
 ## Full-Width Tile Accumulator (TACC)
 
 > **Implementation status:** the Python oracle, the native accelerator, the
-> strict-cycle system model and the RTL implement this contract, every
-> format included; the hosted simulator does not implement TACC. A store
-> into memory a chiplet lends (below) is built in the RTL, the native
-> accelerator, the strict-cycle model and the Python oracle, which hands it
-> to the shared C++ port model.
+> strict-cycle system model, the RTL and the hosted simulator implement this
+> contract, every format included. The simulator's accumulator is native
+> code over the lane arithmetic the native accelerator uses, and it reports
+> a bus fault by failing the dispatch rather than through a BIOS handler
+> (`docs/simulator-contract.md`). A store into memory a chiplet lends
+> (below) is built in the RTL, the native accelerator, the strict-cycle
+> model, the simulator and the Python oracle, which hands it to the shared
+> C++ port model.
 
 Each physical tile engine owns one 2,048-bit TACC bank plus owner, valid,
 dirty, format, busy, force-pending, and cancellation metadata.  Software
@@ -826,6 +828,8 @@ These emit the corresponding MEX instruction or CSR access inline.
 | `TFMA` | `( -- )` | Fused multiply-add: `a×b + dst` → `[TDST]` |
 | `TDOTACC` | `( -- )` | 4-way chunked dot product → ACC0–ACC3 |
 | `TAMAC` | `( -- )` | Accumulate widened `[TSRC0] × [TSRC1]` products into TACC |
+| `TAMAC-SCALAR` | `( x -- )` | TAMAC's broadcast form: accumulate `[TSRC0] × x` into TACC |
+| `TAMAC-SCALARS` | `( tiles xs n -- )` | `TAMAC-SCALAR` over n tiles from tiles, tile i times scalar i of the vector at xs |
 
 ### TACC Lifecycle
 
@@ -836,6 +840,8 @@ These emit the corresponding MEX instruction or CSR access inline.
 | `TACC-LOAD` | `( -- )` | Load the 256-byte image at `TSRC0` |
 | `TACC-STORE` | `( -- )` | Store the 256-byte image at `TDST` |
 | `TACC-RELEASE` | `( -- )` | Zeroize and release owned TACC |
+| `TACC-SEND` | `( dst -- status )` | Store the image TACC holds to dst, which may be a chiplet port's window; a status, never a trap |
+| `TACC-RELAY` | `( src dst -- status )` | Load the image at src and store it to dst, which may be a chiplet port's window; a status, never a trap |
 
 The convenience word does not hide a spin.  Software chooses whether and how
 long to retry:
@@ -1090,6 +1096,25 @@ TACC-RELEASE
 Both examples avoid the destination-tile load/add/store traffic required by
 legacy `TMAC`/`TFMA` accumulation.  The stored result remains the canonical
 256-byte TACC image rather than a silently narrowed tile.
+
+The broadcast form scores many candidates at once.  With one feature to a
+tile, byte c of tile f holding feature f of candidate c, a vector of one
+weight per feature gives each candidate's weighted sum in its own lane:
+
+```forth
+TACC-ACQUIRE
+0 TMODE!  TACC-CLEAR                \ 64 candidates, 32-bit sums
+features weights 16 TAMAC-SCALARS   \ lane c += weight f × feature f of c
+scores TDST!  TACC-STORE            \ 64 U32 scores
+TACC-RELEASE
+```
+
+`TAMAC-SCALARS` reads the weights at the lane width of the format, one byte
+each here, and leaves `TSRC0` at the last feature tile.  A service that
+delivers scores into memory a chiplet lends stores them with `TACC-SEND`
+when they are in TACC, or moves an image of them with `TACC-RELAY`.  Both
+return a status instead of trapping, 6 for a store the chiplet did not
+take (`docs/BIOS-DICTIONARY.md`).
 
 ---
 

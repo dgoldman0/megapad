@@ -13,6 +13,7 @@ from typing import Protocol
 
 from shared import ieee_fp, tile_float, tile_formats
 from shared.cells import MASK64, u64
+from simulator import tacc as tacc_faults
 from simulator.errors import IllegalInstructionFault
 from simulator.field import HostedFieldALUService
 from simulator.memory import SparseAddressSpace
@@ -109,13 +110,15 @@ def tile_sum_u8(tile: bytes) -> int:
 
 
 class HostedTileService:
-    """One runtime-local semantic legacy tile engine.
+    """One runtime-local semantic tile engine.
 
     The service accepts every defined format and fails closed on the reserved
     codes and on operations a format does not admit (``tile_formats.admits``).
-    It
-    implements the legacy and extended BIOS operations reached by ordinary
-    source.  The separately owned full-width TACC family remains unsupported.
+    It implements the legacy and extended BIOS operations reached by ordinary
+    source.  The full-width TACC family runs on the native TACC service
+    (``simulator.tacc``) given as ``tacc``: these words pass it the tile
+    registers, count the TACC instructions it completes, and raise the
+    fault it reports.  Without one, the TACC words fail.
     """
 
     __slots__ = (
@@ -128,6 +131,7 @@ class HostedTileService:
         "_native_values",
         "_registers",
         "_source1",
+        "_tacc",
     )
 
     def __init__(
@@ -137,6 +141,7 @@ class HostedTileService:
         *,
         core_id: int = 0,
         account_operation: Callable[[], None] | None = None,
+        tacc: object | None = None,
     ) -> None:
         if not isinstance(memory, SparseAddressSpace):
             raise TypeError("tile memory must be a SparseAddressSpace")
@@ -155,6 +160,7 @@ class HostedTileService:
         self._source1 = 0
         self._native_values = None
         self._native_guard_matches = None
+        self._tacc = tacc
         # Validate the injected shared-register view at construction.
         self._registers.accumulator_words(core_id)
 
@@ -601,6 +607,139 @@ class HostedTileService:
                 lane_format, tile_float.unpack_bits(bits, source)))),
         )
         self._account()
+
+    # -- The full-width tile accumulator ------------------------------------
+
+    @property
+    def tacc(self):
+        """The native TACC service the TACC words run on, or None."""
+
+        return self._tacc
+
+    def tacc_status(self) -> int:
+        """``TACC-STATUS@``: TACC_STATUS as core 0 reads it."""
+
+        return self._require_tacc().status
+
+    def tacc_try(self) -> None:
+        """``TACC-TRY``: claim a free accumulator; never wait."""
+
+        self._tacc_publish(self._require_tacc().try_claim(), "TACC-TRY")
+
+    def tacc_claim(self) -> bool:
+        """``TACC-CLAIM?``: one ``TACC-TRY``, then whether core 0 owns it."""
+
+        self.tacc_try()
+        return bool(self._tacc.status & 0x2)
+
+    def tacc_clear(self) -> None:
+        """``TACC-CLEAR``: latch TMODE's format and zero the accumulator."""
+
+        self._tacc_publish(self._require_tacc().clear(self._mode), "TACC-CLEAR")
+
+    def tacc_load(self) -> None:
+        """``TACC-LOAD``: the canonical image at TSRC0, in TMODE's format."""
+
+        self._tacc_publish(
+            self._require_tacc().load(self._mode, self.source0), "TACC-LOAD"
+        )
+
+    def tacc_store(self) -> None:
+        """``TACC-STORE``: the canonical image to TDST, in memory or a window."""
+
+        self._tacc_publish(
+            self._require_tacc().store(self.destination), "TACC-STORE"
+        )
+
+    def tacc_release(self) -> None:
+        """``TACC-RELEASE``: zero the accumulator and give it up."""
+
+        self._tacc_publish(self._require_tacc().release(), "TACC-RELEASE")
+
+    def tamac(self) -> None:
+        """``TAMAC``: accumulate the products of the rows at TSRC0 and TSRC1."""
+
+        self._tacc_publish(
+            self._require_tacc().tamac(self._mode, self.source0, self.source1),
+            "TAMAC",
+        )
+
+    def tamac_scalar(self, scalar: int) -> None:
+        """``TAMAC-SCALAR``: TAMAC's broadcast form, the row at TSRC0 times
+        the low lane-width bits of ``scalar``."""
+
+        self._tacc_publish(
+            self._require_tacc().tamac_scalar(
+                self._mode, self.source0, self._cell(scalar, label="TAMAC scalar")
+            ),
+            "TAMAC-SCALAR",
+        )
+
+    def tamac_scalars(self, tiles: int, scalars: int, count: int) -> None:
+        """``TAMAC-SCALARS``: the broadcast form over ``count`` tiles from
+        ``tiles``, each times its scalar packed at TMODE's lane width from
+        ``scalars``.  TSRC0 is left at the last tile reached."""
+
+        tacc = self._require_tacc()
+        outcome, source0 = tacc.tamac_scalars(
+            self._mode,
+            self._cell(tiles, label="TAMAC-SCALARS tiles"),
+            self._cell(scalars, label="TAMAC-SCALARS scalars"),
+            self._cell(count, label="TAMAC-SCALARS count"),
+            self.source0,
+        )
+        self.set_source0(source0)
+        self._tacc_publish(outcome, "TAMAC-SCALARS")
+
+    def tacc_send(self, destination: int) -> int:
+        """``TACC-SEND``: store what the accumulator holds to
+        ``destination``, in memory or a chiplet port's window, and return a
+        status (``simulator.tacc``'s ``TACC_STATUS_*``) instead of faulting.
+        TDST takes ``destination`` once the store runs."""
+
+        tacc = self._require_tacc()
+        destination = self._cell(destination, label="TACC-SEND destination")
+        outcome, status = tacc.send(destination)
+        if status in tacc_faults.TACC_STATUSES_THAT_RAN:
+            self.set_destination(destination)
+        self._tacc_publish(outcome, "TACC-SEND")
+        return status
+
+    def tacc_relay(self, source: int, destination: int) -> int:
+        """``TACC-RELAY``: move the image at ``source`` into ``destination``
+        through the accumulator, by ``TACC-LOAD`` then ``TACC-STORE``, and
+        return a status instead of faulting.  TSRC0 and TDST take the two
+        addresses once the load runs."""
+
+        tacc = self._require_tacc()
+        source = self._cell(source, label="TACC-RELAY source")
+        destination = self._cell(destination, label="TACC-RELAY destination")
+        outcome, status = tacc.relay(self._mode, source, destination)
+        if status in tacc_faults.TACC_STATUSES_THAT_RAN:
+            self.set_source0(source)
+            self.set_destination(destination)
+        self._tacc_publish(outcome, "TACC-RELAY")
+        return status
+
+    def _require_tacc(self):
+        tacc = self._tacc
+        if tacc is None:
+            raise IllegalInstructionFault(
+                "this tile service has no full-width tile accumulator"
+            )
+        return tacc
+
+    def _tacc_publish(self, outcome: tuple, word: str) -> None:
+        """Count the TACC instructions OUTCOME retired, then raise its fault.
+
+        A faulting instruction does not retire, so it adds nothing to
+        PERF-TILEOPS, while the ones before it in the same word do.
+        """
+
+        for _ in range(outcome[4]):
+            self._account()
+        if outcome[0]:
+            tacc_faults.raise_fault(outcome, word)
 
     def _extended_format(self, funct: int, funct_byte: int):
         lane_format = tile_formats.decode(self._mode)

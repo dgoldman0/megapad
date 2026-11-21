@@ -83,6 +83,33 @@ bool tile_float_index_replaces(const TileFloatFormat&, std::uint64_t, std::uint6
 std::uint64_t tile_float_from_integer(const TileFloatFormat&, bool, std::uint64_t);
 std::uint64_t tile_float_to_integer(const TileFloatFormat&, std::uint64_t, int, bool, bool);
 
+// The full-width tile accumulator (docs/tile-engine.md, "Full-Width Tile
+// Accumulator"). Its canonical image is 256 bytes, of which a format fills
+// the first tacc_active_bytes and keeps the rest zero.
+inline constexpr std::size_t TACC_IMAGE_BYTES = 256;
+
+// The formats TACC.CLEAR, TACC.LOAD and TAMAC admit: every defined format
+// except U64.
+constexpr bool tacc_format_is_legal(int ew) {
+    return ew >= 0 && ew <= 7 && ew != 3;
+}
+
+// 256 bytes for U8 and U16, 64 for FP64 and 128 for the others.
+constexpr std::size_t tacc_active_bytes(int ew) {
+    return ew <= 1 ? TACC_IMAGE_BYTES
+         : ew == 7 ? TACC_IMAGE_BYTES / 4 : TACC_IMAGE_BYTES / 2;
+}
+
+// TAMAC's arithmetic over one pair of 64-byte source rows, A and B: each
+// lane of IMAGE gains the widened product of its two input lanes. Integer
+// lanes extend by SIGNED_LANES and wrap at the accumulator lane's width
+// without saturating; float lanes take RN(acc + a * b) in their
+// accumulation format, rounded once. The bytes past the format's active
+// image become zero. EW must be a legal TACC format. Both the emulator's
+// native engine and the hosted simulator's TACC service compute TAMAC here.
+void tacc_accumulate(int ew, bool signed_lanes, std::uint8_t* image,
+                     const std::uint8_t* a, const std::uint8_t* b);
+
 enum class Operation {
     Add, Subtract, And, Or, Xor, Minimum, Maximum, Absolute, Multiply,
     FusedMultiplyAdd, WideningMultiply, Dot, Sum, SumSquares, L1,
