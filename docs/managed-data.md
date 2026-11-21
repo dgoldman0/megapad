@@ -104,6 +104,13 @@ request at a time, each answered after it completes
 ([chiplet-link.md](chiplet-link.md) §4). Every access to the two words
 therefore falls in one order that both chips see.
 
+That order holds because MegaPad's cores have no data cache and no store
+buffer. A core given either must keep its accesses to lent memory uncached
+and in program order, or a core could read `HOLD` before its `OPEN` lands
+and use a window the collector does not see. The interconnect plan already
+lists a production core's data cache among its open items
+([chiplet-interconnect-plan.md](chiplet-interconnect-plan.md) §10).
+
 ### Opening a window
 
 A core keeps its window's nesting depth in its own memory. An open at depth
@@ -1039,3 +1046,6 @@ would.
   made at production size.
 - **The bounds.** The values of §3's three times, which the chiplet module
   measures.
+- **A data cache or store buffer on a production core.** §3's protocol needs
+  each core's accesses to lent memory to reach memory uncached and in
+  program order.
