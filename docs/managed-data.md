@@ -735,8 +735,13 @@ function lasts (stage 0):
 
 MegaPad enters a kind once the reply to its `SHAPE` request gives the ID,
 before any core uses the ID, and grows the registry as it grows the block
-list. The registry holds the kinds MegaPad registers. How LM1 records the
-kinds it puts into the shared heap itself is open (§16).
+list. The registry also holds the kinds LM1 puts into the shared heap
+itself (stage 2): records of kinds it interns, objects of a task's result,
+and, through Lisp's stores, closures, symbols and foreign pointers. Before
+the first object of such a kind reaches the shared heap, LM1 asks MegaPad
+to enter the kind with a `KIND` request (§10), which marks whether a
+restarted LM1 can adopt objects of it, so MegaPad stays the registry's one
+writer (decided 2026-11-21).
 
 ### What each side checks
 
@@ -792,6 +797,7 @@ From LM1, on the grant's pair:
 | `GROW` | `0x180` | `ARG0`: the bytes wanted, at least | `OK` with a new block's base in `ARG0` and its length in `ARG1`, lent for reading and writing; `NO_MEMORY` when MegaPad refuses |
 | `RETURN` | `0x181` | `IN_ADDR`, `IN_LEN`: a block LM1 no longer uses | `OK` once MegaPad has taken it back |
 | `NOTICE` | `0x182` | `ARG0`: 1 an overdue window, 2 corrupt data, 3 a broken log; `ARG1`: in bits 15:0 the core's ID, and for an overdue window in bits 63:16 the nanoseconds it has stayed open; `IN_ADDR`: the address concerned | `OK` |
+| `KIND` | `0x183` | `IN_ADDR`, `IN_LEN`: the kind's description (§8); `ARG0`: the shape ID LM1 gave it; `ARG1`: 1 when a restarted LM1 cannot adopt objects of it, else 0 (stage 2) | `OK` once the registry holds the kind; `NO_MEMORY` when the registry cannot grow; `BAD_RECORD` for an unsound description or an ID inside `SHAPE_RANGE` |
 
 The class's statuses are `0x100` `NO_MEMORY`, `0x101` `BAD_RECORD` and
 `0x102` `NO_RESUME` (stage 2). `COLLECT` serves memory pressure and the
@@ -882,8 +888,8 @@ heap is adopted or lost. In the last column, sections are those of LM1's
 |-------|--------------|--------------------------|----------------------|
 | Fixes | Bounds on the waits LM1 can leave unended, and a lost heap's memory held until LM1's reset | The bound on a hold that stalls before `ACTIVE`, and the full log's deadline (§3); memory returned only after LM1's reset (below) | Setting `ACTIVE`, and draining a full log, within those bounds (§12.3, §12.4) |
 | 0 | The records the rule reads, and the write order that keeps them true | `STATE`, `CAUSE`, the block list and the shape registry (§9) | `MOVE`, the move set, the write order and marks kept outside headers (§12.3); fixed shape IDs and the registry's range (§12.6) |
-| 1 | The stand-in adopts the heap | The stop request and the wait for `BUSY`, the failure's `CAUSE`, the evidence latch and the rule (below); the stand-in (§10, §13); `OBJ-ENGINE` (§14) | Nothing new |
-| 2 | A restarted LM1 takes the heap back | The handback (§13) | Taking the heap back at `ATTACH`, with the registry, old blocks counted full until the first mark, and the first hold (§12.11) |
+| 1 | The stand-in adopts the heap | The stop request and the wait for `BUSY`, the failure's `CAUSE`, the evidence latch and the rule (below); the stand-in, and dropping its heap once nothing reaches it (§10, §13); `OBJ-ENGINE` (§14) | Answering a stop only between moves (§12.9) |
+| 2 | A restarted LM1 takes the heap back | The handback (§13); entering LM1's kinds (§9, §10) | Asking for its own kinds with `KIND` (§12.6); taking the heap back at `ATTACH`, with the registry, old blocks counted full until the first mark, and the first hold (§12.11) |
 | 3 | Recovery from a failure while a hold flips | The stand-in's resolving traversal, if MegaPad resolves (§16) | The resolving traversal (§12.11) |
 
 The release builds the fixes and stages 0 and 1, and stage 2 joins it if
@@ -897,7 +903,12 @@ which lose the heap at once (below), the module stops LM1, unless LM1 is
 held in reset already: it cancels and resets the port by the link's rule
 ([chiplet-link.md](chiplet-link.md) §8), and from stage 1 it first asks LM1
 to stop, by setting `STOP_REQ` and waiting for `STOPPED` for at most a
-request's deadline. From stage 1 it then waits for the port's `BUSY` bit to
+request's deadline. LM1 answers only between moves: a hold that has begun
+flipping finishes its moves and rewrites, so that `MOVE` reads `FIXED`,
+before LM1 sets `STOPPED` (LM1's `spec/05-memory-gc.md` §12.9; decided
+2026-11-21). A stop LM1 answers therefore never leaves the heap in the
+middle of a move, and only a failure it cannot answer, such as a crash, can
+leave a hold `FLIPPING`. From stage 1 it then waits for the port's `BUSY` bit to
 clear before it reads the records, since an access already admitted runs to
 its end ([chiplet-link.md](chiplet-link.md) §6). Each of LM1's writes lands
 whole, so the records then show LM1's writes up to one point and none after
@@ -1050,11 +1061,15 @@ module has stopped LM1 (§11), the stand-in:
 7. **Records its state.** It stores `STATE` as `STAND-IN`, with the
    failure's `CAUSE`.
 
-If LM1 never takes the heap back, memory grows until KDOS refuses a block,
-and constructors then fail with `OBJ-E-NOMEM`. Reads, stores and saves
-still work, so the user can save and restart Desk (§16). Until stage 2 is
-built, MegaPad refuses a restarted LM1's offer of the function while the
-stand-in serves.
+Until stage 2 is built, the stand-in serves an adopted heap only while
+something can reach it (decided 2026-11-21). Once no handle is live and no
+window is open, nothing can reach the heap, so the module loses it by
+§11's loss path, returns its memory, and starts the function afresh on a
+restarted LM1. Restarting Desk, which releases every owner's handles,
+therefore brings collection back. Meanwhile, if memory runs out, KDOS
+refuses a block and constructors fail with `OBJ-E-NOMEM`, while reads,
+stores and saves still work. While the stand-in serves, MegaPad refuses a
+restarted LM1's offer of the function.
 
 ### Handing the heap back
 
@@ -1380,6 +1395,15 @@ Adopt branches:
 - **A7, a failure during the handback** (stage 2). Sets up A6's resume,
   with a hook that stops LM1 inside its first hold. Checks: the module stops
   LM1, the rule adopts the heap again, and every handle stays valid.
+- **A8, a stop while a hold flips** (stage 1). Sets up a moving `COLLECT`
+  and a hook that sets `STOP_REQ` once `MOVE` reads `FLIPPING`. Checks: LM1
+  sets `STOPPED` only after `MOVE` reads `FIXED`, the rule adopts the heap,
+  and each handle gives the contents its object had before the hold.
+- **A9, the stand-in's heap dropped** (stage 1). Sets up the stand-in
+  serving after A1, then every owner released with no window open. Checks:
+  the module loses the heap, returns its memory to KDOS, accepts a
+  restarted LM1's offer, and starts the function afresh with new handles
+  working.
 
 Lose branches:
 
@@ -1403,9 +1427,11 @@ Lose branches:
   forwarding pointer outside the move set during a flipping hold, then a
   reset. Checks: the resolving traversal meets it and loses the heap.
 - **L7, a refused resume** (stage 2). Sets up A6's resume with LM1 replying
-  `NO_RESUME`, and in a second run `BAD_RECORD`. Checks: after `NO_RESUME`
-  the stand-in serves on and every handle stays valid; after `BAD_RECORD`
-  the heap is lost.
+  `NO_RESUME`, and in a second run `BAD_RECORD`; in a third run, LM1 enters
+  a closure's kind with `KIND` marked as one it cannot adopt and stores a
+  closure into the shared heap before the failure. Checks: after
+  `NO_RESUME`, in the first and third runs, the stand-in serves on and
+  every handle stays valid; after `BAD_RECORD` the heap is lost.
 - **L8, corruption found late** (stage 2). Sets up a hook that damages a
   header which LM1's first full mark reaches after the handback. Checks:
   LM1 sets `FAILED` when its mark reaches the header, and the heap is lost
@@ -1421,30 +1447,11 @@ Lose branches:
   shared heap's blocks, the handle table and the records within the port's
   lent ranges ([chiplet-interconnect-plan.md](chiplet-interconnect-plan.md)
   §10).
-- **Kinds that LM1 puts into the shared heap** (stage 2). The shape
-  registry lies in memory lent for reading, so MegaPad alone writes it, and
-  it holds the kinds MegaPad registers. LM1 also puts objects of kinds of
-  its own into the shared heap: records of kinds it interns itself, objects
-  of a task's result, and, through Lisp's stores, closures, symbols and
-  foreign pointers. A restarted LM1 needs those kinds' IDs to read such
-  objects, and it has to refuse a heap that holds an object it cannot adopt
-  before it resumes, since its first full mark comes after. One option has
-  LM1 ask MegaPad, with a new request on the grant's pair, to enter each
-  such kind in the registry before the first object of the kind reaches the
-  shared heap, the entry marking a kind a restarted LM1 cannot adopt.
-  Another has LM1 keep a second part of the registry, in memory lent to it
-  for writing and named from its block. The cheapest has LM1 set one word
-  in its block before it first puts into the shared heap an object that a
-  restarted LM1 could not adopt, a record of an unregistered kind included,
-  and has a restarted LM1 reply `NO_RESUME` while that word is set. Word
-  values that carry LM1's compiled entry need a rule for re-binding under
-  each option, and wait on how Uroko represents them.
-- **The stand-in's heap before stage 2** (stage 1). Until stage 2, the
-  stand-in serves an adopted heap for as long as MegaPad runs, and the heap
-  only grows. Once no handle is live and no window is open, nothing can
-  reach the heap; the module could then lose it, return its memory and
-  start the function afresh on a restarted LM1, so that restarting Desk,
-  which releases every owner's handles, brings collection back.
+- **Re-binding word values** (stage 2). Word values that carry LM1's
+  compiled entry depend on LM1's private state, like closures and symbols,
+  so their kinds are entered as ones a restarted LM1 cannot adopt (§9). A
+  rule for re-binding them after a restart waits on how Uroko represents
+  them.
 - **Stage 3's order of work.** LM1 makes the resolving traversal as it
   takes the heap back, so the cores stay held out from the failure through
   LM1's restart and the traversal. How the module keeps them there, and
