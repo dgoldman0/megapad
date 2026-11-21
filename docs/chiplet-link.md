@@ -452,10 +452,9 @@ states what it granted. A chiplet that later needs more sends another
 `OFFER` for the class, and each grant stands beside the earlier ones. KDOS
 registers a granted function under its class, and software asks for a class
 and is given whichever chiplet provides it. Class 0 is reserved, and class
-numbers are assigned in this section as functions are specified. The first
-function specified, managed data, has its operations and statuses in
-[managed-data.md](managed-data.md), a proposal; its class number is assigned
-here once that is accepted.
+numbers are assigned in this section as functions are specified. Class 1 is
+managed data, the first function specified, whose operations and statuses
+are in [managed-data.md](managed-data.md).
 
 ### Ranges a chiplet lends
 
@@ -481,6 +480,12 @@ after that reply.
 - MegaPad gives each of its requests a deadline. It cancels a request that
   misses its deadline, and resets the port when the cancel goes unanswered
   too.
+- A port that serves managed data is asked to stop before any reset,
+  whatever the reset's cause: MegaPad sets `STOP_REQ`, waits for `STOPPED`
+  for at most a request's deadline, and then cancels and resets as above.
+  Managed data's records outlive the chiplet, and MegaPad reads them once
+  the chiplet can write no more ([managed-data.md](managed-data.md) §11,
+  from stage 1 of its recovery).
 
 ## 9. The emulator and the simulator
 
@@ -542,7 +547,7 @@ that memory into its reply when a command asks it to.
   its boot image.
 - **Classes.** Each function's class number, operations and statuses are
   assigned with the function, LM1's with LM1's layer. The managed-data part
-  of that layer is [managed-data.md](managed-data.md), proposed; sandbox
+  of that layer is [managed-data.md](managed-data.md), class 1; sandbox
   jobs and borrowed tile work are still to specify.
 - **Taking a grant back.** How MegaPad withdraws a function's queues and
   memory from a running chiplet.

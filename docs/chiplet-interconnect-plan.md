@@ -12,11 +12,12 @@ lends, was accepted on 2026-11-19 for `TACC.STORE`. MegaPad's RTL, the
 emulator and the simulator build it; LM1's end of it and its software are
 not built yet. Borrowed tile work, LM1's third use of the link (§7), in
 which LM1 has MegaPad's tile engines do its number work and the results land
-in its own memory, was proposed on 2026-11-20. The BIOS words it runs on are
-built, in the emulator and the simulator alike; the service, its operation
-and LM1's side are not. Managed data, LM1's second use, was specified as a
-proposal the same day in [managed-data.md](managed-data.md), and none of it
-is built. This note records how chiplets attach to MegaPad in
+in its own memory, was decided on 2026-11-20 (release plan decision 38). The
+BIOS words it runs on are built, in the emulator and the simulator alike;
+the service, its operation and LM1's side are not. Managed data, LM1's
+second use, was decided the same day as [managed-data.md](managed-data.md)
+specifies it, recovery after an LM1 failure included, and none of it is
+built. This note records how chiplets attach to MegaPad in
 Leviathan: the contract every chiplet meets, how the chips share memory, how
 they signal and exchange work, and how LM1, the first chiplet, runs sandbox
 jobs, managed data and borrowed tile work over the link. It schedules no
@@ -240,7 +241,7 @@ lent memory, which LM1's collector replays through its own barrier, so the
 barrier's rules exist once, on LM1. A core opens a window by storing its
 flag and then loading the collector's hold flag, and the collector moves or
 frees shared objects only while it holds every core out.
-[managed-data.md](managed-data.md) specifies all of this, as a proposal of
+[managed-data.md](managed-data.md) specifies all of this, decided on
 2026-11-20, with the words MegaPad code uses and the requests that cross the
 queues.
 
