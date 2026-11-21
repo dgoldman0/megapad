@@ -1,6 +1,7 @@
 # Managed data
 
-Status: proposed on 2026-11-20. Nothing is built. This is the specification
+Status: decided on 2026-11-20, except what follows a failure (§11), which is
+still being studied. Nothing is built. This is the specification
 of managed data on MegaPad, and of the link's LM1 layer for it: how MegaPad
 code holds, reads, writes, creates and releases objects that LM1's collector
 manages, the windows in which it uses them, the handles it keeps past a
@@ -737,7 +738,8 @@ when one of its queues breaks or a request misses its deadline
 ([chiplet-link.md](chiplet-link.md) §8), or when the chiplet is reset. From
 then on every word returns `OBJ-E-FAILED`, and `OBJ-WITHIN` throws it; every
 handle is stale; releasing an owner succeeds and does nothing; and the
-objects are lost. The module returns the function's memory to KDOS once no
+objects are lost. Whether a restarted chiplet could take the shared heap
+back instead is being studied (§16). The module returns the function's memory to KDOS once no
 core has a window open. A restarted chiplet offers the function again, and
 the module starts it afresh. Managed data does not outlive a failure, so
 what must outlive one is saved as Desk saves any document.
@@ -776,9 +778,9 @@ own engine can serve the class with the same records and the same words:
 its collector runs on a MegaPad core, holds the other cores out through the
 same hold word, and replays the same logs, so a program means the same on
 one engine as on two. The simplest engine that conforms never frees
-anything: every rule still holds, and only memory use differs. Whether the
-release builds a collector for MegaPad is open (§16), since every
-configuration of the release has LM1.
+anything: every rule still holds, and only memory use differs. The release
+builds that engine and no collector for MegaPad (decided 2026-11-20), since
+every configuration of the release has LM1.
 
 A task's own objects follow decision 32 on either engine. They live in a
 heap that lasts as long as the task, its result is copied out, and a store
@@ -1032,18 +1034,17 @@ would.
 - **Tasks.** The requests that start a task and return its result, of
   which §4 fixes only how they name objects, belong to the link's layer for
   jobs, which is still to specify.
-- **A collector for MegaPad.** Whether the release builds one (§13). Every
-  release configuration has LM1, and decision 32's comparison of one engine
-  with two concerns tasks, whose heaps need no collector.
 - **Lendable memory.** How KDOS's allocator for lendable memory places the
   shared heap's blocks, the handle table and the records within the port's
   lent ranges ([chiplet-interconnect-plan.md](chiplet-interconnect-plan.md)
   §10).
-- **Recovery.** Whether a restarted chiplet, or MegaPad's own engine, could
-  adopt the shared heap after a failure instead of losing it.
+- **Recovery,** being studied. Whether a restarted chiplet, or MegaPad's
+  own engine, could take the shared heap back after a failure instead of
+  losing it (§11).
 - **Large objects.** The layout of LM1's extended header, which objects of
   more than 65,535 fields need (§5), so that a long string or vector can be
-  made at production size.
+  made at production size. Release plan Part 8b's revision of LM1's object
+  model defines it (decided 2026-11-20).
 - **The bounds.** The values of §3's three times, which the chiplet module
   measures.
 - **A data cache or store buffer on a production core.** §3's protocol needs
