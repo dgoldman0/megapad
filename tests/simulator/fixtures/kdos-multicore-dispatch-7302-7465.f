@@ -155,8 +155,8 @@ VARIABLE PAR-N          \ next core to use
 \ -- P.BENCH-PAR ( pipe -- )  benchmark parallel pipeline --
 : P.BENCH-PAR  ( pipe -- )
     ."  Parallel pipeline (" DUP P.COUNT . ."  steps, "
-    NCORES . ."  cores):" CR
-    DUP
+    NCORES .
+    ."  cores):" CR
     CYCLES >R
     P.RUN-PAR
     CYCLES R> -

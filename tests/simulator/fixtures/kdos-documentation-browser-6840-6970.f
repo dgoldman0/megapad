@@ -84,12 +84,12 @@ VARIABLE DOC-LINES              \ newline counter for pagination
 
 \ DOC ( "name" -- )  page through a documentation file
 : DOC  ( "name" -- )
-    OPEN DUP 0= IF EXIT THEN
+    OPEN ?DUP 0= IF EXIT THEN
     DUP >R CR SHOW-FILE CR R> FCLOSE ;
 
 \ TUTORIAL ( "name" -- )  walk through a tutorial file
 : TUTORIAL  ( "name" -- )
-    OPEN DUP 0= IF EXIT THEN
+    OPEN ?DUP 0= IF EXIT THEN
     DUP >R CR SHOW-FILE CR R> FCLOSE ;
 
 \ OPEN-BY-SLOT ( slot -- fdesc | 0 )  open a file by directory slot
@@ -126,6 +126,6 @@ VARIABLE DOC-LINES              \ newline counter for pagination
         ."  Use TOPICS to list available documentation."  CR
         EXIT
     THEN
-    OPEN-BY-SLOT DUP 0= IF EXIT THEN
+    OPEN-BY-SLOT ?DUP 0= IF EXIT THEN
     DUP >R CR SHOW-FILE CR R> FCLOSE ;
 

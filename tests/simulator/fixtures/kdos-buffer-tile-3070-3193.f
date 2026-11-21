@@ -31,8 +31,8 @@
     DUP B.DATA                ( desc addr )
     SWAP B.TILES              ( addr ntiles )
     DUP 0= IF 2DROP 0 ELSE
-        0 DO                  ( addr )
-            DUP TSRC0!
+        0 DO                  ( addr | addr min )
+            I IF OVER ELSE DUP THEN TSRC0!   \ this tile's address
             2 TCTRL!          \ zero ACC each time (we want per-tile min)
             TMIN
             I 0= IF
@@ -52,8 +52,8 @@
     DUP B.DATA                ( desc addr )
     SWAP B.TILES              ( addr ntiles )
     DUP 0= IF 2DROP 0 ELSE
-        0 DO                  ( addr )
-            DUP TSRC0!
+        0 DO                  ( addr | addr max )
+            I IF OVER ELSE DUP THEN TSRC0!   \ this tile's address
             2 TCTRL!
             TMAX
             I 0= IF

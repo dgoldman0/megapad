@@ -35,9 +35,9 @@ FIXTURE = (
 FIRST_LINE = 3070
 LAST_LINE = 3193
 SLICE_SHA256 = (
-    "91d0fc5a15da85c31f9e4c4fcf17691c2bd32ba306b6b5bc338a7cf8b1ab96c4"
+    "e49585c22815338c9c87ab2b3c5ab2859ea0c7c34cd01639ebee6057a502ca06"
 )
-SLICE_GIT_BLOB = "4b15984477ff8ae1d9fb22f0810ffc158e4594c7"
+SLICE_GIT_BLOB = "53c79c7c17643a5d9827af525c13e57b57ad0614"
 DEFINITIONS = (
     b"B.SUM",
     b"B.MIN",
@@ -55,7 +55,7 @@ DESTINATION = 0x2B_200
 
 def _verified_slice() -> bytes:
     source = FIXTURE.read_bytes()
-    assert len(source) == 4_170
+    assert len(source) == 4_280
     assert source.count(b"\n") == LAST_LINE - FIRST_LINE + 1
     assert hashlib.sha256(source).hexdigest() == SLICE_SHA256
     assert _git_blob_id(source) == SLICE_GIT_BLOB
@@ -462,7 +462,7 @@ def test_b_sum_accumulates_full_tiles_and_includes_partial_tile_tail(
     assert _execute(runtime, "B.SUM", partial) == (68,)
 
 
-def test_b_min_max_pin_safe_empty_one_tile_and_multitile_address_bug(
+def test_b_min_max_cover_empty_one_and_several_tiles(
     loaded_buffer_tile: MegaForthRuntime,
 ) -> None:
     runtime = loaded_buffer_tile
@@ -477,11 +477,14 @@ def test_b_min_max_pin_safe_empty_one_tile_and_multitile_address_bug(
     assert _execute(runtime, "B.MIN", one) == (4,)
     assert _execute(runtime, "B.MAX", one) == (250,)
 
+    # Each later tile is read from its own address.  The running minimum
+    # or maximum, 64 and 128 here, once went to TSRC0! in the address's
+    # place, so the bytes at those addresses are decoys that must not count.
     minimum, minimum_data = _define_hbw_buffer(runtime, "MIN-TWO", 128)
     runtime.memory.write_bytes(minimum_data, bytes((64,)) * 64 + bytes((1,)) * 64)
     runtime.memory.write_bytes(64, bytes((7,)) * 64)
-    assert _execute(runtime, "B.MIN", minimum) == (7,)
-    assert runtime.tile.source0 == 64
+    assert _execute(runtime, "B.MIN", minimum) == (1,)
+    assert runtime.tile.source0 == minimum_data + 64
 
     maximum, maximum_data = _define_hbw_buffer(runtime, "MAX-TWO", 128)
     runtime.memory.write_bytes(
@@ -489,8 +492,18 @@ def test_b_min_max_pin_safe_empty_one_tile_and_multitile_address_bug(
         bytes((128,)) * 64 + bytes((200,)) * 64,
     )
     runtime.memory.write_bytes(128, bytes((250,)) * 64)
-    assert _execute(runtime, "B.MAX", maximum) == (250,)
-    assert runtime.tile.source0 == 128
+    assert _execute(runtime, "B.MAX", maximum) == (200,)
+    assert runtime.tile.source0 == maximum_data + 64
+
+    three, three_data = _define_hbw_buffer(runtime, "EXTREMA-THREE", 192)
+    runtime.memory.write_bytes(
+        three_data,
+        bytes((9,)) * 64 + bytes((5,)) * 64 + bytes((7,)) * 64,
+    )
+    assert _execute(runtime, "B.MIN", three) == (5,)
+    assert runtime.tile.source0 == three_data + 128
+    assert _execute(runtime, "B.MAX", three) == (9,)
+    assert runtime.tile.source0 == three_data + 128
 
 
 def test_b_add_sub_process_complete_tiles_and_overwrite_partial_tail(

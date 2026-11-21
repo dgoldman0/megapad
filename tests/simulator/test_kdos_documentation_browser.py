@@ -55,11 +55,11 @@ FIXTURE = (
 
 FIRST_LINE = 6840
 LAST_LINE = 6970
-SLICE_BYTES = 3_945
+SLICE_BYTES = 3_948
 SLICE_SHA256 = (
-    "442e5e39598d71a589bf19d6345c5bb042d678ba9f51607a878ae5030fbdcee6"
+    "122adbcf35e821d33fe332bad92f166692a4c76294d018aa8e6be173bf4be424"
 )
-SLICE_GIT_BLOB = "242fc879957ba14f3a00b3284e8af921a4fa365c"
+SLICE_GIT_BLOB = "f0e9c3a26658801bb608a39f30878c79f464c493"
 
 SOURCE_LEDGER = (
     ("CONSTANT", b"FTYPE-DOC"),
@@ -529,7 +529,7 @@ def test_browser_open_failures_do_not_leak_descriptors_and_pin_parse_order() -> 
 
     doc_context = absent.new_context()
     absent.evaluate(b"DOC 41", context=doc_context, source_name="doc-no-fs")
-    assert doc_context.data.snapshot() == (0, 41)
+    assert doc_context.data.snapshot() == (41,)
     assert doc_context.returns.snapshot() == ()
     assert absent.drain_uart_output() == b" No filesystem\r\n"
 
@@ -539,7 +539,7 @@ def test_browser_open_failures_do_not_leak_descriptors_and_pin_parse_order() -> 
         context=tutorial_context,
         source_name="tutorial-no-fs",
     )
-    assert tutorial_context.data.snapshot() == (0, 42)
+    assert tutorial_context.data.snapshot() == (42,)
     assert tutorial_context.returns.snapshot() == ()
     assert absent.drain_uart_output() == b" No filesystem\r\n"
 
@@ -575,7 +575,7 @@ def test_browser_open_failures_do_not_leak_descriptors_and_pin_parse_order() -> 
         context=doc_context,
         source_name="doc-missing",
     )
-    assert doc_context.data.snapshot() == (0,)
+    assert doc_context.data.snapshot() == ()
     assert doc_context.returns.snapshot() == ()
     assert mounted.drain_uart_output() == b" Not found: absent\r\n"
     tutorial_context = mounted.new_context()
@@ -584,7 +584,7 @@ def test_browser_open_failures_do_not_leak_descriptors_and_pin_parse_order() -> 
         context=tutorial_context,
         source_name="tutorial-missing",
     )
-    assert tutorial_context.data.snapshot() == (0,)
+    assert tutorial_context.data.snapshot() == ()
     assert tutorial_context.returns.snapshot() == ()
     assert mounted.drain_uart_output() == b" Not found: absent\r\n"
     describe_context = mounted.new_context()
@@ -612,7 +612,7 @@ def test_browser_open_failures_do_not_leak_descriptors_and_pin_parse_order() -> 
         context=describe_context,
         source_name="describe-fd-exhausted",
     )
-    assert describe_context.data.snapshot() == (0,)
+    assert describe_context.data.snapshot() == ()
     assert describe_context.returns.snapshot() == ()
     assert mounted.drain_uart_output() == b" No free FD slots\r\n"
     assert _fd_headers(mounted) == (MASK64,) * FD_MAX
