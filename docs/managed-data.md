@@ -881,7 +881,7 @@ heap is adopted or lost. In the last column, sections are those of LM1's
 |-------|--------------|--------------------------|----------------------|
 | Fixes | Bounds on the waits LM1 can leave unended, and a lost heap's memory held until LM1's reset | The bound on a hold that stalls before `ACTIVE`, and the full log's deadline (§3); memory returned only after LM1's reset (below) | Setting `ACTIVE`, and draining a full log, within those bounds (§12.3, §12.4) |
 | 0 | The records the rule reads, and the write order that keeps them true | `STATE`, `CAUSE`, the block list and the shape registry (§9) | `MOVE`, the move set, the write order and marks kept outside headers (§12.3); fixed shape IDs and the registry's range (§12.6) |
-| 1 | The stand-in adopts the heap | The stop request and the wait for `BUSY`, the evidence latch and the rule (below); the stand-in (§10, §13); `OBJ-ENGINE` (§14) | Nothing new |
+| 1 | The stand-in adopts the heap | The stop request and the wait for `BUSY`, the failure's `CAUSE`, the evidence latch and the rule (below); the stand-in (§10, §13); `OBJ-ENGINE` (§14) | Nothing new |
 | 2 | A restarted LM1 takes the heap back | The handback (§13) | Taking the heap back at `ATTACH`, with the registry, old blocks counted full until the first mark, and the first hold (§12.11) |
 | 3 | Recovery from a failure while a hold flips | The stand-in's resolving traversal, if MegaPad resolves (§16) | The resolving traversal (§12.11) |
 
