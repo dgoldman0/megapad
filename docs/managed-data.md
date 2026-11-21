@@ -764,9 +764,8 @@ require:
 
 ## 10. Requests on the queues
 
-The function's class number is assigned in
-[chiplet-link.md](chiplet-link.md) §8 when this layer is accepted; this
-document calls the class `MANAGED`. LM1 offers it once its runtime is up,
+The function is class 1 ([chiplet-link.md](chiplet-link.md) §8), which
+this document calls `MANAGED`. LM1 offers it once its runtime is up,
 asking in `OUT_LEN` for the shared heap's first block, and MegaPad's grant
 gives the function its first queue pair and that block as working memory.
 The grant's pair carries `ATTACH` and LM1's own requests, and the core that
@@ -1414,7 +1413,6 @@ Lose branches:
 
 ## 16. Still open
 
-- **The class number**, assigned in chiplet-link.md §8.
 - **Tasks.** The requests that start a task and return its result, of
   which §4 fixes only how they name objects, belong to the link's layer for
   jobs, which is still to specify. That layer also says how a task that
