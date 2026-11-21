@@ -1,7 +1,9 @@
 # Managed data
 
-Status: decided on 2026-11-20, except what follows a failure (§11), which is
-still being studied. Nothing is built. This is the specification
+Status: decided on 2026-11-20. Nothing is built. Recovery after an LM1
+failure is decided in stages, and its design stays in
+[managed-data-recovery.md](managed-data-recovery.md) until this document
+absorbs it. This is the specification
 of managed data on MegaPad, and of the link's LM1 layer for it: how MegaPad
 code holds, reads, writes, creates and releases objects that LM1's collector
 manages, the windows in which it uses them, the handles it keeps past a
@@ -738,11 +740,15 @@ when one of its queues breaks or a request misses its deadline
 ([chiplet-link.md](chiplet-link.md) §8), or when the chiplet is reset. From
 then on every word returns `OBJ-E-FAILED`, and `OBJ-WITHIN` throws it; every
 handle is stale; releasing an owner succeeds and does nothing; and the
-objects are lost. Whether a restarted chiplet could take the shared heap
-back instead is being studied (§16). The module returns the function's memory to KDOS once no
-core has a window open. A restarted chiplet offers the function again, and
-the module starts it afresh. Managed data does not outlive a failure, so
-what must outlive one is saved as Desk saves any document.
+objects are lost. Losing the heap is the fallback: where the state
+recorded at the failure shows the shared heap sound, MegaPad's own engine
+takes it over instead and every handle stays valid
+([managed-data-recovery.md](managed-data-recovery.md)). On the fallback,
+the module returns the function's memory to KDOS once no core has a window
+open and LM1 has been reset, since until the reset LM1 may still hold
+references into it. A restarted chiplet offers the function again, and the
+module starts it afresh. What must outlive a lost heap is saved as Desk
+saves any document.
 
 ## 12. Capabilities and forging
 
@@ -1038,9 +1044,15 @@ would.
   shared heap's blocks, the handle table and the records within the port's
   lent ranges ([chiplet-interconnect-plan.md](chiplet-interconnect-plan.md)
   §10).
-- **Recovery,** being studied. Whether a restarted chiplet, or MegaPad's
-  own engine, could take the shared heap back after a failure instead of
-  losing it (§11).
+- **Recovery** (decided 2026-11-20, in stages).
+  [managed-data-recovery.md](managed-data-recovery.md) gives the design,
+  which is still to be written into §3, §9 to §11 and §13 to §15.
+- **Two gaps to close** whatever recovery does. A hold whose collector
+  stops after storing `HELD` and before setting `ACTIVE` leaves every core
+  waiting in `OBJ-OPEN` for ever, Desk's included, since only an `ACTIVE`
+  hold times out. A core whose store log is full waits for `LOG_HEAD` with
+  no deadline, possibly inside a window. Both need bounds
+  ([managed-data-recovery.md](managed-data-recovery.md) §2).
 - **Large objects.** The layout of LM1's extended header, which objects of
   more than 65,535 fields need (§5), so that a long string or vector can be
   made at production size. Release plan Part 8b's revision of LM1's object
