@@ -38,6 +38,7 @@ Feel free top drop by and discuss this project in the Tinkerers Guild channel of
 | **C++ Accelerator** | Optional pybind11 CPU fast path |
 | **Hosted simulator** | Semantic source backend with an optional native executor; runs the complete Akashic Desktop ([simulator/README.md](simulator/README.md), [docs/simulator-contract.md](docs/simulator-contract.md)) |
 | **Rich terminal** | Optional boot-loaded `rich-terminal.f` APT-1 module with a retained host compositor and viewer ([docs/rich-terminal/](docs/rich-terminal/)) |
+| **Uroko** | `uroko.f`, the declarations in Uroko's form of the BIOS and KDOS words' effects, which Uroko's checker reads |
 | **Tests** | Host, guest, RTL, multicore, and live-network coverage; resource and environment gates are reported separately |
 | **Filesystem** | MP64FS — capacity-derived marker-1 geometry through 32 MiB, 128 entries, two extents |
 | **Tooling** | CLI/debugger, two-pass assembler (with listing output), disk utility |
