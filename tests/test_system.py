@@ -16071,8 +16071,11 @@ class TestBIOSWotsCheckpoint3(unittest.TestCase):
 
     _CONTEXT_ADDR = 0x1E000
     _DEST_ADDR = 0x1E100
-    # A free MMIO offset for the scripted device, above the storage units.
-    _SCRIPT_WOTS_BASE = 0x0E00
+    # The scripted device's MMIO offset. The chiplet ports' window ends at
+    # 0xEFF, and nothing in the emulator, the simulator or the SoC decodes
+    # 0xF00 onward. _boot_scripted_wots checks the device's whole window
+    # against both of the emulator's decoders before it registers there.
+    _SCRIPT_WOTS_BASE = 0x0F00
     _MASK64 = (1 << 64) - 1
     _MMIO_LOAD_LABELS = (
         ("_wots_initial_status_address", 0x0A),
@@ -16203,6 +16206,28 @@ class TestBIOSWotsCheckpoint3(unittest.TestCase):
             for index, value in enumerate(fake_load):
                 sys_obj.cpu.mem_write8(address + index, value)
 
+    def _assert_mmio_window_free(self, sys_obj, base, size):
+        """Check that no device answers any byte of an MMIO window.
+
+        The emulator's native bus decodes some devices itself and passes
+        every other offset to the Python bus. The AES, SHA-3 and TRNG
+        engines and the chiplet ports' window have no device on the Python
+        bus, so the native singleton preflight is asked as well. It returns
+        -1 for an offset that none of the native singletons holds.
+        """
+        native = sys_obj.cpu._cs
+        for offset in range(base, base + size):
+            device, _ = sys_obj.bus.find_device(offset)
+            if device is not None:
+                self.fail(
+                    f"MMIO +{offset:#05x} belongs to the Python bus's "
+                    f"{device.name} device"
+                )
+            if native._native_singleton_preflight(offset, 1, False) != -1:
+                self.fail(
+                    f"MMIO +{offset:#05x} belongs to a native device"
+                )
+
     def _boot_scripted_wots(
         self,
         *,
@@ -16212,8 +16237,6 @@ class TestBIOSWotsCheckpoint3(unittest.TestCase):
         initial=(0, 0),
     ):
         sys_obj, buf = self._boot_bios()
-        existing, _ = sys_obj.bus.find_device(self._SCRIPT_WOTS_BASE)
-        self.assertIsNone(existing)
         device = _ScriptedWotsMMIO(
             sys_obj,
             self._SCRIPT_WOTS_BASE,
@@ -16222,6 +16245,7 @@ class TestBIOSWotsCheckpoint3(unittest.TestCase):
             dout=dout,
             initial=initial,
         )
+        self._assert_mmio_window_free(sys_obj, device.base, device.size)
         sys_obj.bus.register(device)
         self._patch_wots_mmio_base(sys_obj, self._SCRIPT_WOTS_BASE)
         return sys_obj, buf, device
