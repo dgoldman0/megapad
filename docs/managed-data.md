@@ -891,8 +891,9 @@ built, every failure loses the heap.
 
 ### Stopping LM1
 
-When the function fails, the module stops LM1, unless LM1 is held in reset
-already: it cancels and resets the port by the link's rule
+When the function fails by any cause but `FAILED` or the evidence latch,
+which lose the heap at once (below), the module stops LM1, unless LM1 is
+held in reset already: it cancels and resets the port by the link's rule
 ([chiplet-link.md](chiplet-link.md) §8), and from stage 1 it first asks LM1
 to stop, by setting `STOP_REQ` and waiting for `STOPPED` for at most a
 request's deadline. From stage 1 it then waits for the port's `BUSY` bit to
@@ -905,9 +906,8 @@ has restarted, and the stand-in, where the rule adopts the heap, is the
 only writer of LM1's block.
 
 The module handles one failure at a time: a core that finds a hold overdue
-while the module is already stopping LM1 waits for the decision. `FAILED`
-and the evidence latch need no stop, since they lose the heap at once
-(below), and LM1's private work goes on after `FAILED`.
+while the module is already stopping LM1 waits for the decision. After
+`FAILED`, LM1's private work goes on.
 
 ### The rule
 
