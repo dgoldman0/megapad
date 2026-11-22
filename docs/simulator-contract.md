@@ -633,6 +633,15 @@ advance a clock. Interpreted source and nested host dispatch cannot yet detach
 their Python continuations, so a caller using those paths must prequeue enough
 input to avoid blocking.
 
+The hosted `ACCEPT ( addr max -- n )` reads its line through that service and
+takes the BIOS's steps. It stops at max before it reads a key, ends at a CR or
+an LF that it neither stores nor echoes, stores and echoes every other byte as
+it came, and ends the line with CR LF. Each byte comes from `KEY`, so `ACCEPT`
+blocks and resumes at `KEY`'s boundary, and an interpreted caller prequeues
+its line as above. `tests/test_accept_and_vram_words.py` gives the same Forth
+to the emulator's BIOS and requires the same echo, count, buffer bytes and
+unread input.
+
 Task descriptors, registry state, synchronous `SCHEDULE`, and the provisional
 checkpoint are now qualified source semantics. `TASK-STACKS` and the saved
 DSP/RSP fields are inert guest storage: execution never installs them. Active
@@ -1507,6 +1516,9 @@ The admitted external-memory slice installs `EXT-MEM-BASE` and
 `EXT-MEM-SIZE` as dynamic semantic BIOS reads of SysInfo `+0x38` and `+0x40`.
 They report the actual external region bound to the sparse address space; the
 runtime does not copy a second geometry or substitute a host allocator.
+`VRAM-BASE` and `VRAM-SIZE` read SysInfo `+0x50` and `+0x58` the same way and
+report the VRAM region bound to the address space, or `(0,0)` without one. No
+framebuffer device or blitter word comes with them.
 Unchanged `kdos.f` lines 2119 through 2397 add all 31 definitions through
 `XBUF`, including the raw XMEM allocator, first-fit free list, public
 `ALLOCATE`/`FREE`/`RESIZE` dispatch, explicit Bank-0 DMA allocation, reset
@@ -3897,10 +3909,13 @@ and Pad and Desk show it in words. The word is asked when code runs. No source
 is compiled differently for it, so one source text serves every backend, and
 so does any compiled form of that text.
 
-The cells `_RELOC-ACTIVE`, `_RELOC-COUNT` and `_RELOC-BUF` exist here so that
-source which names them loads. The hosted compiler records nothing into them,
-and with the refusal in place nothing arms them either. `LATEST!` still refuses
-a header chain that has no hosted definitions, as described in section 11.
+The cells `_RELOC-ACTIVE`, `_RELOC-COUNT`, `_RELOC-BUF` and `_RELOC-CAP` exist
+here so that source which names them loads. `_RELOC-CAP`, the number of entries
+the buffer holds, follows the words of borrowed tile work in the hosted core, as
+the BIOS appends it after them. The hosted compiler records nothing into the
+cells, and with the refusal in place nothing arms them either. `LATEST!` still
+refuses a header chain that has no hosted definitions, as described in section
+11.
 
 A module may also be loaded from its token form, a record of the
 interpreter's work on the module's source that `TOKEN-REPLAY` runs through

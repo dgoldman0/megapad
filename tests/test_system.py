@@ -2018,6 +2018,27 @@ class TestBIOS(unittest.TestCase):
         text = self._run_forth(sys, buf, ["65 EMIT"])
         self.assertIn("A", text)
 
+    def test_accept_reads_and_echoes_a_line(self):
+        """ACCEPT stores and echoes each byte KEY returns, keeping its count
+        across the key routine, which uses R13 for the UART."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "CREATE ABUF 16 ALLOT",
+            "60 EMIT ABUF 10 ACCEPT 124 EMIT . 62 EMIT",
+            "hello",
+            "60 EMIT ABUF 3 ACCEPT 124 EMIT . 62 EMIT",
+            "abc",
+            "60 EMIT ABUF 0 ACCEPT 124 EMIT . 62 EMIT",
+            "40 EMIT ABUF 5 TYPE 41 EMIT",
+        ])
+        self.assertNotIn("BUS FAULT", text)
+        self.assertIn("<hello\r\n|5 >", text)
+        # Three bytes fill the buffer; the line's LF is left to the
+        # interpreter as an empty line.
+        self.assertIn("<abc\r\n|3 >", text)
+        self.assertIn("<\r\n|0 >", text)
+        self.assertIn("(abclo)", text)
+
     def test_all_bios_byte_writers_use_direct_uart_fallback(self):
         sys, buf = self._boot_bios()
         caps_addr = self.__class__._bios_labels["var_uart_caps"]
@@ -5536,27 +5557,32 @@ class TestBIOS(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_reloc_vars_exist(self):
-        """_RELOC-ACTIVE, _RELOC-COUNT, _RELOC-BUF are visible and default 0."""
+        """_RELOC-ACTIVE, _RELOC-COUNT, _RELOC-BUF and _RELOC-CAP are
+        visible and default 0."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
             'CR ." [RA=" _RELOC-ACTIVE @ . ." ]"',
             'CR ." [RC=" _RELOC-COUNT  @ . ." ]"',
             'CR ." [RB=" _RELOC-BUF    @ . ." ]"',
+            'CR ." [RK=" _RELOC-CAP    @ . ." ]"',
         ])
         import re
         ra = re.search(r'\[RA=(\d+)', text)
         rc = re.search(r'\[RC=(\d+)', text)
         rb = re.search(r'\[RB=(\d+)', text)
-        self.assertTrue(ra and rc and rb, f"Could not parse reloc vars: {text}")
+        rk = re.search(r'\[RK=(\d+)', text)
+        self.assertTrue(ra and rc and rb and rk,
+                        f"Could not parse reloc vars: {text}")
         self.assertEqual(int(ra.group(1)), 0)
         self.assertEqual(int(rc.group(1)), 0)
         self.assertEqual(int(rb.group(1)), 0)
+        self.assertEqual(int(rk.group(1)), 0)
 
     def test_reloc_inactive_by_default(self):
         """Compiling with tracking OFF records nothing."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
-            "HERE _RELOC-BUF ! 1024 ALLOT",
+            "HERE _RELOC-BUF ! 128 CELLS ALLOT 128 _RELOC-CAP !",
             "0 _RELOC-COUNT !",
             ": TNOP DUP DROP ;",
             'CR ." [RC=" _RELOC-COUNT @ . ." ]"',
@@ -5570,7 +5596,7 @@ class TestBIOS(unittest.TestCase):
         """Colon def with word refs records relocs via compile_call."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
-            "HERE _RELOC-BUF ! 1024 ALLOT",
+            "HERE _RELOC-BUF ! 128 CELLS ALLOT 128 _RELOC-CAP !",
             "1 _RELOC-ACTIVE ! 0 _RELOC-COUNT !",
             ": TREL DUP DROP + ;",
             "0 _RELOC-ACTIVE !",
@@ -5586,7 +5612,7 @@ class TestBIOS(unittest.TestCase):
         """Numeric literals do NOT generate relocation entries."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
-            "HERE _RELOC-BUF ! 1024 ALLOT",
+            "HERE _RELOC-BUF ! 128 CELLS ALLOT 128 _RELOC-CAP !",
             "1 _RELOC-ACTIVE ! 0 _RELOC-COUNT !",
             ": TLIT 42 100 ;",
             "0 _RELOC-ACTIVE !",
@@ -5602,7 +5628,7 @@ class TestBIOS(unittest.TestCase):
         """VARIABLE records a reloc for the data-field LDI64."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
-            "HERE _RELOC-BUF ! 1024 ALLOT",
+            "HERE _RELOC-BUF ! 128 CELLS ALLOT 128 _RELOC-CAP !",
             "1 _RELOC-ACTIVE ! 0 _RELOC-COUNT !",
             "VARIABLE XTMP",
             "0 _RELOC-ACTIVE !",
@@ -5618,7 +5644,7 @@ class TestBIOS(unittest.TestCase):
         """CREATE records a reloc for the data-field LDI64."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
-            "HERE _RELOC-BUF ! 1024 ALLOT",
+            "HERE _RELOC-BUF ! 128 CELLS ALLOT 128 _RELOC-CAP !",
             "1 _RELOC-ACTIVE ! 0 _RELOC-COUNT !",
             "CREATE YTMP",
             "0 _RELOC-ACTIVE !",
@@ -5635,7 +5661,7 @@ class TestBIOS(unittest.TestCase):
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
             'CR ." [H1=" HERE . ." ]"',
-            "HERE _RELOC-BUF ! 1024 ALLOT",
+            "HERE _RELOC-BUF ! 128 CELLS ALLOT 128 _RELOC-CAP !",
             'CR ." [H2=" HERE . ." ]"',
             "1 _RELOC-ACTIVE ! 0 _RELOC-COUNT !",
             ": TBUF DUP ;",
@@ -5659,6 +5685,41 @@ class TestBIOS(unittest.TestCase):
                                 f"Reloc {reloc_addr} >= compile region start")
         self.assertLess(reloc_addr, here_end,
                         f"Reloc {reloc_addr} < compile region end")
+
+    def test_reloc_full_buffer_keeps_the_cell_past_it(self):
+        """A record past _RELOC-CAP is counted and never stored.
+
+        Each buffer holds _RELOC-CAP entries and is followed by a sentinel
+        cell, where binimg's IMG-MARK puts the first byte of the code it
+        tracks. ": TCAP DUP DROP + ;" carries three call immediates, so the
+        buffer of no entries refuses all three, the buffer of two refuses
+        the third, and the buffer of three is exactly full.
+        """
+        for capacity in (0, 2, 3):
+            with self.subTest(capacity=capacity):
+                sys, buf = self._boot_bios()
+                lines = [
+                    f"HERE _RELOC-BUF ! {capacity} CELLS ALLOT 7777 ,",
+                    f"{capacity} _RELOC-CAP !",
+                    "1 _RELOC-ACTIVE ! 0 _RELOC-COUNT !",
+                    ": TCAP DUP DROP + ;",
+                    "0 _RELOC-ACTIVE !",
+                    'CR ." [RC=" _RELOC-COUNT @ . ." ]"',
+                    f'CR ." [SENT=" _RELOC-BUF @ {capacity} CELLS + @ . ." ]"',
+                    'CR ." [RUN=" 1 2 TCAP . ." ]"',
+                ]
+                # A kept entry is the address of a call's inline XT.
+                for index, name in enumerate(("DUP", "DROP", "+")[:capacity]):
+                    lines.append(
+                        f'CR ." [E{index}=" _RELOC-BUF @ {index} CELLS + @ @ '
+                        f"' {name} = . .\" ]\""
+                    )
+                text = self._run_forth(sys, buf, lines)
+                self.assertRegex(text, r"\[RC=3 \]")
+                self.assertRegex(text, r"\[SENT=7777 \]")
+                self.assertRegex(text, r"\[RUN=3 \]")
+                for index in range(min(capacity, 3)):
+                    self.assertRegex(text, rf"\[E{index}=-1 \]")
 
     # ------------------------------------------------------------------
     #  :NONAME — anonymous colon definitions
@@ -5931,10 +5992,12 @@ class TestBIOSTACC(unittest.TestCase):
     def test_tacc_dictionary_tail_chain(self):
         """WOTS, AES's block-mode words, SHA-384, the storage unit words, the
         QUIT callback, the string scan, the dictionary's code kind, the token
-        replay, the boot's identity and the words of borrowed tile work
-        append after the unchanged full-TACC dictionary tail."""
+        replay, the boot's identity, the words of borrowed tile work and the
+        relocation buffer's capacity append after the unchanged full-TACC
+        dictionary tail."""
         labels = self._labels
         chain = (
+            ("d_reloc_cap", "d_tacc_relay"),
             ("d_tacc_relay", "d_tacc_send"),
             ("d_tacc_send", "d_tamac_scalars"),
             ("d_tamac_scalars", "d_tamac_scalar"),
@@ -5981,7 +6044,7 @@ class TestBIOSTACC(unittest.TestCase):
             ("d_caller_span_status", "d_entropy_ready"),
         )
         self.assertEqual(
-            labels["latest_entry"], labels["d_tacc_relay"])
+            labels["latest_entry"], labels["d_reloc_cap"])
         for current, previous in chain:
             link = int.from_bytes(
                 self._code[labels[current]:labels[current] + 8],
@@ -5998,7 +6061,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 567)
+        self.assertEqual(len(seen), 568)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -16071,8 +16134,11 @@ class TestBIOSWotsCheckpoint3(unittest.TestCase):
 
     _CONTEXT_ADDR = 0x1E000
     _DEST_ADDR = 0x1E100
-    # A free MMIO offset for the scripted device, above the storage units.
-    _SCRIPT_WOTS_BASE = 0x0E00
+    # The scripted device's MMIO offset. The chiplet ports' window ends at
+    # 0xEFF, and nothing in the emulator, the simulator or the SoC decodes
+    # 0xF00 onward. _boot_scripted_wots checks the device's whole window
+    # against both of the emulator's decoders before it registers there.
+    _SCRIPT_WOTS_BASE = 0x0F00
     _MASK64 = (1 << 64) - 1
     _MMIO_LOAD_LABELS = (
         ("_wots_initial_status_address", 0x0A),
@@ -16203,6 +16269,28 @@ class TestBIOSWotsCheckpoint3(unittest.TestCase):
             for index, value in enumerate(fake_load):
                 sys_obj.cpu.mem_write8(address + index, value)
 
+    def _assert_mmio_window_free(self, sys_obj, base, size):
+        """Check that no device answers any byte of an MMIO window.
+
+        The emulator's native bus decodes some devices itself and passes
+        every other offset to the Python bus. The AES, SHA-3 and TRNG
+        engines and the chiplet ports' window have no device on the Python
+        bus, so the native singleton preflight is asked as well. It returns
+        -1 for an offset that none of the native singletons holds.
+        """
+        native = sys_obj.cpu._cs
+        for offset in range(base, base + size):
+            device, _ = sys_obj.bus.find_device(offset)
+            if device is not None:
+                self.fail(
+                    f"MMIO +{offset:#05x} belongs to the Python bus's "
+                    f"{device.name} device"
+                )
+            if native._native_singleton_preflight(offset, 1, False) != -1:
+                self.fail(
+                    f"MMIO +{offset:#05x} belongs to a native device"
+                )
+
     def _boot_scripted_wots(
         self,
         *,
@@ -16212,8 +16300,6 @@ class TestBIOSWotsCheckpoint3(unittest.TestCase):
         initial=(0, 0),
     ):
         sys_obj, buf = self._boot_bios()
-        existing, _ = sys_obj.bus.find_device(self._SCRIPT_WOTS_BASE)
-        self.assertIsNone(existing)
         device = _ScriptedWotsMMIO(
             sys_obj,
             self._SCRIPT_WOTS_BASE,
@@ -16222,6 +16308,7 @@ class TestBIOSWotsCheckpoint3(unittest.TestCase):
             dout=dout,
             initial=initial,
         )
+        self._assert_mmio_window_free(sys_obj, device.base, device.size)
         sys_obj.bus.register(device)
         self._patch_wots_mmio_base(sys_obj, self._SCRIPT_WOTS_BASE)
         return sys_obj, buf, device
@@ -17006,7 +17093,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 567)
+        self.assertEqual(len(seen), 568)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -18631,12 +18718,14 @@ class TestBIOSEntropyFill(unittest.TestCase):
         """WOTS, then AES's block-mode words, then SHA-384, then the storage
         unit words, then the QUIT callback, then the string scan, then the
         dictionary's code kind, then the token replay, then the boot's
-        identity, then the words of borrowed tile work append without
-        changing any older dictionary link."""
+        identity, then the words of borrowed tile work, then the relocation
+        buffer's capacity append without changing any older dictionary
+        link."""
         labels = self._bios_labels
         self.assertEqual(
-            labels["latest_entry"], labels["d_tacc_relay"])
+            labels["latest_entry"], labels["d_reloc_cap"])
         for current, previous in (
+            ("d_reloc_cap", "d_tacc_relay"),
             ("d_tacc_relay", "d_tacc_send"),
             ("d_tacc_send", "d_tamac_scalars"),
             ("d_tamac_scalars", "d_tamac_scalar"),

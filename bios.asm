@@ -5034,20 +5034,30 @@ compile_call:
 ; reloc_record: if relocation tracking is active, record an immediate offset.
 ;   R1 = byte address of the 64-bit immediate.
 ;   Clobbers: R0, R7, R11.
+; The caller's buffer at _RELOC-BUF holds _RELOC-CAP entries.  An entry is
+; stored only while the count is below that capacity, so a full buffer never
+; writes past its end into the code being compiled.  The count still counts
+; every immediate: a count above the capacity tells the caller how many
+; entries it needed and that the ones past the capacity were not kept.
 reloc_record:
     ldi64 r11, var_reloc_active
     ldn r7, r11
     cmpi r7, 0
     breq reloc_record_skip
-    ; Store R1 at buf[count], increment count
-    ldi64 r11, var_reloc_buf
-    ldn r0, r11               ; R0 = buf base
     ldi64 r11, var_reloc_count
     ldn r7, r11               ; R7 = count
+    ldi64 r11, var_reloc_cap
+    ldn r0, r11               ; R0 = capacity in entries
+    cmp r7, r0
+    brcs reloc_record_count   ; count >= capacity (unsigned): keep nothing
+    ; Store R1 at buf[count]
+    ldi64 r11, var_reloc_buf
+    ldn r0, r11               ; R0 = buf base
     mov r11, r7
     lsli r11, 3               ; count * 8
     add r0, r11               ; R0 = &buf[count]
     str r0, r1                ; buf[count] = offset
+reloc_record_count:
     inc r7
     ldi64 r11, var_reloc_count
     str r11, r7               ; write back
@@ -8547,14 +8557,16 @@ dqrt_scan:
     ret.l
 
 ; ACCEPT ( addr max -- n ) read up to max chars into addr, return count
+;   The count lives in R10: key_char returns its byte in R1 and uses R11
+;   and R13 for the UART, and emit_char changes no register.
 w_accept:
     ldn r12, r14              ; max
     addi r14, 8
     ldn r9, r14               ; addr
     addi r14, 8
-    ldi r13, 0                ; count
+    ldi r10, 0                ; count
 w_accept_loop:
-    cmp r13, r12
+    cmp r10, r12
     breq w_accept_done
     sep  r5                 ; key -> R1
     cmpi r1, 0x0D
@@ -8562,16 +8574,16 @@ w_accept_loop:
     cmpi r1, 0x0A
     breq w_accept_done
     mov r7, r9
-    add r7, r13
+    add r7, r10
     st.b r7, r1
-    inc r13
+    inc r10
     sep  r4                 ; echo
     br w_accept_loop
 w_accept_done:
     ldi64 r11, print_crlf
     call.l r11
     subi r14, 8
-    str r14, r13              ; push count
+    str r14, r10              ; push count
     ret.l
 
 ; =====================================================================
@@ -25752,13 +25764,24 @@ d_tacc_send:
     ret.l
 
 ; === TACC-RELAY ===
-latest_entry:
 d_tacc_relay:
     .dq d_tacc_send
     .db 10
     .ascii "TACC-RELAY"
     ldi64 r11, w_tacc_relay
     call.l r11
+    ret.l
+
+; The relocation buffer's capacity appends after it.
+; === _RELOC-CAP ===
+latest_entry:
+d_reloc_cap:
+    .dq d_tacc_relay
+    .db 10
+    .ascii "_RELOC-CAP"
+    ldi64 r1, var_reloc_cap
+    subi r14, 8
+    str r14, r1
     ret.l
 
 ; =====================================================================
@@ -25984,9 +26007,11 @@ var_jit_last_here:
 var_reloc_active:
     .dq 0                             ; 0 = off, nonzero = tracking active
 var_reloc_count:
-    .dq 0                             ; number of reloc entries recorded
+    .dq 0                             ; immediates counted, kept or not
 var_reloc_buf:
     .dq 0                             ; pointer to user-allocated relocation buffer
+var_reloc_cap:
+    .dq 0                             ; entries the buffer at var_reloc_buf holds
 
 ; Cooperative multitasking state  [Phase 8]
 ; 4-task model: Task 0 = REPL (R3), Tasks 1–3 = background slots.

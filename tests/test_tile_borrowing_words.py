@@ -236,7 +236,14 @@ def test_the_words_append_after_boot_id():
     def link(entry: str) -> int:
         return int.from_bytes(code[labels[entry]:labels[entry] + 8], "little")
 
-    assert labels["latest_entry"] == labels["d_tacc_relay"]
+    # Later words append after these; the chain from the newest entry still
+    # reaches TACC-RELAY.  The system test pins which entry is newest.
+    chain = set()
+    address = labels["latest_entry"]
+    while address and address not in chain:
+        chain.add(address)
+        address = int.from_bytes(code[address:address + 8], "little")
+    assert labels["d_tacc_relay"] in chain
     assert link("d_tacc_relay") == labels["d_tacc_send"]
     assert link("d_tacc_send") == labels["d_tamac_scalars"]
     assert link("d_tamac_scalars") == labels["d_tamac_scalar"]
@@ -259,7 +266,9 @@ def test_the_words_append_after_boot_id():
 
 def test_simulator_words_follow_the_bios_order():
     runtime = MegaForthRuntime()
-    assert tuple(word.name for word in runtime.dictionary.words[-4:]) == (
+    names = [word.name for word in runtime.dictionary.words]
+    first = names.index(b"TAMAC-SCALAR")
+    assert tuple(names[first:first + 4]) == (
         b"TAMAC-SCALAR", b"TAMAC-SCALARS", b"TACC-SEND", b"TACC-RELAY")
 
 
