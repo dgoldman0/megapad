@@ -35,10 +35,13 @@ from simulator.entropy import (
 from simulator.ir import (
     Branch,
     BranchZero,
+    Call,
     Idle,
     IdleUntil,
+    Literal,
     Return,
     UartReadAttempt,
+    WriteOutput,
 )
 from simulator.memory import MMIO_BASE, MemoryAccessError, SparseAddressSpace
 from simulator.mp64fs import validate_attached_mp64fs
@@ -50,6 +53,8 @@ from simulator.platform import (
     SYSINFO_HBW_SIZE,
     SYSINFO_NUM_CORES,
     SYSINFO_NUM_FULL,
+    SYSINFO_VRAM_BASE,
+    SYSINFO_VRAM_SIZE,
 )
 from simulator.rtc import (
     RTC_EPOCH,
@@ -3318,6 +3323,71 @@ def install_core(runtime: MegaForthRuntime) -> None:
     # The relocation buffer's capacity follows, as the BIOS appends it. Like
     # the three relocation cells, it exists so that source naming it loads.
     runtime.define_created(b"_RELOC-CAP", initial_body=bytes(CELL_BYTES))
+
+    # ACCEPT, then the VRAM window's two System Info words, in the BIOS's
+    # order.
+    _define_accept(runtime)
+    runtime.define_primitive(
+        b"VRAM-BASE",
+        lambda context: _sysinfo_fetch(runtime, context, SYSINFO_VRAM_BASE),
+    )
+    runtime.define_primitive(
+        b"VRAM-SIZE",
+        lambda context: _sysinfo_fetch(runtime, context, SYSINFO_VRAM_SIZE),
+    )
+
+
+def _define_accept(runtime: MegaForthRuntime) -> None:
+    """``ACCEPT ( addr max -- n )`` as the BIOS's ``w_accept`` runs it.
+
+    It stops at max before it reads a key. A CR or an LF ends the line and
+    is neither stored nor echoed; every other byte is stored as it came and
+    echoed. The line then ends with CR LF, as ``print_crlf`` ends it. Each
+    byte comes from KEY, so ACCEPT waits for input exactly as KEY does.
+    """
+
+    def xt(name: bytes) -> int:
+        word = runtime.find(name)
+        if word is None:
+            raise AssertionError(f"ACCEPT needs the core word {name!r}")
+        return word.xt
+
+    done = 26
+    runtime.define_colon(
+        b"ACCEPT",
+        (
+            Literal(0),                  # 0: addr max count
+            Call(xt(b"2DUP")),           # 1: the loop
+            Call(xt(b"=")),
+            BranchZero(5),
+            Branch(done),                # count = max
+            Call(xt(b"KEY")),            # 5: addr max count key
+            Call(xt(b"DUP")),
+            Literal(0x0D),
+            Call(xt(b"=")),
+            Call(xt(b"OVER")),
+            Literal(0x0A),
+            Call(xt(b"=")),
+            Call(xt(b"OR")),
+            BranchZero(16),
+            Call(xt(b"DROP")),           # 14: CR or LF ends the line
+            Branch(done),
+            Call(xt(b"DUP")),            # 16: store at addr + count
+            Literal(4),
+            Call(xt(b"PICK")),
+            Literal(3),
+            Call(xt(b"PICK")),
+            Call(xt(b"+")),
+            Call(xt(b"C!")),
+            Call(xt(b"EMIT")),           # the echo
+            Call(xt(b"1+")),
+            Branch(1),
+            WriteOutput(b"\r\n"),        # 26: done
+            Call(xt(b"NIP")),
+            Call(xt(b"NIP")),
+            Return(),
+        ),
+    )
 
 
 def _tamac_scalars(runtime, context) -> None:

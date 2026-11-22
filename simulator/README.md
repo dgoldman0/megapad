@@ -922,6 +922,19 @@ entries in the buffer at `_RELOC-BUF`. It is a zeroed cell like the three
 relocation cells, so that Akashic's `binimg` loads here, and the hosted
 compiler records nothing into any of them.
 
+`ACCEPT`, `VRAM-BASE` and `VRAM-SIZE` come last, in the BIOS's order.
+`ACCEPT ( addr max -- n )` is a semantic definition over `KEY` and `EMIT`
+that takes the BIOS's steps: it stops at max before it reads a key, ends at a
+CR or an LF that it neither stores nor echoes, stores and echoes every other
+byte as it came, and ends the line with CR LF. It waits for input at `KEY`'s
+`Idle` boundary. `VRAM-BASE` and `VRAM-SIZE` read the bound SysInfo, as
+`EXT-MEM-BASE` and `EXT-MEM-SIZE` do; the simulator still has no framebuffer.
+`tests/test_accept_and_vram_words.py` runs the same Forth on the emulator's
+BIOS and here. Public `SOURCE` remains out, with `>IN` and `STATE`: the hosted
+evaluator keeps the input line and its position in host state, so a guest
+address for the line and a `>IN` cell that moves the parser both still have
+to be built.
+
 ### Semantic evaluator and checked source
 
 The hosted BIOS now exposes `EVALUATE`, the early `EVALUATE-CHECKED`,

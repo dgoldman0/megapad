@@ -633,6 +633,15 @@ advance a clock. Interpreted source and nested host dispatch cannot yet detach
 their Python continuations, so a caller using those paths must prequeue enough
 input to avoid blocking.
 
+The hosted `ACCEPT ( addr max -- n )` reads its line through that service and
+takes the BIOS's steps. It stops at max before it reads a key, ends at a CR or
+an LF that it neither stores nor echoes, stores and echoes every other byte as
+it came, and ends the line with CR LF. Each byte comes from `KEY`, so `ACCEPT`
+blocks and resumes at `KEY`'s boundary, and an interpreted caller prequeues
+its line as above. `tests/test_accept_and_vram_words.py` gives the same Forth
+to the emulator's BIOS and requires the same echo, count, buffer bytes and
+unread input.
+
 Task descriptors, registry state, synchronous `SCHEDULE`, and the provisional
 checkpoint are now qualified source semantics. `TASK-STACKS` and the saved
 DSP/RSP fields are inert guest storage: execution never installs them. Active
@@ -1507,6 +1516,9 @@ The admitted external-memory slice installs `EXT-MEM-BASE` and
 `EXT-MEM-SIZE` as dynamic semantic BIOS reads of SysInfo `+0x38` and `+0x40`.
 They report the actual external region bound to the sparse address space; the
 runtime does not copy a second geometry or substitute a host allocator.
+`VRAM-BASE` and `VRAM-SIZE` read SysInfo `+0x50` and `+0x58` the same way and
+report the VRAM region bound to the address space, or `(0,0)` without one. No
+framebuffer device or blitter word comes with them.
 Unchanged `kdos.f` lines 2119 through 2397 add all 31 definitions through
 `XBUF`, including the raw XMEM allocator, first-fit free list, public
 `ALLOCATE`/`FREE`/`RESIZE` dispatch, explicit Bank-0 DMA allocation, reset
