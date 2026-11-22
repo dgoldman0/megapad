@@ -1003,3 +1003,28 @@ def test_the_port_saves_and_restores_while_managed_data_serves(backend):
     # The restored collector moves the record again, and its handle follows.
     got = machine.run(["2 OBJ-COLLECT REPORT", "CHECK2 R1 @ N0 @ <> REPORT"])
     assert got == [0] + PAIR_READS + [-1]
+
+
+# ---------------------------------------------------------------------------
+#  Recovery L1: FAILED, a fix built before stage 1
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_recovery_l1_failed_loses_the_heap_and_its_memory_waits_for_the_reset(backend):
+    """Test 21's forged reference makes LM1 set FAILED: every handle is
+    then stale, every word fails, and the function's memory stays lent
+    until LM1 is reset, since until then LM1 may still hold references into
+    it (docs/managed-data.md section 11)."""
+    machine = ready(backend)
+    shape, ref, field, forged = machine.run(MAKE_A)
+    machine.lm1.md_write(field, forged)
+    _step_lm1(machine)
+    got = machine.run([
+        "1 OBJ-COLLECT REPORT OBJ-ENGINE REPORT REPORT",
+        "OBJ-OPEN REPORT H @ OBJ-GET NIP REPORT H @ OBJ-DROP REPORT 1 1 OBJ-OWNER-RELEASE REPORT",
+        "OBJ-MEMORY 0> REPORT _P-CTRL 0 CHIP@ _CTRL-RESET-HOLD AND REPORT",
+        "0 CHIP-RESET OBJ-MEMORY REPORT OBJ-ENGINE REPORT REPORT",
+    ])
+    # LM1's private work goes on: the port is not reset for FAILED, and the
+    # memory goes back only once the chiplet is.
+    assert got == [-1102, 1, 0, -1102, -1102, -1102, 0, -1, 0, 0, 1, 0]
