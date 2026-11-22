@@ -1414,14 +1414,17 @@ _RELOC-CAP → TACC-RELAY → TACC-SEND → TAMAC-SCALARS → TAMAC-SCALAR
 | Base Address | Device | Registers |
 |---|---|---|
 | `0xFFFF_FF00_0000_0000` | UART | TX=+0, RX=+1, STATUS=+2, CAPS=+7; emulator ring flush=+6 and base=+8..+F |
+| `0xFFFF_FF00_0000_0010` | UART geometry | COLS=+0..+1, ROWS=+2..+3, STATUS=+4 (bit 0 resized, bit 1 denied; write 1 to clear), CTRL=+5 (bit 1 requests a resize), REQUEST_COLS=+6..+7, REQUEST_ROWS=+8..+9; the emulator only (see Terminal Geometry) |
 | `0xFFFF_FF00_0000_0100` | Timer | COUNT=+0..+3, COMPARE=+4..+7, CTRL=+8, STATUS=+9 |
 | `0xFFFF_FF00_0000_0200` | Storage | CMD=+0, STATUS=+1, SECTOR=+2..+5, DMA=+6..+D, SEC_COUNT=+E, TOTAL=+11..+14, RESULT=+15, COMPLETE=+16..+19, MEDIA_GEN=+1A..+1D, CAPS=+1E, TRANSFERRED=+1F, EXPECTED_MEDIA_GEN=+20..+23, GUARDED_CMD=+24 |
-| `0xFFFF_FF00_0000_0300` | System Info | Exact 112-byte window; `NUM_CORES`=+10, `CRYPTO_CAPS`=+60, `NUM_BUS_PORTS`=+68 |
+| `0xFFFF_FF00_0000_0280` | Storage 1 | The settings disk, its medium write-protected; the same registers as Storage |
+| `0xFFFF_FF00_0000_0300` | System Info | Exact 120-byte window; `NUM_CORES`=+10, `CRYPTO_CAPS`=+60, `NUM_BUS_PORTS`=+68, `CHIPLET_PORTS`=+70 |
 | `0xFFFF_FF00_0000_0400` | NIC | CMD=+0, STATUS=+1, DMA=+2..+9, LEN=+A..+B, MAC=+E..+13 |
 | `0xFFFF_FF00_0000_0500` | Mailbox | DATA=+0..+7, SEND=+8, STATUS=+9, ACK=+A |
 | `0xFFFF_FF00_0000_0600` | Spinlock | Exact 64-byte/16-lock aperture; per-lock ACQUIRE=+n*4, RELEASE=+n*4+1; lock 8 at +20/+21 is the crypto guard |
 | `0xFFFF_FF00_0000_0700` | AES-256-GCM | Key/IV/data/tag registers |
 | `0xFFFF_FF00_0000_0780` | SHA-3/SHAKE/raw Keccak | Exact 96-byte aperture: CMD +00, STATUS +01, CTRL +02, ERROR +03, DIN +08, 64-byte DOUT +10..+4F, STATE_INDEX +50, STATE_DATA +58..+5F |
+| `0xFFFF_FF00_0000_07E0` | *(reserved)* | No QoS device; accesses fault |
 | `0xFFFF_FF00_0000_0800` | TRNG | RAND8=+0, RAND64=+8..+F, STATUS=+10, SEED=+18..+1F |
 | `0xFFFF_FF00_0000_0840` | *(free)* | Field ALU is ISA-native (`EXT.CRYPTO FB 20..2D`); no MMIO device occupies this range |
 | `0xFFFF_FF00_0000_0880` | Port I/O Bridge | PORT1_TARGET..PORT7_TARGET=+00..+0D (16-bit LE, low 12 bits used), BRIDGE_CTRL=+0E |
@@ -1430,7 +1433,12 @@ _RELOC-CAP → TACC-RELAY → TACC-SEND → TAMAC-SCALARS → TAMAC-SCALAR
 | `0xFFFF_FF00_0000_0900` | KEM Engine | Executable 40-byte window: STATUS(R)=+00, CMD(W)=+01, BUF_SEL(W)=+08, DIN(W)=+10, DOUT(R)=+18, BUF_SIZE(R,uint16-LE)=+20..+21; current RTL uses an incompatible 64-bit-slot map and deterministic crypto stub |
 | `0xFFFF_FF00_0000_0940` | ~~SHA-2~~ | Removed — now ISA (`sha.init`/`sha.din`/`sha.final`/`sha.dout`/`sha.release`) |
 | `0xFFFF_FF00_0000_0980` | ~~CRC Engine~~ | Removed — now ISA-native (`crc.mode`/`crc.init`/`crc.seed`/`crc.b`/`crc.q`/`crc.fin`/`crc.finraw`) |
+| `0xFFFF_FF00_0000_0A00` | Framebuffer | 80-byte window: BASE=+00..+07, WIDTH=+08..+0B, HEIGHT=+10..+13, STRIDE=+18..+1B, MODE=+20, ENABLE=+28, VSYNC=+30..+33, PAL_IDX=+38, PAL_DATA=+40..+43, STATUS=+48; the emulator only |
 | `0xFFFF_FF00_0000_0B00` | RTC | UPTIME=+0..7 (R,latched), EPOCH=+8..F (RW,latched), SEC=+10, MIN=+11, HOUR=+12, DAY=+13, MON=+14, YEAR=+15..16, DOW=+17, CTRL=+18, STATUS=+19, ALARM=+1A..1C |
+| `0xFFFF_FF00_0000_0C00` | PCM audio output | 32-byte window: CMD=+00, STATUS=+01, FORMAT=+02, CHANNELS=+03, RATE=+04..+07, DMA=+08..+0F, FRAMES=+10..+13, GEN=+14..+17, ERROR=+18, CAPS=+19; the emulator and the simulator |
+| `0xFFFF_FF00_0000_0D00` | Storage 2 | The system disk, its medium write-protected; the same registers as Storage |
+| `0xFFFF_FF00_0000_0D80` | Storage 3 | The user disk; the same registers as Storage |
+| `0xFFFF_FF00_0000_0E00` | Chiplet ports | 256-byte window of 64-bit registers, reached only by aligned 64-bit accesses: port count, port select, and the selected port's lent ranges, control, refusal record and sideband ([chiplet-link.md](chiplet-link.md)) |
 
 ### Memory Layout
 

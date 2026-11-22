@@ -153,7 +153,7 @@ device occupies a small range:
 | Device | Offset | Size | Description |
 |--------|--------|------|-------------|
 | **UART** | `+0x0000` | 16 bytes | Serial I/O (keyboard/terminal) |
-| **UART Geometry** | `+0x0010` | 16 bytes | Terminal dimensions, resize status/request |
+| **UART Geometry** | `+0x0010` | 16 bytes | Terminal dimensions, resize status/request; the emulator decodes them, the simulator serves the geometry words directly, and the RTL's UART has no geometry registers yet |
 | **Timer** | `+0x0100` | 16 bytes | 32-bit timer with compare-match |
 | **Storage** | `+0x0200` | 37 bytes | Checked sector controller with completion, precise result, media identity, and capacity registers: the boot disk |
 | **Storage 1** | `+0x0280` | 37 bytes | The same controller: the settings disk, its medium write-protected |
@@ -169,16 +169,19 @@ device occupies a small range:
 | **WOTS Chain** | `+0x08A0` | 32 bytes | Qualified checked byte-only WOTS chain sequencer with 64-bit read-only Bank 0 context DMA |
 | **NTT Engine** | `+0x08C0` | 64 bytes | Generic 256-point cyclic transform; executable byte ABI and current RTL slots differ |
 | **KEM** | `+0x0900` | 40 executable bytes | Synchronous Python ML-KEM-512 value device; the allocated 64-byte RTL block has an incompatible slot ABI and crypto stub |
-| **Framebuffer** | `+0x0A00` | 80 bytes | Tile-based framebuffer controller |
+| **Framebuffer** | `+0x0A00` | 80 bytes | Tile-based framebuffer controller; the emulator decodes it, and the RTL decodes no device here yet |
 | **RTC / System Clock** | `+0x0B00` | 32 bytes | 64-bit ms uptime + ms epoch + calendar (sec/min/hour/day/mon/year/dow) + alarm IRQ |
 | **PCM Audio Output** | `+0x0C00` | 32 bytes | One-shot PCM16 DMA contract; emulator capture/playback implemented, physical DMA/I2S bridge pending |
 | **Storage 2** | `+0x0D00` | 37 bytes | The same controller: the system disk, its medium write-protected |
 | **Storage 3** | `+0x0D80` | 37 bytes | The same controller: the user disk |
-| **Chiplet Ports** | `+0x0E00` | 256 bytes | RTL only: port count, port select, and the selected port's lent ranges, control, refusal record and sideband ([chiplet-link.md](chiplet-link.md)) |
+| **Chiplet Ports** | `+0x0E00` | 256 bytes | Port count, port select, and the selected port's lent ranges, control, refusal record and sideband, in aligned 64-bit accesses only; the RTL, the emulator's native core and the simulator all decode it ([chiplet-link.md](chiplet-link.md)) |
+
+`+0x0F00` through `+0x0FFF` holds no device. MegaPad's WOTS checkpoint
+tests place a scripted test device at `+0x0F00` in the emulator.
 
 The crypto register, ownership, and capability assignments are normative in
 [`crypto-interface-contract.md`](crypto-interface-contract.md). System Info
-extends through `+0x6F`. The qualified checkpoint-3 configuration reports
+extends through `+0x77`. The qualified checkpoint-3 configuration reports
 `CRYPTO_CAPS = 0xF`: bit 0 is reflected/raw CRC, bit 1 is checked SHA3/SHAKE
 streaming, bit 2 is raw Keccak-f[1600], and bit 3 is the production WOTS
 chain. The checked-in backends completed the real DMA, shared-Keccak,

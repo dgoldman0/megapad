@@ -1372,35 +1372,49 @@ all generalise to N engines with a round-robin scheduler.
 
 ## 8. MMIO Map After Changes
 
-Proposed layout with SHA-256/512 widened and CRC relocated:
+The map as built, with SHA-2 and CRC moved into the ISA. The RTL and the
+emulator both decode every device marked existing; a status that names
+backends lists the only ones that decode that device, and the hosted
+simulator models a subset of the devices. The next device takes a free
+range from this table.
 
 | Range         | Size   | Peripheral          | Status     |
 |---------------|--------|---------------------|------------|
-| 0x000–0x0FF   | 256 B  | UART                | existing   |
+| 0x000–0x00F   | 16 B   | UART                | existing; the RTL selects it across 0x000–0x0FF, so its 16 registers repeat through that range |
+| 0x010–0x01F   | 16 B   | Terminal geometry   | the emulator only; the simulator serves the geometry words directly, and the RTL's UART has no geometry registers yet |
+| 0x020–0x0FF   | 224 B  | *(free)*            | a device here needs the RTL's UART select narrowed first |
 | 0x100–0x1FF   | 256 B  | Timer               | existing   |
 | 0x200–0x27F   | 128 B  | Disk 0: the boot disk | existing |
-| 0x280–0x2FF   | 128 B  | Disk 1: the settings disk, write-protected; shares disk 0's DMA port | new |
-| 0x300–0x3FF   | 256 B  | SysInfo             | existing   |
+| 0x280–0x2FF   | 128 B  | Disk 1: the settings disk, write-protected; shares disk 0's DMA port | existing |
+| 0x300–0x377   | 120 B  | SysInfo             | existing   |
+| 0x378–0x3FF   | 136 B  | *(free)*            |            |
 | 0x400–0x4FF   | 256 B  | NIC                 | existing   |
-| 0x500–0x6FF   | 512 B  | Mailbox             | existing   |
+| 0x500–0x50F   | 16 B   | Mailbox             | existing   |
+| 0x510–0x5FF   | 240 B  | *(free)*            |            |
+| 0x600–0x63F   | 64 B   | Spinlocks: 16 locks, lock 8 the crypto guard | existing |
+| 0x640–0x6FF   | 192 B  | *(free)*            |            |
 | 0x700–0x77F   | 128 B  | AES                 | existing   |
 | 0x780–0x7DF   | 96 B   | SHA-3               | existing   |
+| 0x7E0–0x7EF   | 16 B   | Reserved: no QoS device; accesses fault | existing |
+| 0x7F0–0x7FF   | 16 B   | *(free)*            |            |
 | 0x800–0x81F   | 32 B   | TRNG                | existing   |
-| 0x840–0x87F   | 64 B   | Field ALU           | **→ per-core ISA (Appendix B)** |
-| 0x880–0x89F   | 32 B   | **Port I/O remap CSR** | **new**    |
-| 0x8A0–0x8BF   | 32 B   | **WOTS+ Chain Accel** | **new (§7)** |
+| 0x820–0x87F   | 96 B   | *(free — Field ALU removed)* | the Field ALU is per-core ISA (Appendix B) |
+| 0x880–0x88F   | 16 B   | Port I/O remap CSR  | existing   |
+| 0x890–0x89F   | 16 B   | *(free)*            | the RTL's bridge decodes 0x880–0x88F, but the emulator's bridge device spans 0x880–0x89F |
+| 0x8A0–0x8BF   | 32 B   | WOTS+ chain accelerator (§7) | existing |
 | 0x8C0–0x8FF   | 64 B   | NTT                 | existing   |
 | 0x900–0x93F   | 64 B   | KEM                 | existing   |
-| 0x940–0x9BF   | 128 B  | *(free — SHA-2/CRC removed)* | ✅ Both are ISA-only |
-| 0x9C0–0x9FF   | 64 B   | *(free)*            |            |
-| 0xA00–0xA1F   | 32 B   | *(free)*            |            |
-| 0xA20–0xA7F   | 96 B   | **Trace readout portal** | **new** |
-| 0xA80–0xAFF   | 128 B  | *(free — future)*   |            |
+| 0x940–0x9FF   | 192 B  | *(free — SHA-2/CRC removed)* | both are ISA-only |
+| 0xA00–0xA4F   | 80 B   | Framebuffer controller | the emulator only; the RTL decodes no device here yet |
+| 0xA50–0xAFF   | 176 B  | *(free)*            | the trace readout portal, proposed but not built, was planned at 0xA20–0xA7F, inside the framebuffer's window, and needs a free range when it is built |
 | 0xB00–0xB1F   | 32 B   | RTC                 | existing   |
-| 0xB20–0xCFF   | 480 B  | *(free)*            |            |
-| 0xD00–0xD7F   | 128 B  | Disk 2: the system disk, write-protected; shares disk 0's DMA port | new |
-| 0xD80–0xDFF   | 128 B  | Disk 3: the user disk; shares disk 0's DMA port | new |
-| 0xE00–0xFFF   | 512 B  | *(free)*            |            |
+| 0xB20–0xBFF   | 224 B  | *(free)*            |            |
+| 0xC00–0xC1F   | 32 B   | PCM audio output    | the emulator and the simulator; the RTL has no device yet, and the physical DMA/I2S bridge is pending |
+| 0xC20–0xCFF   | 224 B  | *(free)*            |            |
+| 0xD00–0xD7F   | 128 B  | Disk 2: the system disk, write-protected; shares disk 0's DMA port | existing |
+| 0xD80–0xDFF   | 128 B  | Disk 3: the user disk; shares disk 0's DMA port | existing |
+| 0xE00–0xEFF   | 256 B  | Chiplet ports: aligned 64-bit accesses only ([chiplet-link.md](chiplet-link.md)) | existing |
+| 0xF00–0xFFF   | 256 B  | *(free)*            | MegaPad's WOTS checkpoint tests place a scripted test device at 0xF00 in the emulator |
 
 The string engine (§2) and dictionary search engine (§3) are **ISA
 extensions** (EXT.STRING F9, EXT.DICT FA) — they live inside each CPU
