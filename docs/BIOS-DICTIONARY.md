@@ -308,7 +308,7 @@ or erase the last status and diagnostics.
 | 55 | `U>` | `( a b -- flag )` | | Unsigned greater-than |
 | 56 | `WITHIN` | `( n lo hi -- flag )` | | True if `(n-lo) u< (hi-lo)` (ANS) |
 
-### Memory (18 words)
+### Memory (22 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
@@ -336,6 +336,15 @@ one atomic wide access.  Fetch publication occurs after the final byte; stores
 consume both stack inputs before the first byte and can retain a written prefix
 if a later access faults.  Address stepping wraps modulo 2^64 and routes every
 byte independently.
+
+Four more words of this section have no number in the catalogue:
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `ON` | `( addr -- )` | Store true (-1) at addr |
+| `2!` | `( x1 x2 addr -- )` | Store a cell pair: x2 at addr and x1 at addr+8 |
+| `2@` | `( addr -- x1 x2 )` | Fetch a cell pair: x2 from addr and x1 from addr+8 |
+| `CMOVE>` | `( src dst u -- )` | Copy u bytes from the highest address down, so a copy onto an overlapping higher destination is safe |
 
 ### I/O & Display (18 words)
 
@@ -1243,6 +1252,58 @@ and makes no scheduler/yield call during the timed interval. Failed clear
 quiescence wipes private scratch but retains owner kind 3 and spinlock 8 until
 machine reset.
 
+### Terminal Geometry (6 words)
+
+The UART's geometry registers at `0xFFFF_FF00_0000_0010` hold the
+terminal's size: the column count at +0x00 and the row count at +0x02, each
+16 bits little-endian. The status byte at +0x04 records a resize in bit 0
+and a denied request in bit 1, each cleared by writing 1; bit 1 of the
+control byte at +0x05 requests a resize to the columns and rows at +0x06
+and +0x08.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `COLS` | `( -- n )` | The terminal's column count |
+| `ROWS` | `( -- n )` | The terminal's row count |
+| `TERMSIZE` | `( -- cols rows )` | Both dimensions |
+| `RESIZED?` | `( -- flag )` | True when the terminal was resized since the last check; clears the status bit |
+| `RESIZE-DENIED?` | `( -- flag )` | True when the host denied the last resize request; clears the status bit |
+| `RESIZE-REQUEST` | `( cols rows -- )` | Ask the host for a new size: write the requested columns and rows, then set the request bit. `RESIZED?` then reports that the host resized the terminal, and `RESIZE-DENIED?` that it refused |
+
+### Memory Regions and Core Types (8 words)
+
+Each word reads one cell of System Info at `0xFFFF_FF00_0000_0300`. A
+region the machine lacks reports a size of zero.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `HBW-BASE` | `( -- addr )` | Base address of the high-bandwidth math RAM, from System Info +0x20 |
+| `HBW-SIZE` | `( -- u )` | Its size in bytes, from +0x28 |
+| `EXT-MEM-BASE` | `( -- addr )` | Base address of external memory, from +0x38 |
+| `EXT-MEM-SIZE` | `( -- u )` | Its size in bytes, from +0x40 |
+| `N-FULL` | `( -- n )` | The number of full cores, from +0x48; the cores numbered from n up are micro-cores |
+| `VRAM-BASE` | `( -- addr )` | Base address of dedicated VRAM, from +0x50 |
+| `VRAM-SIZE` | `( -- u )` | Its size in bytes, from +0x58 |
+| `MICRO?` | `( id -- flag )` | True when core id is a micro-core, that is when id is at least `N-FULL` |
+
+### Relocation Tracking (3 words)
+
+While tracking is on, the compiler records the address of every 64-bit
+immediate it compiles that carries an address, such as a call's target or
+the token `[']` compiles, so that a dictionary image built from the code can
+be moved. Akashic's `utils/binimg.f` builds such images. Each word pushes
+the address of one of the tracker's cells.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `_RELOC-ACTIVE` | `( -- addr )` | The cell that turns tracking on while it holds a nonzero value |
+| `_RELOC-COUNT` | `( -- addr )` | The cell counting the immediates recorded |
+| `_RELOC-BUF` | `( -- addr )` | The cell holding the address of the caller's buffer, which receives one cell per immediate |
+
+The BIOS stores each record at the next cell of the buffer and checks no
+bound, so the caller's buffer must have a cell for every such immediate
+compiled while tracking is on.
+
 ---
 
 ## Summary Statistics
@@ -1256,7 +1317,7 @@ catalogue's order.
 | Arithmetic | 17 |
 | Logic & Bitwise | 11 |
 | Comparison | 13 |
-| Memory | 18 |
+| Memory | 22 |
 | I/O & Display | 18 |
 | String & Parsing | 9 |
 | Control Flow | 15 |
@@ -1301,9 +1362,12 @@ catalogue's order.
 | Token Replay | 1 |
 | Boot Identity | 1 |
 | Checked WOTS Chain | 1 |
-| **Catalogued subtotal** | **490** |
+| Terminal Geometry | 6 |
+| Memory Regions and Core Types | 8 |
+| Relocation Tracking | 3 |
+| **Catalogued subtotal** | **511** |
 
-The catalogue lists 490 of the 567 entries in the link chain; the chain in
+The catalogue lists 511 of the 567 entries in the link chain; the chain in
 `bios.asm` holds the rest.
 
 ### All Immediate Words (34)
