@@ -420,23 +420,10 @@ def test_bus_requester_metadata_preserves_spinlock_ownership_contract():
     assert system.spinlock.owner[8] == 0
 
 
-def test_native_ipi_router_does_not_replay_legacy_line_callbacks():
-    """Routed pending/line transitions cannot be overwritten after unlocking."""
+def test_native_ipi_router_moves_pending_bit_and_line_together():
+    """A send and its acknowledgement change the bit and the line at once."""
     system = _new_system(full_cores=2)
     target = system.cores[1]
-
-    # These deliberately stale line mutations model the legacy callback path.
-    # A router-attached mailbox must not invoke them after its atomic update.
-    system.mailbox.on_ipi = lambda core_id: setattr(
-        system.cores[core_id],
-        "irq_ipi",
-        False,
-    )
-    system.mailbox.on_ack = lambda core_id: setattr(
-        system.cores[core_id],
-        "irq_ipi",
-        True,
-    )
 
     assert system.mailbox.send_ipi(0, 1)
     assert system.mailbox.pending[1] == 1
@@ -444,6 +431,14 @@ def test_native_ipi_router_does_not_replay_legacy_line_callbacks():
 
     assert system.mailbox.acknowledge_ipi(1, 0)
     assert system.mailbox.pending[1] == 0
+    assert not target.irq_ipi
+
+    # A send by the mailbox's SEND register carries the payload as well.
+    system.mailbox.data[0] = 0x5A
+    assert system.mailbox.send_ipi(0, 1, publish_payload=True)
+    assert system.mailbox.data == [0x5A, 0x5A]
+    assert target.irq_ipi
+    system.bus.write8(MBOX_BASE + 0x0A, 0, requester_id=1)
     assert not target.irq_ipi
 
 

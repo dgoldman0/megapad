@@ -2417,78 +2417,82 @@ class NetworkDevice(Device):
 
 
 # ---------------------------------------------------------------------------
-#  Inter-Core Mailbox (IPI)
+#  Inter-Core Mailbox (IPI) and Hardware Spinlocks
 # ---------------------------------------------------------------------------
-# Emulates the hardware mailbox from the FPGA multicore SoC.
-# Each core has a 64-bit data slot. Writing MBOX_SEND triggers an IPI
-# to the target core. The target reads STATUS to see who sent it,
-# reads DATA, then writes ACK to clear the pending bit.
+# Both devices are written once, in shared/accel/mailbox.h and
+# shared/accel/spinlock_bank.h, for the emulator and the simulator. The
+# native system owns them, the mailbox beside its IPI router, and the cores
+# it runs reach them without Python. These facades put their windows on the
+# Python bus for host accesses, which name their requester, and for cores
+# without native state, and they give host code its views of the state.
 #
-# Register map (offsets from MBOX_BASE):
-#   0x00..0x07  DATA_LO/HI — 64-bit mailbox data (per-requester slot)
-#   0x08        SEND       — write target_core_id to send IPI
-#   0x09        STATUS     — read: bit[n] = pending IPI from core n
-#   0x0A        ACK        — write source_core_id to clear pending bit
+# Mailbox register map (offsets from MBOX_BASE), as the requester sees it:
+#   0x00..0x07  DATA    — the requester's 64-bit data word
+#   0x08        SEND    — write a participant's ID to signal it; a core
+#                         that is signalled takes a copy of the data word
+#   0x09        STATUS  — read: bit[n] = signal pending from ID n, n < 8
+#   0x0A        ACK     — write a source's ID to take its signal
 #
-# Requester identity is carried explicitly by each DeviceBus transaction.
+# Spinlock N is at SPINLOCK_BASE + N*4: reading +0 acquires it (0 when it
+# was free or is already the requester's, 1 while another core holds it),
+# and writing +1 releases it when the requester owns it.
+
+NUM_SPINLOCKS = 16
+_MASK64 = (1 << 64) - 1
+
+
+class _MailboxData:
+    """Each core's mailbox data word, read and written in the native model."""
+
+    def __init__(self, native, num_cores: int):
+        self._native = native
+        self._cores = num_cores
+
+    def __len__(self) -> int:
+        return self._cores
+
+    def _core(self, index: int) -> int:
+        if not -self._cores <= index < self._cores:
+            raise IndexError("no such core")
+        return index % self._cores
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[core] for core in range(self._cores)[index]]
+        return int(self._native.mailbox_data(self._core(index)))
+
+    def __setitem__(self, index: int, value: int) -> None:
+        self._native.set_mailbox_data(self._core(index), value & _MASK64)
+
+    def __iter__(self):
+        return (self[core] for core in range(self._cores))
+
+    def __eq__(self, other):
+        if isinstance(other, (list, tuple, _MailboxData)):
+            return list(self) == list(other)
+        return NotImplemented
+
+    def __repr__(self) -> str:
+        return repr(list(self))
+
 
 class MailboxDevice(Device):
-    """Inter-core mailbox with IPI delivery."""
+    """The mailbox's window on the Python bus, over the native model."""
 
-    def __init__(self, num_cores: int = 4, num_ports: int = 0):
+    def __init__(self, native, num_cores: int, num_ports: int = 0):
         super().__init__("Mailbox", MBOX_BASE, 0x10)
+        self._native = native
         self.num_cores = num_cores
         # Chiplet ports are participants beside the cores.  Port p has the
-        # ID num_cores + p: a core rings it by sending to that ID and
-        # acknowledges its signal by that ID.
+        # ID first_chiplet_port_id + p: a core rings it by sending to that
+        # ID and acknowledges its signal by that ID.
         self.num_ports = num_ports
-        # data[sender] = 64-bit value written by sender
-        self.data: list[int] = [0] * num_cores
-        # Standalone devices retain local pending state.  MegapadSystem
-        # attaches the SystemState router so MMIO and native CSR accesses
-        # observe one pending mask and interrupt line.
-        self._pending: list[int] = [0] * (num_cores + num_ports)
-        self._router_pending = None
-        self._router_snapshot = None
-        self._router_send = None
-        self._router_ack = None
-        # Callback: called with (target_core_id,) when IPI is sent
-        self.on_ipi: Optional[callable] = None
-        # Callback: called with (acking_core_id,) after ACK clears a pending bit
-        self.on_ack: Optional[callable] = None
-
-    def attach_ipi_router(
-        self,
-        *,
-        pending_mask,
-        pending_snapshot,
-        send,
-        acknowledge,
-    ):
-        """Attach explicit SystemState IPI routing operations."""
-        self._router_pending = pending_mask
-        self._router_snapshot = pending_snapshot
-        self._router_send = send
-        self._router_ack = acknowledge
+        self.data = _MailboxData(native, num_cores)
 
     @property
     def pending(self) -> list[int]:
-        if self._router_pending is None:
-            return self._pending
-        if self._router_snapshot is not None:
-            return [
-                int(mask)
-                for mask in self._router_snapshot()
-            ]
-        return [
-            int(self._router_pending(core_id))
-            for core_id in range(self.num_cores)
-        ]
-
-    def _pending_mask(self, core_id: int) -> int:
-        if self._router_pending is not None:
-            return int(self._router_pending(core_id))
-        return self._pending[core_id]
+        """Each core's pending mask, by source ID."""
+        return [int(mask) for mask in self._native.ipi_pending_snapshot()]
 
     def send_ipi(
         self,
@@ -2498,29 +2502,12 @@ class MailboxDevice(Device):
         publish_payload: bool = False,
         requester_valid: bool = True,
     ) -> bool:
-        """Send using the frozen emulator contract for the selected path."""
-        if (
-            not requester_valid
-            or not 0 <= requester_id < self.num_cores
-            or not 0 <= target_id < self.num_cores + self.num_ports
-            or target_id == requester_id
-        ):
+        """Signal TARGET_ID as core REQUESTER_ID: with the payload as a write
+        of SEND does, without it as a write of CSR MBOX does."""
+        if not requester_valid:
             return False
-        # A port has no data slot: a chiplet's data crosses in lent memory.
-        if publish_payload and target_id < self.num_cores:
-            self.data[target_id] = self.data[requester_id]
-        if self._router_send is not None:
-            sent = bool(self._router_send(requester_id, target_id))
-        else:
-            self._pending[target_id] |= 1 << requester_id
-            sent = True
-        # A native router owns both pending bits and the IPI level as one
-        # synchronized transition.  Legacy callbacks are only for standalone
-        # devices; running them after a routed transition could overwrite the
-        # router's newer line state.
-        if self._router_send is None and sent and self.on_ipi:
-            self.on_ipi(target_id)
-        return sent
+        return bool(self._native.mailbox_send(
+            requester_id, target_id, publish_payload))
 
     def acknowledge_ipi(
         self,
@@ -2529,25 +2516,9 @@ class MailboxDevice(Device):
         *,
         requester_valid: bool = True,
     ) -> bool:
-        if (
-            not requester_valid
-            or not 0 <= requester_id < self.num_cores
-            or not 0 <= source_id < self.num_cores + self.num_ports
-        ):
+        if not requester_valid:
             return False
-        if self._router_ack is not None:
-            acknowledged = bool(
-                self._router_ack(requester_id, source_id)
-            )
-        else:
-            was_pending = bool(
-                self._pending[requester_id] & (1 << source_id)
-            )
-            self._pending[requester_id] &= ~(1 << source_id)
-            acknowledged = was_pending
-        if self._router_ack is None and self.on_ack:
-            self.on_ack(requester_id)
-        return acknowledged
+        return bool(self._native.ipi_ack(requester_id, source_id))
 
     def read8_for_requester(
         self,
@@ -2556,16 +2527,8 @@ class MailboxDevice(Device):
         *,
         requester_valid: bool = True,
     ) -> int:
-        if not requester_valid or not 0 <= requester_id < self.num_cores:
-            return 0
-        if 0x00 <= offset <= 0x07:
-            # Read mailbox data for the requesting core's slot
-            # Returns the data from the first pending sender
-            shift = 8 * offset
-            return (self.data[requester_id] >> shift) & 0xFF
-        elif offset == 0x09:  # STATUS
-            return self._pending_mask(requester_id) & 0xFF
-        return 0
+        return int(self._native.mailbox_read8(
+            MBOX_BASE + offset, requester_id if requester_valid else -1))
 
     def write8_for_requester(
         self,
@@ -2575,25 +2538,9 @@ class MailboxDevice(Device):
         *,
         requester_valid: bool = True,
     ):
-        value &= 0xFF
-        if not requester_valid or not 0 <= requester_id < self.num_cores:
-            return
-        if 0x00 <= offset <= 0x07:
-            # Write to this core's outgoing data slot
-            shift = 8 * offset
-            mask = 0xFF << shift
-            self.data[requester_id] = (
-                self.data[requester_id] & ~mask
-            ) | (value << shift)
-            self.data[requester_id] &= (1 << 64) - 1
-        elif offset == 0x08:  # SEND — value is target core ID
-            self.send_ipi(
-                requester_id,
-                value,
-                publish_payload=True,
-            )
-        elif offset == 0x0A:  # ACK — value is source core ID to clear
-            self.acknowledge_ipi(requester_id, value)
+        self._native.mailbox_write8(
+            MBOX_BASE + offset, value & 0xFF,
+            requester_id if requester_valid else -1)
 
     def read8(self, offset: int) -> int:
         return self.read8_for_requester(0, offset)
@@ -2602,32 +2549,23 @@ class MailboxDevice(Device):
         self.write8_for_requester(0, offset, value)
 
 
-# ---------------------------------------------------------------------------
-#  Hardware Spinlocks
-# ---------------------------------------------------------------------------
-# 16 test-and-set spinlocks with owner tracking.
-# Read SLOCK_ACQUIRE: returns 0 if acquired, 1 if busy (atomic test-and-set).
-# Write SLOCK_RELEASE: releases the lock (only if caller is owner).
-#
-# Lock N is at SPINLOCK_BASE + N*4.
-# Offset within each 4-byte slot:
-#   +0  ACQUIRE (R) — read returns 0=got it, 1=busy
-#   +1  RELEASE (W) — write anything to release
-
-NUM_SPINLOCKS = 16
-
-
 class SpinlockDevice(Device):
-    """Hardware spinlocks with test-and-set semantics."""
+    """The spinlocks' window on the Python bus, over the native model."""
 
-    def __init__(self, num_cores: int, num_locks: int = NUM_SPINLOCKS):
-        super().__init__("Spinlock", SPINLOCK_BASE, num_locks * 4)
+    def __init__(self, native, num_cores: int):
+        super().__init__("Spinlock", SPINLOCK_BASE, NUM_SPINLOCKS * 4)
+        self._native = native
         self.num_cores = num_cores
-        self.num_locks = num_locks
-        # locked[i] = True if lock i is held
-        self.locked: list[bool] = [False] * num_locks
-        # owner[i] = core_id that holds lock i (-1 if free)
-        self.owner: list[int] = [-1] * num_locks
+        self.num_locks = NUM_SPINLOCKS
+
+    @property
+    def owner(self) -> list[int]:
+        """Each lock's owning core, or -1 while it is free."""
+        return [int(owner) for owner in self._native.spinlock_owners()]
+
+    @property
+    def locked(self) -> list[bool]:
+        return [owner >= 0 for owner in self.owner]
 
     def read8_for_requester(
         self,
@@ -2636,27 +2574,8 @@ class SpinlockDevice(Device):
         *,
         requester_valid: bool = True,
     ) -> int:
-        lock_idx = offset // 4
-        sub = offset % 4
-        if not 0 <= lock_idx < self.num_locks:
-            return 0xFF
-        if sub == 0:  # ACQUIRE (test-and-set)
-            if (
-                not requester_valid
-                or not 0 <= requester_id < self.num_cores
-            ):
-                return 1
-            if not self.locked[lock_idx]:
-                # Free — acquire it
-                self.locked[lock_idx] = True
-                self.owner[lock_idx] = requester_id
-                return 0  # success
-            elif self.owner[lock_idx] == requester_id:
-                # Re-entrant — already own it
-                return 0
-            else:
-                return 1  # busy
-        return 0
+        return int(self._native.spinlock_read8(
+            SPINLOCK_BASE + offset, requester_id if requester_valid else -1))
 
     def write8_for_requester(
         self,
@@ -2666,21 +2585,9 @@ class SpinlockDevice(Device):
         *,
         requester_valid: bool = True,
     ):
-        lock_idx = offset // 4
-        sub = offset % 4
-        if (
-            not 0 <= lock_idx < self.num_locks
-            or not requester_valid
-            or not 0 <= requester_id < self.num_cores
-        ):
-            return
-        if sub == 1:  # RELEASE
-            if (
-                self.locked[lock_idx]
-                and self.owner[lock_idx] == requester_id
-            ):
-                self.locked[lock_idx] = False
-                self.owner[lock_idx] = -1
+        self._native.spinlock_write8(
+            SPINLOCK_BASE + offset, value & 0xFF,
+            requester_id if requester_valid else -1)
 
     def read8(self, offset: int) -> int:
         return self.read8_for_requester(0, offset)

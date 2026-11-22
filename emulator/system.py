@@ -1375,17 +1375,15 @@ class MegapadSystem:
             ),
             chiplet_ports=self._native_system.chiplet_port_count_word,
         )
+        # The native system owns the mailbox and the spinlocks; these put
+        # their windows on the Python bus and give the host its views.
         self.mailbox = MailboxDevice(
+            self._native_system,
             num_cores=self.num_cores,
             num_ports=self.num_chiplet_ports,
         )
-        self.mailbox.attach_ipi_router(
-            pending_mask=self._native_system.ipi_pending_mask,
-            pending_snapshot=self._native_system.ipi_pending_snapshot,
-            send=self._native_system.ipi_send,
-            acknowledge=self._native_system.ipi_ack,
-        )
-        self.spinlock = SpinlockDevice(num_cores=self.num_cores)
+        self.spinlock = SpinlockDevice(
+            self._native_system, num_cores=self.num_cores)
         self.ntt = NTTDevice()
         self.kem = KemDevice()
         # FB is now handled natively by C++ accelerator — use proxy

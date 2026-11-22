@@ -46,6 +46,8 @@
 #include "../../shared/accel/keccak_bindings.h"
 #include "../../shared/accel/tile_values_bindings.h"
 #include "../../shared/accel/chiplet_bindings.h"
+#include "../../shared/accel/mailbox.h"
+#include "../../shared/accel/spinlock_bank.h"
 #include "../../shared/accel/storage_faults_bindings.h"
 #include "../../shared/accel/crc.h"
 #include "../../shared/accel/routine_call.h"
@@ -345,14 +347,18 @@ struct MemoryMappings : GuestMemoryMap {
 
 class InterruptRouter {
 public:
+    using Mailbox = megapad::mailbox::Mailbox;
+
     // The mailbox's participants are the cores, then the chiplet ports,
-    // whose IDs follow the cores'. The pending table is shared with the
-    // simulator; this router adds the lock and the line mirrors that
-    // concurrently running cores read.
+    // whose IDs follow the cores'. The pending table and the mailbox's MMIO
+    // model over it (shared/accel/mailbox.h) are shared with the simulator;
+    // this router adds the lock and the line mirrors that concurrently
+    // running cores read.
     void configure(int core_count, int port_count = 0) {
         std::lock_guard<std::mutex> guard(mutex_);
         core_count_ = core_count;
         table_.configure(core_count, port_count);
+        mailbox_ = std::make_unique<Mailbox>(&table_);
         ipi_lines_ =
             std::make_unique<std::atomic<uint8_t>[]>(
                 static_cast<std::size_t>(core_count));
@@ -485,9 +491,98 @@ public:
         return masks;
     }
 
+    // ---- The mailbox's MMIO window, at offsets 0x500 to 0x50F ----
+
+    static bool handles_mailbox(uint32_t mmio_off) noexcept {
+        return mmio_off >= Mailbox::OFFSET && mmio_off < Mailbox::LIMIT;
+    }
+
+    // Whether the window takes a whole access of this shape.
+    bool mailbox_admits(uint32_t offset, unsigned width, bool write) const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        return mailbox_->preflight(offset, width, write, 0).admitted();
+    }
+
+    // One whole access by `requester`, its bytes moved lowest first under
+    // one hold of the lock; false, with nothing moved, when the window
+    // refuses the access's shape.
+    bool mailbox_read(
+            uint32_t offset, unsigned width, int requester,
+            uint64_t& value) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!mailbox_->preflight(offset, width, false, requester).admitted())
+            return false;
+        value = 0;
+        for (unsigned index = 0; index < width; index++) {
+            value |= uint64_t{mailbox_->read8(offset + index, requester)}
+                << (8 * index);
+        }
+        return true;
+    }
+
+    bool mailbox_write(
+            uint32_t offset, unsigned width, uint64_t value, int requester) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!mailbox_->preflight(offset, width, true, requester).admitted())
+            return false;
+        for (unsigned index = 0; index < width; index++) {
+            const uint32_t byte_offset = offset + index;
+            const uint8_t byte = static_cast<uint8_t>(value >> (8 * index));
+            mailbox_->write8(byte_offset, byte, requester);
+            // A write of SEND or ACK changes the table under one core's
+            // lines: the target's, or the acknowledging core's.
+            if (!table_.is_core(requester))
+                continue;
+            if (byte_offset == Mailbox::SEND)
+                refresh_lines_unlocked(byte);
+            else if (byte_offset == Mailbox::ACK)
+                refresh_lines_unlocked(requester);
+        }
+        return true;
+    }
+
+    // A send from the host as a core's: with the payload, as a write of
+    // SEND, which copies the sender's data word to a core target; without
+    // it, as a write of CSR MBOX.
+    bool mailbox_send(int requester, int target, bool payload) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!payload) {
+            if (!table_.is_core(requester))
+                return false;
+            return send_unlocked(requester, target);
+        }
+        if (!mailbox_->send(requester, target))
+            return false;
+        refresh_lines_unlocked(target);
+        return true;
+    }
+
+    // A core's data word; zero for an ID that names no core.
+    uint64_t mailbox_data(int core) const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        return mailbox_->data(core);
+    }
+
+    void set_mailbox_data(int core, uint64_t value) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        mailbox_->set_data(core, value);
+    }
+
 private:
     bool valid_core_unlocked(int core_id) const {
         return core_id >= 0 && core_id < core_count_;
+    }
+
+    // A core's lines follow its pending bits: the IPI line all of them, the
+    // external flag those that ports set.
+    void refresh_lines_unlocked(int core_id) {
+        if (!valid_core_unlocked(core_id))
+            return;
+        const std::size_t index = static_cast<std::size_t>(core_id);
+        ipi_lines_[index].store(
+            table_.any_pending(core_id) ? 1 : 0, std::memory_order_release);
+        ef_lines_[index].store(
+            table_.port_pending(core_id) ? 1 : 0, std::memory_order_release);
     }
 
     bool send_unlocked(int source_id, int target_id) {
@@ -507,8 +602,76 @@ private:
     mutable std::mutex mutex_;
     int core_count_ = 0;
     megapad::chiplet::MailboxPending table_;
+    std::unique_ptr<Mailbox> mailbox_;
     std::unique_ptr<std::atomic<uint8_t>[]> ipi_lines_;
     std::unique_ptr<std::atomic<uint8_t>[]> ef_lines_;
+};
+
+// ---------------------------------------------------------------------------
+//  Hardware spinlocks
+// ---------------------------------------------------------------------------
+
+// The 16 spinlocks at MMIO 0x600, the model in shared/accel/spinlock_bank.h
+// that the simulator uses too, behind the lock that orders the cores' and
+// the host's accesses.
+class SharedSpinlocks {
+public:
+    using Bank = megapad::spinlock::SpinlockBank;
+
+    void configure(int core_count) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        bank_ = std::make_unique<Bank>(core_count);
+    }
+
+    static bool handles(uint32_t mmio_off) noexcept {
+        return mmio_off >= Bank::OFFSET && mmio_off < Bank::LIMIT;
+    }
+
+    bool admits(uint32_t offset, unsigned width, bool write) const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        return bank_->preflight(offset, width, write, 0).admitted();
+    }
+
+    // One whole access by `requester`, as the mailbox's are moved.
+    bool read(
+            uint32_t offset, unsigned width, int requester,
+            uint64_t& value) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!bank_->preflight(offset, width, false, requester).admitted())
+            return false;
+        value = 0;
+        for (unsigned index = 0; index < width; index++) {
+            value |= uint64_t{bank_->read8(offset + index, requester)}
+                << (8 * index);
+        }
+        return true;
+    }
+
+    bool write(
+            uint32_t offset, unsigned width, uint64_t value, int requester) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!bank_->preflight(offset, width, true, requester).admitted())
+            return false;
+        for (unsigned index = 0; index < width; index++) {
+            bank_->write8(
+                offset + index, static_cast<uint8_t>(value >> (8 * index)),
+                requester);
+        }
+        return true;
+    }
+
+    // Each lock's owner, or Bank::FREE.
+    std::vector<int> owners() const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        std::vector<int> owners(Bank::LOCKS);
+        for (int lock = 0; lock < Bank::LOCKS; lock++)
+            owners[static_cast<std::size_t>(lock)] = bank_->owner(lock);
+        return owners;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::unique_ptr<Bank> bank_;
 };
 
 // ---------------------------------------------------------------------------
@@ -2228,6 +2391,9 @@ struct CPUState {
     TRNGDevice* trng = nullptr;
     // The machine's chiplet ports; a standalone core has none.
     ChipletDevice* chiplet = nullptr;
+    // The machine's spinlocks; a standalone core reaches them, like the
+    // mailbox, through its MMIO callbacks.
+    SharedSpinlocks* spinlocks = nullptr;
     std::unique_ptr<UARTDevice> private_uart;
     UARTDevice* uart = nullptr;
 
@@ -5624,6 +5790,7 @@ struct SystemState {
             main_bus_port_count,
             main_bus_port_count - 1);
         shared_interrupts.configure(all_core_count, chiplet_port_count);
+        shared_spinlocks.configure(all_core_count);
         shared_chiplet.configure(
             chiplet_port_count,
             shared_interrupts.first_port_id(),
@@ -5669,6 +5836,7 @@ struct SystemState {
             core->core_id = static_cast<uint8_t>(index);
             core->num_cores = static_cast<uint8_t>(all_core_count);
             core->chiplet = &shared_chiplet;
+            core->spinlocks = &shared_spinlocks;
             cores.push_back(std::move(core));
         }
         if (all_core_count == 1) {
@@ -5696,6 +5864,7 @@ struct SystemState {
                 full_core_count + index);
             core->num_cores = static_cast<uint8_t>(all_core_count);
             core->chiplet = &shared_chiplet;
+            core->spinlocks = &shared_spinlocks;
             micro_cores.push_back(std::move(core));
         }
         execution_cores.reserve(static_cast<std::size_t>(all_core_count));
@@ -6062,6 +6231,7 @@ struct SystemState {
     FramebufferDevice shared_fb{};
     RTCDevice shared_rtc{};
     InterruptRouter shared_interrupts{};
+    SharedSpinlocks shared_spinlocks{};
     // After the memory and the router it uses, so its chiplets go first.
     ChipletDevice shared_chiplet{};
     SystemClock shared_clock{};
@@ -10307,6 +10477,56 @@ static inline uint32_t native_mmio_offset(
     return static_cast<uint32_t>(offset);
 }
 
+// The mailbox and the spinlocks keep state by requester, here the core, in
+// the models of shared/accel that a machine's cores reach directly; a
+// standalone core has neither and reaches the Python bus. Each helper moves
+// one whole access and returns whether either window holds the offset. A
+// shape the window refuses is a bus fault, with no byte moved.
+static inline bool read_signal_device(
+        CPUState& s,
+        uint64_t addr,
+        uint32_t mmio_off,
+        unsigned width,
+        uint64_t& value) {
+    bool admitted = false;
+    if (s.interrupts != nullptr &&
+            InterruptRouter::handles_mailbox(mmio_off))
+        admitted = s.interrupts->mailbox_read(
+            mmio_off, width, s.core_id, value);
+    else if (s.spinlocks != nullptr && SharedSpinlocks::handles(mmio_off))
+        admitted = s.spinlocks->read(mmio_off, width, s.core_id, value);
+    else
+        return false;
+    if (!admitted) {
+        s.trap_addr = addr;
+        throw std::runtime_error("TRAP:BUS_FAULT");
+    }
+    return true;
+}
+
+static inline bool write_signal_device(
+        CPUState& s,
+        uint64_t addr,
+        uint32_t mmio_off,
+        unsigned width,
+        uint64_t value) {
+    bool admitted = false;
+    if (s.interrupts != nullptr &&
+            InterruptRouter::handles_mailbox(mmio_off))
+        admitted = s.interrupts->mailbox_write(
+            mmio_off, width, value, s.core_id);
+    else if (s.spinlocks != nullptr && SharedSpinlocks::handles(mmio_off))
+        admitted = s.spinlocks->write(mmio_off, width, value, s.core_id);
+    else
+        return false;
+    if (!admitted) {
+        s.trap_addr = addr;
+        throw std::runtime_error("TRAP:BUS_FAULT");
+    }
+    icache_invalidate_span(s, addr, width);
+    return true;
+}
+
 // Memory access with MMIO and HBW intercept
 static inline uint8_t sys_read8(
         CPUState& s,
@@ -10327,6 +10547,9 @@ static inline uint8_t sys_read8(
         uint32_t mmio_off = native_mmio_offset(s, cb, addr);
         if (s.chiplet != nullptr && s.chiplet->handles(mmio_off))
             reject_chiplet_access(s, addr);
+        uint64_t signal = 0;
+        if (read_signal_device(s, addr, mmio_off, 1, signal))
+            return static_cast<uint8_t>(signal);
         if (s.nic->handles(mmio_off))
             return s.nic->read8(mmio_off);
         if (s.uart->handles(mmio_off))
@@ -10399,6 +10622,8 @@ static inline void sys_write8(
         uint32_t mmio_off = native_mmio_offset(s, cb, addr);
         if (s.chiplet != nullptr && s.chiplet->handles(mmio_off))
             reject_chiplet_access(s, addr);
+        if (write_signal_device(s, addr, mmio_off, 1, val))
+            return;
         if (write_native_nic_bytes(
                 s, cb, mmio_off, val, 1)) {
             icache_invalidate_span(s, addr, 1);
@@ -10502,6 +10727,9 @@ static inline uint64_t sys_read64(
                 reject_chiplet_access(s, addr);
             return s.chiplet->read64(mmio_off);
         }
+        uint64_t signal = 0;
+        if (read_signal_device(s, addr, mmio_off, 8, signal))
+            return signal;
         if (s.nic->handles(mmio_off)) {
             uint64_t v = 0;
             for (int i = 0; i < 8; i++)
@@ -10590,6 +10818,8 @@ static inline void sys_write64(
             icache_invalidate_span(s, addr, 8);
             return;
         }
+        if (write_signal_device(s, addr, mmio_off, 8, val))
+            return;
         if (write_native_nic_bytes(
                 s, cb, mmio_off, val, 8)) {
             icache_invalidate_span(s, addr, 8);
@@ -10670,6 +10900,9 @@ static inline uint16_t sys_read16(
         uint32_t mmio_off = native_mmio_offset(s, cb, addr);
         if (s.chiplet != nullptr && s.chiplet->handles(mmio_off))
             reject_chiplet_access(s, addr);
+        uint64_t signal = 0;
+        if (read_signal_device(s, addr, mmio_off, 2, signal))
+            return static_cast<uint16_t>(signal);
         if (s.trng->handles(mmio_off)) {
             if (!s.trng->handles_span(mmio_off, 2))
                 throw std::runtime_error("TRAP:BUS_FAULT");
@@ -10727,6 +10960,8 @@ static inline void sys_write16(
         uint32_t mmio_off = native_mmio_offset(s, cb, addr);
         if (s.chiplet != nullptr && s.chiplet->handles(mmio_off))
             reject_chiplet_access(s, addr);
+        if (write_signal_device(s, addr, mmio_off, 2, val))
+            return;
         if (write_native_nic_bytes(
                 s, cb, mmio_off, val, 2)) {
             icache_invalidate_span(s, addr, 2);
@@ -10806,6 +11041,9 @@ static inline uint32_t sys_read32(
         uint32_t mmio_off = native_mmio_offset(s, cb, addr);
         if (s.chiplet != nullptr && s.chiplet->handles(mmio_off))
             reject_chiplet_access(s, addr);
+        uint64_t signal = 0;
+        if (read_signal_device(s, addr, mmio_off, 4, signal))
+            return static_cast<uint32_t>(signal);
         if (s.trng->handles(mmio_off)) {
             if (!s.trng->handles_span(mmio_off, 4))
                 throw std::runtime_error("TRAP:BUS_FAULT");
@@ -10883,6 +11121,8 @@ static inline void sys_write32(
         uint32_t mmio_off = native_mmio_offset(s, cb, addr);
         if (s.chiplet != nullptr && s.chiplet->handles(mmio_off))
             reject_chiplet_access(s, addr);
+        if (write_signal_device(s, addr, mmio_off, 4, val))
+            return;
         if (write_native_nic_bytes(
                 s, cb, mmio_off, val, 4)) {
             icache_invalidate_span(s, addr, 4);
@@ -33016,6 +33256,20 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 return -1;
             const uint32_t mmio_off = static_cast<uint32_t>(offset);
             auto memory_guard = acquire_shared_memory_use(s);
+            uint64_t signal = 0;
+            if (s.interrupts != nullptr &&
+                    InterruptRouter::handles_mailbox(mmio_off)) {
+                if (!s.interrupts->mailbox_read(
+                        mmio_off, 1, s.core_id, signal))
+                    throw py::value_error("invalid native mailbox read");
+                return static_cast<int>(signal);
+            }
+            if (s.spinlocks != nullptr &&
+                    SharedSpinlocks::handles(mmio_off)) {
+                if (!s.spinlocks->read(mmio_off, 1, s.core_id, signal))
+                    throw py::value_error("invalid native spinlock read");
+                return static_cast<int>(signal);
+            }
             if (s.nic->handles(mmio_off))
                 return s.nic->read8(mmio_off);
             if (s.trng->handles(mmio_off))
@@ -33056,6 +33310,13 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 return ChipletDevice::shape_valid(mmio_off, width)
                     ? 1 : 0;
             }
+            if (s.interrupts != nullptr &&
+                    InterruptRouter::handles_mailbox(mmio_off))
+                return s.interrupts->mailbox_admits(mmio_off, width, write)
+                    ? 1 : 0;
+            if (s.spinlocks != nullptr &&
+                    SharedSpinlocks::handles(mmio_off))
+                return s.spinlocks->admits(mmio_off, width, write) ? 1 : 0;
             int status = check_span(s.nic);
             if (status >= 0)
                 return status;
@@ -33102,6 +33363,19 @@ PYBIND11_MODULE(_mp64_accel, m) {
             if (s.nic->handles(mmio_off))
                 require_cycle_device_mutation_allowed(s, "native NIC");
             auto memory_guard = acquire_shared_memory_use(s);
+            if (s.interrupts != nullptr &&
+                    InterruptRouter::handles_mailbox(mmio_off)) {
+                if (!s.interrupts->mailbox_write(
+                        mmio_off, 1, value, s.core_id))
+                    throw py::value_error("invalid native mailbox write");
+                return true;
+            }
+            if (s.spinlocks != nullptr &&
+                    SharedSpinlocks::handles(mmio_off)) {
+                if (!s.spinlocks->write(mmio_off, 1, value, s.core_id))
+                    throw py::value_error("invalid native spinlock write");
+                return true;
+            }
             if (s.nic->handles(mmio_off)) {
                 s.nic->write8(mmio_off, value);
                 return true;
@@ -37535,6 +37809,82 @@ PYBIND11_MODULE(_mp64_accel, m) {
             "ipi_pending_snapshot",
             [](const SystemState& system) {
                 return system.shared_interrupts.pending_snapshot();
+            })
+        // The mailbox's and the spinlocks' windows as the Python bus reaches
+        // them, by MMIO offset and for a named requester: the host's
+        // accesses and those of cores that Python runs without native state.
+        .def(
+            "mailbox_read8",
+            [](SystemState& system, uint32_t offset, int requester) {
+                uint64_t value = 0;
+                if (!system.shared_interrupts.mailbox_read(
+                        offset, 1, requester, value))
+                    throw py::value_error("the offset is outside the mailbox");
+                return static_cast<int>(value);
+            },
+            py::arg("offset"),
+            py::arg("requester"))
+        .def(
+            "mailbox_write8",
+            [](SystemState& system, uint32_t offset, uint8_t value,
+               int requester) {
+                if (!system.shared_interrupts.mailbox_write(
+                        offset, 1, value, requester))
+                    throw py::value_error("the offset is outside the mailbox");
+            },
+            py::arg("offset"),
+            py::arg("value"),
+            py::arg("requester"))
+        .def(
+            "mailbox_send",
+            [](SystemState& system, int requester, int target, bool payload) {
+                return system.shared_interrupts.mailbox_send(
+                    requester, target, payload);
+            },
+            py::arg("requester"),
+            py::arg("target"),
+            py::arg("payload"))
+        .def(
+            "mailbox_data",
+            [](const SystemState& system, int core) {
+                return system.shared_interrupts.mailbox_data(core);
+            },
+            py::arg("core"))
+        .def(
+            "set_mailbox_data",
+            [](SystemState& system, int core, uint64_t value) {
+                system.shared_interrupts.set_mailbox_data(core, value);
+            },
+            py::arg("core"),
+            py::arg("value"))
+        .def(
+            "spinlock_read8",
+            [](SystemState& system, uint32_t offset, int requester) {
+                uint64_t value = 0;
+                if (!system.shared_spinlocks.read(
+                        offset, 1, requester, value))
+                    throw py::value_error(
+                        "the offset is outside the spinlocks");
+                return static_cast<int>(value);
+            },
+            py::arg("offset"),
+            py::arg("requester"))
+        .def(
+            "spinlock_write8",
+            [](SystemState& system, uint32_t offset, uint8_t value,
+               int requester) {
+                if (!system.shared_spinlocks.write(
+                        offset, 1, value, requester))
+                    throw py::value_error(
+                        "the offset is outside the spinlocks");
+            },
+            py::arg("offset"),
+            py::arg("value"),
+            py::arg("requester"))
+        .def(
+            "spinlock_owners",
+            [](const SystemState& system) {
+                return system.shared_spinlocks.owners();
             })
         .def(
             "ef_line",

@@ -216,6 +216,14 @@ span the RTL's bus decodes as MMIO, so an access higher in the emulator's
 2^39-byte aperture faults the same way on native cores and on cores that
 Python runs.
 
+The mailbox and the spinlocks keep state by requester, and both are the
+models in `shared/accel/mailbox.h` and `shared/accel/spinlock_bank.h`, which
+the hosted simulator attaches as well. The native system owns them, the
+mailbox beside its IPI router: a core reaches them directly, as requester
+under its own ID, with each access preflighted whole (1, 2, 4 or 8 bytes,
+naturally aligned, inside the window), and the Python bus forwards the
+host's accesses, which name their requester, to the same models.
+
 The native TRNG owns its complete `+0x0800`–`+0x081F` window even when it is
 disabled or unhealthy. `STATUS` at `+0x10` exposes only bit 0 (`USABLE`);
 reads from `RAND8` at `+0x00` or the eight-byte `RAND64` window at
