@@ -150,12 +150,11 @@ class Emulated(_Machine):
     def run(self, lines: list[str]) -> list[int]:
         return [int(v) for v in _REPORT.findall(self._feed(lines))]
 
-    def settle(self, rounds: int = 20) -> None:
-        """Let LM1 work while MegaPad's cores wait at the prompt."""
-        for _ in range(rounds):
-            self.system.run_batch(10_000)
-            self.system.native._service_chiplet_ports(True) if hasattr(
-                self.system, "native") else None
+    def save_port(self) -> bytes:
+        return self.system._native_system.chiplet_save()
+
+    def restore_port(self, state: bytes) -> bool:
+        return bool(self.system._native_system.chiplet_restore(state))
 
 
 class Hosted(_Machine):
@@ -198,9 +197,11 @@ class Hosted(_Machine):
         return [int(v) for v in _REPORT.findall(
             self.runtime.drain_uart_output().decode("latin-1"))]
 
-    def settle(self, rounds: int = 20) -> None:
-        for _ in range(rounds):
-            self.runtime.chiplet_ports.step()
+    def save_port(self) -> bytes:
+        return self.runtime.chiplet_ports.save()
+
+    def restore_port(self, state: bytes) -> bool:
+        return bool(self.runtime.chiplet_ports.restore(state))
 
 
 BACKENDS = [pytest.param(Emulated, id="emulator"), pytest.param(Hosted, id="simulator")]
@@ -885,3 +886,120 @@ def test_17_a_region_request_during_a_hold():
         "OBJ-CLOSE C1-WAIT C1-IOR @ REPORT EPOCH N0 @ - REPORT",
     ])
     assert got == [0, 0, 0, -1, -1, 0, -1, 0, 1]
+
+
+# ---------------------------------------------------------------------------
+#  Recovery's stage 0: the order of a moving hold's writes
+# ---------------------------------------------------------------------------
+
+def check_write_order(trace: list[tuple[int, int]], lm1_block: int) -> dict:
+    """Check a moving hold's writes against the order spec/05-memory-gc.md
+    section 12.3 fixes for recovery's stage 0 (items 10 to 12): the move set
+    first, then MOVE_SET, then MOVE reading FLIPPING; each copy whole before
+    the forwarding pointer over its old header; a reference to a new place
+    only after that place's forwarding pointer; copies only into the move
+    set's destinations, apart from its sources; MOVE reading FIXED after the
+    last rewrite and before the hold ends; and no mark in any header."""
+    move, move_set, hold = lm1_block + 0x40, lm1_block + 0x48, lm1_block
+    flips = [i for i, (a, v) in enumerate(trace) if a == move and v & 7 == 1]
+    fixes = [i for i, (a, v) in enumerate(trace) if a == move and v & 7 == 2]
+    assert len(flips) == 1 and len(fixes) == 1, "one FLIPPING and one FIXED"
+    flip, fixed = flips[0], fixes[0]
+    assert trace[flip][1] >> 3 == trace[fixed][1] >> 3, "MOVE names one epoch"
+    epoch = trace[flip][1] >> 3
+    sets = [i for i, (a, _) in enumerate(trace) if a == move_set]
+    assert len(sets) == 1 and sets[0] < flip, "MOVE_SET before FLIPPING"
+    base = trace[sets[0]][1]
+    words = {}
+    for i, (a, v) in enumerate(trace[:sets[0]]):
+        if a >= base:
+            words[a] = (i, v)
+    s, d = words[base][1], words[base + 8][1]
+    ranges = [words[base + 16 + 16 * k][1:] + words[base + 24 + 16 * k][1:] for k in range(s + d)]
+    sources, destinations = ranges[:s], ranges[s:]
+    for b, l in sources:
+        for b2, l2 in destinations:
+            assert l <= b2 or l2 <= b, "a destination overlaps a source"
+    inside = lambda a, rs: any(b <= a < l for b, l in rs)
+    # Forwarding pointers: GC bits 0xFF over a header in a source range.
+    forward = {}
+    for i, (a, v) in enumerate(trace):
+        if v & 7 == 7 and v >> 56 == 0xFF:
+            assert flip < i < fixed, "a forwarding pointer outside the flip"
+            assert inside(a, sources), "a forwarding pointer outside the sources"
+            new = v & 0x00FFFFFFFFFFFFF8
+            assert inside(new, destinations), "a forwarding pointer to no destination"
+            forward[new] = (i, a)
+        elif v & 7 == 7:
+            assert v >> 56 == 0, "a mark in a header's GC bits"
+    assert forward, "the hold moved nothing"
+    # Each copy lies whole in the destinations before its pointer.
+    for new, (i, old) in forward.items():
+        header = [v for a, v in trace[flip:i] if a == new]
+        assert header, "a forwarding pointer before its copy's header"
+        size = 8 * (1 + ((header[-1] >> 8) & 0xFFFF))
+        written = {a for a, _ in trace[flip:i] if new <= a < new + size}
+        assert written == set(range(new, new + size, 8)), "a copy not whole before its pointer"
+    # A reference to a new place only after that place's pointer, and every
+    # reference without metadata.  Copies hold the old references until the
+    # rewrites, so a reference to a new place is always a rewrite.
+    for i, (a, v) in enumerate(trace[flip:fixed], flip):
+        if v & 7 in (1, 3):
+            assert v >> 51 == 0, "a reference written with metadata"
+            target = v & 0x0007FFFFFFFFFFF8
+            if target in forward:
+                assert i > forward[target][0], "a reference to a new place before its pointer"
+    ends = [i for i, (a, v) in enumerate(trace) if a == hold and v & 3 == 0 and v >> 3 == epoch + 1]
+    assert ends and ends[0] > fixed, "the hold ended before FIXED"
+    return {"moved": len(forward), "sources": len(sources), "epoch": epoch}
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("mode", [0, 2])
+def test_stage0_a_moving_holds_writes_keep_their_order(backend, mode):
+    machine = ready(backend, extra=[TWO_DESC])
+    got = machine.run([
+        "D-TWO %d OBJ-SHAPE REPORT SH !" % TWO_LEN,
+        # A chain of records and a list, some made old by a collection
+        # first, held by handles: the hold moves objects that refer to one
+        # another, from the slots, old objects and the copies themselves.
+        ": TWO ( a b -- r ) SH @ OBJ-RECORD THROW TUCK 2 OBJ! THROW TUCK 1 OBJ! THROW ;",
+        ": CHAIN OBJ-OPEN THROW 1 INT>OBJ THROW 2 INT>OBJ THROW TWO DUP 3 INT>OBJ THROW TWO "
+        "DUP 1 1 OBJ-HANDLE THROW H ! OBJ-NIL OBJ-CONS THROW OBJ-NIL OBJ-CONS THROW "
+        "1 1 OBJ-HANDLE THROW H2 ! OBJ-CLOSE ;",
+        "CHAIN 0 OBJ-COLLECT REPORT CHAIN _OBJ-LB @ REPORT",
+    ])
+    assert got[:2] == [0, 0]
+    lm1 = machine.lm1
+    lm1.md_trace(True)
+    assert machine.run(["%d OBJ-COLLECT REPORT" % mode]) == [0]
+    trace = lm1.md_trace_take()
+    lm1.md_trace(False)
+    found = check_write_order(trace, got[2])
+    assert found["moved"] >= (3 if mode == 0 else 6)
+    # The handles still give the chain.
+    assert machine.run([
+        ": CHECKW OBJ-OPEN THROW H @ OBJ-GET THROW DUP 2 OBJ@ OBJ>INT THROW REPORT 1 OBJ@ OBJ>REF THROW "
+        "DUP 1 OBJ@ OBJ>INT THROW REPORT 2 OBJ@ OBJ>INT THROW REPORT OBJ-CLOSE ;",
+        "CHECKW",
+    ]) == [3, 1, 2]
+
+
+# ---------------------------------------------------------------------------
+#  The port saved and restored while managed data serves
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_the_port_saves_and_restores_while_managed_data_serves(backend):
+    """The module's state, its stand-in for LM1's runtime included, survives
+    a save and a restore of the port: the state it saves again is the same,
+    and the function serves on from it."""
+    machine = ready(backend)
+    assert machine.run(MAKE_PAIR + ["0 OBJ-COLLECT REPORT", "CHECK2 R1 @ N0 !"]) == \
+        [0, 0] + PAIR_READS
+    state = machine.save_port()
+    assert machine.restore_port(state)
+    assert machine.save_port() == state
+    # The restored collector moves the record again, and its handle follows.
+    got = machine.run(["2 OBJ-COLLECT REPORT", "CHECK2 R1 @ N0 @ <> REPORT"])
+    assert got == [0] + PAIR_READS + [-1]
