@@ -1,17 +1,17 @@
 # Multicore simulator plan
 
-Status: Proposed, 2026-11-22. Nothing in this plan is built. It is the
-staged plan for Part 3 of the release plan (`dev/PLAN.md` in fantasy-engine),
-in which MegaPad's hosted simulator becomes the multicore machine MegaPad
-is. Section 1 describes the simulator as it stands, section 2 says what
-matching the emulator's lock-step can mean for a simulator that runs Forth
-semantically, section 3 lists what each step of Part 3 needs, section 4 sets
-out the design the stages share, and section 5 gives the stages with their
-tests, estimates and closing costs. Sections 6 to 9 cover the order of the
-work, the RTL prerequisite for microcores, the work in flight that the plan
-touches, and what the investigation found that the release plan and the
-simulator contract should take up. Section 10 lists the decisions the plan
-needs from the author.
+Status: Accepted, 2026-11-22, with the nine decisions of section 10. No
+stage is built yet. It is the staged plan for Part 3 of the release plan
+(`dev/PLAN.md` in fantasy-engine), in which MegaPad's hosted simulator
+becomes the multicore machine MegaPad is. Section 1 describes the simulator
+as it stands, section 2 says what matching the emulator's lock-step can mean
+for a simulator that runs Forth semantically, section 3 lists what each step
+of Part 3 needs, section 4 sets out the design the stages share, and section
+5 gives the stages with their tests, estimates and closing costs. Sections 6
+to 9 cover the order of the work, the RTL prerequisite for microcores, the
+work in flight that the plan touches, and what the investigation found that
+the release plan and the simulator contract should take up. Section 10
+records the decisions taken with the plan.
 
 ## 1. The simulator today
 
@@ -120,7 +120,7 @@ Here 3a means three promises, which stage 3 writes into the contract:
    simulator, which may differ from the emulator's; the contract already
    leaves physical multicore races outside its claims.
 
-Decision 1 asks the author to confirm this reading.
+Decision 1 adopts this reading.
 
 ## 3. What each step of Part 3 needs
 
@@ -142,10 +142,10 @@ gives them kernel words, a restricted Forth subset that the BIOS JIT
 compiles for them, and that document lists the kernel vocabulary, launch,
 completion and the calling convention as open questions. A semantic
 simulator can only run kernels on microcores, because it runs no machine
-code, so this half of 3a waits for a kernel contract that no part of the
-release plan schedules (decision 6). The cluster's devices, `CLUSTER-EN`,
-the barrier, the scratchpad and the engines its four microcores share, come
-with the kernels.
+code, so this half of 3a waits for a design round on the kernel contract,
+which the release plan gains as a step (decision 6). The cluster's devices,
+`CLUSTER-EN`, the barrier, the scratchpad and the engines its four
+microcores share, come with the kernels.
 
 **3b, parallel rounds.** Each core's turn in a round must run in the native
 engine from its start to its end, holding the core's stack state in C++, so
@@ -366,7 +366,7 @@ Desktop journey takes about 2.5 minutes.
 | Stage | Builds | Agent hours | Closing cost | Unblocks |
 |---|---|---|---|---|
 | 1 | Devices attach through one interface (3c) | 6 to 12 | 70 min, journey | 3, 4 |
-| 2 | The BIOS worker loop takes signals and aborts correctly, and boot sets every full core's stacks | 4 to 8, and 3 to 5 for the emulator's shared devices | 190 min, two classes of `tests/test_system.py` on request | 3; LM1 8d stage 3 and borrowed tile work on the emulator |
+| 2 | The BIOS worker loop takes signals and aborts correctly, boot sets every full core's stacks, and the emulator uses the shared device models | 7 to 13 | 190 min, and `TestMulticore` and `TestKDOSMulticore` of `tests/test_system.py`, one class at a time | 3; LM1 8d stage 3 and borrowed tile work on the emulator |
 | 3 | Full cores, the scheduler and the worker loop (3a) | 16 to 30 | 75 min, journey | 4, 5, 9 |
 | 4 | Per-core engines, contention, chiplets in rounds, worker services (3a, 3f) | 8 to 16 | 120 min, journey | 9; LM1 8d stage 3 on the simulator; release plan 9f |
 | 5 | Cooperative tasks on core 0 | 3 to 6 | 70 min | the contract's named target |
@@ -375,8 +375,8 @@ Desktop journey takes about 2.5 minutes.
 | 8 | Parallel rounds (3b) | 22 to 44 | 70 min per part, journeys, the lane suite | simulator speed with busy workers |
 | 9 | Desk with background work on extra cores | 4 to 8 | 70 min, journeys | Part 3's done-when |
 
-The full-core path, stages 1 to 5 and 9, comes to about 41 to 80 agent hours,
-44 to 85 with decision 4's emulator work, and about 10 hours of closing runs.
+The full-core path, stages 1 to 5 and 9, comes to about 44 to 85 agent hours,
+decision 4's emulator work included, and about 10 hours of closing runs.
 Recent rounds finished well inside their estimates: the move of the ext4
 tests onto the simulator took 2.7 agent hours against an estimate in weeks,
 and LM1's core model 75 minutes against 8 to 14 hours. The ranges here keep
@@ -419,7 +419,7 @@ BIOS change:
   addresses they have now, so the emulator's boot stops setting R2 for the
   BIOS and the RTL needs no reset value for it (section 7).
 
-With decision 4, the emulator's Python `MailboxDevice` data slots and
+Under decision 4 the emulator's Python `MailboxDevice` data slots and
 `SpinlockDevice` move to the shared models in the same stage, so both
 backends' multicore devices have one definition before stage 3 builds on
 them.
@@ -430,8 +430,9 @@ that leaves the worker idle and core 0's stacks intact, and the existing
 multicore emulator tests (`test_lockstep_rounds.py`,
 `test_chiplet_emulator.py`, `test_chiplet_mailbox.py`,
 `test_concurrency_handoff.py`). `TestMulticore` and `TestKDOSMulticore` live
-in `tests/test_system.py`, the `final` set's file, so they run through
-`make test-sequential TEST_PATH=tests/test_system.py K=...` after asking.
+in `tests/test_system.py`, the `final` set's file; they run one class at a
+time through `make test-sequential TEST_PATH=tests/test_system.py K=...`,
+with each class's peak memory noted.
 This stage can run beside stage 1, since they touch different files; their
 closing runs go one at a time.
 
@@ -492,7 +493,7 @@ steps; LM1's units.
 
 ### Stage 5. Cooperative tasks on core 0
 
-With decision 7, builds the BIOS's three background slots on core 0:
+Under decision 7, builds the BIOS's three background slots on core 0:
 `BACKGROUND`, `BACKGROUND2` and `BACKGROUND3` start a slot on stacks of the
 BIOS's size, 32 cells each; `PAUSE` turns through slots 1 to 3 from the
 foreground; `TASK-YIELD` returns to task 0; `TASK-STOP` ends a slot; and
@@ -507,7 +508,8 @@ Section 7.
 
 ### Stage 7. Clusters and microcore kernels (3a)
 
-After the kernel contract of decision 6, builds clusters of four microcores
+After the kernel-contract round of decision 6, builds clusters of four
+microcores
 (IDs 4 to 15), `CLUSTER-EN`, the cluster barrier, the 1 KiB scratchpad, the
 results of the engines a cluster shares, the cluster privilege registers,
 and kernels running on microcore contexts with the contract's checks. Tests
@@ -572,12 +574,12 @@ them, at an estimated 4 to 8 agent hours of rework, and parallel rounds would
 inherit two MMIO paths to make safe instead of one. Doing 3c first costs its
 6 to 12 hours before any core runs.
 
-Stage 2 can run beside stage 1, and stage 3 needs both. Stages 4, 5 and 9
-follow stage 3; stage 9 needs only stages 1 to 4, so it can come straight
-after stage 4 if the author wants Part 3's done-when sooner than the
-microcore and parallel work. Stage 6 is RTL work and can run at any time;
-stage 7 waits for it and for the kernel contract. Stage 8 follows stage 4 and
-is reviewed on its own.
+The full-core stages run in the order 1, 2, 3, 4, 5 and 9, each reported
+once it is green; stage 2 could run beside stage 1, since they touch
+different files, and stage 3 needs both. Stage 9 needs only stages 1 to 4.
+Stage 6 is RTL work and can run at any time; stage 7 waits for it and for
+the kernel-contract round. Stage 8 follows stage 4 and is reviewed on its
+own.
 
 ## 7. The RTL prerequisite for microcores (3e)
 
@@ -665,12 +667,13 @@ emulator. Each needs a change in the BIOS, the release plan or the contract.
    idle loop; stage 2 gives aborts the same ending.
 3. **On the RTL every core starts with R2 at zero (read from the
    source).** Section 7.
-4. **3a's microcore half rests on unscheduled work.** Kernel words, with
+4. **3a's microcore half rested on unscheduled work.** Kernel words, with
    their vocabulary, launch, completion and calling convention, and their
    compilation by the BIOS JIT are open questions in
-   `docs/microcore-kernels-plan.md` §6, and the release plan schedules them
-   in none of its parts; kernels are all a semantic simulator can run on a
-   microcore (decision 6).
+   `docs/microcore-kernels-plan.md` §6, which no part of the release plan
+   scheduled, and kernels are all a semantic simulator can run on a
+   microcore. Decision 6 adds a design round for the kernel contract to the
+   release plan.
 5. **Part 3f reads as unbuilt.** The release plan says the simulator marks
    the full-width TACC family unsupported, but it was built on 2026-11-20
    (4b07a41c, 39e8628b) and merged with the 2026-11-21 batch; what remains
@@ -701,141 +704,76 @@ emulator. Each needs a change in the BIOS, the release plan or the contract.
 11. **The parallel plan's commit rule can be narrower.** Section 4.8 states
     the rule that exactly reproduces the sequential order, with its proof.
 
-## 10. Decisions for the author
+## 10. Decisions
 
-**1. What matching the emulator's lock-step means.** Step 3a asks for
-results that match the emulator's lock-step, and the simulator executes
-semantic operations whose memory accesses differ from the BIOS's machine
-code, so the emulator's interleaving of a racing program is out of its
-reach (section 2). The options:
+All nine were decided on 2026-11-22, each as this plan proposed.
 
-- (a) three promises: determinism with the host never picking a winner, an
-  outcome the architecture allows, and equal results wherever the program's
-  synchronization fixes them;
-- (b) equal results for racing programs too, which only an MP64 instruction
-  model gives, so the simulator would become the emulator;
-- (c) (a) plus a race report, in which the simulator names accesses of
-  different cores to one cell with no synchronization between them, using
-  the read and write records of stage 8.
+**1. Matching the emulator's lock-step means the three promises of section
+2.** The simulator executes semantic operations whose memory accesses differ
+from the BIOS's machine code, so the emulator's interleaving of a racing
+program lies beyond it. Determinism, an outcome the architecture allows, and
+equal results wherever a program's synchronization fixes them are what the
+differential suite can check, and they agree with the contract's existing
+claims.
 
-Recommended: (a). It is what the differential suite can check and what the
-contract already claims; (c) can follow as a debugging tool. Cost: none
-beyond the stages; (c) adds about 6 to 10 agent hours after stage 8.
+**2. The round rule.** A turn runs for at most 65,536 semantic steps, a
+quantum fixed in the machine profile and the same for both executors, and
+ends early at `IDL`, at a refused spinlock acquire and at the end of a worker
+job. Time follows the emulator's round clock: a round advances it by its
+longest turn, and a core's reads see the round's start plus its own steps.
+The quantum's measured cost is within noise on today's path, ending a turn
+early stops a waiting core from spinning through its quantum, and the round
+clock reduces to today's rule with one awake core and lets parallel rounds
+read `CYCLES` without reruns. The quantum can shrink after stage 8a without
+touching the differential suite, which checks synchronized results only.
 
-**2. The round rule: the quantum, where a turn ends, and the clock.**
-Determinism needs a fixed rule for when cores switch and how time advances,
-and the quantum becomes guest-visible through racing programs and through
-how long a waiting core spins. Options for the quantum:
+**3. Device attachment (3c) comes before the multicore model (3a).** The
+mailbox, the IPIs, the spinlocks and the wake lines are then built once, on
+the new interface, and stage 8 has one MMIO path to make thread-safe. Stage 1
+costs its 6 to 12 agent hours before any second core runs.
 
-- (a) 65,536 semantic steps per turn, fixed in the profile for both
-  executors, with a turn ending early at `IDL`, at a refused spinlock
-  acquire and at the end of a worker job;
-- (b) 1,000 steps, the emulator's round size, which needs stage 8a's native
-  core switch first, since today's path makes a quantum of 1,024 about ten
-  times slower on tight native loops.
+**4. One model of each multicore device serves both backends.** The mailbox
+and the spinlock bank are written once in `shared/accel`, and stage 2 moves
+the emulator's Python `MailboxDevice` and `SpinlockDevice` onto them, so no
+second definition of either device can drift from the first and the
+emulator gains native mailbox and spinlock access. The move costs 3 to 5
+agent hours inside stage 2, whose closing run already covers the emulator's
+units for the BIOS change.
 
-Options for the clock:
+**5. A BIOS worker acknowledges signals other than jobs as wake-ups, and an
+abort on a worker ends the job as a fault does.** The worker's IPI handler
+takes a job only from a full core and acknowledges every other pending
+signal, as core 0's sleep already does, which fits the link's rule that a
+doorbell means "look at your queues". This corrects findings 1 and 2, on
+which borrowed tile work's serving core and managed data's worker cores
+depend. It costs 3 to 6 agent hours and a closing run of about 190 minutes,
+shared with decision 4's work in stage 2.
 
-- (i) one counter advanced by every step of every core, in execution order;
-- (ii) a round clock, in which a round advances time by its longest turn and
-  a core's reads see the round's start plus its own steps.
+**6. A design round for the kernel contract comes before microcores.** The
+round settles the kernel vocabulary, launch, completion, calling convention
+and spill areas; kernels are then built in the BIOS JIT and in the simulator,
+with the cluster devices, as stage 7. The release plan gains the round as a
+step. Part 3's done-when needs full cores only. By estimate the design takes
+4 to 8 agent hours, kernel compilation in the BIOS JIT 20 to 40 with a BIOS
+closing run of about 150 minutes, and stage 7 10 to 18.
 
-Recommended: (a) with (ii). The measured cost of (a) is within noise, and
-ending a turn early stops a waiting core from spinning through its quantum.
-(ii) is the emulator's model, reduces to today's rule with one awake core,
-and under it `CYCLES` reads force no reruns in parallel rounds. The quantum can
-shrink after stage 8a without touching the differential suite, which checks
-synchronized results only. Cost: none for (a) and (ii); (b) moves stage 8a,
-10 to 20 agent hours, before stage 3.
+**7. The BIOS's cooperative task slots are built in Part 3, as stage 5.**
+Step 3a points to the contract's target scheduler, which is the cooperative
+one, and stage 3's contexts make the slots cheap to build: 3 to 6 agent
+hours and a 70-minute closing run. Nothing in Akashic uses the slots yet,
+and their 32-cell stacks suit only small work.
 
-**3. Whether device attachment (3c) comes before the multicore model
-(3a).** Built first, multicore's devices are built once on the new
-interface; built second, the mailbox, IPIs, spinlocks and wake lines are
-built in the hard-coded windows and moved later. Options: (a) stage 1 first;
-(b) stage 3 first on today's windows. Recommended: (a). Cost: (a) puts 6 to
-12 agent hours before any second core runs; (b) costs an estimated 4 to 8
-hours of rework and leaves stage 8 two MMIO paths to make thread-safe.
+**8. Parallel rounds (3b) serve the simulator first.** The Desktop and its
+journeys run on the simulator, Part 3 is about it, and its reference order is
+whole turns in core order, where the emulator's interleaves every memory
+access and needs finer records and checks. The read and write records live
+in `shared/accel`, so the emulator can adopt them later. Stage 8 is estimated
+at 22 to 44 agent hours.
 
-**4. One model of each multicore device for both backends.** The emulator's
-mailbox data slots and spinlocks are Python (`MailboxDevice`,
-`SpinlockDevice` in `emulator/devices.py`), the simulator's spinlocks are a
-second Python model (`simulator/spinlocks.py`), and stage 1 writes C++
-models. Options: (a) write the mailbox and the spinlock bank once in
-`shared/accel` and move the emulator to them in stage 2; (b) give the
-simulator its own C++ models and leave the emulator's. Recommended: (a),
-since two definitions of one device can drift, as the rule against fast
-copies warns, and the emulator gains native mailbox and spinlock access.
-Cost: 3 to 5 agent hours in stage 2, whose closing run already covers the
-emulator's units for the BIOS change.
-
-**5. How a BIOS worker takes signals other than jobs, and how an abort on a
-worker ends.** Findings 1 and 2: a chiplet's or microcore's signal
-re-runs a worker's last job or traps the worker in its IPI handler, and an
-abort on a worker starts the outer interpreter there. Borrowed tile work's
-serving core and managed data's worker cores depend on the fix. Options for
-signals:
-
-- (a) the handler takes a job only from a full core and acknowledges every
-  other signal as a wake-up, as core 0's sleep already does, which fits the
-  link's rule that a doorbell means "look at your queues";
-- (b) a worker keeps IPIs masked while a job runs and polls for signals;
-- (c) the handler records non-job signals in a per-core word for software.
-
-For aborts: end the job as a fault does. Recommended: (a), and aborts ending
-as faults. (b) changes what an interrupt-enabled worker means, and (c) adds
-state no consumer reads yet. Cost: 3 to 6 agent hours and a closing run of
-about 190 minutes (`bios.asm` and the emulator's units), shared with decision
-4's work.
-
-**6. What the simulator runs on microcores.** A semantic simulator can run
-only kernel words on microcores, and the kernel contract is undesigned
-(finding 4). Options:
-
-- (a) a design round for the kernel contract first (vocabulary, launch,
-  completion, calling convention, spill areas), then kernels in the BIOS JIT
-  and in the simulator, with the cluster devices, as stage 7;
-- (b) the cluster devices now, with microcores idle and `WAKE-CORE` to a
-  microcore failing explicitly until kernels exist;
-- (c) ordinary semantic words on microcores with run-time checks, which
-  would set the contract in the simulator before the BIOS can compile any of
-  it.
-
-Recommended: (a), with the release plan gaining the kernel contract as a
-step. Part 3's done-when needs full cores only. Cost: about 4 to 8 agent
-hours of design, 20 to 40 for kernel compilation in the BIOS JIT with a BIOS
-closing run of about 150 minutes, and 10 to 18 for stage 7. (b) costs about 4
-to 6 hours that (a) would partly redo.
-
-**7. Cooperative tasks on core 0 in Part 3.** The BIOS has three background
-slots, `PAUSE` and `TASK-YIELD`; the contract names a cooperative scheduler
-as its target (finding 6); nothing in Akashic uses the slots today, and their
-32-cell stacks are far too small for VFS work. Options: (a) build them as
-stage 5, reusing stage 3's contexts; (b) leave them failing until a consumer
-exists. Recommended: (a), since step 3a points to the contract's target and
-the shared machinery makes them cheap now. Cost: 3 to 6 agent hours and a
-70-minute closing run.
-
-**8. Which backend parallel rounds (3b) serve first.** The parallel plan was
-written while the simulator had one core and measures the emulator. Options:
-(a) the simulator first, with the read and write records in `shared/accel`
-for the emulator to adopt later; (b) the emulator first; (c) both in one
-stage. Recommended: (a), because the Desktop and its journeys run on the
-simulator and Part 3 is about it, and because the simulator's reference
-order is whole turns in core order, where the emulator's interleaves every
-memory access and so needs finer records and checks. Cost: stage 8 as
-estimated, 22 to 44 agent hours; by estimate (c) adds about half again for
-the emulator's instruction-level checkpoints.
-
-**9. What a worker core may do.** KDOS's concurrency contract keeps the
-heap, arena setup and dictionary on core 0, and the rich terminal keeps
-input there. KDOS guards its heap words itself, but on the machine a worker
-can still compile, evaluate or read the UART while core 0 does the same.
-Options: (a) the simulator holds workers to the contract: the compiler, the
+**9. Workers are held to KDOS's core-0 contract.** The compiler, the
 evaluator, dictionary growth and rollback, and UART input run on core 0
-alone, a worker that reaches one faults with -21, and a rollback that would
-remove a word a suspended core runs inside is refused; (b) workers may do
-anything the machine lets them, with per-core evaluator state, mirroring the
-machine's races. Recommended: (a). It keeps the differential suite to
-programs that follow the contract, which is where results are defined, and
-fails closed where the machine would corrupt itself. Cost: included in
-stage 3; (b) adds about 6 to 10 agent hours.
+alone; a worker that reaches one faults with -21; and a rollback that would
+remove a word a suspended core runs inside is refused. This keeps the
+differential suite to programs that follow the contract, which is where
+results are defined, and fails closed where the machine would corrupt itself.
+It is part of stage 3.
