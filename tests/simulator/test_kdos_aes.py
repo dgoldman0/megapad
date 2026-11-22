@@ -40,7 +40,7 @@ from simulator.memory import (
     MMIOAccessError,
     UnmappedAddressError,
 )
-from simulator.platform import OneCorePlatformMMIO, create_one_core_address_space
+from simulator.platform import HostedPlatform, create_one_core_address_space
 from simulator.runtime import MegaForthRuntime
 from tests.simulator.test_kdos_diagnostics import _load_diagnostics
 
@@ -412,7 +412,7 @@ def test_each_mode_fails_closed_on_a_configuration_that_is_not_its_own() -> None
 
 def test_bios_and_direct_mmio_share_one_aes_transaction_both_directions() -> None:
     runtime = MegaForthRuntime()
-    assert isinstance(runtime.memory.mmio, OneCorePlatformMMIO)
+    assert isinstance(runtime.memory.mmio, HostedPlatform)
     assert runtime.memory.mmio.aes is runtime.aes
 
     _write_mmio(runtime, AES_KEY, KEY)

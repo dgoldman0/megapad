@@ -99,7 +99,13 @@ _INPUT_ORACLE_GLOBALS = tuple(
 
 
 def _register_input_platform_route(platform_type: type) -> None:
-    """Capture the sole original router once; repeated registration declines."""
+    """Capture the sole original platform once; repeated registration declines.
+
+    The platform's port methods hand each access to its native table, whose
+    routing is compiled code. The route a byte takes is therefore those two
+    methods, which are captured here, and the device the table holds at the
+    input register, which each submission checks.
+    """
 
     global _INPUT_PLATFORM_ROUTE, _INPUT_PLATFORM_ORIGINAL, _INPUT_PLATFORM_REGISTERED
     if _INPUT_PLATFORM_REGISTERED:
@@ -107,15 +113,23 @@ def _register_input_platform_route(platform_type: type) -> None:
         return
     _INPUT_PLATFORM_REGISTERED = True
     methods = tuple((name, platform_type.__dict__[name])
-                    for name in ("preflight", "write8", "_service"))
-    namespace = platform_type._service.__globals__
-    constants = tuple((name, namespace[name]) for name in (
-        "SYSINFO_OFFSET", "SYSINFO_LIMIT", "AES_OFFSET", "AES_LIMIT",
-        "SHA3_OFFSET", "SHA3_LIMIT", "TRNG_OFFSET", "TRNG_LIMIT",
-        "RTC_UPTIME", "RTC_EPOCH_LIMIT", "AUDIO_OFFSET", "AUDIO_LIMIT",
-    ))
-    _INPUT_PLATFORM_ROUTE = (platform_type, methods, namespace, constants)
+                    for name in ("preflight", "write8"))
+    _INPUT_PLATFORM_ROUTE = (platform_type, methods)
     _INPUT_PLATFORM_ORIGINAL = _INPUT_PLATFORM_ROUTE
+
+
+def _input_table_reaches(port: object, service: "HostedSHA3Service") -> bool:
+    """Whether the platform's table gives the input register to SERVICE
+    through the native adapter alone."""
+
+    try:
+        table = object.__getattribute__(port, "_table")
+    except AttributeError:
+        return False
+    extension = sys.modules.get("_megaforth_native")
+    table_type = getattr(extension, "PlatformTable", None)
+    return (table_type is not None and type(table) is table_type
+            and table.python_target_at(SHA3_DATA_INPUT) is service)
 
 
 def _input_methods_match(owner: object, originals: tuple) -> bool:
@@ -466,19 +480,21 @@ class HostedSHA3Service:
                 or type(payload) is not bytes or route is None
                 or route is not _INPUT_PLATFORM_ORIGINAL):
             return False
-        platform_type, methods, namespace, constants = route
+        platform_type, methods = route
         port = memory._mmio
-        if (type(port) is not platform_type or port.sha3 is not self
+        if (type(port) is not platform_type
                 or not _input_methods_match(memory, _INPUT_MEMORY_METHODS)
                 or not _input_methods_match(port, methods)
                 or not _input_methods_match(self, _INPUT_SERVICE_METHODS)):
             return False
+        # The table is asked about the input register only once the
+        # register's constant is known to be the original.
         if (any(getattr(_memory_module, name) is not original
                 for name, original in _INPUT_MEMORY_GLOBALS)
                 or _memory_module._ResolvedSpan.__init__ is not _INPUT_SPAN_INITIALIZER
-                or any(namespace.get(name) is not original for name, original in constants)
                 or any(globals().get(name) is not original
                        for name, original in _INPUT_SERVICE_GLOBALS)
+                or not _input_table_reaches(port, self)
                 or not _input_permutation_is_canonical(self)):
             return False
         # Keep customized containers or scalar objects on the byte route too:

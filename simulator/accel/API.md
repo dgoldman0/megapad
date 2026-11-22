@@ -3,12 +3,14 @@
 The extension and its Python owner are built from the same checkout and use
 one current internal interface. Rebuild the extension after changing this
 boundary with `python setup_simulator_accel.py build_ext --inplace --force`.
-The extension exports `SEMANTIC_API_VERSION = 13`; its Python owner checks this
+The extension exports `SEMANTIC_API_VERSION = 14`; its Python owner checks this
 version before admission. An explicit native request rejects older builds;
 automatic selection keeps the reference executor and the Python dictionary
 when the version mismatches. The simulator's CRC and storage services are
 classes of this extension, so a runtime needs a matching build whichever
 executor runs Forth, and refuses an older one when it makes those services.
+So are the platform's attachment table, its native devices and the spinlock
+bank (`platform_bindings.h`; section "Platform devices" below).
 
 `_megaforth_native.NativeProgram(regions, page_size, continuation_type,
 dense_regions=())` retains sparse ordinary regions as `(base, size, pages)`
@@ -430,10 +432,10 @@ that call alone. The host file that holds a medium is still
 `shared.storage.HostImageFile`, which the service calls to mark the sectors
 a write changes and to flush them.
 
-`bind_storage(services, memory, lock_owners)` gives the program the
-runtime's units in unit order, the memory they are bound to and the live
-owner list of the runtime's spinlock bank, and `run` takes `disk=True`
-while the runtime still keeps all three. The run then admits
+`bind_storage(services, memory, lock_bank)` gives the program the
+runtime's units in unit order, the memory they are bound to and the
+runtime's native spinlock bank, and `run` takes `disk=True` while the
+runtime still keeps all three. The run then admits
 `OP_DISK_VALUE`, the compiled calls of `DISK@`, `DISK-SECTORS`,
 `DISK-MEDIA-GEN`, `DISK-CAPS` and their `UNIT-DISK-*` forms, with the
 register in operand `b`; `OP_DISK_TRANSFER`, the checked READ and WRITE
@@ -507,3 +509,30 @@ of the dictionary first for that reason.
 `NativeColonBody` owns no Python reference. `TileIdentityGuard` keeps
 classes, functions of theirs and a module, none of which a machine owns, and
 stays outside collection.
+
+## Platform devices
+
+`PlatformTable` holds every MMIO window of the hosted platform. `attach(name,
+device, windows)` claims half-open windows of the aperture for a device and
+refuses one that overlaps another; `replace(name, device)` puts another
+device in the same windows. A device is a native `MMIODevice`, or any Python
+object with `preflight(offset, width, *, write)`, `read8(offset)` and
+`write8(offset, value)`, which the table reaches through its adapter.
+`preflight`, `read8` and `write8` give an access to the device whose window
+holds its first byte, with the table's `requester`, a core's ID or a DMA
+requester's negative number. A refusal calls the handler `set_refusal`
+installs with `(name, message, offset, width, write)`, which raises the
+device's own error, or raises `ValueError` without one; a Python device's
+exceptions pass through unchanged. `lines(core)` collects the `LINE_IPI`,
+`LINE_EXTERNAL_FLAG` and `LINE_WAKE` bits every device raises for a core,
+and `name_at`, `python_target_at`, `device` and `windows` describe the
+attachments.
+
+The native devices are `SysInfo`, made from the board ID, the topology, the
+memory geometry, the crypto capabilities and the chiplet ports' word;
+`ChipletWindowDevice` over a `ChipletLink`; `Mailbox`, the shared model of
+`shared/accel/mailbox.h`, over a `ChipletLink`'s participant table, a
+`MailboxPending`, or a table of its own for a core count; and
+`SpinlockBank`, the shared model of `shared/accel/spinlock_bank.h`, which
+`simulator/spinlocks.py` exports as `HostedSpinlockBank` and whose window
+the platform does not attach yet.

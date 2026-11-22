@@ -9,9 +9,9 @@ import sys
 import pytest
 
 from shared.keccak import keccak_f1600
-from simulator import memory as memory_module, platform as platform_module, sha3
+from simulator import memory as memory_module, sha3
 from simulator.memory import MMIOAccessError, MMIO_BASE, SparseAddressSpace
-from simulator.platform import OneCorePlatformMMIO, create_one_core_address_space
+from simulator.platform import HostedPlatform, create_one_core_address_space
 from simulator.sha3 import (
     CALLER_SPAN_OK, CRYPTO_STATUS_HARDWARE, CRYPTO_STATUS_OK,
     CRYPTO_STATUS_PROTECTED, CRYPTO_STATUS_STATE, HostedSHA3Service,
@@ -49,7 +49,7 @@ def _observe_input_routes():
     counts = {"memory": 0, "platform": 0, "service": 0}
     codes = {
         SparseAddressSpace.write8.__code__: ("memory", "address", MMIO_BASE + SHA3_DATA_INPUT),
-        OneCorePlatformMMIO.write8.__code__: ("platform", "offset", SHA3_DATA_INPUT),
+        HostedPlatform.write8.__code__: ("platform", "offset", SHA3_DATA_INPUT),
         HostedSHA3Service.write8.__code__: ("service", "offset", SHA3_DATA_INPUT),
     }
     previous = sys.getprofile()
@@ -124,20 +124,20 @@ def test_memory_overrides_before_or_after_first_transfer_keep_byte_dispatch(monk
     assert calls["memory"] == calls["platform"] == calls["service"] == len(payload)
 
 
-@pytest.mark.parametrize("method", ("preflight", "write8", "_service"))
+@pytest.mark.parametrize("method", ("preflight", "write8"))
 @pytest.mark.parametrize("before_construction", (False, True))
 def test_platform_class_overrides_are_never_blessed_by_first_use(monkeypatch, method, before_construction):
     if not before_construction:
         memory, service = _new()
         assert _update(memory, service, b"prefix") == CRYPTO_STATUS_OK
-    original = getattr(OneCorePlatformMMIO, method)
+    original = getattr(HostedPlatform, method)
     seen = []
 
     def observe(self, *args, **kwargs):
         seen.append(args)
         return original(self, *args, **kwargs)
 
-    monkeypatch.setattr(OneCorePlatformMMIO, method, observe)
+    monkeypatch.setattr(HostedPlatform, method, observe)
     if before_construction:
         memory, service = _new()
     seen.clear()
@@ -166,12 +166,13 @@ def test_late_service_helpers_keep_the_original_memory_route(monkeypatch, method
     assert calls["memory"] == len(payload)
 
 
-@pytest.mark.parametrize("route", ("memory", "platform", "service", "different_service"))
+@pytest.mark.parametrize(
+    "route", ("memory", "platform", "service", "different_service", "foreign_table"))
 def test_subclasses_and_a_different_device_owner_decline_qualification(route):
     class CustomMemory(SparseAddressSpace):
         pass
 
-    class CustomPlatform(OneCorePlatformMMIO):
+    class CustomPlatform(HostedPlatform):
         pass
 
     class CustomService(HostedSHA3Service):
@@ -181,16 +182,27 @@ def test_subclasses_and_a_different_device_owner_decline_qualification(route):
     memory, service = _new(service=custom, memory_type=CustomMemory if route == "memory" else SparseAddressSpace)
     if route == "platform":
         old = memory._mmio
-        memory._mmio = CustomPlatform(**{name: getattr(old, name) for name in old.__slots__})
+        memory._mmio = CustomPlatform(
+            aes=old.aes, sha3=old.sha3, entropy=old.entropy, rtc=old.rtc,
+            audio=old.audio,
+        )
     elif route == "different_service":
         memory._mmio.sha3 = HostedSHA3Service(service.capabilities)
+    elif route == "foreign_table":
+        class ForeignTable:
+            def __init__(self, table):
+                self._table = table
+
+            def __getattr__(self, name):
+                return getattr(self._table, name)
+
+        memory._mmio._table = ForeignTable(memory._mmio._table)
     assert not service._input_transfer_eligible(memory, b"data")
 
 
 @pytest.mark.parametrize("target,name", (
     (memory_module, "_checked_span"), (memory_module, "_require_integer"),
-    (platform_module, "SHA3_OFFSET"), (sha3, "SHA3_DATA_INPUT"),
-    (sha3, "_INPUT_PLATFORM_ROUTE"),
+    (sha3, "SHA3_DATA_INPUT"), (sha3, "_INPUT_PLATFORM_ROUTE"),
 ))
 def test_changed_route_helpers_constants_or_missing_registry_decline(monkeypatch, target, name):
     memory, service = _new()
@@ -355,7 +367,7 @@ def test_replaced_platform_registry_declines_without_using_it(monkeypatch, repla
 def test_repeated_platform_registration_fails_closed(monkeypatch):
     memory, service = _new()
     monkeypatch.setattr(sha3, "_INPUT_PLATFORM_ROUTE", sha3._INPUT_PLATFORM_ROUTE)
-    sha3._register_input_platform_route(OneCorePlatformMMIO)
+    sha3._register_input_platform_route(HostedPlatform)
     assert not service._input_transfer_eligible(memory, b"data")
     assert _update(memory, service, b"data") == CRYPTO_STATUS_OK
 

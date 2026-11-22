@@ -3,13 +3,11 @@
 The ports themselves are the C++ model the emulator uses
 (``shared/accel/chiplet_port.h``, ``docs/chiplet-link.md``), reached through
 the native extension. This module is the hosted profile's glue around it:
-
-* the register window at MMIO offset ``0xE00``, which takes aligned 64-bit
-  accesses alone;
-* a mailbox at ``0x500`` for the profile's one core and its ports, over the
-  table the ports use: the core rings a port through ``SEND``, sees a port's
-  signal in ``STATUS`` and clears it through ``ACK``;
-* the points at which attached chiplets step.
+the ports' native link, the chiplets attached to them, and the points at
+which those chiplets step. The register window at MMIO offset ``0xE00``,
+which takes aligned 64-bit accesses alone, and the mailbox at ``0x500``,
+whose table the ports ring through, are native devices on the platform's
+table (``simulator/platform.py``).
 
 The hosted profile has no scheduler rounds, interrupts or flag branch, so a
 chiplet steps where the guest can observe it: before each read of a window
@@ -45,11 +43,9 @@ MAILBOX_ACK = MAILBOX_OFFSET + 0x0A
 HOSTED_CORE_COUNT = 1
 HOSTED_CORE_ID = 0
 
-_INTEGER_WIDTHS = frozenset((1, 2, 4, 8))
-
 
 class ChipletAccessError(ValueError):
-    """One access does not belong to the chiplet window or the mailbox."""
+    """One access does not belong to the chiplet window."""
 
     def __init__(
         self,
@@ -79,11 +75,9 @@ def _native_extension():
 
 
 class HostedChipletPorts:
-    """The hosted profile's chiplet ports, their window and their chiplets."""
+    """The hosted profile's chiplet ports and their chiplets."""
 
-    __slots__ = (
-        "_port_count", "_link", "_latch", "_latch_base", "_mailbox_service",
-    )
+    __slots__ = ("_port_count", "_link")
 
     def __init__(self, port_count: int = 1) -> None:
         if isinstance(port_count, bool) or not isinstance(port_count, int):
@@ -95,15 +89,6 @@ class HostedChipletPorts:
         _native_extension()
         self._port_count = port_count
         self._link = None
-        self._latch = bytearray(8)
-        self._latch_base: int | None = None
-        self._mailbox_service = HostedChipletMailbox(self)
-
-    @property
-    def mailbox_service(self) -> "HostedChipletMailbox":
-        """The MMIO service of the mailbox that serves these ports."""
-
-        return self._mailbox_service
 
     @property
     def port_count(self) -> int:
@@ -168,8 +153,9 @@ class HostedChipletPorts:
 
     @property
     def link(self):
-        """The native model of the ports, through whose windows the tile
-        accumulator's stores reach memory the chiplets lend."""
+        """The native model of the ports, whose register window the
+        platform attaches and through whose windows the tile accumulator's
+        stores reach memory the chiplets lend."""
 
         return self._require_bound()
 
@@ -211,7 +197,8 @@ class HostedChipletPorts:
 
     @property
     def mailbox(self):
-        """The participant table: the core is ID 0, port ``p`` is ``1 + p``."""
+        """The participant table: the core is ID 0, port ``p`` is ``1 + p``.
+        The platform's mailbox works over this same table."""
 
         return self._require_bound().mailbox
 
@@ -221,149 +208,12 @@ class HostedChipletPorts:
     def restore(self, state: bytes) -> bool:
         return bool(self._require_bound().restore(state))
 
-    # -- the register window ---------------------------------------------
-
-    def preflight(self, offset: int, width: int, *, write: bool) -> None:
-        """Admit one aligned 64-bit access inside the window."""
-
-        self._require_bound()
-        if not isinstance(offset, int) or not isinstance(width, int):
-            raise TypeError("chiplet window offset and width must be integers")
-        if (
-            width != 8
-            or offset % 8
-            or not CHIPLET_OFFSET <= offset
-            or offset + width > CHIPLET_LIMIT
-        ):
-            raise ChipletAccessError(
-                "the chiplet window takes aligned 64-bit accesses",
-                offset=offset,
-                width=width,
-                write=write,
-            )
-
-    def read8(self, offset: int) -> int:
-        link = self._require_bound()
-        self._require_window_byte(offset, write=False)
-        index = offset & 7
-        if index == 0:
-            # The chiplets step before the guest looks at a register.
-            link.step()
-        value = link.read64((offset & ~7) - CHIPLET_OFFSET)
-        return (value >> (8 * index)) & 0xFF
-
-    def write8(self, offset: int, value: int) -> None:
-        link = self._require_bound()
-        self._require_window_byte(offset, write=True)
-        index = offset & 7
-        base = offset & ~7
-        # A register is written whole: its eight bytes arrive in order and
-        # take effect with the last.
-        if index == 0:
-            self._latch_base = base
-        elif self._latch_base != base:
-            raise ChipletAccessError(
-                "a chiplet register is written as one 64-bit access",
-                offset=offset,
-                width=1,
-                write=True,
-            )
-        self._latch[index] = value & 0xFF
-        if index == 7:
-            self._latch_base = None
-            link.write64(
-                base - CHIPLET_OFFSET,
-                int.from_bytes(self._latch, "little"),
-            )
-
-    @staticmethod
-    def _require_window_byte(offset: int, *, write: bool) -> None:
-        if not isinstance(offset, int):
-            raise TypeError("chiplet window offset must be an integer")
-        if not CHIPLET_OFFSET <= offset < CHIPLET_LIMIT:
-            raise ChipletAccessError(
-                "byte access is outside the chiplet window",
-                offset=offset,
-                width=1,
-                write=write,
-            )
-
-
-class HostedChipletMailbox:
-    """The mailbox as the hosted profile's one core reaches it.
-
-    Bytes 0 to 7 are the core's data slot, which no port reads: a chiplet's
-    data crosses in lent memory. A write of an ID to ``SEND`` signals that
-    participant, ``STATUS`` shows the pending bits of IDs 0 to 7, and a write
-    of an ID to ``ACK`` clears that participant's signal.
-    """
-
-    __slots__ = ("_ports", "_data")
-
-    def __init__(self, ports: HostedChipletPorts) -> None:
-        if not isinstance(ports, HostedChipletPorts):
-            raise TypeError("mailbox ports must be HostedChipletPorts")
-        self._ports = ports
-        self._data = bytearray(8)
-
-    def preflight(self, offset: int, width: int, *, write: bool) -> None:
-        self._ports.mailbox
-        if not isinstance(offset, int) or not isinstance(width, int):
-            raise TypeError("mailbox offset and width must be integers")
-        if (
-            width not in _INTEGER_WIDTHS
-            or offset % width
-            or not MAILBOX_OFFSET <= offset
-            or offset + width > MAILBOX_LIMIT
-        ):
-            raise ChipletAccessError(
-                "access is outside the mailbox or not naturally aligned",
-                offset=offset,
-                width=width,
-                write=write,
-            )
-
-    def read8(self, offset: int) -> int:
-        self._require_byte(offset, write=False)
-        register = offset - MAILBOX_OFFSET
-        if register < 8:
-            return self._data[register]
-        if offset == MAILBOX_STATUS:
-            # The chiplets step before the guest looks for their signal.
-            self._ports.step()
-            return self._ports.mailbox.pending_mask(HOSTED_CORE_ID) & 0xFF
-        return 0
-
-    def write8(self, offset: int, value: int) -> None:
-        self._require_byte(offset, write=True)
-        register = offset - MAILBOX_OFFSET
-        value &= 0xFF
-        if register < 8:
-            self._data[register] = value
-        elif offset == MAILBOX_SEND:
-            self._ports.mailbox.send(HOSTED_CORE_ID, value)
-        elif offset == MAILBOX_ACK:
-            self._ports.mailbox.acknowledge(HOSTED_CORE_ID, value)
-
-    @staticmethod
-    def _require_byte(offset: int, *, write: bool) -> None:
-        if not isinstance(offset, int):
-            raise TypeError("mailbox offset must be an integer")
-        if not MAILBOX_OFFSET <= offset < MAILBOX_LIMIT:
-            raise ChipletAccessError(
-                "byte access is outside the mailbox",
-                offset=offset,
-                width=1,
-                write=write,
-            )
-
 
 __all__ = [
     "CHIPLET_LIMIT",
     "CHIPLET_OFFSET",
     "CHIPLET_RANGES",
     "ChipletAccessError",
-    "HostedChipletMailbox",
     "HostedChipletPorts",
     "MAILBOX_ACK",
     "MAILBOX_LIMIT",

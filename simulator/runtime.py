@@ -84,7 +84,7 @@ from simulator.memory import MMIO_BASE, AddressClass, GuestCell, SparseAddressSp
 from simulator.ntt import HostedNTTService
 from simulator.platform import (
     HOSTED_CRYPTO_CAPABILITIES,
-    OneCorePlatformMMIO,
+    HostedPlatform,
     SYSINFO_CRYPTO_CAPS,
     SYSINFO_EXTERNAL_BASE,
     SYSINFO_EXTERNAL_SIZE,
@@ -95,7 +95,7 @@ from simulator.scalar_float import HostedScalarFloatService
 from simulator.sha2 import HostedSHA2Service
 from simulator.sha3 import HostedSHA3Service
 from simulator.tile import HostedTileService
-from simulator.spinlocks import HostedSpinlockBank
+from simulator import spinlocks as spinlock_service
 from simulator import storage as storage_service
 from simulator import tacc as tacc_service
 from simulator.source import (
@@ -809,9 +809,9 @@ class MegaForthRuntime:
                 "hosted runtime cannot admit unknown crypto capabilities"
             )
         platform_mmio = self.memory.mmio
-        if not isinstance(platform_mmio, OneCorePlatformMMIO):
+        if not isinstance(platform_mmio, HostedPlatform):
             raise ValueError(
-                "hosted runtime requires the admitted one-core platform MMIO"
+                "hosted runtime requires the hosted platform MMIO"
             )
         crc_capabilities = (
             crypto_capabilities & CRYPTO_CAP_CRC_REFLECT_RAW
@@ -833,7 +833,7 @@ class MegaForthRuntime:
         # The profile's chiplet ports, or None when it has none.
         self.chiplet_ports = platform_mmio.chiplet
         self.sha2 = HostedSHA2Service(core_count=num_full)
-        self.spinlocks = HostedSpinlockBank(core_count=num_cores)
+        self.spinlocks = spinlock_service.HostedSpinlockBank(core_count=num_cores)
         self.field = HostedFieldALUService(core_count=num_cores)
         self.ntt = HostedNTTService()
         self.kem = HostedKEMService()

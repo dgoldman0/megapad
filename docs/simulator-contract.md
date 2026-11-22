@@ -709,6 +709,18 @@ window. Ultimately, word-only substitution is insufficient because ordinary
 source contains narrow direct-MMIO paths, including UART flush and audio
 control.
 
+Every admitted window belongs to one device on the platform's attachment
+table (`simulator/platform.py`, `simulator/accel/platform_bindings.h`). A
+device claims its windows when it attaches, and the table refuses a window
+that overlaps another. Each access reaches the device whose window holds its
+first byte, with the access's requester: a whole-access preflight first, then
+each byte lowest address first. An access outside every window fails before
+any byte moves. System Info, the mailbox and the chiplet port window are
+native devices; AES, SHA-3, the TRNG, the RTC and the audio output are the
+Python services described below, attached through the table's adapter, and
+assigning one of them on the platform puts the new service in the same
+windows. This profile's one requester is core 0.
+
 An unsupported service advertises an absent capability and returns the
 existing unsupported or absent status when its ABI has one; otherwise it
 fails explicitly. It never silently reports success.
@@ -724,7 +736,11 @@ instructions, CSRs, hardware arbitration, DMA, or accelerator latency.
 Runtime construction requires that qword to be readable and rejects capability
 bits without an admitted service; missing or malformed SysInfo never enables a
 host fallback implicitly. Runtime construction likewise requires the admitted
-one-core topology qwords to report exactly one full core.
+one-core topology qwords to report exactly one full core. System Info is built
+from the profile's topology and the address space's geometry, and reports
+`NUM_BUS_PORTS` as the emulator does, full cores plus clusters plus the NIC,
+disk and WOTS requesters, which is 4 here; only the WOTS deadlines read it,
+and WOTS is not admitted.
 
 That topology has no synthetic secondary worker. `CORE-STATUS` accepts only
 core ID zero and replaces it with zero, meaning the core-0 secondary-worker
@@ -743,11 +759,18 @@ space is created with `chiplet_ports`. The ports are the C++ model the
 emulator uses (`shared/accel/chiplet_port.h`, `docs/chiplet-link.md`), so
 asking for them requires the native extension. With ports, SysInfo's
 `CHIPLET_PORTS` qword at `+0x70` holds the port window's `PORT_COUNT`, the
-window at MMIO offset `0xE00` admits aligned 64-bit accesses, and a mailbox
-window at `0x500` serves core 0 and the ports: the core's data slot,
-`MBOX_SEND`, `MBOX_STATUS` for IDs 0 to 7 and `MBOX_ACK`. The first port has
-the ID 1, the ID after the one core's. Without ports the qword reads zero and
-both windows lie outside every admitted window. The register values, the
+window at MMIO offset `0xE00` admits aligned 64-bit accesses, and the
+mailbox works over the participant table the ports ring through. The first
+port has the ID 1, the ID after the one core's. Without ports the qword reads
+zero and the port window lies outside every admitted window.
+
+The mailbox window at `0x500` is admitted in every profile, as the machine
+always has its mailbox. It is the shared model of `shared/accel/mailbox.h`:
+the requester's data word at `+0` to `+7`, `MBOX_SEND` at `+8`, which also
+copies the sender's word to a core it signals, `MBOX_STATUS` at `+9` for IDs
+0 to 7 and `MBOX_ACK` at `+A`, in accesses of 1, 2, 4 or 8 naturally aligned
+bytes; every other byte reads 0 and ignores writes. Without ports this
+profile's one core has no participant to signal. The register values, the
 admission of a chiplet's memory requests against lent ranges with its
 refusal record, the traffic through lent external memory and the pending
 state of doorbells are compatibility claims. Arbitration, `QOS` and latency
@@ -1008,14 +1031,18 @@ remains published while the final output window is zero. These are recorded
 compatibility findings, not endorsed security properties.
 
 The admitted semantic `SPIN@`/`SPIN!` surface uses one runtime-local bank of
-16 independent locks keyed by architectural physical-core ID, not task ID. A
+16 independent locks keyed by architectural physical-core ID, not task ID. The
+bank is the shared native model of `shared/accel/spinlock_bank.h`, and the
+pseudo-BIOS words, the checked disk words and the native engine's disk words
+all take their locks from it. A
 free or same-owner acquire returns 0, a foreign-owner attempt returns 1, and
 only the owner can release. Reacquisition is depthless, so one release frees a
 lock after any number of same-core successes. Construction/reset starts every
 lock free; guest `THROW` does not release one implicitly. The current slice
 needs only valid lock 9 through the pseudo-BIOS words. It does not admit direct
-spinlock MMIO, and rejects IDs outside 0 through 15 instead of reproducing the
-BIOS's unchecked address arithmetic, which can fault or alias another device.
+spinlock MMIO, whose window the model already serves, and rejects IDs outside
+0 through 15 instead of reproducing the BIOS's unchecked address arithmetic,
+which can fault or alias another device.
 The simulator claims ordered terminal ownership/results, not host-thread
 synchronization, memory fences, fairness, bus arbitration, contention timing,
 interrupt behavior, or physical multicore evidence.
