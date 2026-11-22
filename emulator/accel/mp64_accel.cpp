@@ -10291,6 +10291,22 @@ static inline void preflight_resumable_bus_access(
     throw std::runtime_error("TRAP:BUS_FAULT");
 }
 
+// The offset of an access inside the MMIO aperture, for the devices, which
+// all answer below 2^32: the RTL's bus decodes only those 4 GiB as MMIO
+// (rtl/bus/mp64_bus.v). No device answers higher in the emulator's 2^39-byte
+// aperture, so an access there faults as one outside every device window
+// does, where narrowing its offset would reach the device at its low 32
+// bits.
+static inline uint32_t native_mmio_offset(
+        CPUState& s, const StepCallbacks& cb, uint64_t addr) {
+    const uint64_t offset = addr - cb.mmio_start;
+    if (offset > std::numeric_limits<uint32_t>::max()) {
+        s.trap_addr = addr;
+        throw std::runtime_error("TRAP:BUS_FAULT");
+    }
+    return static_cast<uint32_t>(offset);
+}
+
 // Memory access with MMIO and HBW intercept
 static inline uint8_t sys_read8(
         CPUState& s,
@@ -10308,7 +10324,7 @@ static inline uint8_t sys_read8(
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         // Try C++ devices first (no Python callback needed)
-        uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        uint32_t mmio_off = native_mmio_offset(s, cb, addr);
         if (s.chiplet != nullptr && s.chiplet->handles(mmio_off))
             reject_chiplet_access(s, addr);
         if (s.nic->handles(mmio_off))
@@ -10380,7 +10396,7 @@ static inline void sys_write8(
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         // Try C++ devices first
-        uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        uint32_t mmio_off = native_mmio_offset(s, cb, addr);
         if (s.chiplet != nullptr && s.chiplet->handles(mmio_off))
             reject_chiplet_access(s, addr);
         if (write_native_nic_bytes(
@@ -10480,7 +10496,7 @@ static inline uint64_t sys_read64(
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         preflight_sysinfo_fallback_span(s, cb, addr, 8);
-        uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        uint32_t mmio_off = native_mmio_offset(s, cb, addr);
         if (s.chiplet != nullptr && s.chiplet->handles(mmio_off)) {
             if (!ChipletDevice::shape_valid(mmio_off, 8))
                 reject_chiplet_access(s, addr);
@@ -10566,7 +10582,7 @@ static inline void sys_write64(
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         preflight_sysinfo_fallback_span(s, cb, addr, 8);
-        uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        uint32_t mmio_off = native_mmio_offset(s, cb, addr);
         if (s.chiplet != nullptr && s.chiplet->handles(mmio_off)) {
             if (!ChipletDevice::shape_valid(mmio_off, 8))
                 reject_chiplet_access(s, addr);
@@ -10651,7 +10667,7 @@ static inline uint16_t sys_read16(
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         preflight_sysinfo_fallback_span(s, cb, addr, 2);
-        uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        uint32_t mmio_off = native_mmio_offset(s, cb, addr);
         if (s.chiplet != nullptr && s.chiplet->handles(mmio_off))
             reject_chiplet_access(s, addr);
         if (s.trng->handles(mmio_off)) {
@@ -10708,7 +10724,7 @@ static inline void sys_write16(
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         preflight_sysinfo_fallback_span(s, cb, addr, 2);
-        uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        uint32_t mmio_off = native_mmio_offset(s, cb, addr);
         if (s.chiplet != nullptr && s.chiplet->handles(mmio_off))
             reject_chiplet_access(s, addr);
         if (write_native_nic_bytes(
@@ -10787,7 +10803,7 @@ static inline uint32_t sys_read32(
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         preflight_sysinfo_fallback_span(s, cb, addr, 4);
-        uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        uint32_t mmio_off = native_mmio_offset(s, cb, addr);
         if (s.chiplet != nullptr && s.chiplet->handles(mmio_off))
             reject_chiplet_access(s, addr);
         if (s.trng->handles(mmio_off)) {
@@ -10864,7 +10880,7 @@ static inline void sys_write32(
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         preflight_sysinfo_fallback_span(s, cb, addr, 4);
-        uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        uint32_t mmio_off = native_mmio_offset(s, cb, addr);
         if (s.chiplet != nullptr && s.chiplet->handles(mmio_off))
             reject_chiplet_access(s, addr);
         if (write_native_nic_bytes(
@@ -32990,9 +33006,15 @@ PYBIND11_MODULE(_mp64_accel, m) {
             auto memory_guard = acquire_shared_memory_use(s);
             return s.trng->test_zeroized_state();
         })
+        // The native devices' answers to a core that Python runs, which
+        // reaches every other offset, and every fault, through the Python
+        // bus. No native device answers at an offset of 2^32 or more.
         .def("_native_singleton_read8",
-             [](CPUState& s, uint32_t mmio_off) -> int {
+             [](CPUState& s, uint64_t offset) -> int {
                 PublicCPUMutationScope mutation_scope(s);
+            if (offset > std::numeric_limits<uint32_t>::max())
+                return -1;
+            const uint32_t mmio_off = static_cast<uint32_t>(offset);
             auto memory_guard = acquire_shared_memory_use(s);
             if (s.nic->handles(mmio_off))
                 return s.nic->read8(mmio_off);
@@ -33008,10 +33030,13 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         .def("_native_singleton_preflight",
              [](CPUState& s,
-                uint32_t mmio_off,
+                uint64_t offset,
                 uint32_t width,
                 bool write) -> int {
                 PublicCPUMutationScope mutation_scope(s);
+            if (offset > std::numeric_limits<uint32_t>::max())
+                return -1;
+            const uint32_t mmio_off = static_cast<uint32_t>(offset);
             auto memory_guard = acquire_shared_memory_use(s);
             const auto check_span = [mmio_off, width](const auto* device) {
                 if (!device->handles(mmio_off))
@@ -33047,9 +33072,12 @@ PYBIND11_MODULE(_mp64_accel, m) {
         // One aligned 64-bit access to the chiplet window, for a core that
         // Python runs. None when the window does not hold the offset.
         .def("_native_chiplet_access64",
-             [](CPUState& s, uint32_t mmio_off, bool write,
+             [](CPUState& s, uint64_t offset, bool write,
                 uint64_t value) -> py::object {
                 PublicCPUMutationScope mutation_scope(s);
+            if (offset > std::numeric_limits<uint32_t>::max())
+                return py::none();
+            const uint32_t mmio_off = static_cast<uint32_t>(offset);
             if (s.chiplet == nullptr || !s.chiplet->handles(mmio_off))
                 return py::none();
             if (!ChipletDevice::shape_valid(mmio_off, 8))
@@ -33066,8 +33094,11 @@ PYBIND11_MODULE(_mp64_accel, m) {
         py::arg("write") = false,
         py::arg("value") = 0)
         .def("_native_singleton_write8",
-             [](CPUState& s, uint32_t mmio_off, uint8_t value) -> bool {
+             [](CPUState& s, uint64_t offset, uint8_t value) -> bool {
                 PublicCPUMutationScope mutation_scope(s);
+            if (offset > std::numeric_limits<uint32_t>::max())
+                return false;
+            const uint32_t mmio_off = static_cast<uint32_t>(offset);
             if (s.nic->handles(mmio_off))
                 require_cycle_device_mutation_allowed(s, "native NIC");
             auto memory_guard = acquire_shared_memory_use(s);

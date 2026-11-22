@@ -211,7 +211,10 @@ The system layer intercepts any CPU memory operation (8/16/32/64-bit) that
 falls in the MMIO aperture and routes it through the device bus; everything
 else hits RAM.  Accesses to unmapped MMIO offsets raise `BusError`, which
 the SoC layer converts to `TrapError(IVEC_BUS_FAULT)` — matching the RTL
-bus arbiter timeout behaviour.
+bus arbiter timeout behaviour.  Every device answers below offset 2^32, the
+span the RTL's bus decodes as MMIO, so an access higher in the emulator's
+2^39-byte aperture faults the same way on native cores and on cores that
+Python runs.
 
 The native TRNG owns its complete `+0x0800`–`+0x081F` window even when it is
 disabled or unhealthy. `STATUS` at `+0x10` exposes only bit 0 (`USABLE`);

@@ -6,7 +6,7 @@ callback installed with QUIT-XT! runs, so KDOS can drop the exception
 frames that lived on the abandoned return stack. A worker core ends its
 job and idles. The checked words that recognize their own bus faults are
 covered with them; these cases fault through an ordinary load from an
-address outside the memory map.
+address outside the memory map or past every device in the MMIO aperture.
 """
 
 from __future__ import annotations
@@ -104,6 +104,19 @@ def test_core_zero_returns_to_the_prompt_through_abort():
     ])
     assert text.count("*** BUS FAULT @") == 3
     assert reports == [prompt_rp, 5, 0, 42]
+
+
+def test_an_access_past_the_mmio_devices_faults_and_recovers():
+    # The address lies 2^32 bytes past the mailbox, beyond every device's
+    # window: a guest bus fault, like any other outside the memory map.
+    machine = _Machine()
+    reports, text = machine.run([
+        "HEX FFFFFF0100000500 DECIMAL CONSTANT PAST-MAILBOX",
+        "1 2 PAST-MAILBOX C@",
+        "DEPTH REPORT 5 7 + REPORT",
+    ])
+    assert "*** BUS FAULT @ 00000500" in text
+    assert reports == [0, 12]
 
 
 def test_a_worker_ends_its_job_and_stays_usable():
