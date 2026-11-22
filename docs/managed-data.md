@@ -1,8 +1,14 @@
 # Managed data
 
-Status: decided on 2026-11-20. Nothing is built. What managed data keeps
-when LM1 fails is built in stages, and each part of it names its stage, or
-marks itself as one of three fixes (§11). This is the specification of
+Status: decided on 2026-11-20. MegaPad's side is built in its chiplet
+system module, `chiplet.f`, and LM1's side in the stand-in for LM1's runtime
+in LM1's chiplet module (`chiplet/` in the lm1 repository); together they
+pass the 27 conformance tests of §15 in the emulator, and in the simulator
+all but the six that need a second MegaPad core (2026-11-22). What managed
+data keeps when LM1 fails is built in stages, and each part of it names its
+stage, or marks itself as one of three fixes (§11). The fixes and stage 0
+are built, so every failure loses the heap; stage 1 and later are not
+built. `chiplet.f` is not yet loaded when the system boots. This is the specification of
 managed data on MegaPad, and of the link's LM1 layer for it: how MegaPad
 code holds, reads, writes, creates and releases objects that LM1's collector
 manages, the windows in which it uses them, the handles it keeps past a
@@ -837,20 +843,19 @@ waits on included (stage 1):
 
 ## 11. Errors and failure
 
-The words return these statuses, whose numbers are assigned when the module
-is written:
+The words return these statuses:
 
-| Status | Meaning |
-|--------|---------|
-| `OBJ-E-ABSENT` | No engine serves managed data |
-| `OBJ-E-FAILED` | The shared heap is lost (below) |
-| `OBJ-E-STALE` | The handle names no live slot |
-| `OBJ-E-OWNER` | The owner token is not two positive cells |
-| `OBJ-E-WINDOW` | A word that needs a window ran outside one, or one that needs none ran inside one |
-| `OBJ-E-KIND` | A word is not of the kind expected: not a reference, not a fixnum, not of the shape |
-| `OBJ-E-RANGE` | A field or byte lies outside its object, or a number does not fit a fixnum |
-| `OBJ-E-CORRUPT` | A word breaks LM1's object model: a reference outside the shared heap, or a header that is not sound |
-| `OBJ-E-NOMEM` | No memory for a region, a handle segment or a log |
+| Status | Number | Meaning |
+|--------|-------:|---------|
+| `OBJ-E-ABSENT` | −1101 | No engine serves managed data |
+| `OBJ-E-FAILED` | −1102 | The shared heap is lost (below) |
+| `OBJ-E-STALE` | −1103 | The handle names no live slot |
+| `OBJ-E-OWNER` | −1104 | The owner token is not two positive cells |
+| `OBJ-E-WINDOW` | −1105 | A word that needs a window ran outside one, or one that needs none ran inside one |
+| `OBJ-E-KIND` | −1106 | A word is not of the kind expected: not a reference, not a fixnum, not of the shape |
+| `OBJ-E-RANGE` | −1107 | A field or byte lies outside its object, or a number does not fit a fixnum |
+| `OBJ-E-CORRUPT` | −1108 | A word breaks LM1's object model: a reference outside the shared heap, or a header that is not sound |
+| `OBJ-E-NOMEM` | −1109 | No memory for a region, a handle segment or a log |
 
 ### When LM1's service ends
 
@@ -1095,10 +1100,10 @@ LM1's side of the handback is LM1's `spec/05-memory-gc.md` §12.11.
 ## 14. The words
 
 These are the managed-data words of the Leviathan vocabulary, which
-MegaPad's chiplet module provides
-([chiplet-interconnect-plan.md](chiplet-interconnect-plan.md) §9). Their
-names and stack orders are a first draft, to settle when the module is
-written. Effects use Uroko's kinds (fantasy-engine `dev/ideas/language.md`):
+MegaPad's chiplet module, `chiplet.f`, provides with these names and stack
+orders ([chiplet-interconnect-plan.md](chiplet-interconnect-plan.md) §9).
+A span is two cells, an address and a length in bytes. Effects use Uroko's
+kinds (fantasy-engine `dev/ideas/language.md`):
 `ref` a reference, `tagged` a tagged word, `handle` a handle, and `ior` a
 status, 0 for success. The window column says whether a word runs inside a
 window, outside one, or either.
@@ -1165,6 +1170,19 @@ Kinds and collections, outside a window:
 |------|--------|------|
 | `OBJ-SHAPE` | `( desc: span -- shape: u ior )` | Register a record kind (§8) |
 | `OBJ-COLLECT` | `( how: u -- ior )` | Ask for a collection (§10) |
+
+`chiplet.f` adds a few words beside these. `OBJ-START` ( port -- ior )
+serves a booted port until managed data has started. `OBJ-COLLECTED`
+( -- live: u epoch: u ) gives the live bytes and the epoch from the reply
+to the core's last `OBJ-COLLECT`, and `OBJ-STATUS` ( -- status ) the status
+of the core's last reply, such as `BAD_RECORD` when `OBJ-SHAPE` returns
+`OBJ-E-KIND` for a description LM1 refused. `OBJ-MEMORY` ( -- u ) gives the
+bytes of lendable memory the function holds, and the variables
+`OBJ-NOTICES`, `OBJ-NOTICE-KIND`, `OBJ-NOTICE-ARG` and `OBJ-NOTICE-ADDR`
+count LM1's `NOTICE`s and keep the last one. Two variables, read when they
+are first needed, size the records: `OBJ-HANDLE-FIRST` the handle table's
+first segment, 64 slots by default, and `OBJ-LOG-ENTRIES` each core's first
+store log, 256 entries.
 
 Uroko's record declarations generate typed words over these, such as a
 constructor for each record kind and an accessor for each field
@@ -1443,10 +1461,18 @@ Lose branches:
   which §4 fixes only how they name objects, belong to the link's layer for
   jobs, which is still to specify. That layer also says how a task that
   LM1's failure ends is reported (§13).
-- **Lendable memory.** How KDOS's allocator for lendable memory places the
-  shared heap's blocks, the handle table and the records within the port's
-  lent ranges ([chiplet-interconnect-plan.md](chiplet-interconnect-plan.md)
-  §10).
+- **Lendable memory.** `chiplet.f` lends each owner's records from chunks
+  of external memory, each chunk lent as one of the port's ranges and each
+  new one twice the size of the owner's before it, and gives every heap
+  block a chunk of its own, so that `RETURN` gives one back alone. The
+  port's lent ranges, eight by default, therefore bound the chunks: after
+  boot the control queues hold two and the function's records two, and the
+  first heap block lies in the function's chunk, which leaves four for heap
+  blocks and growing records. A heap that grows by doubling reaches about
+  sixteen times its first block before `GROW` is refused. Whether KDOS's
+  allocator for lendable memory should place blocks inside fewer, larger
+  ranges, or a port should hold more ranges, is still to decide
+  ([chiplet-interconnect-plan.md](chiplet-interconnect-plan.md) §10).
 - **Re-binding word values** (stage 2). Word values that carry LM1's
   compiled entry depend on LM1's private state, like closures and symbols,
   so their kinds are entered as ones a restarted LM1 cannot adopt (§9). A
@@ -1464,7 +1490,17 @@ Lose branches:
   model defines it (decided 2026-11-20).
 - **The bounds.** The values of §3's three times, and of the deadline
   MegaPad gives a request, which also bounds a full log's wait and a stop
-  request (§3, §11). The chiplet module measures them.
+  request (§3, §11). The first build uses a millisecond for `WINDOW_LIMIT`
+  and `HOLD_LIMIT`, a tenth of that for `HOLD_GAP`, and 100 ms for a
+  request (`CHIP-DEADLINE`). In the emulator and the simulator LM1's clock
+  is the chiplet module's own, each step standing for a fixed share of
+  LM1's time, set so that it keeps within a small factor of MegaPad's; the
+  values for the chip wait for the RTL's timing.
+- **Starting at boot.** System composition loads `chiplet.f`, boots LM1 and
+  starts managed data at boot (release plan Part 9a), and a background task
+  serves the control queues and the grant's pair while core 0 waits for
+  input; until then a caller boots the port and calls `OBJ-START`, and the
+  pairs are served whenever a word waits.
 - **A data cache or store buffer on a production core.** §3's protocol needs
   each core's accesses to lent memory to reach memory uncached and in
   program order.
