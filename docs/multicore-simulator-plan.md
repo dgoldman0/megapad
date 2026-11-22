@@ -264,9 +264,9 @@ overlaps are refused then, and an access outside every window faults as it
 does now. A device may keep state per requester and drives each core's IPI
 request, external flag and wake request, which the scheduler reads.
 Devices written in Python today, AES, SHA-3, TRNG, RTC and audio, attach
-through a thin adapter and keep their models. The native engine reaches the
-C++ devices directly, which speeds the simulator and leaves the device's cost
-as it is.
+through a thin adapter and keep their models. From stage 8a the native
+engine reaches the C++ devices directly, which speeds the simulator and
+leaves the device's cost as it is.
 
 The two devices multicore adds are written once in `shared/accel`, beside
 `mailbox_pending.h` and `chiplet_port.h`, so the emulator can use the same
@@ -391,17 +391,21 @@ SHA-3, TRNG, RTC, audio and the chiplet window move onto the table; the
 mailbox and the spinlock bank become the `shared/accel` devices; the
 mailbox exists in every profile, since the machine always has one; the
 native disk words take lock 2 from the C++ bank instead of reading the
-Python owner list. `HostedChipletPorts` keeps its API (`link`, `mailbox`,
-`first_port_id`, `step`, `work_waits`, `save`, `restore`), which
+Python owner list. The bank's window stays unattached until stage 4 makes the
+crypto guard's lock 8 the bank's, as the contract requires before direct
+spinlock MMIO is admitted. `HostedChipletPorts` keeps its API (`link`,
+`mailbox`, `first_port_id`, `step`, `work_waits`, `save`, `restore`), which
 `tests/test_lm1_chiplet.py` uses.
 
 Tests: every platform, SysInfo, crypto, RTC, entropy, audio and chiplet unit
 of the simulator passes, with the expectations that change because the
 mailbox now answers without ports updated in the same commit. New focused
 tests cover overlap refusal, the requester reaching the device, the lines a
-device drives, and faults outside every window; the shared mailbox and
-spinlock models run in both extensions, as `tests/test_chiplet_mailbox.py`
-runs the participant table.
+device drives, and faults outside every window. The shared mailbox and
+spinlock models, as the simulator's extension builds them, answer seeded
+streams of requester-tagged accesses exactly as the emulator's Python
+`MailboxDevice` and `SpinlockDevice` do (`tests/test_shared_mmio_devices.py`);
+stage 2 builds them into the emulator's extension.
 
 ### Stage 2. The BIOS worker loop takes signals and aborts correctly
 
@@ -475,8 +479,9 @@ Builds per-core `FPCSR`, tile engine and accumulator, with `TACC-SEND` and
 CRC, SHA-2, SHA-3 and the Field ALU; contention inside native paths, where
 the disk words, the checked SHA-3 service and HMAC end the turn when another
 core holds their lock and retry, and the SHA-3 service's lock 8 becomes the
-bank's lock 8, as the contract already requires before multicore; and the
-chiplet step points of section 4.7. Akashic's `_profile_machine_shape` admits
+bank's lock 8, as the contract already requires before multicore, after
+which the bank's window at `0x600` attaches to the table; and the chiplet
+step points of section 4.7. Akashic's `_profile_machine_shape` admits
 multicore shapes on the simulator, so the worker profiles run there:
 `sandbox-capability-workers-contracts` on four cores, `agent-security` and
 `audio-contracts` on two, and `sandbox-job-service-gate`.
@@ -521,8 +526,9 @@ the simulator on one to three clusters.
 Two parts, reviewed apart from the stages before them:
 
 - **8a, native turns.** A core's turn runs in the native engine from start
-  to end, holding the core's stack pointers and continuations in C++, and
-  stops at the first Python-owned operation, its quantum or `IDL`. By
+  to end, holding the core's stack pointers and continuations in C++, reaches
+  the table's native devices without Python, and stops at the first
+  Python-owned operation, its quantum or `IDL`. By
   estimate a turn switch then costs a fraction of a microsecond instead of
   about 20 µs, which also makes smaller quanta affordable.
 - **8b, speculation.** With dense guest memory, the round's native turns run

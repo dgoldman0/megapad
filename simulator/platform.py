@@ -1,14 +1,26 @@
-"""Focused platform services for the hosted one-core simulator profile.
+"""The hosted machine's MMIO devices, attached to one native table.
 
-The hosted profile routes read-only SysInfo and each admitted accelerator
-through one virtual MMIO port.  Its memory-topology registers are built from
-the exact :class:`~simulator.memory.SparseAddressSpace` returned by the factory
-below; the services do not carry an independent copy of the address-space
-defaults.
+Every device claims its windows on the simulator's native ``PlatformTable``
+(``simulator/accel/platform_bindings.h``), which refuses overlapping windows
+and gives each access, with its requester, to the device whose window holds
+its first byte: a whole-access preflight, then each byte lowest address
+first. System Info, the chiplet port window and the mailbox are native
+devices. AES, SHA-3, the TRNG, the RTC and the audio output are Python
+services that attach through the table's adapter and keep their models.
+
+A machine profile names its topology, and System Info reports it with the
+memory geometry of the exact :class:`~simulator.memory.SparseAddressSpace`
+the factory below returns. Runtime construction still admits only one full
+core with no cluster (``docs/simulator-contract.md``, section 6).
+
+This module is glue. The table and the native devices load with the
+simulator's extension when a platform is made, so importing the simulator
+needs no build.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Literal
 
 from shared.cells import MASK64
@@ -26,7 +38,7 @@ from simulator.chiplet import (
     CHIPLET_OFFSET,
     MAILBOX_LIMIT,
     MAILBOX_OFFSET,
-    HostedChipletMailbox,
+    ChipletAccessError,
     HostedChipletPorts,
 )
 from simulator.entropy import (
@@ -65,6 +77,7 @@ SYSINFO_NUM_FULL = SYSINFO_OFFSET + 0x48
 SYSINFO_VRAM_BASE = SYSINFO_OFFSET + 0x50
 SYSINFO_VRAM_SIZE = SYSINFO_OFFSET + 0x58
 SYSINFO_CRYPTO_CAPS = SYSINFO_OFFSET + 0x60
+SYSINFO_NUM_BUS_PORTS = SYSINFO_OFFSET + 0x68
 SYSINFO_CHIPLET_PORTS = SYSINFO_OFFSET + 0x70
 
 BOARD_ID_VERSION = 0x4D50_3634_0002_0001
@@ -75,7 +88,23 @@ HOSTED_CRYPTO_CAPABILITIES = (
     | CRYPTO_CAP_KECCAK_F1600
 )
 
-_INTEGER_WIDTHS = frozenset((1, 2, 4, 8))
+# The Python services that attach through the table's adapter, by the name
+# each answers to, and their windows. The RTC answers in its clock registers
+# and in its one epoch status byte.
+_PYTHON_DEVICE_WINDOWS = {
+    "aes": ((AES_OFFSET, AES_LIMIT),),
+    "sha3": ((SHA3_OFFSET, SHA3_LIMIT),),
+    "entropy": ((TRNG_OFFSET, TRNG_LIMIT),),
+    "rtc": ((RTC_UPTIME, RTC_EPOCH_LIMIT), (RTC_EPOCH_STAT, RTC_EPOCH_STAT + 1)),
+    "audio": ((AUDIO_OFFSET, AUDIO_LIMIT),),
+}
+_PYTHON_DEVICE_TYPES = {
+    "aes": HostedAESService,
+    "sha3": HostedSHA3Service,
+    "entropy": HostedTRNGService,
+    "rtc": HostedRTCService,
+    "audio": HostedAudioService,
+}
 
 
 class SysInfoAccessError(ValueError):
@@ -96,7 +125,8 @@ class SysInfoAccessError(ValueError):
 
 
 class PlatformMMIOAccessError(ValueError):
-    """One access does not resolve to a hosted platform service window."""
+    """One access falls outside every platform window, or the mailbox
+    refuses it."""
 
     def __init__(
         self,
@@ -112,30 +142,98 @@ class PlatformMMIOAccessError(ValueError):
         super().__init__(message)
 
 
-class OneCoreSysInfo:
-    """Read-only SysInfo service for one hosted full core.
+# The error each native device's refusal raises, by its name on the table.
+_REFUSAL_ERRORS = {
+    "sysinfo": SysInfoAccessError,
+    "chiplet": ChipletAccessError,
+}
 
-    Constructing the service and its address space is a two-phase operation
-    because :class:`SparseAddressSpace` receives its MMIO port at construction
-    time, while SysInfo must report that constructed space's actual regions.
-    Callers should normally use :func:`create_one_core_address_space`.
+
+def _refuse(name: str, message: str, offset: int, width: int, write: bool) -> None:
+    raise _REFUSAL_ERRORS.get(name, PlatformMMIOAccessError)(
+        message, offset=offset, width=width, write=write,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class Topology:
+    """The machine's cores: one to four full cores, and zero to three
+    clusters of four microcores, the shapes the BIOS and the emulator
+    support."""
+
+    full_cores: int = 1
+    clusters: int = 0
+
+    def __post_init__(self) -> None:
+        for value, label in ((self.full_cores, "full cores"), (self.clusters, "clusters")):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"a topology's {label} must be an integer")
+        if not 1 <= self.full_cores <= 4:
+            raise ValueError("a machine has one to four full cores")
+        if not 0 <= self.clusters <= 3:
+            raise ValueError("a machine has zero to three clusters")
+
+    @property
+    def core_count(self) -> int:
+        """Every core: the full cores, then four microcores per cluster."""
+
+        return self.full_cores + 4 * self.clusters
+
+
+ONE_CORE = Topology()
+
+
+def _native_extension():
+    try:
+        import _megaforth_native as extension
+    except ImportError:
+        extension = None
+    if extension is None or not hasattr(extension, "PlatformTable"):
+        raise RuntimeError(
+            "the hosted platform requires _megaforth_native, built to match "
+            "this checkout: run make simulator-accel"
+        )
+    return extension
+
+
+def _python_service_property(name: str) -> property:
+    def get(self: "HostedPlatform"):
+        return self._table.device(name)
+
+    def put(self: "HostedPlatform", service: object) -> None:
+        self._check_service(name, service)
+        self._table.replace(name, service)
+
+    return property(get, put, doc=f"The platform's {name} service.")
+
+
+class HostedPlatform:
+    """The machine's MMIO devices and the native table that routes to them.
+
+    The platform is the address space's MMIO port. Its services are named
+    attributes; assigning a Python service puts it in the place of the one
+    attached under that name, in the same windows.
     """
 
-    __slots__ = ("_chiplet_ports", "_crypto_capabilities", "_image")
+    __slots__ = (
+        "_table", "_topology", "_crypto_capabilities", "_chiplet",
+        "_sysinfo", "_mailbox", "_bound", "__weakref__",
+    )
 
     def __init__(
         self,
         *,
+        aes: HostedAESService,
+        sha3: HostedSHA3Service,
+        entropy: HostedTRNGService,
+        rtc: HostedRTCService,
+        audio: HostedAudioService | None = None,
+        chiplet: HostedChipletPorts | None = None,
+        topology: Topology = ONE_CORE,
         crypto_capabilities: int = HOSTED_CRYPTO_CAPABILITIES,
-        chiplet_ports: int = 0,
     ) -> None:
-        # The chiplet ports as PORT_COUNT of the port window packs them, or
-        # zero for a profile without ports.
-        if isinstance(chiplet_ports, bool) or not isinstance(chiplet_ports, int):
-            raise TypeError("chiplet ports must be an integer")
-        if not 0 <= chiplet_ports < 1 << 32:
-            raise ValueError("chiplet ports must be a 32-bit PORT_COUNT word")
-        self._chiplet_ports = chiplet_ports
+        if not isinstance(topology, Topology):
+            raise TypeError("platform topology must be a Topology")
         if (
             isinstance(crypto_capabilities, bool)
             or not isinstance(crypto_capabilities, int)
@@ -147,244 +245,134 @@ class OneCoreSysInfo:
             raise ValueError(
                 "hosted profile cannot advertise unimplemented crypto bits"
             )
+        if chiplet is not None and not isinstance(chiplet, HostedChipletPorts):
+            raise TypeError("platform chiplet ports must be HostedChipletPorts")
+        services = {
+            "aes": aes, "sha3": sha3, "entropy": entropy, "rtc": rtc,
+            "audio": HostedAudioService() if audio is None else audio,
+        }
+        for name, service in services.items():
+            self._check_service(name, service)
+        table = _native_extension().PlatformTable()
+        table.set_refusal(_refuse)
+        for name, service in services.items():
+            table.attach(name, service, _PYTHON_DEVICE_WINDOWS[name])
+        self._table = table
+        self._topology = topology
         self._crypto_capabilities = crypto_capabilities
-        self._image: bytes | None = None
+        self._chiplet = chiplet
+        self._sysinfo = None
+        self._mailbox = None
+        self._bound = False
+
+    @staticmethod
+    def _check_service(name: str, service: object) -> None:
+        expected = _PYTHON_DEVICE_TYPES[name]
+        if not isinstance(service, expected):
+            raise TypeError(f"platform {name} must be a {expected.__name__}")
 
     def bind(self, memory: SparseAddressSpace) -> None:
-        """Bind once to the address space whose geometry SysInfo reports."""
+        """Bind once to the address space whose geometry System Info
+        reports, and attach the devices that need it."""
 
         if not isinstance(memory, SparseAddressSpace):
-            raise TypeError("SysInfo memory must be a SparseAddressSpace")
-        if self._image is not None:
-            raise RuntimeError("SysInfo is already bound")
-
+            raise TypeError("platform memory must be a SparseAddressSpace")
+        if self._bound:
+            raise RuntimeError("the platform is already bound")
+        extension = _native_extension()
         regions = {spec.kind: spec for spec in memory.regions}
 
         def geometry(kind: AddressClass) -> tuple[int, int]:
             spec = regions.get(kind)
-            if spec is None:
-                return 0, 0
-            return spec.base, spec.size
+            return (0, 0) if spec is None else (spec.base, spec.size)
 
         _bank0_base, bank0_size = geometry(AddressClass.BANK0)
         hbw_base, hbw_size = geometry(AddressClass.HBW)
         external_base, external_size = geometry(AddressClass.EXTERNAL)
         vram_base, vram_size = geometry(AddressClass.VRAM)
-
-        register_values = (
-            BOARD_ID_VERSION,
-            bank0_size,
-            1,  # NUM_CORES: the initial profile has one full core.
-            0,  # CLUSTER_EN: there are no hosted micro-core clusters.
-            hbw_base,
-            hbw_size,
-            bank0_size + hbw_size,
-            external_base,
-            external_size,
-            1,  # NUM_FULL
-            vram_base,
-            vram_size,
-            self._crypto_capabilities,
-            1,  # NUM_BUS_PORTS: the sole full-core requester.
-            self._chiplet_ports,
+        chiplet = self._chiplet
+        sysinfo = extension.SysInfo(
+            board_id=BOARD_ID_VERSION,
+            full_cores=self._topology.full_cores,
+            clusters=self._topology.clusters,
+            bank0_size=bank0_size,
+            hbw_base=hbw_base,
+            hbw_size=hbw_size,
+            external_base=external_base,
+            external_size=external_size,
+            vram_base=vram_base,
+            vram_size=vram_size,
+            crypto_capabilities=self._crypto_capabilities,
+            chiplet_ports=0 if chiplet is None else chiplet.port_count_word,
         )
-        image = bytearray(SYSINFO_SIZE)
-        for index, value in enumerate(register_values):
-            start = index * 8
-            image[start : start + 8] = value.to_bytes(8, "little")
-        self._image = bytes(image)
+        self.audio.bind(memory)
+        if chiplet is None:
+            mailbox = extension.Mailbox(self._topology.core_count)
+        else:
+            chiplet.bind(memory)
+            mailbox = extension.Mailbox(chiplet.link)
+            self._table.attach(
+                "chiplet",
+                extension.ChipletWindowDevice(chiplet.link),
+                ((CHIPLET_OFFSET, CHIPLET_LIMIT),),
+            )
+        self._table.attach("sysinfo", sysinfo, ((SYSINFO_OFFSET, SYSINFO_LIMIT),))
+        self._table.attach("mailbox", mailbox, ((MAILBOX_OFFSET, MAILBOX_LIMIT),))
+        self._sysinfo = sysinfo
+        self._mailbox = mailbox
+        self._bound = True
+
+    # -- the port -----------------------------------------------------------
 
     def preflight(self, offset: int, width: int, *, write: bool) -> None:
-        """Validate one complete naturally aligned scalar MMIO access."""
-
-        self._require_bound()
-        if not isinstance(offset, int):
-            raise TypeError("SysInfo offset must be an integer")
-        if not isinstance(width, int):
-            raise TypeError("SysInfo width must be an integer")
-        if width not in _INTEGER_WIDTHS:
-            self._reject(
-                "SysInfo width must be 1, 2, 4, or 8 bytes",
-                offset=offset,
-                width=width,
-                write=write,
-            )
-        if offset < SYSINFO_OFFSET or offset + width > SYSINFO_LIMIT:
-            self._reject(
-                "access is outside the exact SysInfo MMIO window",
-                offset=offset,
-                width=width,
-                write=write,
-            )
-        if offset % width:
-            self._reject(
-                "SysInfo access is not naturally aligned",
-                offset=offset,
-                width=width,
-                write=write,
-            )
-        if write:
-            self._reject(
-                "the hosted SysInfo window is read-only",
-                offset=offset,
-                width=width,
-                write=True,
-            )
+        self._table.preflight(offset, width, write)
 
     def read8(self, offset: int) -> int:
-        """Return one little-endian byte after whole-access preflight."""
-
-        image = self._require_bound()
-        self._require_byte_offset(offset, write=False)
-        return image[offset - SYSINFO_OFFSET]
+        return self._table.read8(offset)
 
     def write8(self, offset: int, value: int) -> None:
-        """Reject a byte write even if a caller bypasses preflight."""
+        self._table.write8(offset, value)
 
-        del value
-        self._require_bound()
-        self._require_byte_offset(offset, write=True)
-        self._reject(
-            "the hosted SysInfo window is read-only",
-            offset=offset,
-            width=1,
-            write=True,
-        )
+    # -- the devices --------------------------------------------------------
 
-    def _require_bound(self) -> bytes:
-        image = self._image
-        if image is None:
-            raise RuntimeError("SysInfo is not bound to an address space")
-        return image
+    @property
+    def table(self):
+        """The native table every access goes through."""
 
-    def _require_byte_offset(self, offset: int, *, write: bool) -> None:
-        if not isinstance(offset, int):
-            raise TypeError("SysInfo offset must be an integer")
-        if not SYSINFO_OFFSET <= offset < SYSINFO_LIMIT:
-            self._reject(
-                "byte access is outside the exact SysInfo MMIO window",
-                offset=offset,
-                width=1,
-                write=write,
-            )
+        return self._table
 
-    @staticmethod
-    def _reject(
-        message: str,
-        *,
-        offset: int,
-        width: int,
-        write: bool,
-    ) -> None:
-        raise SysInfoAccessError(
-            message,
-            offset=offset,
-            width=width,
-            write=write,
-        )
+    @property
+    def topology(self) -> Topology:
+        return self._topology
+
+    @property
+    def sysinfo(self):
+        """System Info's native device, once the platform is bound."""
+
+        return self._sysinfo
+
+    @property
+    def mailbox(self):
+        """The native mailbox, once the platform is bound."""
+
+        return self._mailbox
+
+    @property
+    def chiplet(self) -> HostedChipletPorts | None:
+        """The profile's chiplet ports, or None when it has none."""
+
+        return self._chiplet
+
+    aes = _python_service_property("aes")
+    sha3 = _python_service_property("sha3")
+    entropy = _python_service_property("entropy")
+    rtc = _python_service_property("rtc")
+    audio = _python_service_property("audio")
 
 
-class OneCorePlatformMMIO:
-    """Route each admitted one-core MMIO window to its sole service state."""
-
-    # Each slot is one of the constructor's arguments, so a platform can be
-    # rebuilt from its slots.
-    __slots__ = ("aes", "audio", "chiplet", "entropy", "rtc", "sha3", "sysinfo")
-
-    def __init__(
-        self,
-        *,
-        sysinfo: OneCoreSysInfo,
-        aes: HostedAESService,
-        sha3: HostedSHA3Service,
-        entropy: HostedTRNGService,
-        rtc: HostedRTCService,
-        audio: HostedAudioService | None = None,
-        chiplet: HostedChipletPorts | None = None,
-    ) -> None:
-        if chiplet is not None and not isinstance(chiplet, HostedChipletPorts):
-            raise TypeError("platform chiplet ports must be HostedChipletPorts")
-        if not isinstance(sysinfo, OneCoreSysInfo):
-            raise TypeError("platform SysInfo must be a OneCoreSysInfo")
-        if not isinstance(aes, HostedAESService):
-            raise TypeError("platform AES must be a HostedAESService")
-        if not isinstance(sha3, HostedSHA3Service):
-            raise TypeError("platform SHA3 must be a HostedSHA3Service")
-        if not isinstance(entropy, HostedTRNGService):
-            raise TypeError("platform entropy must be a HostedTRNGService")
-        if not isinstance(rtc, HostedRTCService):
-            raise TypeError("platform RTC must be a HostedRTCService")
-        if audio is not None and not isinstance(audio, HostedAudioService):
-            raise TypeError("platform audio must be a HostedAudioService")
-        self.sysinfo = sysinfo
-        self.aes = aes
-        self.sha3 = sha3
-        self.entropy = entropy
-        self.rtc = rtc
-        self.audio = HostedAudioService() if audio is None else audio
-        # A profile without chiplet ports has neither their window nor the
-        # mailbox that serves them.
-        self.chiplet = chiplet
-
-    def preflight(self, offset: int, width: int, *, write: bool) -> None:
-        self._service(offset, width, write=write).preflight(
-            offset,
-            width,
-            write=write,
-        )
-
-    def read8(self, offset: int) -> int:
-        return self._service(offset, 1, write=False).read8(offset)
-
-    def write8(self, offset: int, value: int) -> None:
-        self._service(offset, 1, write=True).write8(offset, value)
-
-    def _service(
-        self,
-        offset: int,
-        width: int,
-        *,
-        write: bool,
-    ) -> (
-        OneCoreSysInfo
-        | HostedAESService
-        | HostedSHA3Service
-        | HostedTRNGService
-        | HostedRTCService
-        | HostedAudioService
-        | HostedChipletPorts
-        | HostedChipletMailbox
-    ):
-        if isinstance(offset, int):
-            if SYSINFO_OFFSET <= offset < SYSINFO_LIMIT:
-                # Let the selected service diagnose a crossing span.
-                return self.sysinfo
-            if AES_OFFSET <= offset < AES_LIMIT:
-                return self.aes
-            if SHA3_OFFSET <= offset < SHA3_LIMIT:
-                return self.sha3
-            if TRNG_OFFSET <= offset < TRNG_LIMIT:
-                return self.entropy
-            if RTC_UPTIME <= offset < RTC_EPOCH_LIMIT or offset == RTC_EPOCH_STAT:
-                return self.rtc
-            if AUDIO_OFFSET <= offset < AUDIO_LIMIT:
-                return self.audio
-            if self.chiplet is not None:
-                if CHIPLET_OFFSET <= offset < CHIPLET_LIMIT:
-                    return self.chiplet
-                if MAILBOX_OFFSET <= offset < MAILBOX_LIMIT:
-                    return self.chiplet.mailbox_service
-        raise PlatformMMIOAccessError(
-            "access is outside every admitted platform MMIO window",
-            offset=offset,
-            width=width,
-            write=write,
-        )
-
-
-# Capture original route identities before any platform instance or caller
-# customization exists. SHA3 requalifies these identities for each submission.
-_register_input_platform_route(OneCorePlatformMMIO)
+# Capture the original route identities before any platform instance or
+# caller customization exists. SHA3 requalifies them for each submission.
+_register_input_platform_route(HostedPlatform)
 
 
 def create_one_core_address_space(
@@ -402,20 +390,15 @@ def create_one_core_address_space(
     initial_uptime_ms: int = 0,
     chiplet_ports: int = 0,
 ) -> SparseAddressSpace:
-    """Return guest memory with the one-core router; sparse unless explicit.
+    """Return guest memory with the one-core platform; sparse unless explicit.
 
     ``chiplet_ports`` gives the profile that many chiplet ports, with their
-    register window and mailbox. The ports are the native model, so asking
-    for any requires the native extension.
+    register window. The ports are the native model, as the platform's
+    table and devices are.
     """
 
     chiplet = HostedChipletPorts(chiplet_ports) if chiplet_ports else None
-    sysinfo = OneCoreSysInfo(
-        crypto_capabilities=crypto_capabilities,
-        chiplet_ports=0 if chiplet is None else chiplet.port_count_word,
-    )
-    platform = OneCorePlatformMMIO(
-        sysinfo=sysinfo,
+    platform = HostedPlatform(
         aes=HostedAESService(),
         sha3=HostedSHA3Service(
             crypto_capabilities
@@ -430,6 +413,8 @@ def create_one_core_address_space(
             initial_uptime_ms=initial_uptime_ms,
         ),
         chiplet=chiplet,
+        topology=ONE_CORE,
+        crypto_capabilities=crypto_capabilities,
     )
     memory = SparseAddressSpace(
         bank0_size=bank0_size,
@@ -440,16 +425,14 @@ def create_one_core_address_space(
         page_size=page_size,
         dense_backing=dense_backing,
     )
-    sysinfo.bind(memory)
-    platform.audio.bind(memory)
-    if chiplet is not None:
-        chiplet.bind(memory)
+    platform.bind(memory)
     return memory
 
 
 __all__ = [
     "BOARD_ID_VERSION",
     "HOSTED_CRYPTO_CAPABILITIES",
+    "ONE_CORE",
     "SYSINFO_BANK0_SIZE",
     "SYSINFO_CHIPLET_PORTS",
     "SYSINFO_CRYPTO_CAPS",
@@ -458,13 +441,14 @@ __all__ = [
     "SYSINFO_HBW_BASE",
     "SYSINFO_HBW_SIZE",
     "SYSINFO_LIMIT",
+    "SYSINFO_NUM_BUS_PORTS",
     "SYSINFO_NUM_CORES",
     "SYSINFO_NUM_FULL",
     "SYSINFO_OFFSET",
     "SYSINFO_SIZE",
-    "OneCoreSysInfo",
-    "OneCorePlatformMMIO",
+    "HostedPlatform",
     "PlatformMMIOAccessError",
     "SysInfoAccessError",
+    "Topology",
     "create_one_core_address_space",
 ]

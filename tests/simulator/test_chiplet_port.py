@@ -118,8 +118,12 @@ def test_the_profile_has_no_ports_unless_asked():
     assert MegaForthRuntime(memory=memory).chiplet_ports is None
     with pytest.raises(MMIOAccessError):
         memory.read64(WINDOW + PORT_COUNT)
-    with pytest.raises(MMIOAccessError):
-        memory.read8(MMIO_BASE + MAILBOX_STATUS)
+    # The machine's mailbox answers without ports, and a signal to the ID a
+    # first port would hold names no participant.
+    memory.write8(MMIO_BASE + MAILBOX_SEND, PORT_ID)
+    assert memory.read8(MMIO_BASE + MAILBOX_STATUS) == 0
+    assert memory.mmio.mailbox.table.port_count == 0
+    assert memory.mmio.mailbox.table.pending_mask(0) == 0
 
 
 def test_system_info_repeats_the_windows_port_count():

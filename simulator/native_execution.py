@@ -16,7 +16,7 @@ from simulator import runtime as rt
 from simulator import storage
 from simulator.diagnostics import HostedDiagnosticsService
 from simulator.memory import SparseAddressSpace, native_region_descriptors
-from simulator.spinlocks import HostedSpinlockBank
+from simulator import spinlocks
 from simulator.stacks import Continuation, DataStack, ReturnStack
 from simulator.timer import HostedTimerService
 
@@ -28,7 +28,7 @@ from simulator.timer import HostedTimerService
 # span a native session's quantum already runs without returning. At 8,192
 # steps the return itself was a fifth to a third of a compute-bound run.
 UNQUANTIZED_NATIVE_INTERVAL_STEPS = 65536
-SEMANTIC_API_VERSION = 13
+SEMANTIC_API_VERSION = 14
 
 
 def load_native_extension(*, required: bool):
@@ -184,8 +184,8 @@ class NativeExecutor:
         self.disk_locks = runtime.spinlocks
         self.disk_primitives = {}
         if (all(type(unit) is storage.HostedStorageService for unit in self.disks)
-                and type(self.disk_locks) is HostedSpinlockBank):
-            self.program.bind_storage(self.disks, memory, self.disk_locks.owner_list)
+                and type(self.disk_locks) is spinlocks.HostedSpinlockBank):
+            self.program.bind_storage(self.disks, memory, self.disk_locks)
             self.disk_primitives = {
                 word.xt: (word, disk_operations[word.name])
                 for word in runtime.dictionary.words

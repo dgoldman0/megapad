@@ -8,16 +8,16 @@ from simulator.memory import (
     MMIO_BASE,
     AddressClass,
     MMIOAccessError,
-    SparseAddressSpace,
 )
 from simulator.platform import (
     BOARD_ID_VERSION,
     HOSTED_CRYPTO_CAPABILITIES,
     SYSINFO_LIMIT,
+    SYSINFO_NUM_BUS_PORTS,
     SYSINFO_OFFSET,
-    OneCoreSysInfo,
     PlatformMMIOAccessError,
     SysInfoAccessError,
+    Topology,
     create_one_core_address_space,
 )
 
@@ -54,7 +54,12 @@ def test_sysinfo_reports_the_returned_address_spaces_actual_geometry() -> None:
     assert _register(memory, 0x50) == regions[AddressClass.VRAM].base
     assert _register(memory, 0x58) == regions[AddressClass.VRAM].size
     assert _register(memory, 0x60) == HOSTED_CRYPTO_CAPABILITIES
-    assert _register(memory, 0x68) == 1
+    # The bus ports of one full core and no cluster, as the emulator counts
+    # them: the core and the NIC, disk and WOTS requesters.
+    assert _register(memory, 0x68) == 4
+    assert memory.mmio.sysinfo.registers == tuple(
+        _register(memory, 8 * index) for index in range(15)
+    )
 
 
 def test_absent_optional_regions_are_not_advertised_from_default_constants() -> None:
@@ -92,8 +97,8 @@ def test_exact_window_supports_little_endian_naturally_aligned_reads() -> None:
     assert memory.read32(SYSINFO_ADDRESS) == 0x0002_0001
     assert memory.read32(SYSINFO_ADDRESS + 4) == 0x4D50_3634
     assert memory.read64(SYSINFO_ADDRESS) == BOARD_ID_VERSION
-    # The last two registers: one bus requester, and no chiplet ports.
-    assert memory.read64(MMIO_BASE + SYSINFO_LIMIT - 16) == 1
+    # The last two registers: the bus requesters, and no chiplet ports.
+    assert memory.read64(MMIO_BASE + SYSINFO_NUM_BUS_PORTS) == 4
     assert memory.read64(MMIO_BASE + SYSINFO_LIMIT - 8) == 0
 
     assert len(
@@ -146,24 +151,33 @@ def test_every_sysinfo_write_is_rejected_in_preflight_without_mutation() -> None
     assert _register(memory, 0x18) == before
 
 
-def test_direct_service_callbacks_reject_bypassed_writes_and_outside_bytes() -> None:
-    service = OneCoreSysInfo()
-    memory = SparseAddressSpace(bank0_size=0x1000, mmio=service)
-    service.bind(memory)
+def test_bytes_that_bypass_the_preflight_are_still_refused() -> None:
+    platform = create_one_core_address_space(bank0_size=0x1000).mmio
 
     with pytest.raises(SysInfoAccessError) as write_error:
-        service.write8(SYSINFO_OFFSET, 0xFF)
+        platform.write8(SYSINFO_OFFSET, 0xFF)
     assert write_error.value.write is True
+    assert write_error.value.offset == SYSINFO_OFFSET
 
-    with pytest.raises(SysInfoAccessError) as read_error:
-        service.read8(SYSINFO_LIMIT)
+    with pytest.raises(PlatformMMIOAccessError) as read_error:
+        platform.read8(SYSINFO_LIMIT)
     assert read_error.value.write is False
 
 
-def test_sysinfo_binding_is_single_assignment() -> None:
-    service = OneCoreSysInfo()
-    memory = SparseAddressSpace(bank0_size=0x1000, mmio=service)
-    service.bind(memory)
+def test_platform_binding_is_single_assignment() -> None:
+    memory = create_one_core_address_space(bank0_size=0x1000)
 
     with pytest.raises(RuntimeError, match="already bound"):
-        service.bind(memory)
+        memory.mmio.bind(memory)
+
+
+@pytest.mark.parametrize(
+    ("full_cores", "clusters"),
+    ((0, 0), (5, 0), (1, -1), (1, 4)),
+)
+def test_a_topology_holds_the_shapes_the_bios_supports(full_cores, clusters) -> None:
+    with pytest.raises(ValueError):
+        Topology(full_cores, clusters)
+    with pytest.raises(TypeError):
+        Topology(True, 0)
+    assert Topology(4, 3).core_count == 16

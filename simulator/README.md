@@ -23,10 +23,20 @@ The implemented slices provide:
 - a sparse 64-bit address space with distinct Bank 0, external, VRAM, HBW, and
   reserved MMIO classes, plus a caller-bounded allocator for hosted runtime
   storage;
-- a read-only one-full-core SysInfo profile whose direct MMIO registers and
-  BIOS topology words share the same service and report the actual sparse
-  memory geometry, now advertising the admitted `0x7` crypto profile: CRC,
-  checked SHA3/SHAKE streaming, and raw Keccak-f[1600];
+- one native attachment table for every MMIO window (`simulator/platform.py`,
+  `accel/platform_bindings.h`): each device claims its windows, overlaps are
+  refused, and every access reaches the device that holds its first byte, with
+  its requester, preflight first and then byte by byte; Python services attach
+  through the table's adapter;
+- a read-only one-full-core SysInfo device, built from the profile's
+  topology, whose direct MMIO registers and BIOS topology words read the same
+  registers and report the actual sparse memory geometry, now advertising the
+  admitted `0x7` crypto profile: CRC, checked SHA3/SHAKE streaming, and raw
+  Keccak-f[1600];
+- the machine's mailbox in every profile, the native model shared with the
+  emulator (`shared/accel/mailbox.h`): the requester's data word, `SEND`,
+  `STATUS` and `ACK`, over the table the chiplet ports ring through when the
+  profile has ports;
 - an explicit one-core worker capability boundary: `CORE-STATUS 0` reports an
   idle secondary-worker slot, other IDs are rejected, and `WAKE-CORE` rejects
   every request without consuming or executing its XT because no secondary
@@ -111,9 +121,11 @@ The implemented slices provide:
 - runtime-local, per-core checked SHA-256 and SHA-512 streams with their
   distinct physical-span policy, exact 64/128-bit length accounting, staged
   digest publication, and no invented MMIO aperture or capability bit;
-- a runtime-local 16-entry semantic spinlock bank with physical-core ownership,
+- a runtime-local 16-entry spinlock bank with physical-core ownership,
   depthless same-core reacquisition, nonblocking contention, and owner-only
-  release for the ordinary pseudo-BIOS words;
+  release, the native model shared with the emulator
+  (`shared/accel/spinlock_bank.h`), for the ordinary pseudo-BIOS words and
+  the checked and native disk words;
 - a runtime-local, exclusively claimed block-media service behind the ten
   production query/checked pseudo-BIOS words, with full physical-window DMA
   validation, generation-bound stale rejection, 255-sector chunking, precise

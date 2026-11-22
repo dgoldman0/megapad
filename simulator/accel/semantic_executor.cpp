@@ -9,6 +9,7 @@
 #include "crc_service_bindings.h"
 #include "storage_service_bindings.h"
 #include "tacc_service_bindings.h"
+#include "platform_bindings.h"
 #include "../../shared/accel/routine_call.h"
 #include "collected.h"
 #include "guest_memory.h"
@@ -93,7 +94,7 @@ enum DiskRegister : uint32_t {
     DISK_STATUS, DISK_SECTORS, DISK_MEDIA_GENERATION, DISK_CAPABILITIES,
 };
 // The BIOS's filesystem lock, which the checked disk words take and release.
-constexpr Py_ssize_t FILESYSTEM_LOCK = 2;
+constexpr int FILESYSTEM_LOCK = 2;
 
 // TADD, TSUB and TMUL, in OP_TILE_BINARY's operand a.
 enum TileBinary : uint32_t { TILE_ADD, TILE_SUBTRACT, TILE_MULTIPLY };
@@ -1012,7 +1013,7 @@ public:
         Py_VISIT(crc_owner_.ptr());
         for (const py::object& owner : disk_owners_) Py_VISIT(owner.ptr());
         Py_VISIT(disk_memory_.ptr());
-        Py_VISIT(lock_owners_.ptr());
+        Py_VISIT(lock_bank_.ptr());
         Py_VISIT(routine_entry_.ptr());
         return megapad::guest::traverse_regions(regions_, visit, arg);
     }
@@ -1028,7 +1029,8 @@ public:
         disks_.clear();
         std::vector<py::object> disk_owners = std::move(disk_owners_);
         py::object disk_memory = std::move(disk_memory_);
-        py::object lock_owners = std::move(lock_owners_);
+        locks_ = nullptr;
+        py::object lock_bank = std::move(lock_bank_);
         py::object continuation_type = std::move(continuation_type_);
         megapad::guest::release_regions(regions_);
     }
@@ -1051,12 +1053,11 @@ public:
     void bind_tile_guard(py::object guard) { tile_guard_ = std::move(guard); }
 
     // The storage services of the machine's units in unit order, the memory
-    // of the runtime they move data through, and the live owner list of its
-    // spinlock bank, for the disk words. A run admits them only when its
+    // of the runtime they move data through, and its spinlock bank, whose
+    // filesystem lock the disk words take. A run admits them only when its
     // owner says the runtime still keeps all three.
-    void bind_storage(const py::iterable& services, py::object memory, py::list lock_owners) {
-        if (PyList_GET_SIZE(lock_owners.ptr()) <= FILESYSTEM_LOCK)
-            throw py::value_error("the spinlock owners must include the filesystem lock");
+    void bind_storage(const py::iterable& services, py::object memory, py::object lock_bank) {
+        auto& bank = lock_bank.cast<megapad::spinlock::SpinlockBank&>();
         std::vector<megapad::storage_service::Service*> bound;
         std::vector<py::object> owners;
         for (py::handle service : services) {
@@ -1068,8 +1069,17 @@ public:
         disk_owners_ = std::move(owners);
         py::object previous_memory = std::move(disk_memory_);
         disk_memory_ = std::move(memory);
-        py::object previous_locks = std::move(lock_owners_);
-        lock_owners_ = std::move(lock_owners);
+        py::object previous_locks = std::move(lock_bank_);
+        lock_bank_ = std::move(lock_bank);
+        locks_ = &bank;
+    }
+
+    // Whether a core holds the BIOS's filesystem lock, in which case the disk
+    // words stay in Python, which takes the lock as the BIOS does. With no
+    // bank bound the lock counts as held.
+    bool filesystem_lock_held() const noexcept {
+        return locks_ == nullptr ||
+            locks_->owner(FILESYSTEM_LOCK) != megapad::spinlock::SpinlockBank::FREE;
     }
 
     // The CRC service the runtime's CRC words use, or None to leave the
@@ -2422,8 +2432,7 @@ private:
             disk::Service* service = unit < disks_.size() ? disks_[unit] : nullptr;
             Cell status = disk::result_no_media;
             if (service != nullptr) {
-                if (service->hooked() ||
-                    PyList_GET_ITEM(lock_owners_.ptr(), FILESYSTEM_LOCK) != Py_None)
+                if (service->hooked() || filesystem_lock_held())
                     return false;
                 status = service->flush(generation);
             }
@@ -2447,7 +2456,7 @@ private:
         if (service != nullptr) {
             // A count past the medium's u32 capacity fails before any memory.
             if (service->hooked() || !service->memory_owner().is(disk_memory_) ||
-                PyList_GET_ITEM(lock_owners_.ptr(), FILESYSTEM_LOCK) != Py_None ||
+                filesystem_lock_held() ||
                 (count <= disk::max_media_sectors &&
                  memory.reaches_return_stack(dma, count * disk::sector_size)))
                 return false;
@@ -2600,11 +2609,12 @@ private:
     megapad::crc_service::Service* crc_ = nullptr;
     py::object crc_owner_;
     // The bound storage services by unit and their Python objects, the
-    // memory they move data through and the spinlock bank's owner list.
+    // memory they move data through and the spinlock bank.
     std::vector<megapad::storage_service::Service*> disks_;
     std::vector<py::object> disk_owners_;
     py::object disk_memory_;
-    py::object lock_owners_;
+    megapad::spinlock::SpinlockBank* locks_ = nullptr;
+    py::object lock_bank_;
     const megapad::hybrid::RoutineCall* routine_call_ = nullptr;
     py::object routine_entry_;
     std::vector<NativeRoutine> routines_;
@@ -2621,9 +2631,10 @@ PYBIND11_MODULE(_megaforth_native, module) {
     megapad::crc_service::register_bindings(module);
     megapad::storage_service::register_bindings(module);
     megapad::tacc_service::register_bindings(module);
+    megapad::platform::register_bindings(module);
     megapad::dictionary::register_bindings(module);
     megapad::walker::register_bindings(module);
-    module.attr("SEMANTIC_API_VERSION") = 13;
+    module.attr("SEMANTIC_API_VERSION") = 14;
     module.attr("MACHINE_STOPPED_CALL") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_CALL));
     module.attr("MACHINE_STOPPED_RESUME") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_RESUME));
     module.attr("MACHINE_CALLBACK") = py::int_(static_cast<uint32_t>(MACHINE_CALLBACK));
@@ -2642,7 +2653,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
         .def("bind_tile_guard", &NativeProgram::bind_tile_guard, py::arg("guard"))
         .def("bind_crc", &NativeProgram::bind_crc, py::arg("service"))
         .def("bind_storage", &NativeProgram::bind_storage, py::arg("services"),
-             py::arg("memory"), py::arg("lock_owners"))
+             py::arg("memory"), py::arg("lock_bank"))
         .def("snapshot_stack", &NativeProgram::snapshot_stack,
              py::arg("bounds"), py::arg("continuations") = py::none())
         .def("run", &NativeProgram::run, py::arg("xt"), py::arg("ip"),
