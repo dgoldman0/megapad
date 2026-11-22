@@ -645,7 +645,12 @@ Core c alone writes its record.
 | `+0x40` | `PAIR` | The record of the core's queue pair (chiplet-link.md §8), six words, zero until the pair is made |
 
 A `FILL` that does not lie inside the region `REGION` names means the core
-has made nothing there yet.
+has made nothing there yet. A core takes a region by storing `FILL` at its
+base and then its base in `REGION`, so no stale `FILL` lies inside it. A
+core that opens no window after a hold still names the region the hold
+retired, so LM1 never grants a core a region that starts at the base its
+record names, and the base alone tells LM1 which of its grants the record
+means.
 
 ### LM1's block
 
@@ -766,7 +771,8 @@ require:
 - MegaPad checks LM1's. `EPOCH` never moves back and moves on by one for
   each hold; `FAILED` stays set once set; `LOG_HEAD` never passes `TAIL`; a
   region LM1 writes lies inside a block MegaPad granted and overlaps no
-  other core's; every reference MegaPad reads, from a handle slot or a
+  region another core took in the same epoch, since a hold retires the
+  regions of earlier ones; every reference MegaPad reads, from a handle slot or a
   field, passes §6's check; and, from stage 1, LM1's writes of `MOVE`
   follow their one progression: outside a hold `MOVE` reads `NONE`, or
   `FIXED` with an epoch below `EPOCH`, and its epoch never moves back. From
