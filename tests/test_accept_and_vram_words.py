@@ -5,10 +5,12 @@ case runs the same Forth on both machines and requires the same report,
 the same bytes in the buffer and the same bytes left unread.
 
 ACCEPT ( addr max -- n ) stops at max before it reads a key, ends at a CR
-or an LF that it neither stores nor echoes, stores and echoes every other
-byte as it came, and ends the line with CR LF. On the emulator the bytes
-ACCEPT reads follow the command line on the same UART; in the simulator
-they wait in the runtime's UART input while the command is evaluated.
+or an LF that it neither stores nor echoes, drops the last byte stored at
+a BS or a DEL and echoes BS, space, BS (with nothing stored either does
+nothing), stores and echoes every other byte as it came, and ends the line
+with CR LF. On the emulator the bytes ACCEPT reads follow the command line
+on the same UART; in the simulator they wait in the runtime's UART input
+while the command is evaluated.
 """
 
 from __future__ import annotations
@@ -126,21 +128,42 @@ def machines():
     return _Emulator(), _Simulator()
 
 
-# (maximum, typed, echo, count, left unread)
+# What a BS or a DEL echoes when it drops a byte.
+RUBOUT = b"\x08 \x08"
+
+# (maximum, typed, echo, count, bytes stored, left unread)
 ACCEPT_CASES = (
-    pytest.param(10, b"hello\n", b"hello\r\n", 5, b"", id="lf-ends"),
-    pytest.param(10, b"hi\r", b"hi\r\n", 2, b"", id="cr-ends"),
-    pytest.param(3, b"abc\n", b"abc\r\n", 3, b"\n", id="max-reached"),
-    pytest.param(0, b"", b"\r\n", 0, b"", id="max-zero-reads-nothing"),
-    pytest.param(10, b"\n", b"\r\n", 0, b"", id="empty-line"),
+    pytest.param(10, b"hello\n", b"hello\r\n", 5, b"hello", b"", id="lf-ends"),
+    pytest.param(10, b"hi\r", b"hi\r\n", 2, b"hi", b"", id="cr-ends"),
+    pytest.param(3, b"abc\n", b"abc\r\n", 3, b"abc", b"\n", id="max-reached"),
+    pytest.param(0, b"", b"\r\n", 0, b"", b"", id="max-zero-reads-nothing"),
+    pytest.param(10, b"\n", b"\r\n", 0, b"", b"", id="empty-line"),
     pytest.param(
-        10, b"ab\x08c\x7f\n", b"ab\x08c\x7f\r\n", 5, b"", id="bytes-unedited"),
+        10, b"abc\x08\n", b"abc" + RUBOUT + b"\r\n", 2, b"ab", b"",
+        id="bs-drops-last"),
+    pytest.param(
+        10, b"abc\x7f\n", b"abc" + RUBOUT + b"\r\n", 2, b"ab", b"",
+        id="del-drops-last"),
+    pytest.param(
+        10, b"\x08\x7fab\n", b"ab\r\n", 2, b"ab", b"",
+        id="bs-and-del-at-count-zero"),
+    pytest.param(
+        10, b"ab\x08c\x7f\x7f\x08xy\x08z\n",
+        b"ab" + RUBOUT + b"c" + RUBOUT * 2 + b"xy" + RUBOUT + b"z\r\n",
+        2, b"xz", b"", id="mixed-edits"),
+    pytest.param(
+        3, b"ab\x08cd\n", b"ab" + RUBOUT + b"cd\r\n", 3, b"acd", b"\n",
+        id="edit-makes-room"),
+    pytest.param(
+        10, b"a\tb\x01\n", b"a\tb\x01\r\n", 4, b"a\tb\x01", b"",
+        id="other-controls-stored"),
 )
 
 
-@pytest.mark.parametrize("maximum, typed, echo, count, unread", ACCEPT_CASES)
+@pytest.mark.parametrize(
+    "maximum, typed, echo, count, kept, unread", ACCEPT_CASES)
 def test_accept_reads_a_line_as_the_bios_does(
-    machines, maximum, typed, echo, count, unread
+    machines, maximum, typed, echo, count, kept, unread
 ) -> None:
     emulator, simulator = machines
     emulator_result = emulator.accept(maximum, typed)
@@ -148,8 +171,7 @@ def test_accept_reads_a_line_as_the_bios_does(
 
     echoed, accepted, stored = simulator_result
     assert (echoed, accepted) == (echo, count)
-    stripped = typed.rstrip(b"\r\n")
-    assert stored[:count] == stripped[:count]
+    assert stored[:count] == kept
     assert simulator_result == emulator_result
     assert simulator.runtime.uart_input == unread
     # A byte left unread stays for the next reader.  The emulator's BIOS
@@ -182,6 +204,16 @@ def test_accept_waits_for_input_and_resumes_as_key_does() -> None:
     assert context.data.snapshot() == (2,)
     assert runtime.memory.read_bytes(simulator.buffer, 2) == b"ok"
     assert runtime.uart_output == b"ok\r\n"
+
+
+def test_interpreter_line_takes_the_same_edits() -> None:
+    """The interpreter's line input edits with the routine ACCEPT uses.
+
+    The BIOS's read_line and ACCEPT share line_rubout. read_line also drops
+    every other byte below 0x20, so the 0x01 typed here never reaches the
+    line, where ACCEPT would store it."""
+    output = _Emulator().run([b"40 9\x08\x7f 2 +\x01 .\n"])
+    assert b"40 9" + RUBOUT * 2 + b" 2 + .\r\n42 " in output
 
 
 @pytest.mark.parametrize(

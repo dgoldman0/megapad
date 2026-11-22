@@ -635,8 +635,9 @@ input to avoid blocking.
 
 The hosted `ACCEPT ( addr max -- n )` reads its line through that service and
 takes the BIOS's steps. It stops at max before it reads a key, ends at a CR or
-an LF that it neither stores nor echoes, stores and echoes every other byte as
-it came, and ends the line with CR LF. Each byte comes from `KEY`, so `ACCEPT`
+an LF that it neither stores nor echoes, drops the last byte stored at a BS or
+a DEL and echoes BS, space, BS (with nothing stored either does nothing),
+stores and echoes every other byte as it came, and ends the line with CR LF. Each byte comes from `KEY`, so `ACCEPT`
 blocks and resumes at `KEY`'s boundary, and an interpreted caller prequeues
 its line as above. `tests/test_accept_and_vram_words.py` gives the same Forth
 to the emulator's BIOS and requires the same echo, count, buffer bytes and

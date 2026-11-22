@@ -1108,6 +1108,24 @@ read_mmio_u32_le:
 ;  Line Input
 ; =====================================================================
 
+; line_rubout: the BS/DEL edit that read_line and ACCEPT share.  R12
+;   counts the bytes stored so far.  When it is nonzero, the last byte is
+;   dropped and BS, space, BS erase it from the terminal; with nothing
+;   stored it does nothing.  Only R1 and R12 change, since emit_char
+;   changes no register.
+line_rubout:
+    cmpi r12, 0
+    breq line_rubout_done
+    dec r12
+    ldi r1, 0x08
+    sep  r4
+    ldi r1, 0x20
+    sep  r4
+    ldi r1, 0x08
+    sep  r4
+line_rubout_done:
+    ret.l
+
 ; read_line: read into tib_buffer, handle BS, echo.
 ;   Sets var_tib_len.
 read_line:
@@ -1138,15 +1156,8 @@ rl_loop:
     sep  r4                 ; echo
     br rl_loop
 rl_bs:
-    cmpi r12, 0
-    breq rl_loop
-    dec r12
-    ldi r1, 0x08
-    sep  r4
-    ldi r1, 0x20
-    sep  r4
-    ldi r1, 0x08
-    sep  r4
+    ldi64 r11, line_rubout
+    call.l r11
     br rl_loop
 rl_done:
     ldi64 r11, print_crlf
@@ -8557,33 +8568,44 @@ dqrt_scan:
     ret.l
 
 ; ACCEPT ( addr max -- n ) read up to max chars into addr, return count
-;   The count lives in R10: key_char returns its byte in R1 and uses R11
-;   and R13 for the UART, and emit_char changes no register.
+;   A CR or LF ends the line.  A BS or DEL drops the last byte stored
+;   through line_rubout, read_line's edit.  Every other byte is stored and
+;   echoed.  The count lives in R12, where line_rubout keeps it, and the
+;   max in R10: key_char returns its byte in R1 and uses R11 and R13 for
+;   the UART, and emit_char changes no register.
 w_accept:
-    ldn r12, r14              ; max
+    ldn r10, r14              ; max
     addi r14, 8
     ldn r9, r14               ; addr
     addi r14, 8
-    ldi r10, 0                ; count
+    ldi r12, 0                ; count
 w_accept_loop:
-    cmp r10, r12
+    cmp r12, r10
     breq w_accept_done
     sep  r5                 ; key -> R1
     cmpi r1, 0x0D
     breq w_accept_done
     cmpi r1, 0x0A
     breq w_accept_done
+    cmpi r1, 0x08
+    breq w_accept_rubout
+    cmpi r1, 0x7F
+    breq w_accept_rubout
     mov r7, r9
-    add r7, r10
+    add r7, r12
     st.b r7, r1
-    inc r10
+    inc r12
     sep  r4                 ; echo
+    br w_accept_loop
+w_accept_rubout:
+    ldi64 r11, line_rubout
+    call.l r11
     br w_accept_loop
 w_accept_done:
     ldi64 r11, print_crlf
     call.l r11
     subi r14, 8
-    str r14, r10              ; push count
+    str r14, r12              ; push count
     ret.l
 
 ; =====================================================================

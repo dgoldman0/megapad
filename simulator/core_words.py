@@ -3341,9 +3341,12 @@ def _define_accept(runtime: MegaForthRuntime) -> None:
     """``ACCEPT ( addr max -- n )`` as the BIOS's ``w_accept`` runs it.
 
     It stops at max before it reads a key. A CR or an LF ends the line and
-    is neither stored nor echoed; every other byte is stored as it came and
-    echoed. The line then ends with CR LF, as ``print_crlf`` ends it. Each
-    byte comes from KEY, so ACCEPT waits for input exactly as KEY does.
+    is neither stored nor echoed. A BS or a DEL drops the last byte stored
+    and echoes BS, space, BS, as the BIOS's ``line_rubout`` does, and with
+    nothing stored it does nothing; every other byte is stored as it came
+    and echoed. The line then ends with CR LF, as ``print_crlf`` ends it.
+    Each byte comes from KEY, so ACCEPT waits for input exactly as KEY
+    does.
     """
 
     def xt(name: bytes) -> int:
@@ -3352,7 +3355,8 @@ def _define_accept(runtime: MegaForthRuntime) -> None:
             raise AssertionError(f"ACCEPT needs the core word {name!r}")
         return word.xt
 
-    done = 26
+    store = 35
+    done = 45
     runtime.define_colon(
         b"ACCEPT",
         (
@@ -3372,7 +3376,26 @@ def _define_accept(runtime: MegaForthRuntime) -> None:
             BranchZero(16),
             Call(xt(b"DROP")),           # 14: CR or LF ends the line
             Branch(done),
-            Call(xt(b"DUP")),            # 16: store at addr + count
+            Call(xt(b"DUP")),            # 16: BS or DEL?
+            Literal(0x08),
+            Call(xt(b"=")),
+            Call(xt(b"OVER")),
+            Literal(0x7F),
+            Call(xt(b"=")),
+            Call(xt(b"OR")),
+            BranchZero(store),
+            Call(xt(b"DROP")),           # 24: addr max count
+            Call(xt(b"DUP")),
+            BranchZero(1),               # nothing stored: nothing to drop
+            Call(xt(b"1-")),             # 27: drop the last byte stored
+            Literal(0x08),
+            Call(xt(b"EMIT")),
+            Literal(0x20),
+            Call(xt(b"EMIT")),
+            Literal(0x08),
+            Call(xt(b"EMIT")),
+            Branch(1),
+            Call(xt(b"DUP")),            # 35: store at addr + count
             Literal(4),
             Call(xt(b"PICK")),
             Literal(3),
@@ -3382,7 +3405,7 @@ def _define_accept(runtime: MegaForthRuntime) -> None:
             Call(xt(b"EMIT")),           # the echo
             Call(xt(b"1+")),
             Branch(1),
-            WriteOutput(b"\r\n"),        # 26: done
+            WriteOutput(b"\r\n"),        # 45: done
             Call(xt(b"NIP")),
             Call(xt(b"NIP")),
             Return(),

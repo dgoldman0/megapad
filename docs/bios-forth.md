@@ -266,7 +266,7 @@ output.
 | `U.` | `( u -- )` | Print an unsigned number followed by a space. |
 | `.S` | `( -- )` | Print the entire stack contents non-destructively. |
 | `TYPE` | `( addr n -- )` | Print *n* characters starting at addr. |
-| `ACCEPT` | `( addr n -- actual )` | Read up to *n* characters from the UART into addr.  Returns actual count.  Handles backspace. |
+| `ACCEPT` | `( addr n -- actual )` | Read up to *n* characters from the UART into addr.  Returns actual count.  A CR or LF ends the line; a BS or DEL drops the last character stored and erases it with BS, space, BS, as the interpreter's line input does; every other byte is stored and echoed. |
 | `WORDS` | `( -- )` | Print all words in the dictionary. |
 | `BYE` | `( -- )` | Flush the TX buffer and halt the CPU (exit Forth). |
 | `TX-FLUSH` | `( -- )` | Publish the emulator ring batch, or wait for physical FIFO-and-shifter idle. |

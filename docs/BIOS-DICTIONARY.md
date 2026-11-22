@@ -363,7 +363,7 @@ Four more words of this section have no number in the catalogue:
 | 80 | `SPACE` | `( -- )` | | Emit one space |
 | 81 | `SPACES` | `( n -- )` | | Emit n spaces |
 | 82 | `TYPE` | `( addr len -- )` | | Print len characters starting at addr |
-| 83 | `ACCEPT` | `( addr max -- n )` | | Read up to max chars from UART into addr, return count |
+| 83 | `ACCEPT` | `( addr max -- n )` | | Read up to max chars from UART into addr, return count; BS or DEL drops the last char stored |
 | 84 | `.ZSTR` | `( addr -- )` | | Print NUL-terminated string |
 | 85 | `WORDS` | `( -- )` | | List all dictionary word names |
 | 86 | `BYE` | `( -- )` | | Flush TX buffer, print "Bye!" and halt the CPU |

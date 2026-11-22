@@ -925,10 +925,12 @@ compiler records nothing into any of them.
 `ACCEPT`, `VRAM-BASE` and `VRAM-SIZE` come last, in the BIOS's order.
 `ACCEPT ( addr max -- n )` is a semantic definition over `KEY` and `EMIT`
 that takes the BIOS's steps: it stops at max before it reads a key, ends at a
-CR or an LF that it neither stores nor echoes, stores and echoes every other
-byte as it came, and ends the line with CR LF. It waits for input at `KEY`'s
-`Idle` boundary. `VRAM-BASE` and `VRAM-SIZE` read the bound SysInfo, as
-`EXT-MEM-BASE` and `EXT-MEM-SIZE` do; the simulator still has no framebuffer.
+CR or an LF that it neither stores nor echoes, drops the last byte stored at a
+BS or a DEL and echoes BS, space, BS (with nothing stored either does
+nothing), stores and echoes every other byte as it came, and ends the line
+with CR LF. It waits for input at `KEY`'s `Idle` boundary. `VRAM-BASE` and
+`VRAM-SIZE` read the bound SysInfo, as `EXT-MEM-BASE` and `EXT-MEM-SIZE` do;
+the simulator still has no framebuffer.
 `tests/test_accept_and_vram_words.py` runs the same Forth on the emulator's
 BIOS and here. Public `SOURCE` remains out, with `>IN` and `STATE`: the hosted
 evaluator keeps the input line and its position in host state, so a guest
