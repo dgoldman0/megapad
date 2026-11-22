@@ -2,15 +2,15 @@
 
 Status: MegaPad's side is implemented in RTL and simulated, LM1's end
 (`rtl/link/` in the lm1 repository) passes a bench joined to it, and the
-emulator and the simulator model MegaPad's side (section 9). MegaPad's
-writes into memory a chiplet lends (sections 3 and 4), accepted on
-2026-11-19 for the tile engine's `TACC.STORE`, are built in MegaPad's RTL
-and modelled in the emulator and the simulator; LM1's end and the `LEND`
-entries of section 8 are not built yet. This is the specification of the
-link between MegaPad and one chiplet: the port's identity, its register
-window, the channels that cross the link, the sideband, and the queues in
-lent memory through which the two chips exchange work (section 8). The
-design it follows, with its reasons, is
+emulator and the simulator model MegaPad's side (section 9), where LM1's
+chiplet module (`chiplet/` in the lm1 repository) plays LM1's end.
+MegaPad's writes into memory a chiplet lends (sections 3 and 4), accepted
+on 2026-11-19 for the tile engine's `TACC.STORE`, are built at both ends;
+the `LEND` entries of section 8 are not built yet. This is the
+specification of the link between MegaPad and one chiplet: the port's
+identity, its register window, the channels that cross the link, the
+sideband, and the queues in lent memory through which the two chips
+exchange work (section 8). The design it follows, with its reasons, is
 [chiplet-interconnect-plan.md](chiplet-interconnect-plan.md). Section 10
 lists the parts of the chiplet contract that remain to be specified or
 built.
@@ -535,7 +535,12 @@ in the emulator and `HostedChipletPorts.attach_module` in the simulator.
 `shared/accel/chiplet_test_module.cpp` is a small chiplet that the tests use
 and a worked example of the interface. It lends MegaPad 4 KiB of its own
 memory, from its address `0x1000`, while it runs, and copies the start of
-that memory into its reply when a command asks it to.
+that memory into its reply when a command asks it to. LM1's chiplet module
+is a module library built from the lm1 repository against this checkout's
+header, and `tests/test_lm1_chiplet.py` attaches it to both, boots a small
+LM-1 program from MegaPad's memory, stores an accumulator image into the
+memory LM1 lends, exchanges doorbells with the program, and saves and
+restores the port with LM1 behind it.
 
 ## 10. Still to specify or build
 
@@ -568,9 +573,8 @@ that memory into its reply when a command asks it to.
   cores and 48 ports. A die with more ports needs a wider mask.
 - **The rest of MegaPad's writes into a chiplet.** Sections 3 and 4
   specify them for the tile engine's `TACC.STORE`, and MegaPad's RTL, the
-  emulator and the simulator build them. LM1's end, whose cluster has no
-  write path from outside yet, and the `LEND` entries of section 8 are
-  still to build.
+  emulator and the simulator build them, as LM1's RTL and chiplet module
+  build LM1's end. The `LEND` entries of section 8 are still to build.
   Reads of memory a chiplet lends, by the cores or the tile engine, are
   still to specify.
 - **The physical layer.** The channels are logical; framing them onto UCIe's
