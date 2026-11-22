@@ -2797,14 +2797,16 @@ class MegapadSystem:
 
             cpu.pc = entry
 
-            # Per-core stack tops (match FPGA layout)
+            # The RTL clears every register at reset, and the BIOS derives
+            # each full core's stacks from COREID and System Info.  A bare
+            # program that runs without the BIOS still finds a stack pointer
+            # here, at the BIOS's zone tops on a 1 MiB machine.
             if i < len(CORE_STACK_TOPS) and self.ram_size >= CORE_STACK_TOPS[0]:
                 sp = CORE_STACK_TOPS[i]
             else:
                 # Small RAM or >4 cores: divide equally
                 sp = self.ram_size - i * (self.ram_size // self.num_cores)
             cpu.regs[cpu.spsel] = sp
-            cpu.regs[2] = sp  # R2 (X) also usable as stack
 
             cpu.halted = False
             cpu.idle = False

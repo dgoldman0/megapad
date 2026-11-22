@@ -390,8 +390,12 @@ provides an interactive REPL over UART.
 
 ### Boot sequence
 
-1. Initialise RSP (R15 ← ram_size) and DSP (R14 ← ram_size / 2)
-2. Check COREID (CSR 0x20) — secondary cores branch to worker loop
+1. Derive this full core's stack zone top from COREID (CSR 0x20) and System
+   Info, as every register is zero at reset: R2 ← min(BANK0_SIZE, 1 MiB) −
+   COREID × 64 KiB
+2. Check COREID — secondary cores branch to the worker loop, whose stacks
+   start at R2 and 32 KiB below it; core 0 sets RSP (R15 ← R2) and DSP
+   (R14 ← R2 / 2)
 3. Set up UART base in R8, TX ring descriptor pointer in R19, and subroutine
    pointers in R4/R5/R6. Read `UART_CAPS` once: register R19 with
    `TX_RING_BASE` when `TX_RING_BATCH` exists, otherwise select the

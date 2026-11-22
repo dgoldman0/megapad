@@ -99,7 +99,7 @@ dominant even with an almost ideal positive cache.
 
 ## Boot Sequence
 
-1. **Hardware init**: RSP = `ram_size`, DSP = `ram_size / 2`, UART base → R8, TX ring descriptor pointer → R19, subroutine pointers → R4/R5/R6, timer enabled. BIOS captures `UART_CAPS` (`+0x07`) once. If `TX_RING_BATCH` is set it writes R19 to `TX_RING_BASE` (`+0x08`); otherwise it selects ready-polled `TX_DATA`.
+1. **Hardware init**: every full core derives its stack zone's top in R2 from `COREID` and System Info, since the chip clears every register at reset: R2 = min(`BANK0_SIZE`, 1 MiB) − `COREID` × 64 KiB. Workers branch to their loop, whose stacks start at R2 and 32 KiB below it. Core 0 sets RSP = R2 and DSP = R2 / 2, UART base → R8, TX ring descriptor pointer → R19, subroutine pointers → R4/R5/R6, timer enabled. BIOS captures `UART_CAPS` (`+0x07`) once. If `TX_RING_BATCH` is set it writes R19 to `TX_RING_BASE` (`+0x08`); otherwise it selects ready-polled `TX_DATA`.
 2. **IVT install**: Bus-fault handler registered via CSR 0x20.
 3. **Forth variables and private arena**: `STATE` = 0, `BASE` = 10, reserve
    and scrub `NUM_CORES × 16` bytes above `dict_free` for CRC owner records,
@@ -114,7 +114,10 @@ dominant even with an almost ideal positive cache.
 
 ## QUIT — The Outer Interpreter
 
-`forth_quit` resets RSP to RAM top, then loops:
+On a worker core `QUIT`, and `ABORT` and `ABORT"` with it, ends the job
+instead (`worker_quit`): the worker takes its own stacks back, runs the
+`QUIT-XT!` callback, clears its slot and sleeps. On core 0 `forth_quit`
+resets RSP to RAM top, then loops:
 1. If `STATE` = 0, print `"> "` prompt.
 2. `read_line` → TIB. Set `>IN` = 0.
 3. Parse words via `parse_word`. For each:
