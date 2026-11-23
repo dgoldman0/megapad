@@ -6,7 +6,7 @@ import pytest
 
 from shared.cells import MASK64
 from simulator.memory import MMIO_BASE, MMIOAccessError
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.rtc import (
     RTC_EPOCH,
     RTC_EPOCH_LIMIT,
@@ -95,12 +95,12 @@ def test_wall_clock_valid_bit_is_read_only() -> None:
 
 
 def test_platform_routes_the_wall_clock_valid_bit() -> None:
-    unset = create_one_core_address_space()
+    unset = create_address_space()
     assert unset.read8(MMIO_BASE + RTC_EPOCH_STAT) == 0
     unset.write64(MMIO_BASE + RTC_EPOCH, 1_760_000_000_000)
     assert unset.read8(MMIO_BASE + RTC_EPOCH_STAT) == 1
     assert unset.read64(MMIO_BASE + RTC_EPOCH) == 1_760_000_000_000
-    seeded = create_one_core_address_space(initial_epoch_ms=0)
+    seeded = create_address_space(initial_epoch_ms=0)
     assert seeded.read8(MMIO_BASE + RTC_EPOCH_STAT) == 1
 
 
@@ -111,7 +111,7 @@ def test_interrupted_wide_epoch_write_commits_nothing() -> None:
                 raise RuntimeError("injected epoch byte fault")
             super().write8(offset, value)
 
-    memory = create_one_core_address_space()
+    memory = create_address_space()
     assert memory.mmio is not None
     faulting = FaultingRTC(1000)
     memory.mmio.rtc = faulting
@@ -206,7 +206,7 @@ def test_clock_aperture_accepts_only_complete_supported_widths() -> None:
 def test_platform_routes_configured_uptime_as_a_read_only_latched_clock() -> None:
     uptime = 0x0102_0304_0506_0708
     epoch = 0x1112_1314_1516_1718
-    memory = create_one_core_address_space(
+    memory = create_address_space(
         initial_epoch_ms=epoch,
         initial_uptime_ms=uptime,
     )
@@ -222,7 +222,7 @@ def test_platform_routes_configured_uptime_as_a_read_only_latched_clock() -> Non
 
 def test_platform_routes_full_width_epoch_reads_through_the_latch() -> None:
     value = 0x0102_0304_0506_0708
-    memory = create_one_core_address_space(initial_epoch_ms=value)
+    memory = create_address_space(initial_epoch_ms=value)
 
     assert memory.read64(MMIO_BASE + RTC_EPOCH) == value
     assert memory.mmio is not None
@@ -236,7 +236,7 @@ def test_platform_routes_full_width_epoch_reads_through_the_latch() -> None:
 
 def test_ms_fetch_reconstructs_latched_uptime_and_preserves_lower_cells() -> None:
     value = 0xFEDC_BA98_7654_3210
-    memory = create_one_core_address_space(initial_uptime_ms=value)
+    memory = create_address_space(initial_uptime_ms=value)
     runtime = MegaForthRuntime(memory=memory)
     context = runtime.new_context()
     context.data.push(0xA55A)
@@ -272,7 +272,7 @@ def test_ms_fetch_publishes_no_partial_cell_after_later_mmio_fault() -> None:
 
 def test_epoch_fetch_reconstructs_u64_and_preserves_lower_stack_cells() -> None:
     value = 0xFEDC_BA98_7654_3210
-    memory = create_one_core_address_space(initial_epoch_ms=value)
+    memory = create_address_space(initial_epoch_ms=value)
     runtime = MegaForthRuntime(memory=memory)
     context = runtime.new_context()
     context.data.push(0xA55A)
@@ -309,13 +309,13 @@ def test_epoch_fetch_publishes_no_partial_cell_after_later_mmio_fault() -> None:
 
 def test_runtimes_own_independent_explicit_clock_state() -> None:
     first = MegaForthRuntime(
-        memory=create_one_core_address_space(
+        memory=create_address_space(
             initial_epoch_ms=1000,
             initial_uptime_ms=100,
         )
     )
     second = MegaForthRuntime(
-        memory=create_one_core_address_space(
+        memory=create_address_space(
             initial_epoch_ms=2000,
             initial_uptime_ms=200,
         )
@@ -353,7 +353,7 @@ def test_epoch_store_sets_the_wall_clock_and_its_valid_bit() -> None:
 
 def test_seeded_runtime_reports_a_valid_wall_clock() -> None:
     runtime = MegaForthRuntime(
-        memory=create_one_core_address_space(initial_epoch_ms=1_000),
+        memory=create_address_space(initial_epoch_ms=1_000),
     )
     context = runtime.new_context()
     runtime.execute("EPOCH-VALID?", context=context)

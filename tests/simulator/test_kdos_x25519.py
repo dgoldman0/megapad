@@ -17,7 +17,7 @@ from simulator.memory import (
     SparseAddressSpace,
     UnmappedAddressError,
 )
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from tests.simulator.test_kdos_aes import (
     KDOS_GIT_BLOB,
@@ -326,7 +326,7 @@ def test_six_bios_words_preserve_staged_synchronous_contract(
 def test_x25519_has_no_crypto_capability_gate() -> None:
     runtime = _load_x25519(
         MegaForthRuntime(
-            memory=create_one_core_address_space(crypto_capabilities=0)
+            memory=create_address_space(crypto_capabilities=0)
         )
     )
     runtime.memory.write_bytes(SCALAR_ADDRESS, RFC_SCALAR_ONE)
@@ -373,7 +373,7 @@ def test_unchanged_x25519_allows_result_to_alias_either_input(
 def test_unchanged_keygen_consumes_exact_deterministic_private_key() -> None:
     runtime = _load_x25519(
         MegaForthRuntime(
-            memory=create_one_core_address_space(entropy_seed=KEYGEN_SEED)
+            memory=create_address_space(entropy_seed=KEYGEN_SEED)
         )
     )
     assert _execute(runtime, "X25519-KEYGEN") == ()

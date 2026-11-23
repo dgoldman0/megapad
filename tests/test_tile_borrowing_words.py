@@ -27,7 +27,7 @@ from asm import assemble
 from shared import ieee_fp
 from simulator.errors import ForthAbort
 from simulator.memory import EXTERNAL_BASE, MMIO_BASE
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from simulator.tacc import TACCBusFault
 from megapad64 import ExternalPhyWordResponse
@@ -147,7 +147,7 @@ class _Simulator:
 
     def __init__(self) -> None:
         # The emulator's memory map: the checked image words route by it.
-        memory = create_one_core_address_space(
+        memory = create_address_space(
             bank0_size=1 << 20, external_size=EXT_SIZE, hbw_size=HBW_SIZE,
             vram_size=VRAM_DEFAULT_SIZE, chiplet_ports=1)
         self.runtime = MegaForthRuntime(memory=memory)

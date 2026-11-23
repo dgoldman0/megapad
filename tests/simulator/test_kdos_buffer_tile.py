@@ -12,7 +12,7 @@ from emulator.megapad64 import Megapad64 as PythonMegapad64
 from shared.cells import MASK64
 from simulator.errors import StepBudgetExceeded
 from simulator.memory import CrossRegionAccessError
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from simulator.tile import UnsupportedTileModeError
 from tests.simulator.test_kdos_aes import (
@@ -92,7 +92,7 @@ def _load_buffer_tile(
 def loaded_buffer_tile() -> MegaForthRuntime:
     return _load_buffer_tile(
         MegaForthRuntime(
-            memory=create_one_core_address_space(
+            memory=create_address_space(
                 hbw_size=CANONICAL_HBW_SIZE,
             )
         )

@@ -15,7 +15,7 @@ from simulator.memory import (
     VRAM_BASE,
     SparseAddressSpace,
 )
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from simulator.sha2 import (
     HostedSHA2Service,
@@ -363,7 +363,7 @@ def test_source_sha2_wrappers_propagate_range_and_clean_up(
 
 
 def test_sha2_span_status_is_physical_not_caller_owned_policy() -> None:
-    memory = create_one_core_address_space(
+    memory = create_address_space(
         external_size=0x1000,
         vram_size=0x1000,
         hbw_size=0x1000,

@@ -36,7 +36,7 @@ from simulator.platform import (
     SYSINFO_CRYPTO_CAPS,
     SYSINFO_NUM_CORES,
     SYSINFO_NUM_FULL,
-    create_one_core_address_space,
+    create_address_space,
 )
 from simulator.runtime import MegaForthRuntime
 from tests.simulator.test_kdos_dictionary_task_hooks import _load_hooks
@@ -437,7 +437,7 @@ def test_host_scratch_contexts_share_the_only_current_guest_crc_identity() -> No
 
 
 def test_zero_capability_profile_rejects_reflection_and_cleans_raw_final() -> None:
-    memory = create_one_core_address_space(crypto_capabilities=0)
+    memory = create_address_space(crypto_capabilities=0)
     runtime = MegaForthRuntime(memory=memory)
     assert _execute(runtime, "CRYPTO-CAPS@") == (0,)
     assert _execute(runtime, "CRC-MODE!", 5) == (CRC_STATUS_UNSUPPORTED,)
@@ -613,7 +613,7 @@ def test_crc_buf_throws_status_without_releasing_another_guest_owner(
 
 
 def test_faulting_source_qword_keeps_address_and_crc_seed_unchanged() -> None:
-    memory = create_one_core_address_space(external_size=7)
+    memory = create_address_space(external_size=7)
     runtime = _load_crc(MegaForthRuntime(memory=memory))
     external = next(
         region
@@ -641,7 +641,7 @@ def test_faulting_source_qword_keeps_address_and_crc_seed_unchanged() -> None:
 
 
 def test_faulting_source_tail_keeps_exact_stack_and_incremental_crc() -> None:
-    memory = create_one_core_address_space(external_size=10)
+    memory = create_address_space(external_size=10)
     runtime = _load_crc(MegaForthRuntime(memory=memory))
     external = next(
         region

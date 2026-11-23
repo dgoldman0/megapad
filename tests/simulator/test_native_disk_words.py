@@ -31,7 +31,7 @@ from shared.storage import (  # noqa: E402
     STORAGE_RESULT_OK,
 )
 from simulator.memory import AddressClass  # noqa: E402
-from simulator.platform import create_one_core_address_space  # noqa: E402
+from simulator.platform import create_address_space  # noqa: E402
 from simulator.runtime import MegaForthRuntime  # noqa: E402
 from simulator.storage import HostedStorageService  # noqa: E402
 from tests.simulator.test_native_execution import _observe  # noqa: E402
@@ -56,7 +56,7 @@ def _runtimes(source: bytes, *, units=_UNITS, external_size: int = 0, prepare=No
         services = [None if medium is None else service(medium) for medium in units]
         runtime = MegaForthRuntime(
             execution_backend=backend,
-            memory=create_one_core_address_space(external_size=external_size),
+            memory=create_address_space(external_size=external_size),
             storage=services[0], settings_storage=services[1],
             system_storage=services[2], user_storage=services[3],
         )

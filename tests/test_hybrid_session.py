@@ -22,7 +22,7 @@ from hybrid.server import (
 from hybrid.session import HybridSession, HybridSharedMachine
 from shared_session import SessionServer
 from simulator.image_bootstrap import ImageBootstrapError, prepare_image_bootstrap
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from simulator.session import SEMANTIC_QUANTUM_ENVIRONMENT
 from simulator.storage import HostedStorageService
@@ -66,7 +66,7 @@ def _runtime(executor, *, machine_instruction_budget=None):
     pytest.importorskip("_mp64_accel")
     if executor == "native":
         pytest.importorskip("_megaforth_native")
-    memory = create_one_core_address_space(
+    memory = create_address_space(
         bank0_size=65536, external_size=4096, dense_backing=True,
     )
     hybrid = HybridRuntime.create(
@@ -80,7 +80,7 @@ def _runtime(executor, *, machine_instruction_budget=None):
 
 
 def test_preconstructed_bootstrap_retains_declared_words_and_exact_runtime():
-    memory = create_one_core_address_space()
+    memory = create_address_space()
     storage = HostedStorageService(_boot_image(autoexec_body=(
         b"PREINSTALLED AUTO-RUNS !\n"
         b'S" \' SESSION-MARK IS _SIMULATOR-SESSION-ENTRY" EVALUATE\n'
@@ -97,12 +97,12 @@ def test_preconstructed_bootstrap_retains_declared_words_and_exact_runtime():
 
 @pytest.mark.parametrize("mismatch", ("memory", "storage", "executor", "type"))
 def test_preconstructed_bootstrap_rejects_mismatch_before_reading_source(mismatch):
-    memory = create_one_core_address_space()
+    memory = create_address_space()
     storage = HostedStorageService(_boot_image())
     runtime = MegaForthRuntime(memory=memory, storage=storage, execution_backend="python")
     options = dict(memory=memory, storage=storage, runtime=runtime)
     if mismatch == "memory":
-        options["memory"] = create_one_core_address_space()
+        options["memory"] = create_address_space()
     elif mismatch == "storage":
         options["storage"] = HostedStorageService(_boot_image())
     elif mismatch == "executor":

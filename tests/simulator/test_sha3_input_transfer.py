@@ -11,7 +11,7 @@ import pytest
 from shared.keccak import keccak_f1600
 from simulator import memory as memory_module, sha3
 from simulator.memory import MMIOAccessError, MMIO_BASE, SparseAddressSpace
-from simulator.platform import HostedPlatform, create_one_core_address_space
+from simulator.platform import HostedPlatform, create_address_space
 from simulator.sha3 import (
     CALLER_SPAN_OK, CRYPTO_STATUS_HARDWARE, CRYPTO_STATUS_OK,
     CRYPTO_STATUS_PROTECTED, CRYPTO_STATUS_STATE, HostedSHA3Service,
@@ -27,7 +27,7 @@ ALGORITHMS = (hashlib.sha3_256, hashlib.sha3_512, hashlib.shake_128, hashlib.sha
 
 
 def _new(mode=0, *, service=None, memory_type=SparseAddressSpace):
-    memory = create_one_core_address_space()
+    memory = create_address_space()
     if memory_type is not SparseAddressSpace:
         memory = memory_type(mmio=memory._mmio)
     if service is not None:

@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from simulator.memory import EXTERNAL_BASE, MemoryAccessError
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 
 EXTERNAL_BYTES = 1 << 20
@@ -20,7 +20,7 @@ TEXT = b"ab\ncd\n\n"
 
 def _runtime() -> tuple[MegaForthRuntime, int]:
     runtime = MegaForthRuntime(
-        memory=create_one_core_address_space(external_size=EXTERNAL_BYTES)
+        memory=create_address_space(external_size=EXTERNAL_BYTES)
     )
     runtime.memory.write_bytes(EXTERNAL_BASE, TEXT)
     return runtime, EXTERNAL_BASE

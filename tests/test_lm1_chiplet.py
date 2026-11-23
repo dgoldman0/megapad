@@ -287,10 +287,10 @@ def test_emulator_saves_and_restores_lm1():
 
 def _hosted():
     from simulator.memory import EXTERNAL_BASE
-    from simulator.platform import create_one_core_address_space
+    from simulator.platform import create_address_space
     from simulator.runtime import MegaForthRuntime
 
-    memory = create_one_core_address_space(bank0_size=1 << 20, external_size=EXT_SIZE,
+    memory = create_address_space(bank0_size=1 << 20, external_size=EXT_SIZE,
                                            chiplet_ports=1)
     runtime = MegaForthRuntime(memory=memory)
     runtime.chiplet_ports.attach_module(0, LIBRARY, CONFIG)

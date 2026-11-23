@@ -17,7 +17,7 @@ import pytest
 pytest.importorskip("_megaforth_native")
 
 from shared.crypto_caps import CRYPTO_CAP_CRC_REFLECT_RAW  # noqa: E402
-from simulator.platform import create_one_core_address_space  # noqa: E402
+from simulator.platform import create_address_space  # noqa: E402
 from simulator.runtime import MegaForthRuntime  # noqa: E402
 from tests.simulator.test_native_execution import _observe, _runtimes  # noqa: E402
 
@@ -102,7 +102,7 @@ def test_without_reflected_modes_raw_fetch_still_releases_a_normal_mode() -> Non
     for backend in ("python", "native"):
         runtime = MegaForthRuntime(
             execution_backend=backend,
-            memory=create_one_core_address_space(crypto_capabilities=capabilities),
+            memory=create_address_space(crypto_capabilities=capabilities),
         )
         runtime.evaluate(
             _SETUP + b": RUN 5 CRC-MODE! 1 CRC-MODE! CRC-RESET CRC-BUF @ CRC-FEED "

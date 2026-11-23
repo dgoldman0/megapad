@@ -9,7 +9,7 @@ import pytest
 
 from simulator.errors import ForthAbort
 from simulator.memory import HBW_BASE
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from tests.simulator.test_idle import _load_idle
 from tests.simulator.test_kdos_aes import (
@@ -191,7 +191,7 @@ def test_bank0_buffer_layout_registry_and_byte_operations(
 def test_hbw_and_xmem_constructors_route_data_but_keep_descriptors_registered() -> None:
     runtime = _load_buffer(
         MegaForthRuntime(
-            memory=create_one_core_address_space(
+            memory=create_address_space(
                 external_size=CANONICAL_EXTERNAL_SIZE,
                 hbw_size=CANONICAL_HBW_SIZE,
             )
@@ -250,7 +250,7 @@ def test_xbuffer_records_the_address_returned_by_free_list_reuse(
 def test_hbw_constructor_failure_leaves_its_partial_descriptor_published() -> None:
     runtime = _load_buffer(
         MegaForthRuntime(
-            memory=create_one_core_address_space(hbw_size=64),
+            memory=create_address_space(hbw_size=64),
         )
     )
     descriptor = runtime.dictionary.here
@@ -337,7 +337,7 @@ def test_arena_buffer_uses_eight_byte_alignment_and_destroy_only_unlinks_it(
 def test_info_preview_and_registry_listing_render_current_base_and_fixed_tile() -> None:
     runtime = _load_buffer(
         MegaForthRuntime(
-            memory=create_one_core_address_space(
+            memory=create_address_space(
                 external_size=CANONICAL_EXTERNAL_SIZE,
                 hbw_size=CANONICAL_HBW_SIZE,
             )

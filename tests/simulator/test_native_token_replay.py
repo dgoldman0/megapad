@@ -24,7 +24,7 @@ pytest.importorskip("_megaforth_native")
 from shared.boot_identity import boot_identity  # noqa: E402
 from shared.token_form import TokenWriter, pack_token_file  # noqa: E402
 from simulator.memory import EXTERNAL_BASE  # noqa: E402
-from simulator.platform import create_one_core_address_space  # noqa: E402
+from simulator.platform import create_address_space  # noqa: E402
 from simulator.runtime import MegaForthRuntime  # noqa: E402
 from simulator.source_acceleration import install_kdos_source_accelerators  # noqa: E402
 from simulator.storage import HostedStorageService  # noqa: E402
@@ -58,7 +58,7 @@ def _kdos() -> MegaForthRuntime:
 
 def _bare() -> MegaForthRuntime:
     return MegaForthRuntime(
-        memory=create_one_core_address_space(external_size=1 << 20)
+        memory=create_address_space(external_size=1 << 20)
     )
 
 

@@ -27,7 +27,7 @@ from simulator.memory import (
     VRAM_BASE,
     MMIOAccessError,
 )
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import ExecutionContext, MegaForthRuntime
 from simulator.sha3 import (
     CRYPTO_STATUS_HARDWARE,
@@ -237,7 +237,7 @@ def test_pure_keccak_has_exact_shape_and_published_zero_state_oracle() -> None:
 
 
 def test_caller_span_status_enforces_geometry_prefix_and_result_slot() -> None:
-    memory = create_one_core_address_space(
+    memory = create_address_space(
         external_size=0x2000,
         vram_size=0x2000,
         hbw_size=0x2000,
@@ -533,7 +533,7 @@ def test_checked_failures_clean_up_without_partial_destination_publication(
 
 
 def test_unchanged_shake_preflights_complete_multiwindow_output() -> None:
-    memory = create_one_core_address_space(external_size=32)
+    memory = create_address_space(external_size=32)
     runtime = _load_sha3(MegaForthRuntime(memory=memory))
     message = b"complete output preflight"
     runtime.memory.write_bytes(SOURCE_ADDRESS, message)
@@ -598,7 +598,7 @@ def test_checked_keccak_is_in_place_staged_and_matches_pure_oracle(
 
 
 def test_capability_disabled_profile_returns_unsupported_without_ownership() -> None:
-    memory = create_one_core_address_space(crypto_capabilities=0)
+    memory = create_address_space(crypto_capabilities=0)
     runtime = MegaForthRuntime(memory=memory)
 
     assert _execute(runtime, "SHA3-BEGIN", 99) == (
@@ -616,10 +616,10 @@ def test_capability_disabled_profile_returns_unsupported_without_ownership() -> 
 def test_entropy_stream_is_deterministic_isolated_and_bios_byte_exact() -> None:
     seed = b"exact replay seed"
     first = MegaForthRuntime(
-        memory=create_one_core_address_space(entropy_seed=seed)
+        memory=create_address_space(entropy_seed=seed)
     )
     second = MegaForthRuntime(
-        memory=create_one_core_address_space(entropy_seed=seed)
+        memory=create_address_space(entropy_seed=seed)
     )
 
     expected = bytes(
@@ -633,7 +633,7 @@ def test_entropy_stream_is_deterministic_isolated_and_bios_byte_exact() -> None:
     assert second.entropy.pool_position == 8
 
     isolated = MegaForthRuntime(
-        memory=create_one_core_address_space(entropy_seed=seed)
+        memory=create_address_space(entropy_seed=seed)
     )
     assert _execute(isolated, "RANDOM8") == (expected[0],)
     assert first.entropy.pool_position == 8
@@ -659,10 +659,10 @@ def test_entropy_preflight_accepts_every_in_window_supported_width() -> None:
 def test_entropy_unaligned_wide_access_decomposes_bytes_after_one_preflight() -> None:
     seed = b"unaligned TRNG spans"
     wide = MegaForthRuntime(
-        memory=create_one_core_address_space(entropy_seed=seed)
+        memory=create_address_space(entropy_seed=seed)
     )
     bytewise = MegaForthRuntime(
-        memory=create_one_core_address_space(entropy_seed=seed)
+        memory=create_address_space(entropy_seed=seed)
     )
 
     expected = (
@@ -672,10 +672,10 @@ def test_entropy_unaligned_wide_access_decomposes_bytes_after_one_preflight() ->
     assert wide.memory.read16(MMIO_BASE + TRNG_RAND64 + 1) == expected
 
     bridge = MegaForthRuntime(
-        memory=create_one_core_address_space(entropy_seed=seed)
+        memory=create_address_space(entropy_seed=seed)
     )
     reference = MegaForthRuntime(
-        memory=create_one_core_address_space(entropy_seed=seed)
+        memory=create_address_space(entropy_seed=seed)
     )
     first_random = reference.memory.read8(MMIO_BASE + TRNG_RAND8)
     assert bridge.memory.read16(MMIO_BASE + TRNG_RAND64 - 1) == (
@@ -683,10 +683,10 @@ def test_entropy_unaligned_wide_access_decomposes_bytes_after_one_preflight() ->
     )
 
     mixed = MegaForthRuntime(
-        memory=create_one_core_address_space(entropy_seed=seed)
+        memory=create_address_space(entropy_seed=seed)
     )
     baseline = MegaForthRuntime(
-        memory=create_one_core_address_space(entropy_seed=seed)
+        memory=create_address_space(entropy_seed=seed)
     )
     mixed.memory.write32(MMIO_BASE + TRNG_SEED - 1, 0x4433_2211)
     plain = bytes(
@@ -701,10 +701,10 @@ def test_entropy_unaligned_wide_access_decomposes_bytes_after_one_preflight() ->
     )
 
     crossing = MegaForthRuntime(
-        memory=create_one_core_address_space(entropy_seed=seed)
+        memory=create_address_space(entropy_seed=seed)
     )
     untouched = MegaForthRuntime(
-        memory=create_one_core_address_space(entropy_seed=seed)
+        memory=create_address_space(entropy_seed=seed)
     )
     with pytest.raises(MMIOAccessError):
         crossing.memory.read16(MMIO_BASE + TRNG_LIMIT - 1)
@@ -716,10 +716,10 @@ def test_entropy_unaligned_wide_access_decomposes_bytes_after_one_preflight() ->
 def test_guest_seed_mixes_little_endian_unread_bytes_but_cannot_recover() -> None:
     seed = b"guest-mix"
     baseline = MegaForthRuntime(
-        memory=create_one_core_address_space(entropy_seed=seed)
+        memory=create_address_space(entropy_seed=seed)
     )
     mixed = MegaForthRuntime(
-        memory=create_one_core_address_space(entropy_seed=seed)
+        memory=create_address_space(entropy_seed=seed)
     )
     supplemental = 0x0123_4567_89AB_CDEF
     _execute(mixed, "SEED-RNG", supplemental)
@@ -747,7 +747,7 @@ def test_guest_seed_mixes_little_endian_unread_bytes_but_cannot_recover() -> Non
 
 def test_unusable_entropy_data_faults_while_window_and_status_remain_decoded() -> None:
     runtime = MegaForthRuntime(
-        memory=create_one_core_address_space(entropy_usable=False)
+        memory=create_address_space(entropy_usable=False)
     )
 
     assert runtime.memory.read8(MMIO_BASE + TRNG_STATUS) == 0
@@ -769,12 +769,12 @@ def test_unchanged_random_helpers_mask_and_bound_the_deterministic_stream() -> N
     seed = b"mask comparison"
     direct32 = _load_sha3(
         MegaForthRuntime(
-            memory=create_one_core_address_space(entropy_seed=seed)
+            memory=create_address_space(entropy_seed=seed)
         )
     )
     wrapped32 = _load_sha3(
         MegaForthRuntime(
-            memory=create_one_core_address_space(entropy_seed=seed)
+            memory=create_address_space(entropy_seed=seed)
         )
     )
     assert _execute(wrapped32, "RANDOM32") == (
@@ -783,12 +783,12 @@ def test_unchanged_random_helpers_mask_and_bound_the_deterministic_stream() -> N
 
     direct16 = _load_sha3(
         MegaForthRuntime(
-            memory=create_one_core_address_space(entropy_seed=seed)
+            memory=create_address_space(entropy_seed=seed)
         )
     )
     wrapped16 = _load_sha3(
         MegaForthRuntime(
-            memory=create_one_core_address_space(entropy_seed=seed)
+            memory=create_address_space(entropy_seed=seed)
         )
     )
     assert _execute(wrapped16, "RANDOM16") == (

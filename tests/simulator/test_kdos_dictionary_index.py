@@ -14,7 +14,7 @@ from simulator.dictionary_index import (
     DICT_INDEX_SATURATED,
 )
 from simulator.memory import EXTERNAL_BASE
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from tests.simulator.test_kdos_aes import (
     KDOS_GIT_BLOB,
@@ -156,7 +156,7 @@ def _table_probe(
 
 def _runtime_with_external_size(size: int) -> MegaForthRuntime:
     return _load_dictionary_index(
-        MegaForthRuntime(memory=create_one_core_address_space(external_size=size))
+        MegaForthRuntime(memory=create_address_space(external_size=size))
     )
 
 

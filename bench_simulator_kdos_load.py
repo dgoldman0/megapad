@@ -21,7 +21,7 @@ from simulator.dictionary_index import (
     DICT_INDEX_AUTHORITATIVE,
     DICT_INDEX_BOUND,
 )
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 
 
@@ -258,7 +258,7 @@ def run_benchmark(args: argparse.Namespace) -> dict:
         fixture_preparation_elapsed_s = time.perf_counter() - setup_started
 
         runtime_construction_started = time.perf_counter()
-        memory = create_one_core_address_space(
+        memory = create_address_space(
             bank0_size=args.ram_kib << 10,
             external_size=args.ext_mem_mib << 20,
             hbw_size=args.hbw_mib << 20,

@@ -14,7 +14,7 @@ from hybrid.session import HybridSession, HybridSharedMachine
 from shared.session_options import configured_production_executor
 from shared_session import SessionServer
 from simulator.image_bootstrap import ImageBootstrapPreparation, prepare_image_bootstrap
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.server import storage_image_paths, storage_services
 from simulator.server import build_argument_parser as semantic_argument_parser
 from simulator.session import configured_semantic_quantum_steps
@@ -94,7 +94,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
             args.cols, args.rows, retained_policy=args.retained_terminal_policy,
             link_pace=args.terminal_link_pace,
         )
-    memory = create_one_core_address_space(
+    memory = create_address_space(
         bank0_size=args.ram_kib << 10,
         external_size=args.ext_mem_mib << 20,
         vram_size=args.vram_mib << 20,

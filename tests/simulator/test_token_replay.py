@@ -13,7 +13,7 @@ import pytest
 
 from shared.token_form import TokenWriter
 from simulator.memory import EXTERNAL_BASE
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from tests.token_streams import STREAMS
 
@@ -25,7 +25,7 @@ REPORT = (
 
 def _replay(records: bytes, slots: int, before: str = "") -> str:
     runtime = MegaForthRuntime(
-        memory=create_one_core_address_space(external_size=1 << 20)
+        memory=create_address_space(external_size=1 << 20)
     )
     runtime.memory.write_bytes(EXTERNAL_BASE, records)
     if before:
@@ -57,7 +57,7 @@ def test_the_table_holds_each_found_word_in_order() -> None:
     writer.word("dot", b".")
     records = writer.finish()
     runtime = MegaForthRuntime(
-        memory=create_one_core_address_space(external_size=1 << 20)
+        memory=create_address_space(external_size=1 << 20)
     )
     runtime.memory.write_bytes(EXTERNAL_BASE, records)
     runtime.memory.fill(TABLE, 8 * 8, 0xEE)
@@ -83,7 +83,7 @@ def test_a_replay_nested_under_a_failed_evaluation_runs_nothing() -> None:
     writer.word("dot", b".")
     records = writer.finish()
     runtime = MegaForthRuntime(
-        memory=create_one_core_address_space(external_size=1 << 20)
+        memory=create_address_space(external_size=1 << 20)
     )
     runtime.memory.write_bytes(EXTERNAL_BASE, records)
     runtime.evaluate(

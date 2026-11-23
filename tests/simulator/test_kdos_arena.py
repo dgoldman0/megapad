@@ -10,7 +10,7 @@ import pytest
 from shared.cells import MASK64, u64
 from simulator.errors import ForthAbort
 from simulator.memory import BANK0_DEFAULT_SIZE, EXTERNAL_BASE, HBW_BASE
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from tests.simulator.test_kdos_aes import (
     KDOS_GIT_BLOB,
@@ -112,7 +112,7 @@ def _runtime_with_regions(
 ) -> MegaForthRuntime:
     return _load_arena(
         MegaForthRuntime(
-            memory=create_one_core_address_space(
+            memory=create_address_space(
                 external_size=external_size,
                 hbw_size=hbw_size,
             )

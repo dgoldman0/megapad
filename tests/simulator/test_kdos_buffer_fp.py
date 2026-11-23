@@ -12,7 +12,7 @@ from emulator.megapad64 import Megapad64 as PythonMegapad64
 from shared import ieee_fp
 from simulator.errors import StepBudgetExceeded
 from simulator.memory import CrossRegionAccessError, HBW_BASE
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from tests.simulator.test_kdos_aes import (
     KDOS_GIT_BLOB,
@@ -86,7 +86,7 @@ def _load_buffer_fp(runtime: MegaForthRuntime | None = None) -> MegaForthRuntime
 def loaded_buffer_fp() -> MegaForthRuntime:
     return _load_buffer_fp(
         MegaForthRuntime(
-            memory=create_one_core_address_space(
+            memory=create_address_space(
                 hbw_size=CANONICAL_HBW_SIZE,
             )
         )

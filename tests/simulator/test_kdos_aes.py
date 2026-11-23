@@ -40,7 +40,7 @@ from simulator.memory import (
     MMIOAccessError,
     UnmappedAddressError,
 )
-from simulator.platform import HostedPlatform, create_one_core_address_space
+from simulator.platform import HostedPlatform, create_address_space
 from simulator.runtime import MegaForthRuntime
 from tests.simulator.test_kdos_diagnostics import _load_diagnostics
 
@@ -629,7 +629,7 @@ def test_active_aes_survives_guest_unwind_and_completes_across_contexts() -> Non
 
 
 def test_incremental_guest_faults_preserve_native_aes_transfer_prefixes() -> None:
-    source_memory = create_one_core_address_space(external_size=31)
+    source_memory = create_address_space(external_size=31)
     source_runtime = MegaForthRuntime(memory=source_memory)
     external = next(
         region
@@ -654,7 +654,7 @@ def test_incremental_guest_faults_preserve_native_aes_transfer_prefixes() -> Non
         ONE_BLOCK_CIPHERTEXT
     )
 
-    destination_memory = create_one_core_address_space(external_size=15)
+    destination_memory = create_address_space(external_size=15)
     destination_runtime = MegaForthRuntime(memory=destination_memory)
     destination = next(
         region

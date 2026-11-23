@@ -4,7 +4,7 @@ import pytest
 from shared.audio_output import AUDIO_ERR_MEMORY, AUDIO_OFFSET, AUDIO_SIZE
 from simulator.audio import HostedAudioService
 from simulator.memory import MMIO_BASE, MMIOAccessError, SparseAddressSpace
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 
 
@@ -12,7 +12,7 @@ BASE = MMIO_BASE + AUDIO_OFFSET
 
 
 def test_public_status_probe_and_registers_are_present():
-    memory = create_one_core_address_space()
+    memory = create_address_space()
     runtime = MegaForthRuntime(memory=memory)
     runtime.evaluate(b": PROBE 0xFFFFFF0000000C01 C@ ; PROBE")
     assert runtime.main_context.data.snapshot() == (0x80,)
@@ -22,7 +22,7 @@ def test_public_status_probe_and_registers_are_present():
 
 
 def test_submit_captures_checked_sparse_memory_and_retains_snapshot():
-    memory = create_one_core_address_space()
+    memory = create_address_space()
     audio = memory.mmio.audio
     memory.write_bytes(0x8000, b"\x01\x02\x03\x04")
     memory.write64(BASE + 8, 0x8000)
@@ -55,7 +55,7 @@ def test_submit_reads_one_sparse_span_without_materializing_missing_pages(monkey
                       read_span=observe_span, span_eligible=span_eligible)
 
     monkeypatch.setattr(HostedAudioService, "_bind_memory", bind_memory)
-    memory = create_one_core_address_space()
+    memory = create_address_space()
     address = memory.page_size - 2
     count = memory.page_size + 4
     memory.write_bytes(address, b"ab")
@@ -107,7 +107,7 @@ def test_initial_custom_memory_reader_keeps_byte_visible_audio(customization, mo
 
 
 def test_submit_rechecks_scalar_helpers_after_memory_binding():
-    memory = create_one_core_address_space()
+    memory = create_address_space()
     memory.write_bytes(0x8000, b"real")
     audio = memory.mmio.audio
     audio.dma_addr = 0x8000
@@ -159,7 +159,7 @@ def test_custom_block_resolver_keeps_scalar_audio_reads(bind_after_override):
 
 
 def test_submit_uses_checked_spans_at_each_hosted_region_end():
-    memory = create_one_core_address_space(
+    memory = create_address_space(
         hbw_size=4096, external_size=4096, vram_size=4096,
     )
     audio = memory.mmio.audio
@@ -185,7 +185,7 @@ def test_submit_uses_checked_spans_at_each_hosted_region_end():
 
 @pytest.mark.parametrize("address", [0xFFFFE, 0x100000, BASE, (1 << 64) - 2])
 def test_invalid_dma_preserves_prior_capture_without_bus_reads(address):
-    memory = create_one_core_address_space()
+    memory = create_address_space()
     audio = memory.mmio.audio
     memory.write_bytes(0x8000, b"good")
     memory.write64(BASE + 8, 0x8000)
@@ -199,7 +199,7 @@ def test_invalid_dma_preserves_prior_capture_without_bus_reads(address):
 
 
 def test_window_crossing_is_preflighted_and_diagnostic_retains_exact_address():
-    memory = create_one_core_address_space()
+    memory = create_address_space()
     with pytest.raises(MMIOAccessError) as caught:
         memory.write16(BASE + AUDIO_SIZE - 1, 0xFFFF)
     assert caught.value.address == BASE + AUDIO_SIZE - 1

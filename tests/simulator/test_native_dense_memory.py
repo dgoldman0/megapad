@@ -13,7 +13,7 @@ native = pytest.importorskip("_megaforth_native")
 from shared.cells import MASK64  # noqa: E402
 from shared.memory_backing import DenseMemoryBacking  # noqa: E402
 from simulator.memory import EXTERNAL_BASE, UnmappedAddressError  # noqa: E402
-from simulator.platform import create_one_core_address_space  # noqa: E402
+from simulator.platform import create_address_space  # noqa: E402
 from simulator.runtime import MegaForthRuntime  # noqa: E402
 from simulator.stacks import Continuation  # noqa: E402
 from tests.simulator.test_native_execution import _observe  # noqa: E402
@@ -23,7 +23,7 @@ def _runtimes(source=b"", *, page_size=4096, external_size=8197):
     runtimes = []
     for backend, dense in (("python", False), ("python", True),
                            ("native", False), ("native", True)):
-        memory = create_one_core_address_space(
+        memory = create_address_space(
             page_size=page_size, external_size=external_size,
             dense_backing=True if dense else None,
         )

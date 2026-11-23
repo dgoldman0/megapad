@@ -18,7 +18,7 @@ from simulator.platform import (
     PlatformMMIOAccessError,
     SysInfoAccessError,
     Topology,
-    create_one_core_address_space,
+    create_address_space,
 )
 
 
@@ -30,7 +30,7 @@ def _register(memory, offset: int) -> int:
 
 
 def test_sysinfo_reports_the_returned_address_spaces_actual_geometry() -> None:
-    memory = create_one_core_address_space(
+    memory = create_address_space(
         bank0_size=0x2_3000,
         external_size=0x4_5000,
         vram_size=0x6_7000,
@@ -63,7 +63,7 @@ def test_sysinfo_reports_the_returned_address_spaces_actual_geometry() -> None:
 
 
 def test_absent_optional_regions_are_not_advertised_from_default_constants() -> None:
-    memory = create_one_core_address_space(bank0_size=0x1_2340)
+    memory = create_address_space(bank0_size=0x1_2340)
 
     assert _register(memory, 0x08) == 0x1_2340
     assert _register(memory, 0x20) == 0
@@ -76,21 +76,21 @@ def test_absent_optional_regions_are_not_advertised_from_default_constants() -> 
 
 
 def test_crypto_capability_profile_accepts_only_admitted_hosted_bits() -> None:
-    memory = create_one_core_address_space(crypto_capabilities=0)
+    memory = create_address_space(crypto_capabilities=0)
 
     assert _register(memory, 0x60) == 0
     for capabilities in (1, 2, 4, HOSTED_CRYPTO_CAPABILITIES):
-        memory = create_one_core_address_space(
+        memory = create_address_space(
             crypto_capabilities=capabilities
         )
         assert _register(memory, 0x60) == capabilities
 
     with pytest.raises(ValueError, match="unimplemented crypto bits"):
-        create_one_core_address_space(crypto_capabilities=8)
+        create_address_space(crypto_capabilities=8)
 
 
 def test_exact_window_supports_little_endian_naturally_aligned_reads() -> None:
-    memory = create_one_core_address_space(bank0_size=0x12_3456)
+    memory = create_address_space(bank0_size=0x12_3456)
 
     assert memory.read8(SYSINFO_ADDRESS) == 0x01
     assert memory.read16(SYSINFO_ADDRESS) == 0x0001
@@ -123,7 +123,7 @@ def test_unmapped_misaligned_and_crossing_reads_fail_in_whole_access_preflight(
     width: int,
     error_type: type[ValueError],
 ) -> None:
-    memory = create_one_core_address_space(bank0_size=0x1000)
+    memory = create_address_space(bank0_size=0x1000)
     read = {1: memory.read8, 2: memory.read16}[width]
 
     with pytest.raises(MMIOAccessError, match="preflight") as exc_info:
@@ -137,7 +137,7 @@ def test_unmapped_misaligned_and_crossing_reads_fail_in_whole_access_preflight(
 
 
 def test_every_sysinfo_write_is_rejected_in_preflight_without_mutation() -> None:
-    memory = create_one_core_address_space(bank0_size=0x2_0000)
+    memory = create_address_space(bank0_size=0x2_0000)
     before = _register(memory, 0x18)
 
     with pytest.raises(MMIOAccessError, match="preflight") as exc_info:
@@ -152,7 +152,7 @@ def test_every_sysinfo_write_is_rejected_in_preflight_without_mutation() -> None
 
 
 def test_bytes_that_bypass_the_preflight_are_still_refused() -> None:
-    platform = create_one_core_address_space(bank0_size=0x1000).mmio
+    platform = create_address_space(bank0_size=0x1000).mmio
 
     with pytest.raises(SysInfoAccessError) as write_error:
         platform.write8(SYSINFO_OFFSET, 0xFF)
@@ -165,7 +165,7 @@ def test_bytes_that_bypass_the_preflight_are_still_refused() -> None:
 
 
 def test_platform_binding_is_single_assignment() -> None:
-    memory = create_one_core_address_space(bank0_size=0x1000)
+    memory = create_address_space(bank0_size=0x1000)
 
     with pytest.raises(RuntimeError, match="already bound"):
         memory.mmio.bind(memory)

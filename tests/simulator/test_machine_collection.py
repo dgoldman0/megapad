@@ -20,7 +20,7 @@ import weakref
 
 import pytest
 
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from simulator.stacks import Continuation
 
@@ -42,7 +42,7 @@ def _machine(backend: str, dense: bool) -> MegaForthRuntime:
         pytest.importorskip("_megaforth_native")
     return MegaForthRuntime(
         execution_backend=backend,
-        memory=create_one_core_address_space(dense_backing=True if dense else None),
+        memory=create_address_space(dense_backing=True if dense else None),
     )
 
 

@@ -21,7 +21,7 @@ import re
 import pytest
 
 from asm import assemble
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import BlockedExecution, ExecutionResult, IdleWake
 from simulator.runtime import MegaForthRuntime
 from system import VRAM_BASE, VRAM_DEFAULT_SIZE, MegapadSystem
@@ -101,7 +101,7 @@ class _Simulator:
     """The hosted simulator with the same memory map."""
 
     def __init__(self, *, vram_size: int = VRAM_DEFAULT_SIZE) -> None:
-        memory = create_one_core_address_space(
+        memory = create_address_space(
             bank0_size=1 << 20, vram_size=vram_size)
         self.runtime = MegaForthRuntime(memory=memory)
         self.runtime.evaluate(b"CREATE ABUF %d ALLOT" % BUFFER_BYTES)

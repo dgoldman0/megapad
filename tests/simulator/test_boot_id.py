@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from shared.boot_identity import bios_code, boot_identity, fold_bytes, take
 from simulator.image_bootstrap import prepare_image_bootstrap
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from simulator.storage import HostedStorageService
 from test_image_bootstrap import _boot_image, _boot_source
@@ -43,7 +43,7 @@ def test_the_boot_file_is_part_of_it_and_it_is_fixed_once_asked() -> None:
 
 def test_an_image_boot_gives_the_file_the_bios_would_load_first() -> None:
     prepared = prepare_image_bootstrap(
-        memory=create_one_core_address_space(),
+        memory=create_address_space(),
         storage=HostedStorageService(_boot_image()),
         terminal_cols=96,
         terminal_rows=32,

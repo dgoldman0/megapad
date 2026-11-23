@@ -13,7 +13,7 @@ import pytest
 from shared.cells import TRUE
 from shared.storage import SECTOR_SIZE, STORAGE_CMD_READ
 from simulator.memory import SparseAddressSpace
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import CreatedDefinition, MegaForthRuntime
 from simulator.storage import HostedStorageService
 from tests.simulator.test_kdos_aes import (
@@ -601,7 +601,7 @@ def test_gpt_copy_crc_corruption_fails_transactionally(region: str) -> None:
 def test_gpt_crc_capability_absence_fails_transactionally() -> None:
     unsupported = _load_partition(
         _gpt_image(),
-        memory=create_one_core_address_space(crypto_capabilities=0),
+        memory=create_address_space(crypto_capabilities=0),
     )
     block, volumes, workspace = _scan_extents(unsupported)
     assert _execute(

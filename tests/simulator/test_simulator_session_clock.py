@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.rich_terminal_host import SemanticBatchStop
 from simulator.rtc import HostedRTCService, RTC_EPOCH, RTC_UPTIME
 from simulator.runtime import MegaForthRuntime
@@ -34,7 +34,7 @@ def test_clock_mode_observation_does_not_sample_or_advance_time() -> None:
 
 
 def test_unbound_session_clock_stays_deterministic_across_host_quanta() -> None:
-    memory = create_one_core_address_space(
+    memory = create_address_space(
         initial_epoch_ms=1_788_890_400_000,
         initial_uptime_ms=123,
     )
@@ -93,7 +93,7 @@ def test_bound_clock_retains_fractional_time_epoch_writes_and_latches() -> None:
 
 def test_source_clock_deadline_advances_only_with_elapsed_host_time() -> None:
     now_ns = [7_000_000_000]
-    memory = create_one_core_address_space(initial_epoch_ms=1_788_890_400_000)
+    memory = create_address_space(initial_epoch_ms=1_788_890_400_000)
     memory.mmio.rtc.bind_monotonic_clock(lambda: now_ns[0])
     runtime = MegaForthRuntime(memory=memory)
     runtime.evaluate(

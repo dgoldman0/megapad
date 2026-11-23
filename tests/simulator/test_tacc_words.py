@@ -29,7 +29,7 @@ from emulator.megapad64 import (
 from shared import ieee_fp
 from simulator.errors import AlignmentFault, ForthAbort, IllegalInstructionFault
 from simulator.memory import EXTERNAL_BASE, HBW_BASE, MMIO_BASE, VRAM_BASE
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from simulator.tacc import TACCBusFault
 
@@ -86,7 +86,7 @@ class Pair:
         cpu.attach_hbw(bytearray(HBW_SIZE), HBW_BASE, HBW_SIZE)
         cpu.attach_vram(bytearray(VRAM_SIZE), VRAM_BASE, VRAM_SIZE)
         self.cpu = cpu
-        memory = create_one_core_address_space(
+        memory = create_address_space(
             bank0_size=BANK0,
             external_size=EXT_SIZE,
             hbw_size=HBW_SIZE,

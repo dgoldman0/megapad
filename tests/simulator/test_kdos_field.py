@@ -32,7 +32,7 @@ from simulator.memory import (
     SparseAddressSpace,
     UnmappedAddressError,
 )
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from tests.simulator.test_kdos_aes import (
     KDOS_GIT_BLOB,
@@ -535,7 +535,7 @@ def test_raw_high_fault_keeps_acc_but_not_previous_result() -> None:
 
 
 def test_raw_low_fault_follows_high_and_previous_commit() -> None:
-    memory = create_one_core_address_space(external_size=0x100)
+    memory = create_address_space(external_size=0x100)
     runtime = _load_field(MegaForthRuntime(memory=memory))
     _write_u256(runtime, A_ADDRESS, FIELD_MASK)
     _write_u256(runtime, B_ADDRESS, FIELD_MASK)

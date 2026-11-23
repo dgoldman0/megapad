@@ -13,7 +13,7 @@ from simulator.memory import BANK0_DEFAULT_SIZE, EXTERNAL_BASE, MMIO_BASE
 from simulator.platform import (
     SYSINFO_EXTERNAL_BASE,
     SYSINFO_EXTERNAL_SIZE,
-    create_one_core_address_space,
+    create_address_space,
 )
 from simulator.runtime import MegaForthRuntime
 from tests.simulator.test_kdos_aes import (
@@ -103,7 +103,7 @@ def _evaluate_xmem(runtime: MegaForthRuntime) -> MegaForthRuntime:
 def _load_xmem(runtime: MegaForthRuntime | None = None) -> MegaForthRuntime:
     if runtime is None:
         runtime = MegaForthRuntime(
-            memory=create_one_core_address_space(
+            memory=create_address_space(
                 external_size=CANONICAL_EXTERNAL_SIZE
             )
         )
@@ -127,7 +127,7 @@ def _pointer(runtime: MegaForthRuntime, name: str) -> int:
 
 def _small_xmem(size: int = 0x200) -> MegaForthRuntime:
     return _load_xmem(
-        MegaForthRuntime(memory=create_one_core_address_space(external_size=size))
+        MegaForthRuntime(memory=create_address_space(external_size=size))
     )
 
 
@@ -170,7 +170,7 @@ def test_xmem_slice_is_exact_and_initializes_complete_ledger(
 def test_external_bios_words_read_bound_sysinfo_and_stack_primitives() -> None:
     external_size = 0x12_340
     runtime = MegaForthRuntime(
-        memory=create_one_core_address_space(external_size=external_size)
+        memory=create_address_space(external_size=external_size)
     )
 
     assert (
@@ -356,7 +356,7 @@ def test_xbuf_sets_reset_floor_and_reset_reclaims_without_wiping() -> None:
 
 def test_absent_xmem_routes_public_allocation_and_xbuf_to_bank0() -> None:
     runtime = _load_xmem(
-        MegaForthRuntime(memory=create_one_core_address_space(external_size=0))
+        MegaForthRuntime(memory=create_address_space(external_size=0))
     )
 
     assert _execute(runtime, "EXT-MEM-BASE") == (0,)
@@ -400,7 +400,7 @@ def test_xmem_status_reports_only_live_bump_tail_for_present_and_absent() -> Non
     )
 
     absent = _load_xmem(
-        MegaForthRuntime(memory=create_one_core_address_space(external_size=0))
+        MegaForthRuntime(memory=create_address_space(external_size=0))
     )
     assert _execute(absent, ".XMEM") == ()
     assert absent.drain_uart_output() == (

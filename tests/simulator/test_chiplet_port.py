@@ -24,7 +24,7 @@ from simulator.chiplet import (
 from simulator.memory import EXTERNAL_BASE, MMIO_BASE, MMIOAccessError
 from simulator.platform import (
     SYSINFO_CHIPLET_PORTS,
-    create_one_core_address_space,
+    create_address_space,
 )
 from simulator.runtime import MegaForthRuntime
 
@@ -55,7 +55,7 @@ def _memory(*, dense=False, ports=1, external=EXT_SIZE):
     if dense:
         backing = DenseMemoryBacking(
             [(0, 1 << 20), (EXTERNAL_BASE, external)])
-    return create_one_core_address_space(
+    return create_address_space(
         bank0_size=1 << 20,
         external_size=external,
         dense_backing=backing,
@@ -113,7 +113,7 @@ def _run(runtime, word):
 # ---------------------------------------------------------------------------
 
 def test_the_profile_has_no_ports_unless_asked():
-    memory = create_one_core_address_space(external_size=EXT_SIZE)
+    memory = create_address_space(external_size=EXT_SIZE)
     assert memory.read64(MMIO_BASE + SYSINFO_CHIPLET_PORTS) == 0
     assert MegaForthRuntime(memory=memory).chiplet_ports is None
     with pytest.raises(MMIOAccessError):
@@ -162,8 +162,8 @@ def test_ports_need_the_native_extension(monkeypatch):
 
     monkeypatch.setattr(simulator.chiplet, "_native_extension", absent)
     with pytest.raises(RuntimeError, match="_megaforth_native"):
-        create_one_core_address_space(chiplet_ports=1)
-    assert create_one_core_address_space().mmio.chiplet is None
+        create_address_space(chiplet_ports=1)
+    assert create_address_space().mmio.chiplet is None
 
 
 @pytest.mark.parametrize("count", [0, -1, 256, True, 1.5])

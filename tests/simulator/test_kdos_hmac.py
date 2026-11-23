@@ -11,7 +11,7 @@ from shared.cells import MASK64
 from simulator.errors import ExecutionError
 from simulator.memory import EXTERNAL_BASE, MMIO_BASE
 from simulator.memory import UnmappedAddressError
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from simulator.sha3 import (
     CRYPTO_STATUS_HARDWARE,
@@ -385,7 +385,7 @@ def test_hmac_span_failures_preserve_output_and_wipe_acquired_scratch(
 
 
 def test_hmac_final_preflights_complete_output_before_publication() -> None:
-    memory = create_one_core_address_space(external_size=31)
+    memory = create_address_space(external_size=31)
     runtime = _load_hmac(MegaForthRuntime(memory=memory))
     runtime.memory.write_bytes(KEY_ADDRESS, b"key")
     runtime.memory.write_bytes(MESSAGE_ADDRESS, b"abc")
@@ -437,7 +437,7 @@ def test_hmac_operation_failure_preserves_output_releases_and_wipes(
 def test_hmac_priority_is_capability_then_lock_then_argument_range() -> None:
     unavailable = _load_hmac(
         MegaForthRuntime(
-            memory=create_one_core_address_space(crypto_capabilities=0)
+            memory=create_address_space(crypto_capabilities=0)
         )
     )
     unavailable.spinlocks = HostedSpinlockBank(core_count=2)

@@ -804,9 +804,9 @@ class MegaForthRuntime:
                     f"{unit.host_name} must be a HostedStorageService or None"
                 )
         if memory is None:
-            from simulator.platform import create_one_core_address_space
+            from simulator.platform import create_address_space
 
-            self.memory = create_one_core_address_space()
+            self.memory = create_address_space()
         else:
             self.memory = memory
         num_cores = self.memory.read64(MMIO_BASE + SYSINFO_NUM_CORES)

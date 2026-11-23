@@ -14,7 +14,7 @@ from simulator.memory import (
 from simulator.platform import (
     BOARD_ID_VERSION,
     SYSINFO_OFFSET,
-    create_one_core_address_space,
+    create_address_space,
 )
 from simulator.runtime import MegaForthRuntime
 
@@ -217,7 +217,7 @@ def test_little_endian_word_and_long_memory_words_are_unaligned_and_masked() -> 
 
 
 def test_little_endian_fetches_route_unaligned_sysinfo_as_separate_bytes() -> None:
-    memory = create_one_core_address_space()
+    memory = create_address_space()
     runtime = MegaForthRuntime(memory=memory)
     address = MMIO_BASE + SYSINFO_OFFSET + 1
 

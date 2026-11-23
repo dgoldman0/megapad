@@ -12,7 +12,7 @@ from simulator.memory import HBW_BASE, MASK64, MMIO_BASE
 from simulator.platform import (
     SYSINFO_HBW_BASE,
     SYSINFO_HBW_SIZE,
-    create_one_core_address_space,
+    create_address_space,
 )
 from simulator.runtime import MegaForthRuntime
 from tests.simulator.test_kdos_aes import (
@@ -78,7 +78,7 @@ def _evaluate_hbw(runtime: MegaForthRuntime) -> MegaForthRuntime:
 
 def _load_hbw(runtime: MegaForthRuntime | None = None) -> MegaForthRuntime:
     if runtime is None:
-        memory = create_one_core_address_space(hbw_size=CANONICAL_HBW_SIZE)
+        memory = create_address_space(hbw_size=CANONICAL_HBW_SIZE)
         runtime = MegaForthRuntime(memory=memory)
     return _evaluate_hbw(_load_hybrid(runtime))
 
@@ -121,7 +121,7 @@ def test_hbw_slice_is_exact_and_initializes_complete_ledger(
 def test_hbw_bios_words_read_the_bound_sysinfo_geometry() -> None:
     hbw_size = 0x12_340
     runtime = MegaForthRuntime(
-        memory=create_one_core_address_space(hbw_size=hbw_size)
+        memory=create_address_space(hbw_size=hbw_size)
     )
 
     assert runtime.memory.read64(MMIO_BASE + SYSINFO_HBW_BASE) == HBW_BASE
@@ -222,7 +222,7 @@ def test_hbw_status_renders_live_source_owned_counters(
 
 def test_absent_hbw_profile_rejects_every_allocation() -> None:
     runtime = _load_hbw(
-        MegaForthRuntime(memory=create_one_core_address_space(hbw_size=0))
+        MegaForthRuntime(memory=create_address_space(hbw_size=0))
     )
 
     assert _execute(runtime, "HBW-BASE") == (0,)
@@ -244,7 +244,7 @@ def test_absent_hbw_profile_rejects_every_allocation() -> None:
 def test_hbw_request_wrap_and_unchecked_alignment_discrepancies_are_visible(
 ) -> None:
     wrapping = _load_hbw(
-        MegaForthRuntime(memory=create_one_core_address_space(hbw_size=128))
+        MegaForthRuntime(memory=create_address_space(hbw_size=128))
     )
 
     assert _execute(wrapping, "HBW-ALLOT?", MASK64) == (HBW_BASE, 0)
@@ -252,7 +252,7 @@ def test_hbw_request_wrap_and_unchecked_alignment_discrepancies_are_visible(
     assert _execute(wrapping, "HBW-FREE") == (129,)
 
     unaligned = _load_hbw(
-        MegaForthRuntime(memory=create_one_core_address_space(hbw_size=65))
+        MegaForthRuntime(memory=create_address_space(hbw_size=65))
     )
     assert _execute(unaligned, "HBW-ALLOT?", 65) == (HBW_BASE, 0)
     assert _execute(unaligned, "HBW-TALIGN") == ()

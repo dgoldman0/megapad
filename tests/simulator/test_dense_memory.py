@@ -13,7 +13,7 @@ from simulator.memory import (
     AddressClass, AddressOverflowError, CrossRegionAccessError,
     MMIOAccessError, SparseAddressSpace, UnmappedAddressError,
 )
-from simulator.platform import SYSINFO_BANK0_SIZE, create_one_core_address_space
+from simulator.platform import SYSINFO_BANK0_SIZE, create_address_space
 from tests.simulator.test_memory import RecordingMMIO
 
 
@@ -215,7 +215,7 @@ def test_memory_requires_exact_configured_geometry(geometry):
 
 def test_platform_forwards_the_same_owner_and_reports_unchanged_geometry():
     backing = DenseMemoryBacking(((0, 65536), (EXTERNAL_BASE, 31)))
-    memory = create_one_core_address_space(bank0_size=65536, external_size=31,
+    memory = create_address_space(bank0_size=65536, external_size=31,
                                            dense_backing=backing)
     assert type(memory) is SparseAddressSpace
     assert memory.dense_backing is backing
@@ -227,7 +227,7 @@ def test_platform_forwards_the_same_owner_and_reports_unchanged_geometry():
 
 
 def test_dense_convenience_allocates_only_the_configured_topology():
-    memory = create_one_core_address_space(bank0_size=65536, external_size=33,
+    memory = create_address_space(bank0_size=65536, external_size=33,
                                            vram_size=17, hbw_size=8,
                                            dense_backing=True)
     owner = memory.dense_backing

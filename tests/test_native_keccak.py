@@ -16,7 +16,7 @@ import pytest
 from shared.cells import MASK64
 from shared.crypto_caps import CRYPTO_CAP_KECCAK_F1600, CRYPTO_CAP_SHA3_STREAM
 from shared.keccak import KECCAK_LANES, keccak_f1600
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from simulator.sha3 import (
     SHA3_COMMAND,
@@ -295,7 +295,7 @@ def test_runtime_native_selection_and_python_reuse_choose_current_policy(monkeyp
         return original(lanes)
 
     monkeypatch.setattr(extension, "keccak_f1600", observe)
-    memory = create_one_core_address_space()
+    memory = create_address_space()
     native = MegaForthRuntime(memory=memory, execution_backend="native")
     lanes = tuple(range(KECCAK_LANES))
     assert _raw_permutation(native.sha3, lanes) == keccak_f1600(lanes)
@@ -321,7 +321,7 @@ def test_runtime_native_selection_preserves_injected_permutation(monkeypatch):
         return keccak_f1600(lanes)
 
     monkeypatch.setattr(extension, "keccak_f1600", reject_native)
-    memory = create_one_core_address_space()
+    memory = create_address_space()
     memory.mmio.sha3 = HostedSHA3Service(CAPABILITIES, permutation=custom_permutation)
     lanes = tuple(range(KECCAK_LANES))
     for backend in ("native", "python"):

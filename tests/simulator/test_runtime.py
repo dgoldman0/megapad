@@ -19,7 +19,7 @@ from simulator.ir import (
     RestoreReturnStackPointer,
 )
 from simulator.memory import AddressClass, SparseAddressSpace
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import (
     ColonDefinition,
     ConstantDefinition,
@@ -45,7 +45,7 @@ def test_runtime_owns_a_default_address_space_or_uses_the_injected_one() -> None
     # This test exercises ownership of an injected address space, not a
     # near-minimum Bank-0 capacity.  Use the profile default so growth in the
     # admitted BIOS vocabulary does not turn it into an accidental size cap.
-    injected = create_one_core_address_space()
+    injected = create_address_space()
 
     assert isinstance(first.memory, SparseAddressSpace)
     assert first.memory is not second.memory

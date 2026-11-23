@@ -11,7 +11,7 @@ import pytest
 from shared.mlkem import mlkem512_decapsulate, mlkem512_encapsulate
 from shared.x25519 import x25519_scalar_multiply
 from simulator.memory import MASK64
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from simulator.sha2 import (
     SHA2_STATUS_OK,
@@ -608,7 +608,7 @@ def test_null_salt_is_selected_by_zero_length_not_a_zero_pointer(
 
 
 def test_lock_contention_preserves_family_specific_priority_and_arguments() -> None:
-    memory = create_one_core_address_space(crypto_capabilities=0)
+    memory = create_address_space(crypto_capabilities=0)
     runtime = _load_hybrid(MegaForthRuntime(memory=memory))
     runtime.spinlocks = HostedSpinlockBank(core_count=2)
     assert runtime.spinlocks.acquire(9, 1) == SPINLOCK_ACQUIRED
@@ -827,7 +827,7 @@ def test_pq_exchange_two_party_roundtrip_matches_composed_oracles(
 
 def test_pq_init_sha3_absence_follows_raw_effects_without_guard_cleanup(
 ) -> None:
-    memory = create_one_core_address_space(crypto_capabilities=0)
+    memory = create_address_space(crypto_capabilities=0)
     runtime = _load_hybrid(MegaForthRuntime(memory=memory))
     basepoint = b"\x09" + bytes(31)
     peer_public = x25519_scalar_multiply(RFC_SCALAR_TWO, basepoint)

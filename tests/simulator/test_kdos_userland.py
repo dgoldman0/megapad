@@ -14,7 +14,7 @@ from simulator.dictionary_index import (
 )
 from simulator.errors import ForthAbort
 from simulator.memory import EXTERNAL_BASE
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from tests.simulator.test_kdos_aes import (
     KDOS_GIT_BLOB,
@@ -117,7 +117,7 @@ def loaded_userland() -> MegaForthRuntime:
 
 def _runtime_with_external_size(size: int) -> MegaForthRuntime:
     return _load_userland(
-        MegaForthRuntime(memory=create_one_core_address_space(external_size=size))
+        MegaForthRuntime(memory=create_address_space(external_size=size))
     )
 
 

@@ -10,7 +10,7 @@ pytest.importorskip("_megaforth_native")
 from shared import scalar_fp  # noqa: E402
 from shared.cells import MASK64  # noqa: E402
 from simulator.errors import ForthAbort, StepBudgetExceeded  # noqa: E402
-from simulator.platform import create_one_core_address_space  # noqa: E402
+from simulator.platform import create_address_space  # noqa: E402
 from simulator.runtime import MegaForthRuntime, YieldedExecution  # noqa: E402
 from simulator.scalar_float import HostedScalarFloatService  # noqa: E402
 from simulator.stacks import DataStack, StackOverflow, StackUnderflow  # noqa: E402
@@ -27,7 +27,7 @@ def _runtimes(source=b"", *, page_size=4096):
     for backend in ("python", "native"):
         runtime = MegaForthRuntime(
             execution_backend=backend,
-            memory=create_one_core_address_space(page_size=page_size),
+            memory=create_address_space(page_size=page_size),
         )
         if source:
             runtime.evaluate(source, source_name="native-scalar-fp.f")

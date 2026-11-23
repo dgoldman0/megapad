@@ -14,7 +14,7 @@ from simulator.dictionary import HEADER_FIXED_BYTES  # noqa: E402
 from simulator.errors import ExecutionError, ForthAbort, StepBudgetExceeded  # noqa: E402
 from simulator.ir import Branch, BranchZero, Call, Literal, Return  # noqa: E402
 from simulator.memory import AddressClass  # noqa: E402
-from simulator.platform import create_one_core_address_space  # noqa: E402
+from simulator.platform import create_address_space  # noqa: E402
 from simulator.runtime import MegaForthRuntime  # noqa: E402
 from simulator.stacks import (  # noqa: E402
     Continuation, DataStack, FaultAbort, ReturnStack, ReturnStackShapeError, StackOverflow,
@@ -28,7 +28,7 @@ def _runtimes(source: bytes = b"", *, external_size: int = 0, page_size: int = 4
     for backend in ("python", "native"):
         runtime = MegaForthRuntime(
             execution_backend=backend,
-            memory=create_one_core_address_space(
+            memory=create_address_space(
                 external_size=external_size, page_size=page_size
             ),
         )

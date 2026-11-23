@@ -37,7 +37,7 @@ from simulator.memory import (
     MMIO_BASE,
     VRAM_BASE,
 )
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from simulator.spinlocks import HostedSpinlockBank, SPINLOCK_ACQUIRED
 from simulator.stacks import StackUnderflow
@@ -178,7 +178,7 @@ def test_generation_checked_stack_underflow_leaves_native_inputs_untouched() -> 
 def test_checked_io_admits_unaligned_spans_in_every_physical_memory_class(
     dma: int,
 ) -> None:
-    memory = create_one_core_address_space(
+    memory = create_address_space(
         external_size=SECTOR_SIZE + 16,
         vram_size=SECTOR_SIZE + 16,
         hbw_size=SECTOR_SIZE + 16,
@@ -197,7 +197,7 @@ def test_checked_io_admits_unaligned_spans_in_every_physical_memory_class(
 
 def test_checked_transfer_splits_at_the_255_sector_controller_boundary() -> None:
     sector_count = 256
-    memory = create_one_core_address_space(
+    memory = create_address_space(
         external_size=sector_count * SECTOR_SIZE,
     )
     image = b"".join(
@@ -246,7 +246,7 @@ def test_later_chunk_guard_reports_only_confirmed_pre_swap_progress() -> None:
             if self.acceptances == 2:
                 self.attach(replacement)
 
-    memory = create_one_core_address_space(
+    memory = create_address_space(
         external_size=sector_count * SECTOR_SIZE,
     )
     storage = SwapAtSecondReadAcceptanceStorage()

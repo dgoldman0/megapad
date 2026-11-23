@@ -22,7 +22,7 @@ from simulator.platform import (
     HostedPlatform,
     PlatformMMIOAccessError,
     Topology,
-    create_one_core_address_space,
+    create_address_space,
 )
 from simulator.aes import HostedAESService
 from simulator.entropy import HostedTRNGService
@@ -194,7 +194,7 @@ def test_the_requester_reaches_native_devices():
 
 
 def test_the_table_and_its_devices_are_collected():
-    memory = create_one_core_address_space(bank0_size=0x1000)
+    memory = create_address_space(bank0_size=0x1000)
     probe = weakref.ref(memory.mmio)
     table = weakref.ref(memory.mmio.table)
     del memory
@@ -207,7 +207,7 @@ def test_the_table_and_its_devices_are_collected():
 # ---------------------------------------------------------------------------
 
 def test_the_platform_attaches_every_window_once():
-    memory = create_one_core_address_space(external_size=0x4000, chiplet_ports=1)
+    memory = create_address_space(external_size=0x4000, chiplet_ports=1)
     names = [name for _start, _limit, name in memory.mmio.table.windows]
     assert names == [
         "sysinfo", "mailbox", "aes", "sha3", "entropy", "rtc", "rtc", "audio",
@@ -222,7 +222,7 @@ def test_the_platform_attaches_every_window_once():
 
 
 def test_assigning_a_service_reroutes_its_windows():
-    memory = create_one_core_address_space()
+    memory = create_address_space()
     platform = memory.mmio
     replacement = HostedRTCService(initial_uptime_ms=0x1234)
     platform.rtc = replacement
@@ -267,7 +267,7 @@ def test_system_info_reports_a_topology(full_cores, clusters, cores, enabled, po
 
 
 def test_the_mailbox_window_keeps_its_shape():
-    memory = create_one_core_address_space()
+    memory = create_address_space()
     with pytest.raises(MMIOAccessError):
         memory.read16(MMIO_BASE + MAILBOX_OFFSET + 1)
     with pytest.raises(MMIOAccessError):

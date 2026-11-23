@@ -8,7 +8,7 @@ import pytest
 pytest.importorskip("_megaforth_native")
 
 from simulator import native_execution
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from simulator.stacks import DataStack, ReturnStack
 from tests.simulator.test_native_execution import _observe
@@ -28,7 +28,7 @@ def _engines(source: bytes = b""):
     for backend, dense in (("python", False), ("native", False), ("native", True)):
         runtime = MegaForthRuntime(
             execution_backend=backend,
-            memory=create_one_core_address_space(dense_backing=True if dense else None),
+            memory=create_address_space(dense_backing=True if dense else None),
         )
         if source:
             runtime.evaluate(source, source_name="native-direct-path.f")
@@ -131,7 +131,7 @@ def test_every_direct_operation_runs_on_the_direct_path(monkeypatch, dense):
     for rounds in (4, 8):
         runtime = MegaForthRuntime(
             execution_backend="native",
-            memory=create_one_core_address_space(dense_backing=True if dense else None),
+            memory=create_address_space(dense_backing=True if dense else None),
         )
         runtime.evaluate(DIRECT_SOURCE, source_name="native-direct-path.f")
         runtime.main_context.data.push(rounds)

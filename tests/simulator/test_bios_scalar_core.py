@@ -7,7 +7,7 @@ import pytest
 from shared import scalar_fp
 from shared.cells import MASK64, TRUE
 from simulator.errors import ExecutionError
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from simulator.stacks import StackUnderflow
 
@@ -511,7 +511,7 @@ def test_bank0_dictionary_reports_the_optional_user_interval_as_disabled() -> No
 
 
 def test_talign_rejects_growth_above_the_guarded_bank0_ceiling_atomically() -> None:
-    memory = create_one_core_address_space(bank0_size=0x1_0010)
+    memory = create_address_space(bank0_size=0x1_0010)
     runtime = MegaForthRuntime(memory=memory)
 
     def escape_dictionary_fault(_context) -> None:

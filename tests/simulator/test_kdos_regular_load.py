@@ -10,7 +10,7 @@ from simulator.dictionary_index import (
     DICT_INDEX_AUTHORITATIVE,
     DICT_INDEX_BOUND,
 )
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from tests.simulator.test_bios_mp64fs import _formatted_image
 from tests.simulator.test_kdos_aes import (
@@ -144,7 +144,7 @@ def _constant(runtime: MegaForthRuntime, name: bytes | str) -> int:
 def test_complete_kdos_loads_once_and_runs_representative_subsystems() -> None:
     """Feed the ordinary file like the CLI, then cross section seams."""
 
-    memory = create_one_core_address_space(
+    memory = create_address_space(
         external_size=CANONICAL_EXTERNAL_BYTES,
         hbw_size=CANONICAL_HBW_BYTES,
         vram_size=CANONICAL_VRAM_BYTES,

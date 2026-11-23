@@ -13,7 +13,7 @@ from simulator.image_bootstrap import (
     blank_terminal_autoexec_invocation,
     prepare_image_bootstrap,
 )
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import MegaForthRuntime
 from simulator.storage import HostedStorageService
 
@@ -214,7 +214,7 @@ def test_autoexec_transform_preserves_every_offset_and_line_ending() -> None:
 def test_image_bootstrap_prepares_autoexec_once_and_defers_live_entry() -> None:
     storage = HostedStorageService(_boot_image())
     prepared = prepare_image_bootstrap(
-        memory=create_one_core_address_space(),
+        memory=create_address_space(),
         storage=storage,
         terminal_cols=96,
         terminal_rows=32,
@@ -252,7 +252,7 @@ def test_image_bootstrap_prepares_autoexec_once_and_defers_live_entry() -> None:
 
 def test_image_bootstrap_preserves_source_data_effects_into_live_entry() -> None:
     prepared = prepare_image_bootstrap(
-        memory=create_one_core_address_space(),
+        memory=create_address_space(),
         storage=HostedStorageService(
             _boot_image(
                 autoexec_body=(
@@ -292,7 +292,7 @@ def test_image_bootstrap_requires_successful_live_entry_binding(
 ) -> None:
     with pytest.raises(ImageBootstrapError, match=message):
         prepare_image_bootstrap(
-            memory=create_one_core_address_space(),
+            memory=create_address_space(),
             storage=HostedStorageService(_boot_image(autoexec_body=autoexec_body)),
         )
 
@@ -304,7 +304,7 @@ def test_image_bootstrap_does_not_rerun_a_later_autoexec_binding() -> None:
         b'S" \' SESSION-MARK IS _SIMULATOR-SESSION-ENTRY" EVALUATE\n'
     )
     prepared = prepare_image_bootstrap(
-        memory=create_one_core_address_space(),
+        memory=create_address_space(),
         storage=HostedStorageService(_boot_image(autoexec_body=source)),
     )
 
@@ -323,7 +323,7 @@ def test_image_bootstrap_gives_each_storage_unit_its_disk() -> None:
             bytes(SECTOR_SIZE), write_protected=unit.write_protected,
         )
         prepared = prepare_image_bootstrap(
-            memory=create_one_core_address_space(),
+            memory=create_address_space(),
             storage=HostedStorageService(_boot_image()),
             **{unit.host_name: disk},
         )
@@ -333,7 +333,7 @@ def test_image_bootstrap_gives_each_storage_unit_its_disk() -> None:
             service.present for service in prepared.runtime.storage_units
         ].count(True) == 2
 
-        memory = create_one_core_address_space()
+        memory = create_address_space()
         storage = HostedStorageService(_boot_image())
         runtime = MegaForthRuntime(memory=memory, storage=storage)
         with pytest.raises(
@@ -350,7 +350,7 @@ def test_image_bootstrap_gives_each_storage_unit_its_disk() -> None:
 def test_image_bootstrap_applies_the_configured_autoexec_budget() -> None:
     with pytest.raises(ImageBootstrapError, match="1-step budget"):
         prepare_image_bootstrap(
-            memory=create_one_core_address_space(),
+            memory=create_address_space(),
             storage=HostedStorageService(_boot_image()),
             semantic_step_budget=1,
         )
@@ -362,7 +362,7 @@ def test_image_bootstrap_preserves_bounded_autoexec_failure_diagnostics() -> Non
         ImageBootstrapError, match="autoexec preparation failed"
     ) as failed:
         prepare_image_bootstrap(
-            memory=create_one_core_address_space(),
+            memory=create_address_space(),
             storage=HostedStorageService(_boot_image(autoexec_body=source)),
         )
 
@@ -377,7 +377,7 @@ def test_image_bootstrap_rejects_invalid_metadata_and_missing_forth_entry() -> N
     invalid_bitmap[SECTOR_SIZE] &= 0xFE
     with pytest.raises(ImageBootstrapError, match="metadata is invalid"):
         prepare_image_bootstrap(
-            memory=create_one_core_address_space(),
+            memory=create_address_space(),
             storage=HostedStorageService(invalid_bitmap),
         )
 
@@ -394,7 +394,7 @@ def test_image_bootstrap_rejects_invalid_metadata_and_missing_forth_entry() -> N
     _write_payload(no_forth, b"note", primary_start=14, primary_count=1)
     with pytest.raises(ImageBootstrapError, match="no occupied Forth"):
         prepare_image_bootstrap(
-            memory=create_one_core_address_space(),
+            memory=create_address_space(),
             storage=HostedStorageService(no_forth),
         )
 
@@ -424,6 +424,6 @@ def test_checked_source_failure_names_the_image_line_and_status() -> None:
         match=r"broken\.f:3: status=1",
     ):
         prepare_image_bootstrap(
-            memory=create_one_core_address_space(),
+            memory=create_address_space(),
             storage=HostedStorageService(image),
         )

@@ -18,7 +18,7 @@ from hybrid.manifest import ABI, RoutineDeclaration, RoutineManifest
 from simulator.dictionary import HEADER_FIXED_BYTES, SEMANTIC_CODE_SLOT_BYTES, Word
 from simulator.errors import ExecutionError, IllegalInstructionFault
 from simulator.memory import AddressClass, MemoryAccessError, SparseAddressSpace
-from simulator.platform import create_one_core_address_space
+from simulator.platform import create_address_space
 from simulator.runtime import (
     MachineCallback,
     MachineReturned,
@@ -123,7 +123,7 @@ class HybridRuntime:
         if memory is not None and geometry is not None:
             raise TypeError("specify memory or geometry, not both")
         if memory is None:
-            memory = create_one_core_address_space(dense_backing=True, **(geometry or {}))
+            memory = create_address_space(dense_backing=True, **(geometry or {}))
         elif type(memory) is not SparseAddressSpace or memory.dense_backing is None:
             raise ValueError("hybrid memory must be densely backed")
         if machine_instruction_budget is not None and (
