@@ -2,7 +2,8 @@
 
 Status: Accepted, 2026-11-22, with the nine decisions of section 10.
 Stages 1 and 2 are built (MegaPad d8016c43; 4ea4bc91, 09a26e8d and
-f317327b), and stage 3 (1c4563f4 to 49d94ecd, with Akashic 95e081c9).
+f317327b), stage 3 (1c4563f4 to 49d94ecd, with Akashic 95e081c9) and
+stage 4 (d8453449 to 348a482a, with Akashic d82d6e80 to 5da2eea3).
 It is the staged plan for Part 3 of the release plan
 (`dev/PLAN.md` in fantasy-engine), in which MegaPad's hosted simulator
 becomes the multicore machine MegaPad is. Section 1 describes the simulator
@@ -533,6 +534,50 @@ doorbells with core 0 and with a worker on two- and four-core simulators,
 besides the one-core cases of `tests/test_lm1_chiplet.py`; two cores
 writing into lent memory while the chiplet checks each core's order at its
 steps; LM1's units.
+
+Built on 2026-11-23:
+
+- The chiplets step at the end of each round and, while every core sleeps,
+  until they rest or ring a core, at most 4,096 steps a visit, the
+  emulator's bound; a worker takes a chiplet's signal at once when its own
+  access steps the chiplet into raising it, through a native set of signal
+  takers that the mailbox and the port window share; and input the host
+  gives during a round reaches the FIFO at the round's end (d8453449).
+  These close the two departures stage 3 left. A first resting visit that
+  read the clock after every step raced a clock bound to advance on each
+  read past LM1's hold deadlines, so the visit watches the IPI lines.
+- Each full core's tile engine, TACC and `FPCSR` are exchanged at each
+  turn switch (0254ea99), and each core has its own CRC unit and owner
+  record, as the BIOS's topology-sized table has (d88fd2d9). SHA-2 and the
+  Field ALU were keyed by core already.
+- The disk words poll lock 2 across turns: a call that finds another core
+  holding it ends the turn and runs again at the next, up to the BIOS's
+  1,048,576 polls (a600657c). The BIOS's checked SHA-3 words take lock 8
+  once and report STATE at once while another core holds it, so the
+  simulator's service takes the bank's lock 8 the same way rather than
+  retrying, and HMAC takes lock 9 through KDOS's `LOCK`, which already ends
+  the turn; the bank's window at `0x600` is attached.
+- A dispatch that cannot detach to its host, as in a guest `EVALUATE` or
+  a boot script, ends core 0's turn in place, and an `IDLE-UNTIL` there
+  ends it early (46022dd5). Without this the four-core sandbox profile,
+  whose boot script lends every job to the other cores and waits for them,
+  never ended.
+- `.S` joined the hosted vocabulary, which the sandbox capability
+  contracts need, and the image bootstrap boots a script that binds no
+  live entry (348a482a). Akashic's driver gives the simulator the
+  profile's full cores (d82d6e80), and the four worker profiles pass there
+  in about 9 seconds.
+
+Tests: `tests/simulator/test_multicore_chiplets.py`,
+`test_multicore_engines.py` and `test_multicore_contention.py`, new cases
+in `test_multicore_runtime.py`, Akashic's
+`test_profiles_on_simulator_cores.py`, `test_worker_job.py`'s cases on two
+and four simulated cores (c9427e47) and `test_par_cores.py` on both
+machines (5da2eea3). Two tests remain to build: two cores writing into
+lent memory while a chiplet checks each core's order at its steps, which
+needs a chiplet that checks order, and LM1's module on four cores, whose
+port is ID 4; LM1's managed-data cases on two cores already carry each
+core's store log in its order.
 
 ### Stage 5. Cooperative tasks on core 0
 
