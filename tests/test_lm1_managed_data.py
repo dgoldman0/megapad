@@ -1267,6 +1267,22 @@ def test_recovery_a9_the_stand_ins_heap_dropped(backend):
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+def test_recovery_a_boot_of_a_running_chiplet_is_a_reset(backend):
+    """CHIP-BOOT of a chiplet that serves managed data resets it as
+    CHIP-RESET does, a reset for any other reason (cause 6): the module asks
+    LM1 to stop first, the stand-in adopts the heap (row 3), the restarted
+    LM1's offer of the function is refused, and the handle stays valid."""
+    machine = ready(backend)
+    got = machine.run(MAKE_HELD + [
+        "0 0 0 CHIP-BOOT REPORT OBJ-ENGINE REPORT REPORT OBJ-ROW @ REPORT OBJ-STOPPED @ REPORT",
+        ": SERVE 200 0 DO _CHIP-SERVICE 0 _CHIP-ACK LOOP ; SERVE OBJ-ENGINE REPORT REPORT",
+        ": READB OBJ-OPEN THROW H @ OBJ-GET NIP REPORT OBJ-CLOSE ; READB",
+    ])
+    assert got == [0, 0, 6, 2, 3, 1, 6, 2, 0]
+    assert machine.lm1.md(lm1_chiplet.MD_PHASE) == 0, "the restarted LM1's offer was refused"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 def test_recovery_the_stand_in_answers_requests(backend):
     """While the stand-in serves, it answers each request itself (section
     10): SHAPE gives the registry's ID for a description it holds, a new ID
