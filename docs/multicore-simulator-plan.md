@@ -741,7 +741,12 @@ needs a change in the BIOS, KDOS, the release plan or the contract.
     about cores the machine does not have; the contract's KDOS paragraphs
     record this from the one-core qualification. `?DO` gives the one-core
     case its natural meaning, nothing to wait for. Stage 3's differential
-    cases run these words on two and four cores.
+    cases run these words on two and four cores. The fix belongs to the
+    first slice that changes `kdos.f`, together with finding 13 and that
+    slice's own work, since a change to `kdos.f` reruns almost every unit,
+    and no later than the first stage whose release use runs these words.
+    None does today: Akashic's `par.f` calls `BARRIER` only with more than
+    one core, where it ends.
 13. **KDOS's messages share their fields between cores (run on the
     emulator).** `MSG-SEND` stores its type, payload and target in the
     shared variables `MS-T`, `MS-P` and `MS-G` before it takes lock 7, and
@@ -755,7 +760,10 @@ needs a change in the BIOS, KDOS, the release plan or the contract.
     sends did not interleave and it delivered 600. Storing after `LOCK` and
     reading before `UNLOCK` closes the race, and per-core variables would
     serve `MSG-BROADCAST`. No Akashic module uses KDOS's message words, and
-    stage 3's differential case sends from one worker at a time.
+    stage 3's differential case sends from one worker at a time. The fix
+    joins finding 12's in the first slice that changes `kdos.f`, and comes
+    no later than the first stage whose release use sends messages from
+    several cores at once.
 14. **Three BIOS flag words answer 255 for true (run on the emulator).**
     `MICRO?`, `RESIZED?` and `RESIZE-DENIED?` load their true flag with
     `ldi r, -1`, whose 8-bit immediate the machine zero-extends, so they
@@ -763,6 +771,10 @@ needs a change in the BIOS, KDOS, the release plan or the contract.
     words answer -1. `IF` reads both alike, while `INVERT`, `AND` with
     another flag and `TRUE =` do not. Loading -1 with `ldi64`, as `=` does,
     fixes all three. Stage 3's differential case compares `MICRO?`'s truth.
+    The fix belongs to the next slice that changes `bios.asm`, stage 7 at
+    the latest, so that one BIOS closing run covers it; a BIOS word that
+    reads CSR `MBOX`'s whole mask (finding 8) joins that slice if it is
+    approved.
 
 ## 10. Decisions
 
