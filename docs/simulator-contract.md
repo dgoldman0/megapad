@@ -856,20 +856,16 @@ slot's own frame. A dictionary rollback that would remove a word an active
 slot runs inside, or will start, is refused, as for a worker's suspended
 job.
 
-Where the machine would crash, the simulator faults. `PAUSE` in a slot
-takes the illegal-operation fault, -21 to a `CATCH`, where the BIOS's
-`PAUSE` would take the running slot's stacks for the foreground's; so does
-`TASK-YIELD` in the foreground, where the BIOS's yield returns through a
-`PAUSE` that is not running; and so do both words on a worker core, which
-has no slots,
-where the BIOS's `PAUSE` would run one of core 0's slots on the worker and
-race core 0 for its records. An error or `ABORT` in a slot ends the slot
-and the foreground's line that paused, while the BIOS's `QUIT` leaves
-`TASK-ID` naming the slot and the slot's record in place, so the next
-`PAUSE` runs the slot again from its last yield, or from its start if it
-never yielded (finding 15 of `docs/multicore-simulator-plan.md`). A slot's stack overflow raises the
-simulator's stack error and ends the slot, where the BIOS's 32-cell stacks
-run into the next slot's.
+Both machines refuse the words where they cannot run. `PAUSE` in a slot,
+which would take the running slot's stacks for the foreground's,
+`TASK-YIELD` in the foreground, which would return through a `PAUSE` that is
+not running, and both words on a worker core, which has no slots, take the
+illegal-operation fault, -21 to a `CATCH`; the BIOS's words execute an
+unassigned opcode, so the fault takes the machine's own path. An error or
+`ABORT` in a slot ends the slot and the foreground's line that paused, as
+the BIOS's `QUIT` ends the slot that was running, and `TASK-ID` answers 0
+again. A slot's stack overflow raises the simulator's stack error and ends
+the slot, where the BIOS's 32-cell stacks run into the next slot's.
 
 ## 6. Platform services
 

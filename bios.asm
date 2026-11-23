@@ -504,6 +504,25 @@ forth_quit:
     breq forth_quit_no_callback
     call.l r11
 forth_quit_no_callback:
+    ; A background slot that aborts, faults or quits ends here, together
+    ; with the foreground's line that ran PAUSE: its stacks and its place
+    ; are gone, so the slot's entry and the running-slot mark go, and the
+    ; next PAUSE finds nothing of it to resume.  The callback above ran
+    ; first, while TASK-ID still named the slot, so KDOS cleared the slot's
+    ; CATCH chain as well as the foreground's.
+    ldi64 r11, var_task_active
+    ldn r7, r11
+    cmpi r7, 0
+    breq .forth_quit_no_slot
+    ldi64 r11, var_task_pcs
+    mov r1, r7
+    lsli r1, 3
+    add r11, r1
+    ldi r1, 0
+    str r11, r1                 ; var_task_pcs[slot] = 0
+    ldi64 r11, var_task_active
+    str r11, r1                 ; the foreground runs again
+.forth_quit_no_slot:
     ; Restore HERE if a temp IF block was active (prevent dict leak)
     ldi64 r11, var_interp_if_depth
     ldn r0, r11
@@ -15220,7 +15239,19 @@ w_fb_setup:
 ; cooperative, same-core — complementary mechanisms.
 
 ; PAUSE ( -- )  yield to next active background task (no-op if none active)
+;   PAUSE belongs to core 0's foreground.  In a running slot it would save
+;   the slot's stacks as the foreground's, and a worker core has no slots of
+;   its own, so there it would run one of core 0's and race core 0 for the
+;   slot's records.  Both take the illegal-operation fault instead
+;   (task_word_refused).
 w_pause:
+    csrr r0, 0x20
+    cmpi r0, 0
+    lbrne task_word_refused     ; a worker core
+    ldi64 r11, var_task_active
+    ldn r0, r11
+    cmpi r0, 0
+    lbrne task_word_refused     ; a running slot
     ; ---- Find next active task (round-robin scan) ----
     ldi64 r11, var_task_index
     ldn r7, r11                 ; r7 = last-run task index
@@ -15340,9 +15371,31 @@ pause_yield_handler:
 ;   Called by Tasks 1–3 via call.l (dictionary dispatch).  The SEP R20
 ;   freezes R3 at the ret.l; next PAUSE resumes there (via mov r3),
 ;   ret.l returns to the caller inside the background task.
+;   Only a running slot yields.  In core 0's foreground no PAUSE is running
+;   to return to, and a worker core has no slots, so both take the
+;   illegal-operation fault (task_word_refused).
 w_task_yield:
+    csrr r0, 0x20
+    cmpi r0, 0
+    lbrne task_word_refused     ; a worker core
+    ldi64 r11, var_task_active
+    ldn r0, r11
+    cmpi r0, 0
+    lbreq task_word_refused     ; core 0's foreground
     sep  r20                    ; yield to PAUSE handler (R3 freezes at ret.l)
     ret.l                       ; resumes here on next PAUSE; returns to caller
+
+; task_word_refused: PAUSE or TASK-YIELD where it cannot run.  The byte
+;   below is one of the ISA's unassigned opcodes, which every backend traps
+;   as IVEC_ILLEGAL_OP, so the refusal is the machine's own illegal-operation
+;   fault: the FAULT-XT! callback receives -21, which KDOS throws to the
+;   innermost CATCH, and with none the fault is reported and core 0 returns
+;   to its prompt or a worker ends its job (fault_report).  An installed
+;   handler that returns past the byte resumes at the ret.l, so the word
+;   does nothing.
+task_word_refused:
+    .db 0xFF
+    ret.l
 
 ; task_setup_slot: shared helper — set up a background task in slot r7
 ;   Entry: r1 = xt, r7 = slot index (1–3)

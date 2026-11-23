@@ -22,12 +22,13 @@ one machine of each kind, so a case that depends on where PAUSE's
 round-robin scan stands first sets it: a slot that PAUSE runs alone leaves
 the scan's cursor at that slot.
 
-An abort in a slot runs on fresh machines of its own. The simulator ends the
-slot and the line that paused; the BIOS's QUIT leaves TASK-ID naming the
-slot and the slot's record behind, and the next PAUSE resumes stale state
-(finding 15 of the plan). The emulator's half of that case is a strict
-expected failure until the BIOS ends the slot too, so the slice that fixes
-bios.asm shows its fix by removing the mark.
+PAUSE in a slot, TASK-YIELD in the foreground, and either word on a worker
+core take the illegal-operation fault on both machines, where the machine
+used to crash: KDOS throws -21 to the innermost CATCH, and with none the
+fault's report ends the line, or the worker's job, as an ABORT does. An
+abort or an uncaught fault in a slot ends the slot together with the line
+that paused, and TASK-ID answers 0 again (finding 15 of the plan). These
+cases run on fresh machines of their own, since each ends a line.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ import pytest
 from simulator.errors import ForthAbort
 from tests.test_multicore_differential import (
     _BETWEEN,
+    _PROGRAM_COUNTER,
     _Emulator,
     _Simulator,
     _bios,
@@ -188,6 +190,27 @@ VARIABLE TS-WCOUNT  VARIABLE TS-WSLOT
 """, b"""0 TS-WCOUNT ! 0 TS-WSLOT ! ['] TS-WJOB 1 CORE-RUN ['] TS-WBG BACKGROUND
 50 0 DO PAUSE LOOP  1 TASK-STOP  1 CORE-WAIT  TS-WCOUNT @ . TS-WSLOT @ .""",
                           b"2000 50 "),
+    # PAUSE in a slot and TASK-YIELD in the foreground take the
+    # illegal-operation fault, which KDOS throws to the CATCH around each:
+    # the slot runs on to its end, and the foreground keeps its line.
+    "misuse-caught": (1, b"""
+VARIABLE TS-MR1  VARIABLE TS-MR2  VARIABLE TS-MC
+: TS-MPAUSE ( -- ) 1 TS-MC +!  ['] PAUSE CATCH TS-MR1 !  10 TS-MC +! ;
+: TS-MYIELD ( -- ) ['] TASK-YIELD CATCH TS-MR2 ! ;
+""", b"""0 TS-MC ! ['] TS-MPAUSE BACKGROUND PAUSE
+TS-MR1 @ . TS-MC @ . 1 TASK? . TASK-ID .
+TS-MYIELD TS-MR2 @ . TASK-ID . #TASKS .""", b"-21 11 0 0 -21 0 0 "),
+    # A worker core has no slots: a job's PAUSE or TASK-YIELD faults on its
+    # core, inside a CATCH or, with none, ending the job after the report.
+    "misuse-workers": (2, b"""
+VARIABLE TS-WR  VARIABLE TS-WC
+: TS-WP ( -- ) ['] PAUSE CATCH TS-WR ! ;
+: TS-WY ( -- ) ['] TASK-YIELD CATCH TS-WR +! ;
+: TS-WU ( -- ) 1 TS-WC +!  PAUSE  10 TS-WC +! ;
+""", b"""0 TS-WR ! 0 TS-WC !  ['] TS-WP 1 CORE-RUN 1 CORE-WAIT
+['] TS-WY 1 CORE-RUN 1 CORE-WAIT  TS-WR @ .
+['] TS-WU 1 CORE-RUN 1 CORE-WAIT  TS-WC @ . 1 CORE-STATUS . TASK-ID .""",
+                       b"-42 \r\n*** ILLEGAL INSTRUCTION CORE=01\r\n1 0 0 "),
 }
 
 
@@ -258,13 +281,45 @@ def test_an_abort_in_a_slot_ends_the_slot_on_the_simulator(executor):
     assert _between(runtime.drain_uart_output()) == ABORT_EXPECTED
 
 
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError,
-    reason="finding 15: the BIOS's QUIT leaves an aborted slot behind",
-)
 def test_an_abort_in_a_slot_ends_the_slot_on_the_emulator():
     emulator = _Emulator(1, _bios(), _kdos())
     emulator.type(ABORT_SETUP.splitlines())
     for line in ABORT_LINES:
         assert b"slot gave up" in emulator.type([line])
     assert _between(emulator.type([ABORT_REPORT])) == ABORT_EXPECTED
+
+
+# PAUSE in a slot with no CATCH, then TASK-YIELD in the foreground: each
+# fault is reported and ends its line, the first ending the slot with it;
+# then what the foreground sees, and a PAUSE that finds no slot.
+MISUSE_SETUP = b"""VARIABLE TS-C
+: TS-INNER ( -- ) 1 TS-C +! PAUSE 1 TS-C +! ;"""
+MISUSE_LINES = (
+    b"0 TS-C ! ' TS-INNER BACKGROUND PAUSE",
+    b"TASK-YIELD 2 TS-C !",
+)
+MISUSE_FAULT = b"\r\n*** ILLEGAL INSTRUCTION CORE=00\r\n"
+MISUSE_REPORT = (b"60 EMIT 60 EMIT TS-C @ . 1 TASK? . TASK-ID . #TASKS . "
+                 b"PAUSE TS-C @ . 62 EMIT 62 EMIT")
+MISUSE_EXPECTED = b"1 0 0 0 1 "
+
+
+@pytest.mark.parametrize("executor", ("native", "python"))
+def test_an_uncaught_misuse_of_the_slot_words_faults_on_the_simulator(executor):
+    runtime = _Simulator(1, executor, _kdos()).runtime
+    runtime.evaluate(MISUSE_SETUP)
+    for line in MISUSE_LINES:
+        with pytest.raises(ForthAbort):
+            runtime.evaluate(line)
+        assert runtime.drain_uart_output() == MISUSE_FAULT
+    runtime.evaluate(MISUSE_REPORT)
+    assert _between(runtime.drain_uart_output()) == MISUSE_EXPECTED
+
+
+def test_an_uncaught_misuse_of_the_slot_words_faults_on_the_emulator():
+    emulator = _Emulator(1, _bios(), _kdos())
+    emulator.type(MISUSE_SETUP.splitlines())
+    for line in MISUSE_LINES:
+        # The BIOS's report also names the program counter.
+        assert MISUSE_FAULT in _PROGRAM_COUNTER.sub(b"", emulator.type([line]))
+    assert _between(emulator.type([MISUSE_REPORT])) == MISUSE_EXPECTED

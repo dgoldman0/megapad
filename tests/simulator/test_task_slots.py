@@ -5,11 +5,12 @@ PAUSE runs the next active slot from the foreground until the slot calls
 TASK-YIELD or its word returns, TASK-STOP ends a slot, and TASK?, #TASKS and
 TASK-ID report them (simulator/tasks.py, docs/multicore-simulator-plan.md,
 stage 5). tests/test_task_slots_differential.py compares the slots with the
-emulator's BIOS; the cases here cover what only the simulator can show or
-where it departs from the BIOS on purpose: where the slots' stacks lie, a
-slot's errors, the words used from the wrong context, dictionary rollback,
-and slots on a machine with several cores. Every case runs on both
-executors.
+emulator's BIOS, KDOS loaded; the cases here run on the simulator's own
+vocabulary and cover what only the simulator can show or where it departs
+from the BIOS on purpose: where the slots' stacks lie and a slot's stack
+overflow, a slot's abort and the words used from the wrong context without
+KDOS's CATCH, dictionary rollback, and slots on a machine with several
+cores. Every case runs on both executors.
 """
 
 from __future__ import annotations
@@ -94,9 +95,8 @@ def test_each_slot_runs_on_stacks_of_32_cells_below_the_dictionary(executor):
 
 @pytest.mark.parametrize("executor", EXECUTORS)
 def test_an_abort_in_a_slot_ends_the_slot_and_the_line_that_paused(executor):
-    # On the machine ABORT in a slot restarts the outer interpreter as well,
-    # and the BIOS's QUIT leaves the slot's record and TASK-ID behind
-    # (finding 15 of the plan); here the slot ends and TASK-ID is 0 again.
+    # As on the machine, where the BIOS's QUIT ends the slot that was
+    # running, the slot ends with the line and TASK-ID is 0 again.
     runtime = _runtime(executor)
     runtime.evaluate(b"""VARIABLE AFTER  0 AFTER !
 : QUITTER ( -- ) TRUE ABORT" slot gave up" ;
@@ -110,8 +110,9 @@ def test_an_abort_in_a_slot_ends_the_slot_and_the_line_that_paused(executor):
 
 @pytest.mark.parametrize("executor", EXECUTORS)
 def test_pause_in_a_slot_and_task_yield_in_the_foreground_fault(executor):
-    # Both crash the machine, whose PAUSE takes the running slot for the
-    # foreground and whose TASK-YIELD returns to a PAUSE that never ran.
+    # The BIOS's words refuse both with the same fault: PAUSE would take the
+    # running slot's stacks for the foreground's, and TASK-YIELD would return
+    # to a PAUSE that never ran.
     runtime = _runtime(executor)
     runtime.evaluate(b"""VARIABLE C  0 C !
 : INNER ( -- ) 1 C +! PAUSE 1 C +! ;
@@ -129,8 +130,8 @@ def test_pause_in_a_slot_and_task_yield_in_the_foreground_fault(executor):
 
 @pytest.mark.parametrize("executor", EXECUTORS)
 def test_a_worker_that_reaches_pause_or_task_yield_faults(executor):
-    # The machine's PAUSE on a worker would run one of core 0's slots there,
-    # racing core 0 for the slot's records.
+    # As the BIOS's words refuse them: PAUSE on a worker would run one of
+    # core 0's slots there, racing core 0 for the slot's records.
     runtime = _runtime(executor, cores=2)
     runtime.evaluate(b"""VARIABLE C  0 C !
 : WAIT-FOR ( core -- ) BEGIN DUP CORE-STATUS 0= UNTIL DROP ;

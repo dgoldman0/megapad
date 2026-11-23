@@ -1139,8 +1139,8 @@ secret-boundary qualifications are recorded in
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 311 | `PAUSE` | `( -- )` | | Round-robin yield across all 4 task slots via `SEP R20`; resumes when the next active task yields back |
-| 312 | `TASK-YIELD` | `( -- )` | | Yield from the current background task back to Task 0 via `SEP R20` |
+| 311 | `PAUSE` | `( -- )` | | From core 0's foreground, run the next active slot until it yields or ends; in a slot or on a worker core, the illegal-operation fault (-21) |
+| 312 | `TASK-YIELD` | `( -- )` | | From a running slot, yield back to Task 0 via `SEP R20`; in the foreground or on a worker core, the illegal-operation fault (-21) |
 | 313 | `BACKGROUND` | `( xt -- )` | | Set xt as Task 1 body and start it |
 | 314 | `TASK-STOP` | `( n -- )` | | Stop background task in slot n (1–3), reset to idle |
 | 315 | `TASK?` | `( n -- flag )` | | Return 0 if task slot n (1–3) is idle, 1 if running |

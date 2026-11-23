@@ -20,10 +20,9 @@ stacks lie in the 1,536 bytes below the dictionary's start, where the BIOS
 keeps its own slot stacks below its dictionary.
 
 PAUSE in a slot, TASK-YIELD in the foreground, and either word on a worker
-core take the illegal-operation fault, where the machine would crash or run
-core 0's slot on the worker. An error or ABORT in a slot ends the slot, and
-the foreground's line that paused ends with it; the BIOS's QUIT leaves the
-slot's record and TASK-ID behind (finding 15 of the plan).
+core take the illegal-operation fault, as the BIOS's words refuse them. An
+error or ABORT in a slot ends the slot, and the foreground's line that
+paused ends with it, as the BIOS's QUIT ends the slot that was running.
 """
 
 from __future__ import annotations
@@ -149,10 +148,10 @@ class HostedTasks:
             native.program.set_task(slot)
 
     def _require_foreground(self, word: str, *, in_slot: bool) -> None:
-        """The illegal-operation fault where WORD would crash the machine:
-        on a worker core, where the slots are not, and in the foreground
-        (IN_SLOT false) or a slot (IN_SLOT true), wherever it does not
-        belong."""
+        """The illegal-operation fault where WORD cannot run, as the BIOS's
+        word takes it: on a worker core, where the slots are not, and in
+        the foreground (IN_SLOT false) or a slot (IN_SLOT true), wherever
+        it does not belong."""
 
         runtime = self.runtime
         runtime.require_core0(f"{word} and the task slots")

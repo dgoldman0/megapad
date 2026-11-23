@@ -1883,8 +1883,8 @@ return stacks.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `PAUSE` | `( -- )` | Round-robin yield across all 4 task slots via `SEP R20`. |
-| `TASK-YIELD` | `( -- )` | Yield from the current background task back to Task 0 via `SEP R20`. |
+| `PAUSE` | `( -- )` | From core 0's foreground, run the next active slot, round-robin from the one last run, until it yields or ends; with none active, nothing. |
+| `TASK-YIELD` | `( -- )` | From a running slot, give the foreground its turn back through `SEP R20`; the next `PAUSE` that reaches the slot resumes it here. |
 | `BACKGROUND` | `( xt -- )` | Set xt as the Task 1 body and start it running. |
 | `TASK-STOP` | `( n -- )` | Stop background task in slot n (1–3), reset to idle. |
 | `TASK?` | `( n -- flag )` | Return 0 if task slot n (1–3) is idle, 1 if running. |
@@ -1892,6 +1892,20 @@ return stacks.
 | `BACKGROUND3` | `( xt -- )` | Set xt as the Task 3 body and start it running. |
 | `#TASKS` | `( -- n )` | Count active background tasks (0–3). |
 | `TASK-ID` | `( -- n )` | Return the executing cooperative slot on core 0 (0 foreground, 1–3 background); worker cores return 0. |
+
+`PAUSE` belongs to core 0's foreground and `TASK-YIELD` to a running slot.
+`PAUSE` in a slot would save the slot's stacks as the foreground's,
+`TASK-YIELD` in the foreground would return through a `PAUSE` that is not
+running, and a worker core has no slots, so each of these takes the
+illegal-operation fault instead: the words execute one of the ISA's
+unassigned opcodes, the `FAULT-XT!` callback receives -21, which KDOS throws
+to the innermost `CATCH`, and with no `CATCH` the fault is reported and the
+line, or the worker's job, ends (see Instruction faults). An `ABORT`, an
+uncaught `THROW` or fault, or `QUIT` in a slot ends the slot together with
+the foreground's line that ran `PAUSE`: `QUIT` runs the `QUIT-XT!` callback
+while `TASK-ID` still names the slot, so KDOS clears the slot's `CATCH`
+chain and the foreground's, and then clears the slot's entry, so `TASK-ID`
+answers 0 and the next `PAUSE` finds nothing of the slot to resume.
 
 ---
 
