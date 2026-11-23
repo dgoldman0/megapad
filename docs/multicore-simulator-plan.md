@@ -2,8 +2,9 @@
 
 Status: Accepted, 2026-11-22, with the nine decisions of section 10.
 Stages 1 and 2 are built (MegaPad d8016c43; 4ea4bc91, 09a26e8d and
-f317327b), stage 3 (1c4563f4 to 49d94ecd, with Akashic 95e081c9) and
-stage 4 (d8453449 to 348a482a, with Akashic d82d6e80 to 5da2eea3).
+f317327b), stage 3 (1c4563f4 to 49d94ecd, with Akashic 95e081c9), stage 4
+(d8453449 to 348a482a, with Akashic d82d6e80 to 5da2eea3) and stage 5
+(ee95d589, with Akashic a603041c).
 It is the staged plan for Part 3 of the release plan
 (`dev/PLAN.md` in fantasy-engine), in which MegaPad's hosted simulator
 becomes the multicore machine MegaPad is. Section 1 describes the simulator
@@ -589,6 +590,44 @@ foreground; `TASK-YIELD` returns to task 0; `TASK-STOP` ends a slot; and
 and slots change only at `PAUSE` and `TASK-YIELD`, so the scheduler's policy
 never enters. Tests compare with the emulator on one core: KDOS's per-slot
 `CATCH` chains and Akashic's `coroutine.f`.
+
+Built on 2026-11-23 (ee95d589, with Akashic a603041c):
+
+- `simulator/tasks.py` keeps the slots. Each is a context of core 0 whose
+  32-cell data and return stacks lie in the 1,536 bytes below the
+  dictionary's start, as the BIOS keeps its slot stacks below its own
+  dictionary, so the checked span rule refuses a slot's Bank 0 buffers on
+  both machines. A slot's run is a dispatch nested in the foreground's
+  `PAUSE`. It detaches where the slot yields, once control is back in the
+  slot's own frame, and the next `PAUSE` resumes it through the path the
+  core scheduler takes for a worker's job. On two cores a worker's job runs
+  inside a slot's run through stage 4's inline turns.
+- `TASK-ID` and the CRC and SHA-3 owners take the running slot, in Python
+  and in the native engine, whose `set_task` and `OP_TASK_ID` answer core
+  0's slot there and 0 on the other cores. Without the native identity,
+  KDOS's `HANDLER` chose the foreground's `CATCH` chain inside a natively
+  run slot, and a `THROW` there unwound into the foreground's return stack.
+- Where the machine would crash, the simulator faults: `PAUSE` in a slot,
+  `TASK-YIELD` in the foreground, and either word on a worker core take
+  the illegal-operation fault. An error or `ABORT` in a slot ends the slot
+  and the line that paused, where the BIOS leaves the slot behind (finding
+  15). Inside a slot, as in the other dispatches that cannot detach, an
+  `IDL` without a deadline fails, an `IDLE-UNTIL` returns early, and a disk
+  word that finds a worker holding lock 2 reports the timeout at once,
+  where the machine halts the whole core or keeps polling.
+- A dictionary rollback that would remove a word an active slot runs
+  inside, or will start, is refused, as for a worker's suspended job.
+
+Tests: `tests/test_task_slots_differential.py` runs fifteen KDOS programs
+on the emulator and on three simulators, on one core and on two: the slot
+words, round-robin order, loop parameters and stacks across yields,
+stopping and replacing slots, `TASK-ID`, the four per-slot `CATCH` cases of
+`tests/test_system.py`, the CRC owner per slot, the span rule, and a
+worker's job running while a slot does, in 6 seconds;
+`tests/simulator/test_task_slots.py` covers the stacks' place and size,
+aborts, the faults, rollback and slots on two cores; and Akashic's
+`test_coroutine_on_simulator.py` runs every check of `test_coroutine.py` on
+the simulator.
 
 ### Stage 6. The RTL microcore (3e)
 
