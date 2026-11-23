@@ -792,8 +792,8 @@ boot leaves a microcore's R2 as reset leaves it.
 
 These came out of reading the sources and, where stated, running the
 emulator; findings 12 to 14 came out of stage 3's differential cases, and
-16 and 17 out of the slice that fixed findings 8 and 12 to 15. Each needs a
-change in the BIOS, KDOS, the release plan or the contract.
+16 to 18 out of the slice that fixed findings 8 and 12 to 15. Each needs a
+change in the BIOS, KDOS, the release plan, the contract or the tests.
 
 1. **A chiplet's doorbell to a BIOS worker core misfires (run on the
    emulator).** The worker's IPI handler scans pending senders 0 to 3 only
@@ -967,6 +967,19 @@ change in the BIOS, KDOS, the release plan or the contract.
     running-slot mark, and `TASK?` reads one; the simulator refuses such a
     number without consuming it. A bound check that refuses it as the
     simulator does belongs to the slice of finding 16.
+18. **Three system tests no longer contend for the locks they test (run on
+    the emulator).** `TestBIOS::test_disk_checked_lock_contention_times_out_without_issuing`,
+    `TestBIOSWotsCheckpoint3::test_guard_contention_returns_state_without_touching_wots`
+    and `TestKDOSSHA3Checkpoint2::test_hmac_hkdf_lock9_contention_preserves_status_precedence`
+    make a spinlock look held by core 1 through `sys.spinlock.locked[n] =
+    True` and `owner[n] = 1`. Since f317327b moved the emulator's spinlocks
+    onto the shared native model, those two properties build fresh lists
+    from the native bank on each read, so the assignments change nothing,
+    the words under test find the lock free, and all three fail on main
+    (7e015eaa) as on the slice that fixed findings 8 and 12 to 15; the
+    file last passed whole at d8016c43, before f317327b. The tests need to
+    take the lock in the native bank as core 1, which the next change to
+    `tests/test_system.py` can do.
 
 ## 10. Decisions
 
