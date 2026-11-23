@@ -19,7 +19,8 @@ second use, was decided the same day as [managed-data.md](managed-data.md)
 specifies it, recovery after an LM1 failure included. MegaPad's side of it
 is built in the chiplet system module, `chiplet.f`, beside the general
 words of §9, and LM1's side in the stand-in for LM1's runtime in LM1's
-chiplet module; recovery is built as far as its stage 0. This note records how chiplets attach to MegaPad in
+chiplet module; recovery is built as far as its stage 1, in which MegaPad's
+never-free engine adopts a sound heap when LM1 fails. This note records how chiplets attach to MegaPad in
 Leviathan: the contract every chiplet meets, how the chips share memory, how
 they signal and exchange work, and how LM1, the first chiplet, runs sandbox
 jobs, managed data and borrowed tile work over the link. It schedules no

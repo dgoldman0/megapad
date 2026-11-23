@@ -98,6 +98,20 @@ class _Machine:
     def reports(self, lines: list[str]) -> list[int]:
         return self.run(lines)
 
+    def read_bytes(self, addr: int, length: int) -> bytes:
+        raise NotImplementedError
+
+    def write_bytes(self, addr: int, data: bytes) -> None:
+        raise NotImplementedError
+
+    def words(self, addr: int, count: int) -> list[int]:
+        """COUNT words of MegaPad's memory from ADDR, read from outside."""
+        data = self.read_bytes(addr, 8 * count)
+        return [int.from_bytes(data[i:i + 8], "little") for i in range(0, 8 * count, 8)]
+
+    def put_word(self, addr: int, value: int) -> None:
+        self.write_bytes(addr, (value & MASK64).to_bytes(8, "little"))
+
 
 class Emulated(_Machine):
     """The emulator's machine: BIOS, KDOS and chiplet.f on CORES full
@@ -157,6 +171,12 @@ class Emulated(_Machine):
     def restore_port(self, state: bytes) -> bool:
         return bool(self.system._native_system.chiplet_restore(state))
 
+    def read_bytes(self, addr: int, length: int) -> bytes:
+        return self.system._raw_mem_read_span(addr, length)
+
+    def write_bytes(self, addr: int, data: bytes) -> None:
+        self.system._raw_mem_write_span(addr, data)
+
 
 class Hosted(_Machine):
     """The hosted simulator: KDOS and chiplet.f on its one core, with LM1
@@ -170,6 +190,7 @@ class Hosted(_Machine):
                                       bank0_size=1 << 20, external_size=EXT_SIZE,
                                       chiplet_ports=1)
         runtime = MegaForthRuntime(memory=memory)
+        self.memory = memory
         runtime.chiplet_ports.attach_module(0, LIBRARY, "%s,hook_id=%d%s" % (
             BASE_CONFIG, self.hook_id, "," + config if config else ""))
         self.lm1 = lm1_chiplet.attached_model(self.hook_id)
@@ -207,6 +228,12 @@ class Hosted(_Machine):
 
     def restore_port(self, state: bytes) -> bool:
         return bool(self.runtime.chiplet_ports.restore(state))
+
+    def read_bytes(self, addr: int, length: int) -> bytes:
+        return self.memory.read_bytes(addr, length)
+
+    def write_bytes(self, addr: int, data: bytes) -> None:
+        self.memory.write_bytes(addr, data)
 
 
 BACKENDS = [pytest.param(Emulated, id="emulator"), pytest.param(Hosted, id="simulator")]
@@ -275,7 +302,7 @@ KIND_ANY, KIND_FIXNUM, KIND_STRING, KIND_CELL = 0, 1, 6, 16
 HELPERS = [
     "CREATE BUF 256 ALLOT",
     "VARIABLE H  VARIABLE H2  VARIABLE H3  VARIABLE R0  VARIABLE R1  VARIABLE SH  VARIABLE N0",
-    "VARIABLE MOST",
+    "VARIABLE MOST  VARIABLE N1  VARIABLE X1",
     # Hold until the stand-in has set HELD.
     ": WAITHELD BEGIN _HOLD@ H-HELD AND 0= WHILE 0 _CHIP-ACK REPEAT ;",
     ": EPOCH _HOLD@ 3 RSHIFT ;",
@@ -662,10 +689,14 @@ def test_22_megapad_refuses_a_bad_reference_from_lm1(backend):
     _step_lm1(machine)
     got = machine.run([
         ": READ22 OBJ-OPEN THROW H @ OBJ-GET THROW 1 OBJ@ DUP N0 @ = REPORT OBJ>REF NIP REPORT OBJ-CLOSE ;",
-        "READ22 OBJ-READY? REPORT",
+        "READ22 OBJ-READY? REPORT OBJ-ENGINE REPORT REPORT OBJ-ROW @ REPORT",
+        "_P-CTRL 0 CHIP@ _CTRL-RESET-HOLD AND REPORT OBJ-MEMORY 0> REPORT",
+        "0 CHIP-RESET OBJ-MEMORY REPORT",
     ])
-    # Until recovery's stage 1 there is no evidence latch: the heap serves on.
-    assert got == [-1, -1108, -1]
+    # The refusal sets the evidence latch, and the heap is lost at once (row
+    # 1, cause 2).  LM1 is not stopped, so the function's memory waits for
+    # its reset.
+    assert got == [-1, -1108, 0, 2, 0, 1, 0, -1, 0]
 
 
 # ---------------------------------------------------------------------------
@@ -674,34 +705,48 @@ def test_22_megapad_refuses_a_bad_reference_from_lm1(backend):
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_23_a_reset_outside_a_hold(backend):
+    """From stage 1 the reset keeps the heap: the stand-in adopts it (row 3)
+    and every handle gives its object.  Once both owners are released no
+    handle is live and no window open, so the stand-in drops the heap and
+    the function's memory goes back to KDOS, leaving MegaPad memory outside
+    it untouched.  A1 checks the reset with windows open."""
     machine = ready(backend)
     got = machine.run([
         "D-ONE %d OBJ-SHAPE REPORT SH !" % ONE_LEN,
-        ": MAKE23 OBJ-OPEN THROW SH @ OBJ-RECORD THROW 1 1 OBJ-HANDLE THROW H ! "
-        "SH @ OBJ-RECORD THROW 2 1 OBJ-HANDLE THROW H2 ! OBJ-CLOSE ;",
+        ": MAKE23 OBJ-OPEN THROW SH @ OBJ-RECORD THROW 23 INT>OBJ THROW OVER 1 OBJ! THROW "
+        "1 1 OBJ-HANDLE THROW H ! SH @ OBJ-RECORD THROW 24 INT>OBJ THROW OVER 1 OBJ! THROW "
+        "2 1 OBJ-HANDLE THROW H2 ! OBJ-CLOSE ;",
         "MAKE23 OBJ-MEMORY 0> REPORT",
         # MegaPad memory outside the function's: a block KDOS gave the test.
         "64 XMEM-ALLOT R1 ! R1 @ 64 0x5A FILL",
-        "0 CHIP-RESET",
-        "OBJ-OPEN REPORT H @ OBJ-GET NIP REPORT 1 1 OBJ-OWNER-RELEASE REPORT "
+        "0 CHIP-RESET OBJ-ENGINE REPORT REPORT OBJ-ROW @ REPORT _OBJ-CB @ MC.STATE + @ REPORT",
+        ": READ23 OBJ-OPEN THROW H @ OBJ-GET THROW 1 OBJ@ OBJ>INT THROW REPORT "
+        "H2 @ OBJ-GET THROW 1 OBJ@ OBJ>INT THROW REPORT OBJ-CLOSE ;",
+        "READ23 1 1 OBJ-OWNER-RELEASE REPORT OBJ-MEMORY 0> REPORT",
         "2 1 OBJ-OWNER-RELEASE REPORT OBJ-MEMORY REPORT OBJ-ENGINE REPORT REPORT",
+        "H @ OBJ-DROP REPORT",
         ": CANARY 0 64 0 DO R1 @ I + C@ 0x5A = IF 1+ THEN LOOP ; CANARY REPORT",
     ])
-    assert got == [0, -1, -1102, -1102, 0, 0, 0, 6, 0, 64]
+    assert got == [0, -1, 6, 2, 3, 1, 23, 24, 0, -1, 0, 0, 6, 0, -1102, 64]
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_24_an_overdue_hold(backend):
+    """A hold the test hook keeps ACTIVE past twice HOLD_LIMIT is overdue.
+    The module asks LM1 to stop, holds it in reset, and the rule decides by
+    MOVE: this hold moved nothing (row 5), so the stand-in adopts the heap
+    and ends the hold one epoch on, and the open goes through (A3).  The
+    killed hold checks a hold cut while it flips (L5)."""
     # HOLD_LIMIT of 100 microseconds: a hold ACTIVE past 200 is overdue.
     machine = ready(backend, "hold_limit=100000")
     machine.lm1.md_hold(lm1_chiplet.MD_HOLD_ONLY, lm1_chiplet.MD_FOR_EVER)
     got = machine.run([
-        "WAITHELD _HOLD@ H-ACTIVE AND 0<> REPORT OBJ-OPEN REPORT",
-        "OBJ-ENGINE REPORT REPORT _P-CTRL 0 CHIP@ _CTRL-RESET-HOLD AND 0<> REPORT OBJ-MEMORY REPORT",
+        "WAITHELD _HOLD@ H-ACTIVE AND 0<> REPORT EPOCH N0 ! OBJ-OPEN REPORT",
+        "OBJ-ENGINE REPORT REPORT OBJ-ROW @ REPORT OBJ-STOPPED @ REPORT EPOCH N0 @ - REPORT",
+        "_HOLD@ 7 AND REPORT _P-CTRL 0 CHIP@ _CTRL-RESET-HOLD AND 0<> REPORT OBJ-MEMORY 0> REPORT",
+        "OBJ-CLOSE",
     ])
-    # The open found the hold overdue (cause 4); the port is held in reset,
-    # and with no window open the function's memory went back to KDOS.
-    assert got == [-1, -1102, 4, 0, -1, 0]
+    assert got == [-1, 0, 4, 2, 5, 1, 1, 0, -1, -1]
     assert machine.lm1.link(lm1_chiplet.LINK_BOOT) == lm1_chiplet.BOOT_RESET
 
 
@@ -1051,31 +1096,49 @@ def test_recovery_l1_failed_loses_the_heap_and_its_memory_waits_for_the_reset(ba
 
 
 # ---------------------------------------------------------------------------
-#  The fixes: waits LM1 leaves unended (the first parts of recovery's A2)
+#  Recovery's stage 1: the stand-in adopts the heap
 # ---------------------------------------------------------------------------
+#
+#  docs/managed-data.md sections 11 and 13.  When LM1's service ends, the
+#  module stops LM1, holds it in reset and applies the rule to the records;
+#  where they show the heap sound, MegaPad's never-free engine adopts it and
+#  serves it with the same words.  OBJ-ROW keeps the rule's row, and
+#  OBJ-STOPPED how the stop went: 0 LM1 was held in reset already, 1 it
+#  answered STOPPED, 2 the deadline passed first.
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_fix_a_hold_that_stalls_before_active_is_overdue(backend):
-    """LM1 stops just after it stores HELD, with no window open.  A core
-    that opens a window finds HELD without ACTIVE, no window word reading
-    OPEN, for more than twice HOLD_LIMIT, and treats the hold as overdue:
-    until recovery's stage 1 the heap is lost, cause 4, with LM1 held in
-    reset and the function's memory back with KDOS."""
-    machine = ready(backend, "hold_limit=100000")
+# A record of one tagged field, held by handle H of owner (1, 1).
+MAKE_HELD = [
+    "D-ONE %d OBJ-SHAPE REPORT SH !" % ONE_LEN,
+    ": MAKEH OBJ-OPEN THROW SH @ OBJ-RECORD THROW 1 1 OBJ-HANDLE THROW H ! OBJ-CLOSE ; MAKEH",
+]
+
+
+@pytest.mark.parametrize("backend", TWO_CORE_BACKENDS)
+def test_recovery_a2_a_hold_that_stalls_before_active(backend):
+    """A2, waits that LM1 leaves unended: LM1 stops just after it stores
+    HELD, with no window open, while cores 0 and 1 both wait to open one.
+    Once twice HOLD_LIMIT has passed a core finds the hold overdue (cause
+    4); LM1 is stopped, the stand-in adopts the heap (row 4) and ends the
+    hold one epoch on, and every core whose window word reads WAITING is
+    rung, so both opens return 0."""
+    machine = ready(backend, "hold_limit=100000", extra=CORE1 + [
+        ": C1-OPEN OBJ-OPEN C1-IOR ! OBJ-CLOSE TRUE C1-DONE ! ;"])
+    assert machine.run(MAKE_HELD) == [0]
     machine.lm1.md_hold(lm1_chiplet.MD_HOLD_STALLS)
     got = machine.run([
-        "WAITHELD _HOLD@ H-ACTIVE AND REPORT OBJ-OPEN REPORT",
-        "OBJ-ENGINE REPORT REPORT _P-CTRL 0 CHIP@ _CTRL-RESET-HOLD AND 0<> REPORT OBJ-MEMORY REPORT",
+        "WAITHELD _HOLD@ H-ACTIVE AND REPORT EPOCH N0 ! ' C1-OPEN C1",
+        "OBJ-OPEN REPORT C1-WAIT C1-IOR @ REPORT OBJ-ENGINE REPORT REPORT OBJ-ROW @ REPORT",
+        "EPOCH N0 @ - REPORT _HOLD@ 7 AND REPORT OBJ-STOPPED @ REPORT OBJ-CLOSE",
     ])
-    assert got == [0, -1102, 4, 0, -1, 0]
+    assert got == [0, 0, 0, 4, 2, 4, 1, 0, 1]
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_fix_a_full_log_outlives_its_deadline(backend):
-    """LM1 stops draining while core 0 waits inside its window on a full
-    log.  Past a request's deadline the core fails the function, cause 5;
-    the store that waited returns OBJ-E-FAILED, and once the window closes
-    the function's memory goes back to KDOS."""
+def test_recovery_a2_a_full_log_past_its_deadline(backend):
+    """A2's second run: LM1 stops draining while core 0 waits inside its
+    window on a full log.  Past a request's deadline the core fails the
+    function (cause 5); the stand-in adopts the heap (row 3), moves the
+    core's LOG_HEAD to its TAIL, and the core goes on: every store lands."""
     machine = ready(backend, extra=["8 OBJ-LOG-ENTRIES !"])
     assert machine.run([
         ": MAKEV OBJ-OPEN THROW OBJ-NIL 32 OBJ-VECTOR THROW 1 1 OBJ-HANDLE THROW H ! OBJ-CLOSE ;",
@@ -1085,8 +1148,421 @@ def test_fix_a_full_log_outlives_its_deadline(backend):
     machine.lm1.md_drain(False)
     got = machine.run([
         ": FILLF 0 N0 ! OBJ-OPEN THROW 32 0 DO SH @ OBJ-RECORD ?DUP IF NIP N0 ! LEAVE THEN "
+        "I INT>OBJ THROW OVER 1 OBJ! THROW "
         "H @ OBJ-GET THROW I 1+ OBJ! ?DUP IF N0 ! LEAVE THEN LOOP "
-        "_HOLD@ H-HELD AND REPORT OBJ-MEMORY 0> REPORT OBJ-CLOSE ;",
-        "FILLF N0 @ REPORT OBJ-ENGINE REPORT REPORT OBJ-MEMORY REPORT",
+        "_ENT CE.LOG-HEAD + @ _REC CR.TAIL + @ = REPORT OBJ-CLOSE ;",
+        "FILLF N0 @ REPORT OBJ-ENGINE REPORT REPORT OBJ-ROW @ REPORT",
+        ": CHECKF OBJ-OPEN THROW 0 32 0 DO H @ OBJ-GET THROW I 1+ OBJ@ OBJ>REF THROW "
+        "1 OBJ@ OBJ>INT THROW I = IF 1+ THEN LOOP REPORT OBJ-CLOSE ;",
+        "CHECKF OBJ-MEMORY 0> REPORT _ENT CE.LOG-HEAD + @ _REC CR.TAIL + @ = REPORT",
     ])
-    assert got == [0, -1, -1102, 5, 0, 0]
+    assert got == [-1, 0, 5, 2, 3, 32, -1, -1]
+
+
+@pytest.mark.parametrize("backend", TWO_CORE_BACKENDS)
+def test_recovery_a1_a_reset_outside_a_hold(backend):
+    """A1: windows open on cores 0 and 1, logs LM1 has left undrained, and
+    core 1 waiting inside its window on a full log.  Core 0 resets LM1.
+    Both windows run to their close; every handle gives its object; the
+    stand-in grants a region in a new block on the block list; every core's
+    LOG_HEAD reaches its TAIL; core 1 is rung and goes on; and OBJ-ENGINE
+    reports MegaPad's engine, with a reset as the cause."""
+    machine = ready(backend, extra=CORE1 + [
+        "8 OBJ-LOG-ENTRIES !",
+        ": OC1@ ( field -- x ) CELLS 1 _OC * + _OBJ-CORE + @ ;"])
+    assert machine.run([
+        ": MAKEV OBJ-OPEN THROW OBJ-NIL 32 OBJ-VECTOR THROW 1 1 OBJ-HANDLE THROW H ! OBJ-CLOSE ;",
+        "MAKEV 0 OBJ-COLLECT REPORT",
+        "D-ONE %d OBJ-SHAPE REPORT SH !" % ONE_LEN,
+        "_OBJ-BL @ @ N0 !",
+    ]) == [0, 0]
+    machine.lm1.md_drain(False)
+    got = machine.run([
+        # Core 1's full log waits long enough for core 0's reset.
+        "10000 CHIP-DEADLINE !",
+        ": C1-FILL OBJ-OPEN C1-IOR ! 16 0 DO SH @ OBJ-RECORD ?DUP IF C1-IOR ! DROP LEAVE THEN "
+        "I INT>OBJ DROP OVER 1 OBJ! DROP H @ OBJ-GET DROP I 1+ OBJ! ?DUP IF C1-IOR ! LEAVE THEN LOOP "
+        "OBJ-CLOSE TRUE C1-DONE ! ;",
+        "' C1-FILL C1",
+        # Core 0 opens a window and logs a store of its own.
+        "OBJ-OPEN REPORT SH @ OBJ-RECORD THROW 77 INT>OBJ THROW OVER 1 OBJ! THROW "
+        "H @ OBJ-GET THROW 21 OBJ! REPORT",
+        ": WAITFULL 0 BEGIN 1+ OC.FULL OC1@ OVER 3000 = OR 0= WHILE MS@ 1+ IDLE-UNTIL REPEAT DROP ;",
+        "WAITFULL OC.FULL OC1@ REPORT "
+        "1 _CE * LB.CORES + _OBJ-LB @ + CE.LOG-HEAD + @ 1 _REC-OF CR.TAIL + @ < REPORT",
+        # LM1 is reset with both windows open.
+        "0 CHIP-RESET OBJ-ENGINE REPORT REPORT OBJ-ROW @ REPORT OBJ-STOPPED @ REPORT",
+        # An object larger than core 0's region's rest: the stand-in grants a
+        # region in its new block, the last on the block list.
+        "OBJ-NIL 200 OBJ-VECTOR REPORT _OBJ-ADDR R0 ! _OBJ-BL @ @ N0 @ - REPORT",
+        "R0 @ _OBJ-BL @ DUP @ 1- 16 * 16 + + DUP @ SWAP 8 + @ OVER + WITHIN REPORT",
+        "OBJ-CLOSE C1-WAIT C1-DONE @ REPORT C1-IOR @ REPORT",
+        ": DRAINED 0 NCORES 0 DO I _CE * LB.CORES + _OBJ-LB @ + CE.LOG-HEAD + @ "
+        "I _REC-OF CR.TAIL + @ = IF 1+ THEN LOOP ; DRAINED REPORT",
+        ": CHECKA1 OBJ-OPEN THROW 0 16 0 DO H @ OBJ-GET THROW I 1+ OBJ@ OBJ>REF THROW "
+        "1 OBJ@ OBJ>INT THROW I = IF 1+ THEN LOOP REPORT "
+        "H @ OBJ-GET THROW 21 OBJ@ OBJ>REF THROW 1 OBJ@ OBJ>INT THROW REPORT OBJ-CLOSE ;",
+        "CHECKA1",
+    ])
+    assert got == [0, 0, -1, -1, 6, 2, 3, 1, 0, 1, -1, -1, 0, 2, 16, 77]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_recovery_a8_a_stop_while_a_hold_flips(backend):
+    """A8: a moving COLLECT, with the hook that makes the stop request reach
+    LM1 as MOVE comes to read FLIPPING.  LM1 finishes the hold's moves and
+    rewrites and writes MOVE reading FIXED before it stops, and writes
+    nothing after, so the hold is ACTIVE with MOVE FIXED when MegaPad's
+    request misses its deadline (cause 5): the rule adopts the heap (row 6)
+    and ends the hold, the stand-in answers the COLLECT, and the handle
+    gives the contents the record had before the hold, at its new place."""
+    machine = ready(backend)
+    got = machine.run(MAKE_PAIR + ["CHECK2 R1 @ N0 ! _OBJ-LB @ REPORT 20 CHIP-DEADLINE !"])
+    assert got[:7] == [0] + PAIR_READS
+    move = got[7] + 0x40
+    lm1 = machine.lm1
+    lm1.md_trace(True)
+    lm1.md_stop_at_flip(True)
+    got = machine.run([
+        "EPOCH N1 ! 2 OBJ-COLLECT REPORT OBJ-ENGINE REPORT REPORT OBJ-ROW @ REPORT OBJ-STOPPED @ REPORT",
+        "EPOCH N1 @ - REPORT CHECK2 R1 @ N0 @ <> REPORT",
+    ])
+    trace = lm1.md_trace_take()
+    lm1.md_trace(False)
+    assert got == [0, 5, 2, 6, 1, 1] + PAIR_READS + [-1]
+    flips = [i for i, (a, v) in enumerate(trace) if a == move and v & 7 == 1]
+    fixes = [i for i, (a, v) in enumerate(trace) if a == move and v & 7 == 2]
+    assert len(flips) == 1 and len(fixes) == 1 and flips[0] < fixes[0]
+    assert fixes[0] == len(trace) - 1, "LM1 wrote after MOVE read FIXED"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_recovery_a9_the_stand_ins_heap_dropped(backend):
+    """A9: while the stand-in serves after a reset, a restarted LM1's offer
+    of the function is refused.  Once every owner is released with no
+    window open, nothing reaches the heap: the module loses it and returns
+    its memory to KDOS, and LM1, restarted again, has its offer accepted and
+    the function starts afresh with new handles working."""
+    machine = ready(backend)
+    got = machine.run([
+        "D-ONE %d OBJ-SHAPE REPORT SH !" % ONE_LEN,
+        ": MAKE9 OBJ-OPEN THROW SH @ OBJ-RECORD THROW 9 INT>OBJ THROW OVER 1 OBJ! THROW "
+        "3 1 OBJ-HANDLE THROW H ! SH @ OBJ-RECORD THROW 4 1 OBJ-HANDLE THROW H2 ! OBJ-CLOSE ;",
+        "MAKE9 0 CHIP-RESET OBJ-ENGINE REPORT REPORT",
+        ": SERVE 200 0 DO _CHIP-SERVICE 0 _CHIP-ACK LOOP ;",
+        "0 0 0 CHIP-BOOT REPORT SERVE OBJ-ENGINE REPORT REPORT",
+    ])
+    assert got == [0, 6, 2, 0, 6, 2]
+    assert machine.lm1.md(lm1_chiplet.MD_PHASE) == 0, "the restarted LM1's offer was refused"
+    got = machine.run([
+        "3 1 OBJ-OWNER-RELEASE REPORT OBJ-ENGINE REPORT REPORT OBJ-MEMORY 0> REPORT",
+        "4 1 OBJ-OWNER-RELEASE REPORT OBJ-ENGINE REPORT REPORT OBJ-MEMORY REPORT",
+        "0 0 0 CHIP-BOOT REPORT 0 OBJ-START REPORT OBJ-ENGINE REPORT REPORT",
+        "D-ONE %d OBJ-SHAPE REPORT SH !" % ONE_LEN,
+        ": NEW9 OBJ-OPEN THROW SH @ OBJ-RECORD THROW 99 INT>OBJ THROW OVER 1 OBJ! THROW "
+        "5 1 OBJ-HANDLE THROW H ! OBJ-CLOSE ; NEW9",
+        ": CHECK9 OBJ-OPEN THROW H @ OBJ-GET THROW 1 OBJ@ OBJ>INT THROW REPORT OBJ-CLOSE ; CHECK9",
+    ])
+    assert got == [0, 6, 2, -1, 0, 6, 0, 0, 0, 0, 0, 1, 0, 99]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_recovery_the_stand_in_answers_requests(backend):
+    """While the stand-in serves, it answers each request itself (section
+    10): SHAPE gives the registry's ID for a description it holds, a new ID
+    from the upper part of SHAPE_RANGE for a new one, and BAD_RECORD for one
+    LM1 would refuse; COLLECT answers at once with every byte of the heap
+    live and the epoch unchanged; REGION grants regions in a new block on
+    the block list; and records of the kind it registered work."""
+    machine = ready(backend, extra=[BAD_DESC, RAW_DESC])
+    got = machine.run([
+        "D-ONE %d OBJ-SHAPE REPORT SH !" % ONE_LEN,
+        ": MAKES OBJ-OPEN THROW SH @ OBJ-RECORD THROW 1 1 OBJ-HANDLE THROW H ! OBJ-CLOSE ;",
+        "MAKES _OBJ-BL @ @ N0 ! 0 CHIP-RESET OBJ-ENGINE REPORT REPORT EPOCH N1 !",
+        "D-ONE %d OBJ-SHAPE REPORT SH @ = REPORT" % ONE_LEN,
+        "D-RAW %d OBJ-SHAPE REPORT DUP H3 ! _OBJ-LB @ LB.SHAPE-RANGE + @ 32 RSHIFT < 0= REPORT" % RAW_LEN,
+        "D-RAW %d OBJ-SHAPE REPORT H3 @ = REPORT" % RAW_LEN,
+        "D-BAD %d OBJ-SHAPE REPORT DROP OBJ-STATUS REPORT" % BAD_LEN,
+        "1 OBJ-COLLECT REPORT OBJ-COLLECTED EPOCH = REPORT _OBJ-HEAP-BYTES = REPORT EPOCH N1 @ = REPORT",
+        ": MANY OBJ-OPEN THROW 100 0 DO SH @ OBJ-RECORD THROW DROP LOOP "
+        "H3 @ OBJ-RECORD THROW -5 OVER 0 OBJ-RAW! THROW 0 OBJ-RAW@ THROW REPORT OBJ-CLOSE ;",
+        "MANY OC.BASE OC@ _OBJ-BL @ DUP @ 1- 16 * 16 + + @ U< 0= REPORT _OBJ-BL @ @ N0 @ - REPORT",
+    ])
+    assert got == [0, 6, 2, 0, -1, 0, -1, 0, -1, -1106, 0x101, 0, -1, -1, -1, -5, -1, 1]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_recovery_l2_the_evidence_latch(backend):
+    """L2: a hook moves EPOCH backwards.  Core 0's open finds it, sets the
+    evidence latch and loses the heap at once (row 1, cause 2), without
+    stopping LM1; after the test resets LM1, the heap stays lost and its
+    memory returns to KDOS."""
+    machine = ready(backend)
+    got = machine.run(MAKE_HELD + [
+        "0 OBJ-COLLECT REPORT OBJ-OPEN REPORT OBJ-CLOSE EPOCH REPORT _OBJ-LB @ REPORT"])
+    assert got[:3] == [0, 0, 0] and got[3] >= 1
+    machine.lm1.md_write(got[4], (got[3] - 1) << 3)
+    _step_lm1(machine)
+    got = machine.run([
+        "OBJ-OPEN REPORT OBJ-ENGINE REPORT REPORT OBJ-ROW @ REPORT",
+        "_P-CTRL 0 CHIP@ _CTRL-RESET-HOLD AND REPORT OBJ-MEMORY 0> REPORT",
+        "0 CHIP-RESET OBJ-MEMORY REPORT OBJ-ENGINE REPORT REPORT H @ OBJ-DROP REPORT",
+    ])
+    assert got == [-1102, 2, 0, 1, 0, -1, 0, 2, 0, -1102]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_recovery_l3_a_broken_queue(backend):
+    """L3: a hook moves TAIL backwards on the queue LM1 writes on the grant's
+    pair.  MegaPad finds the queue broken, the heap is lost at once (row 1,
+    cause 3), the port is reset by the link's rule, and the function's
+    memory goes back to KDOS."""
+    machine = ready(backend)
+    ring, seen = machine.run(["_OBJ-GRANT @ P.FROM-RING P@ REPORT _OBJ-GRANT @ P.TAIL-SEEN P@ REPORT"])
+    assert seen >= 1
+    machine.lm1.md_write(ring, seen - 1)
+    _step_lm1(machine)
+    got = machine.run([
+        ": SERVE3 200 0 DO _CHIP-SERVICE 0 _CHIP-ACK LOOP ; SERVE3",
+        "_P-CTRL 0 CHIP@ _CTRL-RESET-HOLD AND 0<> REPORT OBJ-ENGINE REPORT REPORT OBJ-ROW @ REPORT "
+        "OBJ-MEMORY REPORT",
+    ])
+    assert got == [-1, 3, 0, 1, 0]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("what", ["active-without-held", "move-ahead", "undefined-phase"])
+def test_recovery_l4_records_that_contradict_each_other(backend, what):
+    """L4: a hook writes, before a reset, ACTIVE without HELD, a MOVE epoch
+    ahead of HOLD's, or an undefined phase.  The rule loses the heap (row 2)
+    before the module writes anything: the block list, the NEXT grant, the
+    log's head, HOLD and MOVE read as the hook left them, and only STATE
+    and CAUSE change.  A window held open keeps the records readable."""
+    machine = ready(backend)
+    got = machine.run(MAKE_HELD + ["0 OBJ-COLLECT REPORT EPOCH REPORT _OBJ-LB @ REPORT"])
+    assert got[:2] == [0, 0]
+    epoch, block = got[2], got[3]
+    addr, value = {
+        "active-without-held": (block, (epoch << 3) | 2),
+        "move-ahead": (block + 0x40, ((epoch + 1) << 3) | 2),
+        "undefined-phase": (block + 0x40, (epoch << 3) | 5),
+    }[what]
+    assert machine.run(["OBJ-OPEN REPORT"]) == [0]
+    machine.lm1.md_write(addr, value)
+    _step_lm1(machine)
+    got = machine.run([
+        "_OBJ-BL @ @ N0 ! _ENT CE.NEXT-SERIAL + @ N1 ! _ENT CE.LOG-HEAD + @ R0 ! "
+        "_HOLD@ R1 ! _OBJ-LB @ LB.MOVE + @ X1 !",
+        "0 CHIP-RESET OBJ-ENGINE REPORT REPORT OBJ-ROW @ REPORT _OBJ-CB @ MC.STATE + @ REPORT",
+        "_OBJ-BL @ @ N0 @ = REPORT _ENT CE.NEXT-SERIAL + @ N1 @ = REPORT "
+        "_ENT CE.LOG-HEAD + @ R0 @ = REPORT _HOLD@ R1 @ = REPORT _OBJ-LB @ LB.MOVE + @ X1 @ = REPORT",
+        "OBJ-CLOSE OBJ-MEMORY REPORT",
+    ])
+    assert got == [6, 0, 2, 2, -1, -1, -1, -1, -1, 0]
+
+
+# ---------------------------------------------------------------------------
+#  The killed hold (stage 1, and stage 3 for its flipping cuts): A3, A4, L5
+# ---------------------------------------------------------------------------
+
+SUB_CONS, SUB_VECTOR, SUB_BYTES, SUB_RECORD = 1, 2, 3, 16
+ADDR_BITS = 0x0007FFFFFFFFFFF8
+
+# The cuts made in order by MegaPad's module: for cut 0 to CT-N, the rule's
+# row, then LM1's next write.
+CUT_WORDS = [
+    "VARIABLE CT-TRACE  VARIABLE CT-N  VARIABLE CT-ROWS",
+    ": CUTS CT-N @ 1+ 0 DO _OBJ-RULE CT-ROWS @ I CELLS + ! "
+    "I CT-N @ < IF CT-TRACE @ I 16 * + DUP 8 + @ SWAP @ ! THEN LOOP ;",
+]
+
+
+class _Cut:
+    """MegaPad's memory as a cut leaves it, read in the host: the hold's
+    starting memory, with LM1's writes up to the cut laid over it."""
+
+    def __init__(self, before: bytes, base: int):
+        self.before, self.base, self.over = before, base, {}
+
+    def __getitem__(self, addr: int) -> int:
+        if addr in self.over:
+            return self.over[addr]
+        at = addr - self.base
+        assert 0 <= at <= len(self.before) - 8, "a word outside external memory"
+        return int.from_bytes(self.before[at:at + 8], "little")
+
+
+def _slots(mem, handle_dir: int) -> list[int]:
+    first, segments = mem[handle_dir], mem[handle_dir + 8]
+    words = []
+    for k in range(segments):
+        base = mem[handle_dir + 16 + 8 * k]
+        words += [mem[base + 8 * i] for i in range(first << k)]
+    return words
+
+
+def _walk(mem, handle_dir: int, blocks: list[tuple[int, int]]) -> tuple:
+    """The graph the handle slots reach, as an independent walker in the
+    host reads it: each object named by the order in which the walk first
+    reaches it, with its header's subtype, size and shape and its words, the
+    references among them replaced by those names.  Fails on a reference
+    with metadata or outside the shared heap, on a word that is no sound
+    header where a reference points, and on a reachable forwarding pointer.
+    Two references to one object get one name, so a graph equal to the
+    hold's starting one has no object at two addresses."""
+    names: dict[int, int] = {}
+    objects: list = []
+
+    def name(ref: int) -> int:
+        assert ref >> 51 == 0, "a reference with metadata"
+        addr = ref & ADDR_BITS
+        assert any(b <= addr < l for b, l in blocks), "a reference outside the shared heap"
+        if addr in names:
+            return names[addr]
+        header = mem[addr]
+        assert header & 7 == 7, "no header where a reference points"
+        assert header >> 56 != 0xFF, "a reachable forwarding pointer"
+        sub, size, shape = (header >> 3) & 0x1F, (header >> 8) & 0xFFFF, header >> 24 & 0xFFFFFFFF
+        assert sub in (SUB_CONS, SUB_VECTOR, SUB_BYTES, SUB_RECORD), "an unknown subtype"
+        names[addr] = len(objects)
+        objects.append(None)
+        words = [mem[addr + 8 * (1 + i)] for i in range(size)]
+        tagged = {SUB_CONS: range(2), SUB_VECTOR: range(1, size), SUB_BYTES: range(0),
+                  SUB_RECORD: range(1, 1 + (words[0] >> 1) if size else 0)}[sub]
+        out = list(words)
+        for i in tagged:
+            if words[i] & 7 in (1, 3):
+                out[i] = ("ref", name(words[i]), words[i] & 7)
+        objects[names[addr]] = (sub, size, shape, tuple(out))
+        return names[addr]
+
+    roots = tuple(("ref", name(v), v & 7) if v & 7 in (1, 3) else v for v in _slots(mem, handle_dir))
+    return roots, tuple(objects)
+
+
+def _rule_rows(hold: int, move: int) -> int:
+    """Section 11's rows 3 to 7, restated in the host for records that do
+    not contradict each other, with LM1 held in reset and no evidence."""
+    if not hold & 1:
+        return 3
+    if not hold & 2:
+        return 4
+    if move == 0 or move >> 3 < hold >> 3:
+        return 5
+    return 6 if move & 7 == 2 else 7
+
+
+def killed_hold(machine, run_hold) -> dict:
+    """The killed hold: run the hold RUN_HOLD starts, recording every word
+    LM1 writes, each word of a burst included; then, for each cut between
+    two recorded words, build the hold's starting memory plus LM1's writes
+    up to the cut, and have MegaPad's module apply the rule to it, with LM1
+    held in reset.  Checks that the rule adopts in exactly the states stage
+    1 qualifies, losing only at cuts made while the hold flips; that at each
+    adopting cut an independent walker finds every reachable reference
+    naming a sound object, no forwarding pointer reachable, and the graph
+    the handles reach as it was before the hold; and that once a cut shows
+    the hold's moves applied to the slots, every later cut does too."""
+    lm1 = machine.lm1
+    block, handle_dir, block_list, base, size = machine.run(CUT_WORDS + [
+        "_OBJ-LB @ REPORT _OBJ-HD @ REPORT _OBJ-BL @ REPORT EXT-MEM-BASE REPORT EXT-MEM-SIZE REPORT"])
+    blocks = []
+    for k in range(machine.words(block_list, 1)[0]):
+        start, length = machine.words(block_list + 16 + 16 * k, 2)
+        blocks.append((start, start + length))
+    before = machine.read_bytes(base, size)
+    grows, returns = lm1.md(lm1_chiplet.MD_GROWS), lm1.md(lm1_chiplet.MD_RETURNS)
+    lm1.md_trace(True)
+    reports = run_hold()
+    assert (lm1.md(lm1_chiplet.MD_GROWS), lm1.md(lm1_chiplet.MD_RETURNS)) == (grows, returns), \
+        "the block list changed during the hold"
+    # LM1 can write no more: held in reset, as the failure leaves it.
+    machine.run(["0 _CHIP-HOLD"])
+    trace = lm1.md_trace_take()
+    lm1.md_trace(False)
+    assert trace, "LM1 wrote nothing"
+    # The hold's starting memory again at every word LM1 wrote; the module
+    # then makes the cuts in order.
+    for addr, _ in trace:
+        machine.write_bytes(addr, before[addr - base:addr - base + 8])
+    n = len(trace)
+    at, rows = machine.run([
+        "%d ALLOCATE THROW DUP CT-TRACE ! REPORT %d ALLOCATE THROW DUP CT-ROWS ! REPORT %d CT-N !"
+        % (16 * n, 8 * (n + 1), n)])
+    machine.write_bytes(at, b"".join(a.to_bytes(8, "little") + (v & MASK64).to_bytes(8, "little")
+                                     for a, v in trace))
+    assert machine.run(["CUTS"]) == []
+    decided = machine.words(rows, n + 1)
+    # The same cuts in the host.
+    mem = _Cut(before, base)
+    start_graph = _walk(mem, handle_dir, blocks)
+    final = _Cut(before, base)
+    final.over = dict(trace)
+    final_slots = _slots(final, handle_dir)
+    move_at = block + 0x40
+    flips = [i for i, (a, v) in enumerate(trace) if a == move_at and v & 7 == 1]
+    fixes = [i for i, (a, v) in enumerate(trace) if a == move_at and v & 7 == 2]
+    applied = False
+    for k in range(n + 1):
+        expected = _rule_rows(mem[block], mem[move_at])
+        assert decided[k] == expected, "cut %d: row %d, not %d" % (k, decided[k], expected)
+        flipping = bool(flips) and flips[0] < k <= fixes[0]
+        assert (expected == 7) == flipping, "cut %d" % k
+        if expected != 7:
+            assert _walk(mem, handle_dir, blocks) == start_graph, "cut %d" % k
+        now = _slots(mem, handle_dir) == final_slots
+        assert now or not applied, "cut %d undoes the moves an earlier cut showed" % k
+        applied = applied or now
+        if k < n:
+            mem.over[trace[k][0]] = trace[k][1]
+    return {"reports": reports, "cuts": n + 1, "rows": sorted(set(decided)),
+            "moved": final_slots != _slots(_Cut(before, base), handle_dir)}
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_recovery_the_killed_hold_that_moves(backend):
+    """A moving hold, every object the collection can move: the rule loses
+    at the cuts made while it flips, until stage 3, and adopts at every
+    other cut (A3, A4 and L5)."""
+    machine = ready(backend, extra=[TWO_DESC])
+    got = machine.run([
+        "D-TWO %d OBJ-SHAPE REPORT SH !" % TWO_LEN,
+        ": TWO ( a b -- r ) SH @ OBJ-RECORD THROW TUCK 2 OBJ! THROW TUCK 1 OBJ! THROW ;",
+        ": CHAIN OBJ-OPEN THROW 1 INT>OBJ THROW 2 INT>OBJ THROW TWO DUP 3 INT>OBJ THROW TWO "
+        "DUP 1 1 OBJ-HANDLE THROW H ! OBJ-NIL OBJ-CONS THROW OBJ-NIL OBJ-CONS THROW "
+        "1 1 OBJ-HANDLE THROW H2 ! OBJ-CLOSE ;",
+        "CHAIN 0 OBJ-COLLECT REPORT CHAIN",
+    ])
+    assert got == [0, 0]
+    found = killed_hold(machine, lambda: machine.run(["2 OBJ-COLLECT REPORT"]))
+    assert found["reports"] == [0] and found["moved"]
+    assert found["rows"] == [3, 4, 5, 6, 7]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_recovery_the_killed_hold_that_moves_nothing(backend):
+    """A hold that only drains logs and retires regions adopts at every
+    cut."""
+    machine = ready(backend)
+    assert machine.run([
+        "D-ONE %d OBJ-SHAPE REPORT SH !" % ONE_LEN,
+        ": MAKEK OBJ-OPEN THROW SH @ OBJ-RECORD THROW 1 1 OBJ-HANDLE THROW H ! OBJ-CLOSE ;",
+        "MAKEK 0 OBJ-COLLECT REPORT",
+        # Young records stored into the old one: entries LM1 has not taken,
+        # in a region the hold retires.
+        ": STOREK OBJ-OPEN THROW 3 0 DO SH @ OBJ-RECORD THROW I INT>OBJ THROW OVER 1 OBJ! THROW "
+        "H @ OBJ-GET THROW 1 OBJ! THROW LOOP OBJ-CLOSE ; STOREK",
+        ": WAITEND 0 BEGIN 1+ 0 _CHIP-ACK EPOCH N0 @ <> OVER 1000000 = OR UNTIL DROP ;",
+    ]) == [0, 0]
+
+    def hold_only():
+        # With no window open, the hold takes one step of LM1's from HELD
+        # to its end, which may come while a line is read, so the epoch is
+        # kept first and the wait is for it to move on.
+        assert machine.run(["EPOCH N0 !"]) == []
+        machine.lm1.md_hold(lm1_chiplet.MD_HOLD_ONLY, 0)
+        return machine.run(["WAITEND EPOCH N0 @ - REPORT"])
+
+    found = killed_hold(machine, hold_only)
+    assert found["reports"] == [1] and not found["moved"]
+    assert found["rows"] == [3, 4, 5]

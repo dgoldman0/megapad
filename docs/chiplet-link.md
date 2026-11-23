@@ -485,7 +485,10 @@ after that reply.
   for at most a request's deadline, and then cancels and resets as above.
   Managed data's records outlive the chiplet, and MegaPad reads them once
   the chiplet can write no more ([managed-data.md](managed-data.md) §11,
-  from stage 1 of its recovery).
+  from stage 1 of its recovery, built). In `chiplet.f` every reset of a
+  running port goes through the port's functions first: `CHIP-RESET`, a
+  boot of a chiplet that runs, and a port that fails, which is held in
+  reset once its functions have heard of the failure.
 
 ## 9. The emulator and the simulator
 
@@ -550,7 +553,8 @@ restores the port with LM1 behind it.
   the control block, lend memory from a pool of ranges for each port, make
   queue pairs, serve offers by class, and send requests with a deadline, a
   cancel when it passes, and a reset of the port when the cancel goes
-  unanswered or a queue breaks. LM1's end is the stand-in for LM1's runtime
+  unanswered or a queue breaks, which the port's functions hear of before
+  and after it. LM1's end is the stand-in for LM1's runtime
   in LM1's chiplet module, which offers managed data and serves it
   ([managed-data.md](managed-data.md)). The test chiplet built into the
   extensions still takes its addresses from its boot image rather than

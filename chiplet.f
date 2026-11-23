@@ -11,13 +11,18 @@
 \  - Above them, managed data's words (docs/managed-data.md section 14):
 \    MegaPad's side of the function of class 1, which LM1's collector
 \    serves.  Its records, windows, handles, store logs, regions and
-\    failure handling follow that document.
+\    failure handling follow that document.  When LM1 fails, the module
+\    stops it and, where the records show the shared heap sound, serves
+\    the heap itself with MegaPad's never-free engine, the stand-in of
+\    recovery's stage 1 (sections 11 and 13).
 \
 \  Load after KDOS:  REQUIRE chiplet.f
 \
 \  Locks: CHIP-LOCK (13) guards the port window's shared PORT_SEL and the
-\  lend pool; OBJ-LOCK (14) guards managed data's handle table, owners and
-\  shape registry.  Neither is held across a wait.
+\  lend pool; OBJ-LOCK (14) guards managed data's handle table, owners,
+\  shape registry, the stand-in's blocks and the function's state as one
+\  core takes a failure's decision.  Neither is held across a wait, and a
+\  core that holds OBJ-LOCK may take CHIP-LOCK, never the other way.
 \
 \  Waiting: a core waits for a chiplet with the loop of _CHIP-SLEEP.  It
 \  reads MBOX_STATUS, at which the hosted simulator steps its chiplets,
@@ -445,8 +450,9 @@ VARIABLE _MK-OWNER  VARIABLE _MK-PORT   VARIABLE _MK-PAIR
 
 : CHIP-REPLY  ( status request pair -- ior )   >R CHIP-REPLY-BEGIN R> CHIP-PUT ;
 
-\ A broken queue, or a chiplet that missed a deadline, ends the port's
-\ service: the functions on the port hear of it, and the port is reset.
+\ A broken queue (3), or a chiplet that missed a deadline (5), ends the
+\ port's service: the functions on the port hear of it first, and may stop
+\ the chiplet before the port is held in reset (CHIP-PORT-FAILED, below).
 DEFER _CHIP-FAILED   ( cause port -- )
 : _CHIP-FAILED-NONE  ( cause port -- )   2DROP ;
 ' _CHIP-FAILED-NONE IS _CHIP-FAILED
@@ -490,6 +496,21 @@ CREATE _CHIP-PORT-STATE  CHIP-PORTS 1 MAX _PS * ALLOT
 _CHIP-PORT-STATE CHIP-PORTS 1 MAX _PS * 0 FILL
 : PS'  ( port field -- addr )   CELLS SWAP _PS * + _CHIP-PORT-STATE + ;
 
+\ Hold the chiplet in reset: RESET_HOLD alone, which closes the port.
+: _CHIP-HOLD  ( port -- )
+    _CTRL-RESET-HOLD _P-CTRL ROT CHIP!  ;
+
+\ Whether the port is booted and not held down since.
+: CHIP-UP?  ( port -- flag )   DUP PS.BOOTED PS' @ SWAP PS.DOWN PS' @ 0= AND ;
+
+\ The port's service ended by CAUSE: its functions hear of it, then the
+\ port is held in reset whatever they did, as chiplet-link.md section 8
+\ answers a broken queue or a cancel that goes unanswered, and then they
+\ hear of the reset, as after CHIP-RESET.
+DEFER _CHIP-RESET-HOOK     ( port -- )
+: CHIP-PORT-FAILED  ( cause port -- )
+    TUCK _CHIP-FAILED  DUP _CHIP-HOLD  TRUE OVER PS.DOWN PS' !  _CHIP-RESET-HOOK ;
+
 0x4C52544350494843 CONSTANT _CHIPCTRL     \ ASCII CHIPCTRL
 
 \ Words that serve a function's OFFER, by class: ( entry pair -- ).
@@ -525,19 +546,22 @@ VARIABLE _CHIP-CLASSES   0 _CHIP-CLASSES !
         THEN @
     REPEAT 2DROP ;
 
-\ Serve what waits for this core on every port it serves.
+\ Serve what waits for this core on every port it serves.  A failure, in
+\ a pair's handler or found in a queue, holds the port down and may end
+\ its functions and free their pairs, so the walk of the port's pairs
+\ stops once the port is down.
 : _CHIP-SERVICE  ( -- )
     CHIP-PORTS 0 ?DO
-        I PS.BOOTED PS' @ I PS.DOWN PS' @ 0= AND IF
+        I CHIP-UP? IF
             I _CHIP-ACK
             I PS.PAIR PS' @ DUP P.NOTIFY P@ COREID = IF
-                CHIP-PAIR-SERVE IF 3 I _CHIP-FAILED THEN
+                CHIP-PAIR-SERVE IF 3 I CHIP-PORT-FAILED THEN
             ELSE DROP THEN
-            \ A failure may end the port's functions and their pairs.
             I PS.DOWN PS' @ IF 0 ELSE I PS.SERVED PS' @ THEN
             BEGIN DUP WHILE
                 DUP 8 + @ DUP P.NOTIFY P@ COREID = IF
-                    CHIP-PAIR-SERVE IF 3 I _CHIP-FAILED DROP 0 ELSE @ THEN
+                    CHIP-PAIR-SERVE IF 3 I CHIP-PORT-FAILED DROP 0
+                    ELSE I PS.DOWN PS' @ IF DROP 0 ELSE @ THEN THEN
                 ELSE DROP @ THEN
             REPEAT DROP
         THEN
@@ -552,14 +576,16 @@ VARIABLE _CHIP-CLASSES   0 _CHIP-CLASSES !
 
 : CHIP-DOWN?  ( port -- flag )   PS.DOWN PS' @ ;
 
-\ Hold the chiplet in reset.  The port's functions hear of it first, so
-\ that what they lent goes back once nothing uses it.
-DEFER _CHIP-RESET-HOOK   ( port -- )
+\ Hold the chiplet in reset.  The port's functions hear of it before the
+\ reset, so that one whose records outlive the chiplet can ask it to stop
+\ first (chiplet-link.md section 8), and after it, so that what they lent
+\ goes back once nothing uses it.
+DEFER _CHIP-BEFORE-RESET   ( port -- )
 : _CHIP-RESET-NONE  ( port -- )   DROP ;
+' _CHIP-RESET-NONE IS _CHIP-BEFORE-RESET
 ' _CHIP-RESET-NONE IS _CHIP-RESET-HOOK
-: _CHIP-HOLD  ( port -- )
-    _CTRL-RESET-HOLD _P-CTRL ROT CHIP!  ;
 : CHIP-RESET  ( port -- )
+    DUP _CHIP-BEFORE-RESET
     DUP _CHIP-HOLD  TRUE OVER PS.DOWN PS' !  _CHIP-RESET-HOOK ;
 
 \ Ask the chiplet to stop, and wait until it has or the deadline passes.
@@ -582,13 +608,14 @@ DEFER _CHIP-RESET-HOOK   ( port -- )
 \ Bring the chiplet up as docs/chiplet-link.md section 6 orders it: the
 \ control block written and lent, the image lent read-only, BOOT_ADDR,
 \ BOOT_LEN and BOOT_ARG named, and the chiplet released, then READY.
-\ The image's range is withdrawn once the chiplet is up.
+\ The image's range is withdrawn once the chiplet is up.  A chiplet that
+\ runs is reset as CHIP-RESET resets it, so its functions hear of it.
 VARIABLE _BOOT-PORT
 : _BOOT-FAIL  ( ior -- ior )   _BOOT-PORT @ _CHIP-HOLD ;
 : CHIP-BOOT  ( addr len port -- ior )
     DUP CHIP-PRESENT? 0= IF DROP 2DROP CHIP-E-ABSENT EXIT THEN
     DUP _BOOT-PORT !
-    _CHIP-HOLD
+    DUP CHIP-UP? IF CHIP-RESET ELSE _CHIP-HOLD THEN
     _BOOT-PORT @ PS.BOOTED PS' @ 0= IF
         8 8 COREID 0 _BOOT-PORT @ CHIP-PAIR-MAKE ?DUP IF NIP NIP NIP EXIT THEN
         ['] _CHIP-CONTROL-REQUEST OVER P.HANDLER P!
@@ -645,6 +672,11 @@ VARIABLE _BOOT-PORT
         OVER _CHIP-NAP
     AGAIN ;
 
+\ A wait for a reply that ended in IOR: a queue of the pair that broke
+\ ends the port's service.
+: _CHIP-AWAIT-FAILED  ( pair flag ior -- ior )
+    NIP DUP CHIP-E-BROKEN = IF 3 ROT P.PORT P@ CHIP-PORT-FAILED ELSE NIP THEN ;
+
 \ Send ENTRY as a request on PAIR and wait for its reply, which lands in
 \ the pair's reply entry.  A request that misses its deadline is
 \ cancelled, and when the cancel goes unanswered too the port's service
@@ -653,15 +685,15 @@ VARIABLE _BOOT-PORT
     DUP P.TAG P@ 1+ OVER P.TAG P!  FALSE OVER P.READY P!
     DUP P.TAG P@ 2 PICK E.TAG E!
     TUCK CHIP-PUT ?DUP IF NIP EXIT THEN
-    CHIP-DEADLINE@ OVER _CHIP-AWAIT ?DUP IF NIP NIP EXIT THEN
+    CHIP-DEADLINE@ OVER _CHIP-AWAIT ?DUP IF _CHIP-AWAIT-FAILED EXIT THEN
     IF DROP 0 EXIT THEN
     \ The cancel's one answer is the request's reply.
     _SEND-BUF _ENTRY-CLEAR  _OP-CANCEL _SEND-BUF !
     DUP P.TAG P@ _SEND-BUF E.TAG E!
     _SEND-BUF OVER CHIP-PUT ?DUP IF NIP EXIT THEN
-    CHIP-DEADLINE@ OVER _CHIP-AWAIT ?DUP IF NIP NIP EXIT THEN
+    CHIP-DEADLINE@ OVER _CHIP-AWAIT ?DUP IF _CHIP-AWAIT-FAILED EXIT THEN
     IF DROP 0 EXIT THEN
-    5 SWAP P.PORT P@ _CHIP-FAILED CHIP-E-TIMEOUT ;
+    5 SWAP P.PORT P@ CHIP-PORT-FAILED CHIP-E-TIMEOUT ;
 
 \ =====================================================================
 \  Managed data (docs/managed-data.md): constants and state
@@ -716,15 +748,37 @@ VARIABLE _BOOT-PORT
 VARIABLE OBJ-HANDLE-FIRST   64 OBJ-HANDLE-FIRST !
 VARIABLE OBJ-LOG-ENTRIES    256 OBJ-LOG-ENTRIES !
 
-\ The function: 0 absent, 1 attaching, 2 served by LM1, 3 lost with its
-\ memory held, 4 lost with its memory returned to KDOS.
+\ The function's state.  The two states that serve are _S-LM1 and
+\ _S-STANDIN, in which MegaPad's never-free engine serves the heap in LM1's
+\ place (section 13); while one core stops LM1 and applies the rule of
+\ section 11, the state reads _S-DECIDING and the other cores wait.
+0 CONSTANT _S-ABSENT      \ no function
+1 CONSTANT _S-ATTACHING   \ ATTACH sent, its reply not yet in
+2 CONSTANT _S-LM1         \ LM1 serves
+3 CONSTANT _S-DECIDING    \ a core stops LM1 and applies the rule
+4 CONSTANT _S-STANDIN     \ MegaPad's never-free engine serves
+5 CONSTANT _S-LOST        \ the heap is lost, its memory held
+6 CONSTANT _S-RETURNED    \ the heap is lost, its memory back with KDOS
+\ STATE in the control block (section 9).
+0 CONSTANT MS-LM1   1 CONSTANT MS-STANDIN   2 CONSTANT MS-LOST
 VARIABLE _OBJ-STATE   0 _OBJ-STATE !
 VARIABLE _OBJ-PORT    VARIABLE _OBJ-GRANT   VARIABLE _OBJ-GRANT-REC
 VARIABLE _OBJ-CB      VARIABLE _OBJ-CT      VARIABLE _OBJ-LB
 VARIABLE _OBJ-HD      VARIABLE _OBJ-BL      VARIABLE _OBJ-SR
 VARIABLE _OBJ-CAUSE   0 _OBJ-CAUSE !
-VARIABLE _OBJ-RESET   \ LM1 has been reset since the loss
+VARIABLE _OBJ-RESET   \ LM1 has been reset, and BUSY found clear, since the failure
 VARIABLE _OBJ-ATTACH-STATUS
+\ The evidence latch: LM1 wrote wrong words (section 11).
+VARIABLE _OBJ-LATCH   FALSE _OBJ-LATCH !
+\ Handles live: the stand-in drops a heap that nothing reaches (section 13).
+VARIABLE _OBJ-LIVE    0 _OBJ-LIVE !
+\ The row of section 11's rule that made the last decision, and how the
+\ stop before it went: 0 LM1 was held in reset already, 1 it answered
+\ STOPPED, 2 the request's deadline passed first.
+VARIABLE OBJ-ROW      0 OBJ-ROW !
+VARIABLE OBJ-STOPPED  0 OBJ-STOPPED !
+\ The stand-in's newest block, from which it carves regions in a row.
+VARIABLE _SI-HERE   VARIABLE _SI-LIMIT
 CREATE _OBJ-ATTACH-BUF  _ENTRY ALLOT
 \ The built-in shapes LM1 stated at ATTACH.
 VARIABLE _SH-CONS  VARIABLE _SH-VECTOR  VARIABLE _SH-BYTES  VARIABLE _SH-STRING
@@ -761,16 +815,27 @@ _OBJ-CORES-CLEAR
 \  Engines and failure (sections 11 and 13)
 \ =====================================================================
 
-: OBJ-READY?  ( -- flag )   _OBJ-STATE @ 2 = ;
-\ Which engine serves: 0 none, 1 LM1; and the cause of the failure that
-\ lost the heap, else 0.  MegaPad's own engine is recovery's stage 1.
+\ Whether an engine serves: LM1, or MegaPad's never-free engine in LM1's
+\ place.
+: OBJ-READY?  ( -- flag )   _OBJ-STATE @ DUP _S-LM1 = SWAP _S-STANDIN = OR ;
+\ Which engine serves: 0 none, 1 LM1, 2 MegaPad's never-free engine; and
+\ the CAUSE of the failure that put MegaPad's engine in LM1's place or
+\ lost the heap, else 0.
 : OBJ-ENGINE  ( -- engine cause )
-    _OBJ-STATE @ 2 = IF 1 ELSE 0 THEN _OBJ-CAUSE @ ;
+    _OBJ-STATE @ DUP _S-LM1 = IF DROP 1 ELSE _S-STANDIN = IF 2 ELSE 0 THEN THEN
+    _OBJ-CAUSE @ ;
+
+\ While one core stops LM1 and applies the rule, the others wait for its
+\ decision (section 11), a millisecond at a time.  The deciding core waits
+\ for no other core, so the wait ends.
+: _OBJ-AWAIT-DECISION  ( -- )
+    BEGIN _OBJ-STATE @ _S-DECIDING = WHILE MS@ 1+ IDLE-UNTIL REPEAT ;
 
 \ 0 while an engine serves; otherwise the status every word returns.
 : _OBJ-SERVES  ( -- ior )
-    _OBJ-STATE @ 2 = IF 0 EXIT THEN
-    _OBJ-STATE @ 3 < IF OBJ-E-ABSENT ELSE OBJ-E-FAILED THEN ;
+    _OBJ-AWAIT-DECISION
+    OBJ-READY? IF 0 EXIT THEN
+    _OBJ-STATE @ _S-LOST < IF OBJ-E-ABSENT ELSE OBJ-E-FAILED THEN ;
 
 \ Whether a window is open on any core, by the window words.
 : _OBJ-ANY-OPEN?  ( -- flag )
@@ -820,48 +885,91 @@ VARIABLE _OBJ-OWNERS   VARIABLE _OBJ-OWNER-N   VARIABLE _OBJ-OWNER-CAP
     NCORES 0 ?DO
         I _OC * _OBJ-CORE + OC.PAIR CELLS + @ ?DUP IF _PAIR-SIZE XMEM-FREE-BLOCK THEN
     LOOP ;
-: _OBJ-RETURN?  ( -- )
-    _OBJ-STATE @ 3 = _OBJ-RESET @ AND 0= IF EXIT THEN
-    _OBJ-ANY-OPEN? IF EXIT THEN
-    _OBJ-FREE-PRIVATE
-    _OBJ-OWNER _OBJ-PORT @ CHIP-UNLEND-OWNER
-    0 _OBJ-GRANT !  0 _OBJ-CB !  0 _OBJ-CT !  0 _OBJ-LB !  0 _OBJ-HD !
-    0 _OBJ-BL !  0 _OBJ-SR !  0 _OBJ-FREE-SLOT !  0 _OBJ-SLOTS !
-    _OBJ-CORES-CLEAR
-    4 _OBJ-STATE ! ;
+\ The cores that may wait on LM1 or on a decision are rung, so that each
+\ wait looks again at what it waits for.
+: _OBJ-RING-ALL  ( -- )
+    NCORES 0 ?DO I COREID <> IF I _CHIP-RING-CORE THEN LOOP ;
 
-\ The heap is lost (section 11): STATE reads LOST with the cause, every
-\ core that waits is rung, and LM1 is held in reset unless it set FAILED,
-\ in which case its private work goes on and the memory waits for its
-\ reset.  Until recovery's stage 1, every failure loses the heap.
-: _OBJ-LOSE  ( cause -- )
-    _OBJ-STATE @ 1 3 WITHIN 0= IF DROP EXIT THEN
-    DUP _OBJ-CAUSE !
-    DUP 1 <> IF
-        _OBJ-PORT @ DUP _CHIP-HOLD TRUE SWAP PS.DOWN PS' !  TRUE _OBJ-RESET !
-    THEN DROP
-    3 _OBJ-STATE !
-    2 _OBJ-CB @ MC.STATE + !  _OBJ-CAUSE @ _OBJ-CB @ MC.CAUSE + !
-    NCORES 0 ?DO
-        I COREID <> IF I _REC-OF CR.WINDOW + @ W-WAITING = IF I _CHIP-RING-CORE THEN THEN
-    LOOP
+\ The memory goes back under OBJ-LOCK, so two cores that close their
+\ windows at once return it once, and an offer of the function sees the
+\ heap lost until its memory is back.
+: _OBJ-RETURN?  ( -- )
+    OBJ-LOCK LOCK
+    _OBJ-STATE @ _S-LOST = _OBJ-RESET @ AND _OBJ-ANY-OPEN? 0= AND IF
+        _OBJ-FREE-PRIVATE
+        _OBJ-OWNER _OBJ-PORT @ CHIP-UNLEND-OWNER
+        0 _OBJ-GRANT !  0 _OBJ-CB !  0 _OBJ-CT !  0 _OBJ-LB !  0 _OBJ-HD !
+        0 _OBJ-BL !  0 _OBJ-SR !  0 _OBJ-FREE-SLOT !  0 _OBJ-SLOTS !
+        _OBJ-CORES-CLEAR
+        _S-RETURNED _OBJ-STATE !
+    THEN
+    OBJ-LOCK UNLOCK ;
+
+\ The heap is lost (section 11): STATE reads LOST with the failure's
+\ CAUSE, every core that may wait is rung, so that each wait ends in
+\ OBJ-E-FAILED, and the memory goes back once no window is open and LM1
+\ has been reset.  The caller holds the decision (_S-DECIDING).
+: _OBJ-LOSE  ( -- )
+    MS-LOST _OBJ-CB @ MC.STATE + !  _OBJ-CAUSE @ _OBJ-CB @ MC.CAUSE + !
+    _S-LOST _OBJ-STATE !
+    _OBJ-RING-ALL
     _OBJ-RETURN? ;
+
+\ This core takes the decision, when LM1 serves or attaches or the
+\ stand-in serves: true then, with the state it found kept in _OBJ-WAS.
+\ False when another core decides or has decided, which this core waits
+\ for, or when no function is there to decide on.
+VARIABLE _OBJ-WAS
+: _OBJ-CLAIM  ( -- flag )
+    OBJ-LOCK LOCK
+    _OBJ-STATE @ DUP _S-ATTACHING _S-DECIDING WITHIN SWAP _S-STANDIN = OR IF
+        _OBJ-STATE @ _OBJ-WAS !  _S-DECIDING _OBJ-STATE !
+        OBJ-LOCK UNLOCK TRUE EXIT
+    THEN
+    OBJ-LOCK UNLOCK  _OBJ-AWAIT-DECISION FALSE ;
+
+\ The function fails by CAUSE (section 11): 1 LM1 set FAILED, 2 a check of
+\ LM1's words failed, 3 a queue broke, 4 a hold was overdue, 5 a full log
+\ or a request outlived its deadline, 6 a reset for any other reason.
+\ Recovery, below, defines it.
+DEFER _OBJ-FAIL  ( cause -- )
+
+\ Evidence that LM1 wrote wrong words sets the evidence latch, and the
+\ heap is lost at once, or by the decision another core is making.
+: _OBJ-EVIDENCE  ( -- )   TRUE _OBJ-LATCH !  2 _OBJ-FAIL ;
+: _OBJ-CORRUPT  ( -- ior )   _OBJ-EVIDENCE OBJ-E-FAILED ;
 
 \ The port's service ended: a broken queue (3) or a missed deadline (5).
 : _OBJ-PORT-FAILED  ( cause port -- )
-    _OBJ-PORT @ = _OBJ-STATE @ 1 3 WITHIN AND IF _OBJ-LOSE ELSE DROP THEN ;
+    _OBJ-PORT @ = _OBJ-STATE @ _S-ATTACHING _S-DECIDING WITHIN AND
+    IF _OBJ-FAIL ELSE DROP THEN ;
 ' _OBJ-PORT-FAILED IS _CHIP-FAILED
 
-\ The chiplet was reset for any other reason (6).
+\ A reset of the port for any other reason (6): before it, LM1 is stopped
+\ and the rule decides, as for any failure; after it, a lost heap's memory
+\ may go back, once BUSY is clear.
+: _OBJ-BEFORE-RESET  ( port -- )
+    _OBJ-PORT @ = _OBJ-STATE @ _S-ATTACHING _S-DECIDING WITHIN AND
+    IF 6 _OBJ-FAIL THEN ;
+' _OBJ-BEFORE-RESET IS _CHIP-BEFORE-RESET
+
+\ Once LM1 is held in reset, wait for BUSY to clear, for at most a
+\ request's deadline, since an access already admitted runs to its end
+\ (chiplet-link.md section 6).  Only then can LM1 write nothing more, and
+\ the function's memory may go back.
+: _OBJ-QUIESCED  ( -- )
+    CHIP-DEADLINE@
+    BEGIN _P-STATUS _OBJ-PORT @ CHIP@ _ST-BUSY AND WHILE
+        DUP _CHIP-PAST? IF DROP EXIT THEN
+        DUP _CHIP-NAP
+    REPEAT DROP
+    TRUE _OBJ-RESET ! ;
+
 : _OBJ-PORT-RESET  ( port -- )
-    _OBJ-PORT @ = _OBJ-STATE @ 1 4 WITHIN AND IF
-        TRUE _OBJ-RESET !
-        _OBJ-STATE @ 3 < IF 6 _OBJ-LOSE ELSE _OBJ-RETURN? THEN
+    _OBJ-PORT @ = _OBJ-STATE @ _S-ABSENT <> AND IF
+        _OBJ-QUIESCED  _OBJ-STATE @ _S-LOST = IF _OBJ-RETURN? THEN
     THEN ;
 ' _OBJ-PORT-RESET IS _CHIP-RESET-HOOK
-
-\ A check of LM1's words failed: the heap is lost (cause 2).
-: _OBJ-CORRUPT  ( -- ior )   2 _OBJ-LOSE OBJ-E-FAILED ;
 
 \ =====================================================================
 \  References (section 6)
@@ -879,31 +987,40 @@ VARIABLE _OBJ-OWNERS   VARIABLE _OBJ-OWNER-N   VARIABLE _OBJ-OWNER-CAP
 \ object and 011 for a cons cell, in bits 2:0.
 : _REF?  ( t -- flag )   7 AND DUP 1 = SWAP 3 = OR ;
 
-\ A tagged word as a reference: tag 001 or 011, zero in bits 63:51, and
-\ an address in the shared heap.  A word with a reference tag that fails
-\ is corrupt, and is never followed.
-: OBJ>REF  ( t -- r ior )
-    _OBJ-SERVES ?DUP IF NIP 0 SWAP EXIT THEN
+\ Section 6's check of a tagged word as a reference: tag 001 or 011, zero
+\ in bits 63:51, and an address in the shared heap.  A word with a
+\ reference tag that fails is corrupt, and is never followed.
+: _OBJ-REF-CHECK  ( t -- r ior )
     DUP _REF? 0= IF DROP 0 OBJ-E-KIND EXIT THEN
     DUP _METADATA AND IF DROP 0 OBJ-E-CORRUPT EXIT THEN
     DUP _ADDR-BITS AND _OBJ-IN-HEAP? 0= IF DROP 0 OBJ-E-CORRUPT EXIT THEN
     0 ;
 
+\ A word read from the shared heap or a handle slot, as a reference.  A
+\ word with a reference tag that fails is evidence that LM1 wrote wrong
+\ words: it sets the evidence latch, and the heap is lost (section 11).
+: OBJ>REF  ( t -- r ior )
+    _OBJ-SERVES ?DUP IF NIP 0 SWAP EXIT THEN
+    _OBJ-REF-CHECK DUP OBJ-E-CORRUPT = IF _OBJ-EVIDENCE THEN ;
+
 \ A value a store may write into a tagged field: any tagged word but a
-\ header, a reference only into the shared heap.
+\ header, a reference only into the shared heap.  The value is MegaPad's
+\ own, so a bad one is refused without the latch.
 : _OBJ-VALUE?  ( t -- ior )
     DUP 7 AND 7 = IF DROP OBJ-E-KIND EXIT THEN
-    DUP _REF? IF OBJ>REF NIP EXIT THEN DROP 0 ;
+    DUP _REF? IF _OBJ-REF-CHECK NIP EXIT THEN DROP 0 ;
 
 : _OBJ-ADDR  ( r -- addr )   _ADDR-BITS AND ;
 
 \ A sound header of one of the four kinds MegaPad reads and makes, not a
-\ forwarding pointer.  Its GC bits are ignored.
+\ forwarding pointer.  Its GC bits are ignored.  While the stand-in serves
+\ an adopted heap, a header that fails the check loses the heap (section
+\ 11, row 8).
 1 CONSTANT K-CONS   2 CONSTANT K-VECTOR   3 CONSTANT K-BYTES   16 CONSTANT K-RECORD
 : H-SUB    ( h -- sub )   3 RSHIFT 0x1F AND ;
 : H-SIZE   ( h -- n )   8 RSHIFT 0xFFFF AND ;
 : H-SHAPE  ( h -- id )   24 RSHIFT 0xFFFFFFFF AND ;
-: _OBJ-HEADER  ( r -- h ior )
+: _OBJ-HEADER-CHECK  ( r -- h ior )
     DUP _OBJ-ADDR _OBJ-IN-HEAP? 0= IF DROP 0 OBJ-E-CORRUPT EXIT THEN
     _OBJ-ADDR @
     DUP 7 AND 7 <> IF DROP 0 OBJ-E-CORRUPT EXIT THEN
@@ -911,6 +1028,8 @@ VARIABLE _OBJ-OWNERS   VARIABLE _OBJ-OWNER-N   VARIABLE _OBJ-OWNER-CAP
     DUP H-SUB DUP K-CONS = OVER K-VECTOR = OR OVER K-BYTES = OR SWAP K-RECORD = OR
     0= IF DROP 0 OBJ-E-CORRUPT EXIT THEN
     0 ;
+: _OBJ-HEADER  ( r -- h ior )
+    _OBJ-HEADER-CHECK DUP IF _OBJ-STATE @ _S-STANDIN = IF _OBJ-EVIDENCE THEN THEN ;
 
 \ The address of field I.
 : _FIELD  ( r i -- addr )   1+ CELLS SWAP _OBJ-ADDR + ;
@@ -948,16 +1067,30 @@ VARIABLE _OBJ-OWNERS   VARIABLE _OBJ-OWNER-N   VARIABLE _OBJ-OWNER-CAP
     DUP _REC CR.PAIR + CHIP-PAIR-RECORD!
     DUP OC.PAIR OC! 0 ;
 
+\ The stand-in's answer to the request in this core's ask entry; recovery,
+\ below, defines it.
+DEFER _SI-ASK  ( -- status ior )
+
 \ A request on this core's pair: the reply's status, with its arguments
-\ kept in OC.ARG0 and OC.ARG1.  A port that fails ends the function.
+\ kept in OC.ARG0 and OC.ARG1.  A request that gets no reply while LM1
+\ serves has missed its deadline (cause 5), and the request then goes to
+\ whichever engine the failure leaves serving: the stand-in answers it
+\ itself, a request sent LM1 before the failure included (section 10).
 : _OBJ-ASK  ( op in-addr in-len arg0 -- status ior )
     _ASK-BUF _ENTRY-CLEAR
     _ASK-BUF E.ARG0 E!  _ASK-BUF E.IN-LEN E!  _ASK-BUF E.IN-ADDR E!  _ASK-BUF !
-    _OBJ-PAIR ?DUP IF NIP 0 SWAP EXIT THEN
-    _ASK-BUF OVER CHIP-REQUEST IF DROP 5 _OBJ-LOSE 0 OBJ-E-FAILED EXIT THEN
-    P.REPLY P'
-    DUP E.ARG0 E@ OC.ARG0 OC!  DUP E.ARG1 E@ OC.ARG1 OC!
-    E-STATUS DUP OC.STATUS OC! 0 ;
+    BEGIN
+        _OBJ-SERVES ?DUP IF 0 SWAP EXIT THEN
+        _OBJ-STATE @ _S-STANDIN = IF _SI-ASK EXIT THEN
+        _OBJ-PAIR ?DUP IF NIP 0 SWAP EXIT THEN
+        _ASK-BUF OVER CHIP-REQUEST 0= IF
+            P.REPLY P'
+            DUP E.ARG0 E@ OC.ARG0 OC!  DUP E.ARG1 E@ OC.ARG1 OC!
+            E-STATUS DUP OC.STATUS OC! 0 EXIT
+        THEN
+        DROP
+        _OBJ-STATE @ _S-LM1 = IF 5 _OBJ-FAIL THEN
+    AGAIN ;
 
 \ =====================================================================
 \  The records, the grant and ATTACH (sections 9 and 10)
@@ -994,7 +1127,7 @@ VARIABLE _GR-LEN
 \ A block of at least the bytes asked, lent for reading and writing, added
 \ to the block list before the reply names it.
 : _OBJ-GROW  ( entry pair -- )
-    _OBJ-STATE @ 2 <> IF OBJ-NO-MEMORY -ROT CHIP-REPLY DROP EXIT THEN
+    _OBJ-STATE @ _S-LM1 <> IF OBJ-NO-MEMORY -ROT CHIP-REPLY DROP EXIT THEN
     OVER E.ARG0 E@ 4096 MAX _ROUND64 _GR-LEN !
     _GR-LEN @ _OBJ-OWNER _OBJ-PORT @ CHIP-LEND-BLOCK IF
         DROP OBJ-NO-MEMORY -ROT CHIP-REPLY DROP EXIT
@@ -1031,10 +1164,10 @@ VARIABLE _GR-LEN
 
 \ ATTACH's reply.  On OK LM1's block holds the hold word clear, its bounds
 \ and the four built-in shapes, nonzero and distinct; anything else ends
-\ the function (cause 2).
+\ the function (cause 2) before it serves.
 : _OBJ-ATTACHED  ( pair -- )
-    _OBJ-STATE @ 1 <> IF DROP EXIT THEN
-    P.REPLY P' E-STATUS DUP _OBJ-ATTACH-STATUS ! IF 2 _OBJ-LOSE EXIT THEN
+    _OBJ-STATE @ _S-ATTACHING <> IF DROP EXIT THEN
+    P.REPLY P' E-STATUS DUP _OBJ-ATTACH-STATUS ! IF 2 _OBJ-FAIL EXIT THEN
     _OBJ-LB @ >R
     R@ LB.SHAPE-CONS + @ _SH-CONS !     R@ LB.SHAPE-VECTOR + @ _SH-VECTOR !
     R@ LB.SHAPE-BYTES + @ _SH-BYTES !   R@ LB.SHAPE-STRING + @ _SH-STRING !
@@ -1043,8 +1176,8 @@ VARIABLE _GR-LEN
     _SH-CONS @ 0= OR _SH-VECTOR @ 0= OR _SH-BYTES @ 0= OR _SH-STRING @ 0= OR
     _SH-CONS @ _SH-VECTOR @ = OR _SH-CONS @ _SH-BYTES @ = OR _SH-CONS @ _SH-STRING @ = OR
     _SH-VECTOR @ _SH-BYTES @ = OR _SH-VECTOR @ _SH-STRING @ = OR _SH-BYTES @ _SH-STRING @ = OR
-    IF 2 _OBJ-LOSE EXIT THEN
-    2 _OBJ-STATE ! ;
+    IF 2 _OBJ-FAIL EXIT THEN
+    _S-LM1 _OBJ-STATE ! ;
 
 VARIABLE _OF-ENTRY   VARIABLE _OF-PAIR   VARIABLE _OF-MEM   VARIABLE _OF-LEN
 
@@ -1078,24 +1211,28 @@ VARIABLE _OF-ENTRY   VARIABLE _OF-PAIR   VARIABLE _OF-MEM   VARIABLE _OF-LEN
 
 \ LM1 offers managed data: MegaPad grants it a pair and the heap's first
 \ block, builds its records, and sends ATTACH to start it afresh.  While
-\ a function serves, or a lost heap's memory is held, the offer is
-\ refused.
+\ a function serves, the stand-in included, or a lost heap's memory is
+\ held, the offer is refused.
 : _OBJ-OFFER  ( entry pair -- )
-    _OBJ-STATE @ DUP 0= SWAP 4 = OR 0= IF CHIP-REFUSED -ROT CHIP-REPLY DROP EXIT THEN
+    _OBJ-STATE @ DUP _S-ABSENT = SWAP _S-RETURNED = OR 0= IF
+        CHIP-REFUSED -ROT CHIP-REPLY DROP EXIT
+    THEN
     _OF-PAIR ! _OF-ENTRY !
     _OF-PAIR @ P.PORT P@ _OBJ-PORT !
     _OBJ-CORES-CLEAR  0 _OBJ-CAUSE !  FALSE _OBJ-RESET !  0 OBJ-NOTICES !
     0 _OBJ-FREE-SLOT !  0 _OBJ-SLOTS !  0 _OBJ-GRANT !
+    FALSE _OBJ-LATCH !  0 _OBJ-LIVE !  0 OBJ-ROW !  0 OBJ-STOPPED !
+    0 _SI-HERE !  0 _SI-LIMIT !
     _OBJ-BUILD IF
         CHIP-REFUSED _OF-ENTRY @ _OF-PAIR @ CHIP-REPLY DROP
         _OBJ-GRANT @ ?DUP IF _PAIR-SIZE XMEM-FREE-BLOCK THEN  0 _OBJ-GRANT !
-        _OBJ-OWNER _OBJ-PORT @ CHIP-UNLEND-OWNER  0 _OBJ-STATE ! EXIT
+        _OBJ-OWNER _OBJ-PORT @ CHIP-UNLEND-OWNER  _S-ABSENT _OBJ-STATE ! EXIT
     THEN
     CHIP-OK _OF-ENTRY @ CHIP-REPLY-BEGIN
     _OBJ-GRANT-REC @ OVER E.IN-ADDR E!  64 OVER E.IN-LEN E!
     _OF-PAIR @ CHIP-PUT DROP
     _OBJ-GRANT @ CHIP-SERVE-PAIR DROP
-    1 _OBJ-STATE !
+    _S-ATTACHING _OBJ-STATE !
     _OBJ-ATTACH-BUF _ENTRY-CLEAR  _OP-ATTACH _OBJ-ATTACH-BUF !
     _OBJ-CB @ _OBJ-ATTACH-BUF E.IN-ADDR E!  128 _OBJ-ATTACH-BUF E.IN-LEN E!
     _OBJ-GRANT @ DUP P.TAG P@ 1+ OVER P.TAG P!  FALSE OVER P.READY P!
@@ -1107,11 +1244,307 @@ VARIABLE _OF-ENTRY   VARIABLE _OF-PAIR   VARIABLE _OF-MEM   VARIABLE _OF-LEN
 : OBJ-START  ( port -- ior )
     DROP CHIP-DEADLINE@
     BEGIN
-        _OBJ-STATE @ 2 = IF DROP 0 EXIT THEN
-        _OBJ-STATE @ 2 > IF DROP OBJ-E-FAILED EXIT THEN
+        _OBJ-AWAIT-DECISION
+        OBJ-READY? IF DROP 0 EXIT THEN
+        \ A lost heap whose memory is held refuses offers; once its memory
+        \ is back, a restarted LM1's offer starts the function afresh.
+        _OBJ-STATE @ _S-LOST = IF DROP OBJ-E-FAILED EXIT THEN
         DUP _CHIP-PAST? IF DROP OBJ-E-ABSENT EXIT THEN
         _CHIP-SERVICE DUP _CHIP-NAP
     AGAIN ;
+
+\ =====================================================================
+\  Recovery (sections 11 and 13)
+\ =====================================================================
+\
+\  When LM1's service ends, the core that finds it stops LM1, holds it in
+\  reset and waits for BUSY to clear, so that the records show LM1's
+\  writes up to one point and none after it.  The rule then reads them.
+\  Where they show the heap sound, MegaPad's never-free engine, the
+\  stand-in, adopts it and serves it in LM1's place with the same words
+\  and records; elsewhere the heap is lost.  The stand-in runs on the core
+\  that needs it: a core answers its own requests, and the core that
+\  decides adopts the heap.
+
+\ The epoch a hold word or a move word names.
+: _EPOCH  ( w -- epoch )   3 RSHIFT ;
+
+\ Stop LM1: unless it is held in reset already, ask it to stop and wait
+\ for STOPPED for at most a request's deadline; hold it in reset; then wait
+\ for BUSY to clear.  LM1 answers a stop only between moves (LM1's
+\ spec/05-memory-gc.md section 12.9), so a stop it answers never leaves a
+\ hold flipping.
+: _OBJ-STOP  ( -- )
+    _P-CTRL _OBJ-PORT @ CHIP@ _CTRL-RESET-HOLD AND IF
+        0 OBJ-STOPPED !
+    ELSE
+        _OBJ-PORT @ CHIP-STOP IF 2 ELSE 1 THEN OBJ-STOPPED !
+        _OBJ-PORT @ _CHIP-HOLD
+    THEN
+    TRUE _OBJ-PORT @ PS.DOWN PS' !
+    _OBJ-QUIESCED ;
+
+\ ---- The rule ----
+
+VARIABLE _RU-HOLD   VARIABLE _RU-MOVE
+
+\ Whether the records contradict each other (row 2): ACTIVE without HELD;
+\ a move word with an undefined phase, NONE with an epoch, an epoch past
+\ HOLD's, FLIPPING for a hold that has ended, or this epoch's phase while
+\ the hold is not ACTIVE; EPOCH below the epoch a core last saw; LOG_HEAD
+\ above TAIL; or a NEXT base, or a NEXT limit, outside the blocks.
+: _OBJ-CONTRADICT?  ( -- flag )
+    _RU-HOLD @ DUP H-ACTIVE AND SWAP H-HELD AND 0= AND IF TRUE EXIT THEN
+    _RU-MOVE @ 7 AND 2 > IF TRUE EXIT THEN
+    _RU-MOVE @ IF
+        _RU-MOVE @ 7 AND 0= IF TRUE EXIT THEN
+        _RU-MOVE @ _EPOCH _RU-HOLD @ _EPOCH U> IF TRUE EXIT THEN
+        _RU-MOVE @ 7 AND 1 =  _RU-MOVE @ _EPOCH _RU-HOLD @ _EPOCH U< AND IF TRUE EXIT THEN
+        _RU-MOVE @ _EPOCH _RU-HOLD @ _EPOCH =  _RU-HOLD @ H-ACTIVE AND 0= AND
+        IF TRUE EXIT THEN
+    THEN
+    NCORES 0 ?DO
+        I _OC * _OBJ-CORE + OC.SEEN CELLS + @
+        DUP -1 <> SWAP _RU-HOLD @ _EPOCH U> AND IF TRUE UNLOOP EXIT THEN
+        I _CE * LB.CORES + _OBJ-LB @ + CE.LOG-HEAD + @  I _REC-OF CR.TAIL + @
+        U> IF TRUE UNLOOP EXIT THEN
+        \ Each NEXT word alone: a cut may fall between the base and the limit
+        \ of a grant LM1 is writing, before it raises NEXT_SERIAL.
+        I _CE * LB.CORES + _OBJ-LB @ + DUP CE.NEXT-BASE + @ ?DUP IF
+            _OBJ-IN-HEAP? 0= IF DROP TRUE UNLOOP EXIT THEN
+        THEN
+        CE.NEXT-LIMIT + @ ?DUP IF
+            1- _OBJ-IN-HEAP? 0= IF TRUE UNLOOP EXIT THEN
+        THEN
+    LOOP FALSE ;
+
+\ The rule of section 11: the row that decides from the records as they
+\ lie, or 0 while LM1 may still write.  1 FAILED or the evidence latch, 2
+\ records that contradict each other, and 7 a hold cut while it flips
+\ lose the heap; 3 HELD clear, 4 HELD without ACTIVE, 5 ACTIVE with MOVE
+\ reading NONE or an earlier epoch, and 6 ACTIVE with MOVE reading FIXED
+\ for this epoch adopt it.  It writes nothing.
+: _OBJ-RULE  ( -- row )
+    _P-CTRL _OBJ-PORT @ CHIP@ _CTRL-RESET-HOLD AND 0=
+    _P-STATUS _OBJ-PORT @ CHIP@ _ST-BUSY AND OR IF 0 EXIT THEN
+    _HOLD@ _RU-HOLD !  _OBJ-LB @ LB.MOVE + @ _RU-MOVE !
+    _RU-HOLD @ H-FAILED AND _OBJ-LATCH @ OR IF 1 EXIT THEN
+    _OBJ-CONTRADICT? IF 2 EXIT THEN
+    _RU-HOLD @ H-HELD AND 0= IF 3 EXIT THEN
+    _RU-HOLD @ H-ACTIVE AND 0= IF 4 EXIT THEN
+    _RU-MOVE @ 0= IF 5 EXIT THEN
+    _RU-MOVE @ _EPOCH _RU-HOLD @ _EPOCH U< IF 5 EXIT THEN
+    _RU-MOVE @ 7 AND 2 = IF 6 EXIT THEN
+    7 ;
+
+\ ---- The stand-in ----
+
+\ The shared heap's bytes, by the block list.
+: _OBJ-HEAP-BYTES  ( -- u )
+    0 _OBJ-BL @ DUP @ 0 ?DO DUP I 16 * 24 + + @ ROT + SWAP LOOP DROP ;
+
+\ A new block for the stand-in, of at least BYTES and at least the heap so
+\ far, so that its blocks stay few as LM1's GROW keeps them: taken from
+\ KDOS's allocator for lendable memory, and named on the block list before
+\ any region in it is granted.  The caller holds OBJ-LOCK.
+: _SI-BLOCK  ( bytes -- ior )
+    _OBJ-HEAP-BYTES MAX _ROUND64 >R
+    R@ _OBJ-OWNER _OBJ-PORT @ CHIP-LEND-BLOCK IF DROP R> DROP OBJ-E-NOMEM EXIT THEN
+    DUP R@ _OBJ-BL MC.BLOCKS _OBJ-LIST-ADD IF
+        _OBJ-PORT @ CHIP-UNLEND-BLOCK R> DROP OBJ-E-NOMEM EXIT
+    THEN
+    DUP _SI-HERE !  R> + _SI-LIMIT !  0 ;
+
+\ The size of region the stand-in grants CORE: what the core held last,
+\ or 4 KiB for a core that held none.
+: _SI-SIZE  ( core -- u )
+    _OC * _OBJ-CORE + DUP OC.LIMIT CELLS + @ SWAP OC.BASE CELLS + @ - 4096 MAX ;
+
+\ A region of at least BYTES for CORE, carved from the stand-in's newest
+\ block, or from a new one, and never from space LM1 managed: NEXT_BASE
+\ and NEXT_LIMIT, then NEXT_SERIAL raised, as LM1 writes a grant.  The
+\ caller holds OBJ-LOCK.
+: _SI-GRANT  ( bytes core -- ior )
+    >R _ROUND64
+    _SI-LIMIT @ _SI-HERE @ - OVER U< IF
+        DUP _SI-BLOCK ?DUP IF NIP R> DROP EXIT THEN
+    THEN
+    _SI-HERE @ TUCK + DUP _SI-HERE !          ( base limit )
+    R> _CE * LB.CORES + _OBJ-LB @ + >R
+    R@ CE.NEXT-LIMIT + !  R@ CE.NEXT-BASE + !
+    R@ CE.NEXT-SERIAL + @ 1+ R> CE.NEXT-SERIAL + !  0 ;
+
+\ The stand-in adopts the heap (section 13).  It trusts none of LM1's last
+\ decisions, so it replaces every core's NEXT grant with a region in a new
+\ block; a core keeps the region it holds until it next takes one.  It
+\ ends the interrupted hold where END? says so, after the grants, so that
+\ a core the hold's end wakes finds its region waiting; drops the logs;
+\ records STATE as STAND-IN with the failure's CAUSE; and rings every
+\ other core.  It never moves or frees anything, so every handle, and
+\ every reference an open window holds, stays valid.
+: _OBJ-ADOPT  ( end? -- ior )
+    0 _SI-HERE !  0 _SI-LIMIT !
+    OBJ-LOCK LOCK
+    NCORES 0 ?DO
+        I _CE * LB.CORES + _OBJ-LB @ + CE.NEXT-SERIAL + @ IF
+            I _SI-SIZE I _SI-GRANT ?DUP IF OBJ-LOCK UNLOCK NIP UNLOOP EXIT THEN
+        THEN
+    LOOP
+    OBJ-LOCK UNLOCK
+    IF _HOLD@ _EPOCH 1+ 3 LSHIFT _OBJ-LB @ LB.HOLD + ! THEN
+    NCORES 0 ?DO
+        I _REC-OF CR.TAIL + @  I _CE * LB.CORES + _OBJ-LB @ + CE.LOG-HEAD + !
+    LOOP
+    MS-STANDIN _OBJ-CB @ MC.STATE + !  _OBJ-CAUSE @ _OBJ-CB @ MC.CAUSE + !
+    _S-STANDIN _OBJ-STATE !
+    _OBJ-RING-ALL  0 ;
+
+\ Whether any core's window word reads OPEN or WAITING: a core that waits
+\ to open a window will reach the heap as soon as it opens.
+: _OBJ-ANY-WINDOW?  ( -- flag )
+    NCORES 0 ?DO I _REC-OF CR.WINDOW + @ IF TRUE UNLOOP EXIT THEN LOOP FALSE ;
+
+\ Until stage 2 is built, the stand-in serves an adopted heap only while
+\ something can reach it (section 13): once no handle is live and no
+\ window is open or waiting to open, the heap is lost, its memory goes
+\ back, and a restarted LM1's offer starts the function afresh.
+: _SI-DROP?  ( -- )
+    _OBJ-STATE @ _S-STANDIN <> IF EXIT THEN
+    _OBJ-LIVE @ IF EXIT THEN
+    _OBJ-ANY-WINDOW? IF EXIT THEN
+    _OBJ-CLAIM 0= IF EXIT THEN
+    _OBJ-WAS @ _S-STANDIN = _OBJ-LIVE @ 0= AND _OBJ-ANY-WINDOW? 0= AND
+    IF _OBJ-LOSE ELSE _OBJ-WAS @ _OBJ-STATE ! THEN ;
+
+\ The rule's decision: rows 3 to 6 adopt the heap, rows 4 to 6 ending the
+\ hold as well; the others lose it.  OBJ-ROW keeps the row.
+: _OBJ-DECIDE  ( -- )
+    _OBJ-RULE DUP OBJ-ROW !
+    DUP 3 7 WITHIN IF
+        3 <> _OBJ-ADOPT IF _OBJ-LOSE EXIT THEN
+        _SI-DROP? EXIT
+    THEN DROP _OBJ-LOSE ;
+
+\ The function fails by CAUSE.  FAILED and the evidence latch lose the heap
+\ at once, and LM1's private work goes on (row 1); a function that has not
+\ yet served is stopped and lost; any other failure stops LM1, and the
+\ rule decides.  While the stand-in serves, only evidence loses the heap
+\ (row 8).  One failure is handled at a time: a core that fails the
+\ function while another decides waits for the decision.
+: _OBJ-FAIL-NOW  ( cause -- )
+    BEGIN _OBJ-CLAIM 0= WHILE
+        _OBJ-LATCH @ _OBJ-STATE @ _S-STANDIN = AND 0= IF DROP EXIT THEN
+    REPEAT
+    _OBJ-WAS @ _S-STANDIN = IF
+        DROP _OBJ-LATCH @ IF 8 OBJ-ROW ! _OBJ-LOSE ELSE _S-STANDIN _OBJ-STATE ! THEN EXIT
+    THEN
+    DUP _OBJ-CAUSE !
+    DUP 3 = IF TRUE _OBJ-LATCH ! THEN
+    _OBJ-WAS @ _S-ATTACHING = IF DROP _OBJ-STOP _OBJ-LOSE EXIT THEN
+    1 = _OBJ-LATCH @ OR IF 1 OBJ-ROW ! _OBJ-LOSE EXIT THEN
+    _OBJ-STOP _OBJ-DECIDE ;
+' _OBJ-FAIL-NOW IS _OBJ-FAIL
+
+\ ---- The stand-in's answers to requests (section 10) ----
+
+\ REGION: a region in a new block, of at least the bytes asked and the
+\ size of the core's last region.
+: _SI-REGION  ( -- status )
+    _ASK-BUF E.ARG0 E@ COREID _SI-SIZE MAX
+    OBJ-LOCK LOCK COREID _SI-GRANT OBJ-LOCK UNLOCK
+    IF OBJ-NO-MEMORY ELSE CHIP-OK THEN ;
+
+\ COLLECT: OK at once, every byte of the heap counted live and the epoch
+\ unchanged.
+: _SI-COLLECT  ( -- status )
+    _OBJ-HEAP-BYTES OC.ARG0 OC!  _HOLD@ _EPOCH OC.ARG1 OC!  CHIP-OK ;
+
+\ A description's length in bytes: its three counts, its kinds and its
+\ name (section 8).
+: _SI-DESC-LEN  ( desc -- u )   DUP @ OVER 8 + @ + CELLS SWAP 16 + @ + 24 + ;
+
+\ The bytes of the UTF-8 character that byte B leads, or 0.
+: _UTF8-LEAD  ( b -- k )
+    DUP 0x80 < IF DROP 1 EXIT THEN
+    DUP 0xE0 AND 0xC0 = IF DROP 2 EXIT THEN
+    DUP 0xF0 AND 0xE0 = IF DROP 3 EXIT THEN
+    0xF8 AND 0xF0 = IF 4 ELSE 0 THEN ;
+\ Whether the bytes after the first of a K-byte character continue it.
+: _UTF8-CONT?  ( addr k -- flag )
+    TRUE SWAP 1 ?DO OVER I + C@ 0xC0 AND 0x80 <> IF DROP FALSE LEAVE THEN LOOP NIP ;
+: _UTF8?  ( addr n -- flag )
+    BEGIN DUP WHILE
+        OVER C@ _UTF8-LEAD
+        DUP 0= OVER 3 PICK > OR IF DROP 2DROP FALSE EXIT THEN
+        2 PICK OVER _UTF8-CONT? 0= IF DROP 2DROP FALSE EXIT THEN
+        TUCK - >R + R>
+    REPEAT 2DROP TRUE ;
+
+\ Whether the LEN-byte description at DESC is sound, as LM1 checks a
+\ SHAPE request's: counts a header can hold, a kind it knows for each
+\ field, a registered shape for a record field, and a name of whole UTF-8
+\ characters.
+VARIABLE _SD
+: _SI-DESC-OK?  ( desc len -- flag )
+    SWAP _SD !
+    DUP 24 < IF DROP FALSE EXIT THEN
+    _SD @ @ 0xFFFF U>  _SD @ 8 + @ 0xFFFF U> OR IF DROP FALSE EXIT THEN
+    _SD @ @ _SD @ 8 + @ + 1+ 0xFFFF U> IF DROP FALSE EXIT THEN
+    _SD @ 16 + @ OVER U> IF DROP FALSE EXIT THEN
+    _SD @ @ _SD @ 8 + @ + CELLS 24 +  SWAP _SD @ 16 + @ -  U> IF FALSE EXIT THEN
+    _SD @ @ 0 ?DO
+        _SD @ 24 + I CELLS + @ DUP 0xFFFFFFFF AND SWAP 32 RSHIFT     ( kind id )
+        OVER 9 < IF NIP IF FALSE UNLOOP EXIT THEN
+        ELSE SWAP 9 <> IF DROP FALSE UNLOOP EXIT THEN
+            _OBJ-KIND-DESC 0= IF FALSE UNLOOP EXIT THEN
+        THEN
+    LOOP
+    _SD @ 8 + @ 0 ?DO
+        _SD @ 24 + _SD @ @ I + CELLS + @ 16 19 WITHIN 0= IF FALSE UNLOOP EXIT THEN
+    LOOP
+    _SD @ 24 + _SD @ @ _SD @ 8 + @ + CELLS +  _SD @ 16 + @  _UTF8? ;
+
+\ The registry's ID for a description equal to DESC, or 0.
+: _SI-FIND  ( desc -- id | 0 )
+    _OBJ-SR @ DUP @ 0 ?DO
+        DUP I 16 * 16 + +                       ( desc list entry )
+        DUP 8 + @  3 PICK _SI-DESC-LEN  OVER _SI-DESC-LEN  OVER = IF
+            4 PICK OVER 2SWAP COMPARE 0= IF @ NIP NIP UNLOOP EXIT THEN
+        ELSE 2DROP THEN
+        DROP
+    LOOP 2DROP 0 ;
+
+\ A new shape ID from the upper part of SHAPE_RANGE: above every ID the
+\ registry holds there, and above the built-in shapes; 0 when none is left.
+: _SI-NEW-ID  ( -- id )
+    _OBJ-LB @ LB.SHAPE-RANGE + @ 32 RSHIFT
+    _SH-CONS @ _SH-VECTOR @ MAX _SH-BYTES @ MAX _SH-STRING @ MAX 1+ MAX
+    _OBJ-SR @ DUP @ 0 ?DO
+        DUP I 16 * 16 + + @ ROT 2DUP U< 0= IF DROP 1+ ELSE NIP THEN SWAP
+    LOOP DROP
+    DUP 0xFFFFFFFF U> IF DROP 0 THEN ;
+
+\ SHAPE: the ID the registry holds for the same description, or else a new
+\ ID, entered in the registry before the answer; BAD_RECORD for a
+\ description LM1 would refuse.
+: _SI-SHAPE  ( -- status )
+    _ASK-BUF E.IN-ADDR E@  DUP _ASK-BUF E.IN-LEN E@ _SI-DESC-OK? 0= IF
+        DROP OBJ-BAD-RECORD EXIT
+    THEN
+    OBJ-LOCK LOCK
+    DUP _SI-FIND ?DUP IF NIP OC.ARG0 OC! OBJ-LOCK UNLOCK CHIP-OK EXIT THEN
+    _SI-NEW-ID ?DUP 0= IF DROP OBJ-LOCK UNLOCK OBJ-NO-MEMORY EXIT THEN
+    DUP OC.ARG0 OC!
+    SWAP _OBJ-SR MC.SHAPES _OBJ-LIST-ADD OBJ-LOCK UNLOCK
+    IF OBJ-NO-MEMORY ELSE CHIP-OK THEN ;
+
+: _SI-ASK-NOW  ( -- status ior )
+    _ASK-BUF E-OP
+    DUP _OP-REGION = IF DROP _SI-REGION ELSE
+    DUP _OP-SHAPE = IF DROP _SI-SHAPE ELSE
+    _OP-COLLECT = IF _SI-COLLECT ELSE CHIP-UNSUPPORTED THEN THEN THEN
+    DUP OC.STATUS OC! 0 ;
+' _SI-ASK-NOW IS _SI-ASK
 
 \ =====================================================================
 \  Windows and holds (section 3)
@@ -1192,22 +1625,31 @@ VARIABLE _OF-ENTRY   VARIABLE _OF-PAIR   VARIABLE _OF-MEM   VARIABLE _OF-LEN
     FALSE OC.FULL OC! ;
 
 \ A full ring: TAIL stored, the port rung, and LM1 given the deadline of a
-\ request to move LOG_HEAD, inside a window or outside one.
+\ request to move LOG_HEAD, inside a window or outside one.  Past the
+\ deadline the function fails (cause 5); a stand-in that adopts the heap
+\ moves LOG_HEAD to TAIL, and the core goes on.  The stand-in drains a
+\ full log at once.
 : _OBJ-LOG-WAIT  ( -- ior )
-    OC.TAIL OC@ _REC CR.TAIL + !  TRUE OC.FULL OC!
+    OC.TAIL OC@ _REC CR.TAIL + !
+    _OBJ-STATE @ _S-STANDIN = IF OC.TAIL OC@ _ENT CE.LOG-HEAD + ! 0 EXIT THEN
+    TRUE OC.FULL OC!
     _OBJ-PORT @ CHIP-RING
     _OBJ-LOG-HEAD@ CHIP-DEADLINE@
     BEGIN
         _OBJ-SERVES ?DUP IF NIP NIP EXIT THEN
+        OVER _OBJ-LOG-HEAD@ <> IF 2DROP 0 EXIT THEN
+        _OBJ-STATE @ _S-STANDIN = IF 2DROP OC.TAIL OC@ _ENT CE.LOG-HEAD + ! 0 EXIT THEN
         _CHIP-SERVICE
         OVER _OBJ-LOG-HEAD@ <> IF 2DROP 0 EXIT THEN
-        DUP _CHIP-PAST? IF 2DROP 5 _OBJ-LOSE OBJ-E-FAILED EXIT THEN
-        DUP _CHIP-NAP
+        DUP _CHIP-PAST? IF 5 _OBJ-FAIL ELSE DUP _CHIP-NAP THEN
     AGAIN ;
 
 \ An entry for a reference stored at ADDR: the word first, then the entry,
 \ and TAIL after both, whenever the ring is half full and at the close.
+\ While the stand-in serves, no entry is made: a heap that is never
+\ collected needs none, and neither does a restarted LM1 (section 13).
 : _OBJ-LOG  ( addr -- ior )
+    _OBJ-STATE @ _S-STANDIN = IF DROP 0 EXIT THEN
     OC.RING OC@ 0= IF _OBJ-LOG-MAKE ?DUP IF NIP EXIT THEN THEN
     BEGIN
         _OBJ-LOG-HEAD@ _REC CR.TAIL + @ U> IF DROP _OBJ-CORRUPT EXIT THEN
@@ -1228,18 +1670,20 @@ VARIABLE _OF-ENTRY   VARIABLE _OF-PAIR   VARIABLE _OF-MEM   VARIABLE _OF-LEN
 \ the hold word is read again, so a ring at the hold's end is never lost.
 : _OBJ-SLEEP  ( -- )
     _CHIP-SERVICE
-    _OBJ-STATE @ 2 = IF _HOLD@ H-HELD AND IF MS@ 1+ IDLE-UNTIL THEN THEN ;
+    _OBJ-STATE @ _S-LM1 = IF _HOLD@ H-HELD AND IF MS@ 1+ IDLE-UNTIL THEN THEN ;
 
-\ An outermost open (section 3, steps 1 to 4).
+\ An outermost open (section 3, steps 1 to 4).  A hold found overdue fails
+\ the function (cause 4), and the open then tries again under whichever
+\ engine the rule leaves serving.
 : _OBJ-OPEN-OUTER  ( -- ior )
     _OBJ-LOG-GROW
     BEGIN
         _OBJ-SERVES ?DUP IF
-            _OBJ-STATE @ 3 = IF W-CLOSED _WINDOW! _OBJ-RETURN? THEN EXIT
+            W-CLOSED _WINDOW!  _OBJ-STATE @ _S-LOST = IF _OBJ-RETURN? THEN EXIT
         THEN
         W-OPEN _WINDOW!
         _HOLD@
-        DUP H-FAILED AND IF DROP W-CLOSED _WINDOW! 1 _OBJ-LOSE OBJ-E-FAILED EXIT THEN
+        DUP H-FAILED AND IF DROP W-CLOSED _WINDOW! 1 _OBJ-FAIL OBJ-E-FAILED EXIT THEN
         DUP H-HELD AND 0= IF
             1 OC.DEPTH OC!
             3 RSHIFT DUP OC.SEEN OC@ = IF DROP 0 EXIT THEN
@@ -1255,23 +1699,27 @@ VARIABLE _OF-ENTRY   VARIABLE _OF-PAIR   VARIABLE _OF-MEM   VARIABLE _OF-LEN
         THEN
         W-WAITING _WINDOW!  _OBJ-PORT @ CHIP-RING
         _HOLD@ DUP H-HELD AND IF
-            _OBJ-OVERDUE? IF DROP W-CLOSED _WINDOW! 4 _OBJ-LOSE OBJ-E-FAILED EXIT THEN
-            _OBJ-SLEEP
+            _OBJ-OVERDUE? IF 4 _OBJ-FAIL ELSE _OBJ-SLEEP THEN
         ELSE DROP THEN
         DROP
     AGAIN ;
 
 \ An outermost close (section 3): FILL and TAIL first, then CLOSED, then
-\ a ring if a hold waits.
+\ a ring if a hold waits.  While the stand-in serves, the core's log is
+\ drained as it closes, and a heap that nothing reaches any more is
+\ dropped (section 13).
 : _OBJ-CLOSE-OUTER  ( -- )
-    _OBJ-STATE @ 2 = IF
+    _OBJ-STATE @ _S-LM1 _S-LOST WITHIN IF
         OC.MADE OC@ IF OC.BUMP OC@ _REC CR.FILL + !  FALSE OC.MADE OC! THEN
         OC.LOGGED OC@ IF OC.TAIL OC@ _REC CR.TAIL + !  FALSE OC.LOGGED OC! THEN
         W-CLOSED _WINDOW!
-        _HOLD@ H-HELD AND IF _OBJ-PORT @ CHIP-RING THEN
-        EXIT
+        _OBJ-STATE @ _S-LM1 = IF _HOLD@ H-HELD AND IF _OBJ-PORT @ CHIP-RING THEN EXIT THEN
+        _OBJ-AWAIT-DECISION
+        _OBJ-STATE @ _S-STANDIN = IF
+            _REC CR.TAIL + @ _ENT CE.LOG-HEAD + !  _SI-DROP? EXIT
+        THEN
     THEN
-    _OBJ-STATE @ 3 = IF W-CLOSED _WINDOW! _OBJ-RETURN? THEN ;
+    _OBJ-STATE @ _S-LOST = IF W-CLOSED _WINDOW! _OBJ-RETURN? THEN ;
 
 : OBJ-OPEN  ( -- ior )
     _OBJ-SERVES ?DUP IF EXIT THEN
@@ -1321,7 +1769,7 @@ VARIABLE _OF-ENTRY   VARIABLE _OF-PAIR   VARIABLE _OF-MEM   VARIABLE _OF-LEN
     THEN
     R> DROP
     DUP OBJ-NO-MEMORY = IF DROP OBJ-E-NOMEM EXIT THEN
-    DROP _HOLD@ H-FAILED AND IF 1 _OBJ-LOSE THEN OBJ-E-FAILED ;
+    DROP _HOLD@ H-FAILED AND IF 1 _OBJ-FAIL THEN OBJ-E-FAILED ;
 
 \ BYTES at the region's next free byte, asking for a region when they do
 \ not fit.
@@ -1552,7 +2000,7 @@ VARIABLE _OF-ENTRY   VARIABLE _OF-PAIR   VARIABLE _OF-MEM   VARIABLE _OF-LEN
     DUP IF OVER SWAP 1- HS.NEXT HS! ELSE DROP DUP R@ HS.OWNER HS@ _OW' 16 + ! THEN
     ?DUP IF R@ HS.PREV HS@ SWAP 1- HS.PREV HS! THEN
     0 R@ _SLOT !
-    0 R@ HS.OWNER HS!
+    0 R@ HS.OWNER HS!  -1 _OBJ-LIVE +!
     R@ HS.GEN HS@ 1+ DUP R@ HS.GEN HS!
     0xFFFFFFFF <> IF _OBJ-FREE-SLOT @ R@ HS.NEXT HS!  R@ 1+ _OBJ-FREE-SLOT ! THEN
     R> DROP ;
@@ -1569,13 +2017,13 @@ VARIABLE _OF-ENTRY   VARIABLE _OF-PAIR   VARIABLE _OF-MEM   VARIABLE _OF-LEN
 : OBJ-HANDLE  ( t id gen -- h ior )
     _OBJ-IN ?DUP IF >R DROP 2DROP 0 R> EXIT THEN
     2DUP _OBJ-OWNER-OK? ?DUP IF >R DROP 2DROP 0 R> EXIT THEN
-    2 PICK _NIL <> IF 2 PICK OBJ>REF NIP ?DUP IF >R DROP 2DROP 0 R> EXIT THEN THEN
+    2 PICK _NIL <> IF 2 PICK _OBJ-REF-CHECK NIP ?DUP IF >R DROP 2DROP 0 R> EXIT THEN THEN
     OBJ-LOCK LOCK
     2DUP _OBJ-OWNER-FIND ?DUP 0= IF 2DUP _OBJ-OWNER-MAKE THEN
     ?DUP 0= IF OBJ-LOCK UNLOCK DROP 2DROP 0 OBJ-E-NOMEM EXIT THEN
     NIP NIP
     _OBJ-TAKE-SLOT ?DUP IF OBJ-LOCK UNLOCK >R 2DROP DROP 0 R> EXIT THEN
-    TUCK SWAP _OBJ-LINK
+    TUCK SWAP _OBJ-LINK  1 _OBJ-LIVE +!
     OBJ-LOCK UNLOCK
     2DUP _SLOT !
     OVER _NIL <> IF DUP _SLOT _OBJ-LOG ?DUP IF NIP NIP 0 SWAP EXIT THEN THEN
@@ -1591,7 +2039,7 @@ VARIABLE _OF-ENTRY   VARIABLE _OF-PAIR   VARIABLE _OF-MEM   VARIABLE _OF-LEN
 : OBJ-SET  ( r h -- ior )
     _OBJ-IN ?DUP IF NIP NIP EXIT THEN
     _OBJ-CHECK ?DUP IF NIP NIP EXIT THEN
-    OVER _NIL <> IF OVER OBJ>REF NIP ?DUP IF NIP NIP EXIT THEN THEN
+    OVER _NIL <> IF OVER _OBJ-REF-CHECK NIP ?DUP IF NIP NIP EXIT THEN THEN
     _SLOT 2DUP !  SWAP _NIL <> IF _OBJ-LOG ELSE DROP 0 THEN ;
 
 \ Release one handle, in a window of its own when called outside one.
@@ -1606,7 +2054,7 @@ VARIABLE _OF-ENTRY   VARIABLE _OF-PAIR   VARIABLE _OF-MEM   VARIABLE _OF-LEN
 
 \ The serial the owner's next handle takes.
 : OBJ-OWNER-MARK  ( id gen -- mark )
-    _OBJ-STATE @ 2 <> IF 2DROP 0 EXIT THEN
+    OBJ-READY? 0= IF 2DROP 0 EXIT THEN
     _OBJ-OWNER-FIND ?DUP IF _OW' 24 + @ ELSE 0 THEN ;
 
 : _OBJ-RELEASE-SINCE  ( mark o -- )
@@ -1619,7 +2067,7 @@ VARIABLE _OF-ENTRY   VARIABLE _OF-PAIR   VARIABLE _OF-MEM   VARIABLE _OF-LEN
 \ Release the owner's handles made since the mark.  Once the heap is lost
 \ releasing succeeds and does nothing.
 : OBJ-OWNER-RELEASE-TO  ( mark id gen -- ior )
-    _OBJ-STATE @ 2 > IF DROP 2DROP 0 EXIT THEN
+    _OBJ-STATE @ _S-LOST < 0= IF DROP 2DROP 0 EXIT THEN
     _OBJ-SERVES ?DUP IF NIP NIP NIP EXIT THEN
     2DUP _OBJ-OWNER-OK? ?DUP IF NIP NIP NIP EXIT THEN
     _OBJ-OWNER-FIND ?DUP 0= IF DROP 0 EXIT THEN
@@ -1630,20 +2078,21 @@ VARIABLE _OF-ENTRY   VARIABLE _OF-PAIR   VARIABLE _OF-MEM   VARIABLE _OF-LEN
 \ Release every handle the owner holds, in as many short windows as it
 \ needs, outside a window; the owner's entry is then free.
 : OBJ-OWNER-RELEASE  ( id gen -- ior )
-    _OBJ-STATE @ 2 > IF 2DROP 0 EXIT THEN
+    _OBJ-STATE @ _S-LOST < 0= IF 2DROP 0 EXIT THEN
     _OBJ-SERVES ?DUP IF NIP NIP EXIT THEN
     OC.DEPTH OC@ IF 2DROP OBJ-E-WINDOW EXIT THEN
     2DUP _OBJ-OWNER-OK? ?DUP IF NIP NIP EXIT THEN
     _OBJ-OWNER-FIND ?DUP 0= IF 0 EXIT THEN
-    BEGIN DUP _OW' 16 + @ WHILE
+    \ The owner's entry is freed inside the last window, since the close
+    \ that ends it may drop a heap nothing reaches, owner table and all.
+    BEGIN
         OBJ-OPEN IF DROP 0 EXIT THEN
         OBJ-LOCK LOCK
         32 0 DO DUP _OW' 16 + @ ?DUP IF 1- _OBJ-RELEASE ELSE LEAVE THEN LOOP
+        DUP _OW' 16 + @ 0= DUP IF 0 2 PICK _OW' !  0 2 PICK _OW' 8 + ! THEN
         OBJ-LOCK UNLOCK
         OBJ-CLOSE
-    REPEAT
-    OBJ-LOCK LOCK  0 OVER _OW' !  0 OVER _OW' 8 + !  OBJ-LOCK UNLOCK
-    DROP 0 ;
+    UNTIL DROP 0 ;
 
 \ =====================================================================
 \  Kinds and collections, outside a window (sections 8 and 10)
@@ -1676,7 +2125,7 @@ VARIABLE _OF-ENTRY   VARIABLE _OF-PAIR   VARIABLE _OF-MEM   VARIABLE _OF-LEN
     _OBJ-OUT ?DUP IF NIP EXIT THEN
     >R _OP-COLLECT 0 0 R> _OBJ-ASK ?DUP IF NIP EXIT THEN
     DUP CHIP-OK = IF DROP 0 EXIT THEN
-    CHIP-FAILED = IF _HOLD@ H-FAILED AND IF 1 _OBJ-LOSE THEN OBJ-E-FAILED ELSE OBJ-E-KIND THEN ;
+    CHIP-FAILED = IF _HOLD@ H-FAILED AND IF 1 _OBJ-FAIL THEN OBJ-E-FAILED ELSE OBJ-E-KIND THEN ;
 : OBJ-COLLECTED  ( -- live epoch )   OC.ARG0 OC@ OC.ARG1 OC@ ;
 
 \ The bytes of lendable memory the function holds, for its owner checks.
