@@ -33,6 +33,14 @@ from shared.crypto_caps import (
 )
 from shared.storage import STORAGE_UNIT_TABLE
 from simulator import crc as crc_service
+from simulator.cores import (
+    MAX_FULL_CORES,
+    NOT_RUN,
+    STACK_ZONE_BYTES,
+    TURN_QUANTUM_STEPS,
+    HostedCores,
+    stack_zone_top,
+)
 from simulator.crc import GuestIdentity
 from simulator.diagnostics import HostedDiagnosticsService
 from simulator.dictionary import Dictionary, DictionaryCheckpoint, Word
@@ -44,6 +52,7 @@ from simulator.errors import (
     ExecutionBlocked,
     ExecutionError,
     ForthAbort,
+    IllegalInstructionFault,
     InstructionFault,
     SourceError,
     StepBudgetExceeded,
@@ -761,6 +770,7 @@ class MegaForthRuntime:
         user_storage: HostedStorageService | None = None,
         install_core_words: bool = True,
         execution_backend: str | None = None,
+        turn_quantum_steps: int = TURN_QUANTUM_STEPS,
     ) -> None:
         selected_backend = (
             os.environ.get("MEGAFORTH_EXECUTOR", "python")
@@ -797,9 +807,10 @@ class MegaForthRuntime:
             self.memory = memory
         num_cores = self.memory.read64(MMIO_BASE + SYSINFO_NUM_CORES)
         num_full = self.memory.read64(MMIO_BASE + SYSINFO_NUM_FULL)
-        if (num_cores, num_full) != (1, 1):
+        if num_cores != num_full or not 1 <= num_full <= MAX_FULL_CORES:
             raise ValueError(
-                "hosted runtime requires exactly one advertised full core"
+                "hosted runtime requires one to four advertised full cores "
+                "and no microcore cluster"
             )
         crypto_capabilities = self.memory.read64(
             MMIO_BASE + SYSINFO_CRYPTO_CAPS
@@ -882,6 +893,12 @@ class MegaForthRuntime:
         self._next_suspension_sequence = 1
         self._next_wake_sequence = 1
         self._suspended_execution: _SuspendedExecution | None = None
+        # The full cores' rounds, on a machine with more than one; see
+        # simulator/cores.py.
+        self._cores: HostedCores | None = None
+        # A refused spinlock acquire ends the running turn at the next
+        # boundary where its dispatch can suspend.
+        self._turn_end_requested = False
         native_extension = None
         if selected_backend != "python":
             from simulator.native_execution import load_native_extension
@@ -937,9 +954,19 @@ class MegaForthRuntime:
         )
         data_empty = bank0.base + bank0.size // 2
         return_empty = bank0.limit
+        return_floor = data_empty
+        if num_full > 1:
+            # The BIOS's layout: core n's 64 KiB zone ends at T - n * 64 KiB,
+            # T Bank 0's size or 1 MiB, whichever is smaller. Core 0's data
+            # stack starts at T / 2 and its return stack, at T, keeps to its
+            # zone, below which core 1's begins.
+            return_empty = stack_zone_top(bank0, 0)
+            data_empty = return_empty // 2
+            return_floor = return_empty - STACK_ZONE_BYTES
         if (
             data_empty <= bank0.base
             or return_empty <= data_empty
+            or return_floor < data_empty
             or data_empty % CELL_BYTES
             or return_empty % CELL_BYTES
         ):
@@ -954,7 +981,7 @@ class MegaForthRuntime:
             ),
             returns=ReturnStack(
                 memory=self.memory,
-                floor=data_empty,
+                floor=return_floor,
                 empty_pointer=return_empty,
             ),
         )
@@ -1053,6 +1080,24 @@ class MegaForthRuntime:
             # The engine's disk words move data through the memory of the
             # runtime that owns the service.
             service.bind_memory(self.memory)
+        if num_full > 1:
+            self._cores = HostedCores(
+                self, full_cores=num_full, quantum=turn_quantum_steps,
+            )
+
+    @property
+    def active_core(self) -> int:
+        """The core whose turn runs: the core COREID reads and services
+        take as their requester."""
+
+        cores = self._cores
+        return 0 if cores is None else cores.active
+
+    @property
+    def cores(self) -> HostedCores | None:
+        """The full cores' rounds, or None on a one-core machine."""
+
+        return self._cores
 
     @property
     def execution_backend(self) -> str:
@@ -1204,16 +1249,26 @@ class MegaForthRuntime:
 
     @property
     def idle_deadline_ms(self) -> int | None:
-        """Return the ``MS@`` deadline of a blocked IDLE-UNTIL, if any."""
+        """Return the ``MS@`` deadline of a blocked IDLE-UNTIL, if any: on a
+        machine with several cores, the earliest of the sleeping cores'."""
 
+        cores = self._cores
+        if cores is not None:
+            return cores.earliest_deadline()
         return self._idle_deadline_ms
 
     @property
     def idle_wake_due(self) -> bool:
-        """Whether a dispatch blocked at IDL may resume: input is waiting, or
-        its IDLE-UNTIL deadline has passed."""
+        """Whether a dispatch blocked at IDL may resume: input is waiting, an
+        IPI request is pending, or its IDLE-UNTIL deadline has passed. On a
+        machine with several cores, whether any core would run."""
 
+        cores = self._cores
+        if cores is not None:
+            return cores.wake_due()
         if self._uart_input:
+            return True
+        if self.memory.mmio.mailbox.table.any_pending(0):
             return True
         deadline = self._idle_deadline_ms
         return deadline is not None and self.rtc.uptime_ms >= deadline
@@ -1222,7 +1277,7 @@ class MegaForthRuntime:
     def idle_wake_delay_s(self) -> float | None:
         """Seconds until a blocked IDLE-UNTIL deadline, or None."""
 
-        deadline = self._idle_deadline_ms
+        deadline = self.idle_deadline_ms
         if deadline is None:
             return None
         return max(deadline - self.rtc.uptime_ms, 0) / 1000
@@ -1578,6 +1633,7 @@ class MegaForthRuntime:
             self._require_session_owner_access("run the BIOS evaluator")
             if not isinstance(context, ExecutionContext):
                 raise TypeError("context must be an ExecutionContext")
+            self.require_core0("the evaluator")
             evaluator = self._require_bios_evaluator()
             try:
                 self._bios_evaluate(evaluator, context)
@@ -1761,6 +1817,7 @@ class MegaForthRuntime:
             self._require_session_owner_access("replay a token stream")
             if not isinstance(context, ExecutionContext):
                 raise TypeError("context must be an ExecutionContext")
+            self.require_core0("the token replayer")
             evaluator = self._require_bios_evaluator()
             try:
                 self._bios_token_replay(evaluator, context)
@@ -2130,9 +2187,139 @@ class MegaForthRuntime:
 
         if not isinstance(context, ExecutionContext):
             raise TypeError("context must be an ExecutionContext")
-        # Host scratch contexts are not schedulable guest tasks.  Until the
-        # deterministic task layer exists, every dispatch is core 0, task 0.
-        return 0, 0
+        # Every dispatch runs on the core whose turn it is.  Host scratch
+        # contexts are not schedulable guest tasks, and until the
+        # cooperative task layer exists every task is task 0.
+        return self.active_core, 0
+
+    # -- the cores' signals and their limits ---------------------------------
+
+    def _signal_pending(self) -> bool:
+        """Whether a signal waits for the active core: its IPI line."""
+
+        return self.memory.mmio.mailbox.table.any_pending(self.active_core)
+
+    def _end_sleep(self) -> None:
+        """A sleep in IDL ends. Core 0 takes every signal pending for it,
+        as the BIOS's ``idle_until`` acknowledges every sender; a worker,
+        whose interrupts are enabled again, takes them as its IPI handler
+        does."""
+
+        cores = self._cores
+        core = self.active_core
+        if cores is not None and core != 0:
+            cores.take_signals(core)
+            return
+        table = self.memory.mmio.mailbox.table
+        mask = table.pending_mask(core)
+        while mask:
+            low = mask & -mask
+            table.acknowledge(core, low.bit_length() - 1)
+            mask ^= low
+
+    def ipi_send(self, message: int, target: int) -> bool:
+        """``IPI-SEND``: the active core's mailbox word takes ``message``,
+        and the core signals ``target``. Whether the mailbox took the
+        signal."""
+
+        mailbox = self.memory.mmio.mailbox
+        source = self.active_core
+        mailbox.set_data(source, u64(message))
+        return bool(mailbox.send(source, target))
+
+    def acquire_spinlock(self, lock_id: int) -> int:
+        """Acquire a hardware spinlock as the active core: 0 when it is the
+        core's, 1 while another core holds it, which ends the core's turn."""
+
+        result = self.spinlocks.acquire(lock_id, self.active_core)
+        if result != 0:
+            self._turn_end_requested = True
+        return result
+
+    def _core0_only(self, what: str) -> str | None:
+        """Why ``what`` faults on the active core, or None on core 0.
+
+        The compiler, the evaluator, dictionary growth and rollback, and
+        terminal input are core 0's alone (KDOS's concurrency contract,
+        decision 9 of docs/multicore-simulator-plan.md); a worker that
+        reaches one takes the illegal-operation fault.
+        """
+
+        core = self.active_core
+        if core == 0:
+            return None
+        return f"{what} runs on core 0 alone; core {core} reached it"
+
+    def require_core0(self, what: str) -> None:
+        """Raise the illegal-operation fault when a worker reaches ``what``."""
+
+        reason = self._core0_only(what)
+        if reason is not None:
+            raise IllegalInstructionFault(reason)
+
+    def _core0_only_fault(
+        self,
+        context: ExecutionContext,
+        what: str,
+    ) -> _GuestFaultRequest:
+        fault = IllegalInstructionFault(self._core0_only(what) or what)
+        return _GuestFaultRequest(
+            self._fault_xt,
+            context,
+            str(fault),
+            FaultAbort(fault.report_for(self.active_core), str(fault)),
+            fault.throw_code,
+        )
+
+    def take_other_core_steps(self) -> int:
+        """The semantic steps cores other than core 0 have run since the
+        last call: the machine's work beyond the host dispatch's own."""
+
+        cores = self._cores
+        if cores is None:
+            return 0
+        steps, cores.other_steps = cores.other_steps, 0
+        return steps
+
+    def core_status(self, *, core0_steps: int | None = None) -> list[dict[str, object]]:
+        """Each full core's state and semantic steps, for host diagnosis.
+
+        On a one-core machine core 0 is awake while its dispatch can run,
+        asleep in IDL, or idle with none; ``core0_steps`` gives its steps,
+        which the runtime does not count apart there.
+        """
+
+        cores = self._cores
+        if cores is not None:
+            return cores.status()
+        suspended = self._suspended_execution
+        if suspended is None:
+            state = "idle"
+        elif suspended.cursor.host_yield:
+            state = "awake"
+        else:
+            state = "asleep"
+        return [{
+            "core": 0,
+            "state": state,
+            "semantic_steps": core0_steps,
+            "turns": None,
+            "job": 0,
+            "deadline_ms": self._idle_deadline_ms if state == "asleep" else None,
+        }]
+
+    def run_rounds(self, max_rounds: int | None = None) -> int:
+        """Run the other cores while core 0 runs no dispatch, until none is
+        awake or ``max_rounds`` have run, as the machine runs them while core
+        0 waits at its prompt. Returns the rounds run; zero on a one-core
+        machine."""
+
+        with self._session_owner_lock:
+            self._require_session_owner_access("run the cores")
+            cores = self._cores
+            if cores is None:
+                return 0
+            return self._step_chiplets(cores.run_rounds(max_rounds))
 
     def caller_span_status(
         self,
@@ -2451,7 +2638,7 @@ class MegaForthRuntime:
                 self._fault_xt,
                 context,
                 str(fault),
-                FaultAbort(fault.report, str(fault)),
+                FaultAbort(fault.report_for(self.active_core), str(fault)),
                 fault.throw_code,
             ) from None
 
@@ -2460,6 +2647,7 @@ class MegaForthRuntime:
         width: int,
         context: ExecutionContext,
     ) -> None:
+        self.require_core0("dictionary growth")
         self._require_no_suspension("mutate the dictionary")
         rejection = self._dictionary_growth_rejection(width, context)
         if rejection is not None:
@@ -2504,6 +2692,7 @@ class MegaForthRuntime:
         target: int,
         context: ExecutionContext,
     ) -> None:
+        self.require_core0("moving the dictionary frontier")
         self._require_no_suspension("move the dictionary frontier")
         if not 0 <= target <= MASK64:
             self._request_dictionary_fault(context, "dictionary target wraps uint64")
@@ -2658,6 +2847,7 @@ class MegaForthRuntime:
     ) -> None:
         self._require_session_owner_access("roll back the dictionary")
         self._preflight_dictionary_target(saved_here, context)
+        self._refuse_unlinking_suspended_jobs(here=saved_here)
         try:
             self.dictionary.rollback_to(saved_here, saved_latest)
         except (TypeError, ValueError, RuntimeError) as exc:
@@ -2673,13 +2863,41 @@ class MegaForthRuntime:
         """Publish one known semantic dictionary ancestor without moving HERE."""
 
         self._require_session_owner_access("publish the dictionary head")
+        self.require_core0("publishing the dictionary head")
         self._require_no_suspension("publish the dictionary head")
+        self._refuse_unlinking_suspended_jobs(latest=latest)
         try:
             self.dictionary.set_latest(latest)
         except (TypeError, ValueError, RuntimeError) as exc:
             self._request_dictionary_fault(context, str(exc))
         self._dictionary_unlinks += 1
         self.dictionary_index.rebuild()
+
+    def _refuse_unlinking_suspended_jobs(
+        self,
+        *,
+        here: int | None = None,
+        latest: int | None = None,
+    ) -> None:
+        """Refuse a rollback that would remove a word a worker's suspended
+        job runs inside: one whose header lies at or above ``here``, or
+        above the header ``latest`` names."""
+
+        cores = self._cores
+        if cores is None:
+            return
+        for core, xts in cores.suspended_call_chains():
+            for xt in xts:
+                word = self.dictionary.live_word(xt)
+                if word is None:
+                    continue
+                if (here is not None and word.header_address >= here) or (
+                    latest is not None and word.header_address > u64(latest)
+                ):
+                    raise ExecutionError(
+                        f"the rollback would remove {word.name!r}, in which "
+                        f"core {core}'s suspended job runs"
+                    )
 
     def new_context(self) -> ExecutionContext:
         """Return an unbacked host scratch context.
@@ -3107,6 +3325,10 @@ class MegaForthRuntime:
             context=context,
             step_budget=step_budget,
         )
+        # On a machine with several cores, core 0's turns end at their
+        # quantum; the word runs on to completion through them.
+        while isinstance(result, YieldedExecution):
+            result = self.resume_yielded(result.suspension)
         if isinstance(result, BlockedExecution):
             raise ExecutionBlocked(result.suspension, result.semantic_steps)
         return result
@@ -3197,15 +3419,30 @@ class MegaForthRuntime:
         active_context._require_reusable()
         word = self._resolve_word(name_or_xt)
         meter, starting_steps = self._meter_for_public_call(step_budget)
-        suspended = self._execute_guarded(
-            word,
-            active_context,
-            meter,
-            allow_idle=True,
-            starting_steps=starting_steps,
-            quantum_steps=quantum_steps,
-            machine_quantum_instructions=machine_quantum_instructions,
-        )
+        cores = self._cores
+        if cores is None:
+            suspended = self._execute_guarded(
+                word,
+                active_context,
+                meter,
+                allow_idle=True,
+                starting_steps=starting_steps,
+                quantum_steps=quantum_steps,
+                machine_quantum_instructions=machine_quantum_instructions,
+            )
+        else:
+            suspended = cores.start_host(
+                lambda budget: self._execute_guarded(
+                    word,
+                    active_context,
+                    meter,
+                    allow_idle=True,
+                    starting_steps=starting_steps,
+                    quantum_steps=budget,
+                ),
+                meter,
+                quantum_steps,
+            )
         semantic_steps = meter.steps - starting_steps
         if suspended is None:
             return ExecutionResult(semantic_steps)
@@ -3287,6 +3524,10 @@ class MegaForthRuntime:
         ):
             raise ExecutionError("wake receipt is stale, foreign, or already consumed")
         self._idle_deadline_ms = None
+        if self._cores is not None:
+            return self._continue_host_dispatch(blocked, after_sleep=True)
+        # The sleep ends: core 0 takes every signal pending for it.
+        self._end_sleep()
         return self._continue_suspension_locked(blocked)
 
     def suspended_call_chain(self) -> tuple[int, ...]:
@@ -3320,6 +3561,10 @@ class MegaForthRuntime:
             blocked = self._require_suspension(suspension)
             if not blocked.cursor.host_yield:
                 raise ExecutionError("IDL suspension requires a runtime-issued wake")
+            if self._cores is not None:
+                return self._step_chiplets(
+                    self._continue_host_dispatch(blocked, after_sleep=False)
+                )
             return self._step_chiplets(
                 self._continue_suspension_locked(blocked)
             )
@@ -3337,11 +3582,94 @@ class MegaForthRuntime:
         self,
         blocked: _SuspendedExecution,
     ) -> RunResult:
+        resumed = self._resume_suspension(blocked)
+        semantic_steps = blocked.meter.steps - blocked.starting_steps
+        if resumed is None:
+            return ExecutionResult(semantic_steps)
+        return self._suspension_result(resumed, semantic_steps)
+
+    def _continue_host_dispatch(
+        self,
+        blocked: _SuspendedExecution,
+        *,
+        after_sleep: bool,
+    ) -> RunResult:
+        """Run the machine on from the host's suspended dispatch.
+
+        Core 0 continues when its turn comes: at once after a host quantum,
+        and after a sleep once its wake rule holds. A round in which it
+        sleeps on gives it a fresh handle for the host to wake.
+        """
+
+        cores = self._cores
+        assert cores is not None
+
+        def stint(budget: int) -> _SuspendedExecution | None:
+            if after_sleep:
+                self._end_sleep()
+            blocked.quantum_steps = budget
+            # Another core may write any memory, a sleeping core's stacks
+            # included, as on the machine.
+            return self._resume_suspension(
+                blocked, check_stacks=not cores.others_ran,
+            )
+
+        outcome = cores.run_host(stint, blocked.meter)
+        if outcome is NOT_RUN:
+            return self._reblock(blocked)
+        semantic_steps = blocked.meter.steps - blocked.starting_steps
+        if outcome is None:
+            return ExecutionResult(semantic_steps)
+        return self._suspension_result(outcome, semantic_steps)
+
+    def _reblock(self, blocked: _SuspendedExecution) -> RunResult:
+        """Keep the host's dispatch suspended under a fresh handle."""
+
+        blocked.context._release_suspension(blocked.handle.sequence)
+        handle = self._allocate_suspension_handle()
+        blocked.handle = handle
+        blocked.wake_receipt = None
+        blocked.context._lease_for_suspension(handle.sequence)
+        self._suspended_execution = blocked
+        return self._suspension_result(
+            blocked, blocked.meter.steps - blocked.starting_steps,
+        )
+
+    def _resume_scheduled(
+        self,
+        blocked: _SuspendedExecution,
+        quantum_steps: int,
+    ) -> _SuspendedExecution | None:
+        """Continue a worker's job for one turn: the scheduler's own switch,
+        which leaves the host's suspension alone."""
+
+        blocked.context._release_suspension(blocked.handle.sequence)
+        blocked.quantum_steps = quantum_steps
+        blocked.wake_receipt = None
+        cursor = self._resume_guarded(blocked)
+        if cursor is None:
+            return None
+        handle = self._allocate_suspension_handle()
+        blocked.handle = handle
+        blocked.cursor = cursor
+        blocked.context._lease_for_suspension(handle.sequence)
+        return blocked
+
+    def _resume_suspension(
+        self,
+        blocked: _SuspendedExecution,
+        *,
+        check_stacks: bool = True,
+    ) -> _SuspendedExecution | None:
+        """Resume the host's suspended dispatch; its new suspension, or None
+        once it completes."""
+
         suspension = blocked.handle
-        if self._stack_snapshot(blocked.context.data) != blocked.blocked_data_snapshot:
-            raise ExecutionError("data stack changed while dispatch was suspended")
-        if self._stack_snapshot(blocked.context.returns) != blocked.blocked_return_snapshot:
-            raise ExecutionError("return stack changed while dispatch was suspended")
+        if check_stacks:
+            if self._stack_snapshot(blocked.context.data) != blocked.blocked_data_snapshot:
+                raise ExecutionError("data stack changed while dispatch was suspended")
+            if self._stack_snapshot(blocked.context.returns) != blocked.blocked_return_snapshot:
+                raise ExecutionError("return stack changed while dispatch was suspended")
 
         blocked.had_pointer_capture = (
             blocked.had_pointer_capture
@@ -3356,9 +3684,8 @@ class MegaForthRuntime:
         blocked.context._release_suspension(old_sequence)
         cursor = self._resume_guarded(blocked)
 
-        semantic_steps = blocked.meter.steps - blocked.starting_steps
         if cursor is None:
-            return ExecutionResult(semantic_steps)
+            return None
 
         handle: ExecutionSuspension | None = None
         lease_installed = False
@@ -3383,7 +3710,7 @@ class MegaForthRuntime:
             )
             raise
         assert handle is not None
-        return self._suspension_result(blocked, semantic_steps)
+        return blocked
 
     def cancel_suspension(self, suspension: ExecutionSuspension) -> None:
         """Unwind internal return state and release one blocked context."""
@@ -4109,8 +4436,13 @@ class MegaForthRuntime:
         starting_steps: int = 0,
         quantum_steps: int | None = None,
         machine_quantum_instructions: int | None = None,
+        publish: bool = True,
     ) -> _SuspendedExecution | None:
-        """Execute atomically with respect to internal return-stack state."""
+        """Execute atomically with respect to internal return-stack state.
+
+        A suspension is the host's to resume unless ``publish`` is false,
+        as for a worker's job, which the core scheduler holds.
+        """
 
         context._require_reusable()
         return_snapshot = self._stack_snapshot(context.returns)
@@ -4160,7 +4492,8 @@ class MegaForthRuntime:
                     machine_quantum_instructions=machine_quantum_instructions,
                 )
                 context._lease_for_suspension(handle.sequence)
-                self._suspended_execution = suspended
+                if publish:
+                    self._suspended_execution = suspended
                 preserve_capture_evidence = True
         except _GuestControlTransfer as transfer:
             primary_error = transfer
@@ -4625,7 +4958,7 @@ class MegaForthRuntime:
             if (
                 allow_idle
                 and quantum_limit is not None
-                and meter.steps >= quantum_limit
+                and (meter.steps >= quantum_limit or self._turn_end_requested)
                 and len(self._active_dispatches) == 1
                 and not self._active_input_states
             ):
@@ -4749,14 +5082,34 @@ class MegaForthRuntime:
                         "dispatch; use run_until_blocked on a compiled word"
                     )
                 self._idle_deadline_ms = None
+                if self._signal_pending():
+                    # A pending IPI request ends IDL at once.
+                    self._end_sleep()
+                    ip += 1
+                    continue
                 return _DispatchCursor(current.xt, ip + 1)
             elif isinstance(operation, IdleUntil):
                 deadline = context.data.pop()
                 ip += 1
-                if allow_idle and deadline > self.rtc.uptime_ms:
+                if (
+                    allow_idle
+                    and deadline > self.rtc.uptime_ms
+                    and not self._signal_pending()
+                ):
                     self._idle_deadline_ms = deadline
                     return _DispatchCursor(current.xt, ip)
+                if deadline != 0:
+                    # The sleep ends at once, at its deadline or at a pending
+                    # IPI request, and takes what is pending, as the BIOS's
+                    # IDLE-UNTIL does; a zero deadline never sleeps.
+                    self._end_sleep()
             elif isinstance(operation, UartReadAttempt):
+                if self.active_core != 0:
+                    request = self._core0_only_fault(context, "terminal input")
+                    if self._has_older_dispatch(context):
+                        raise request
+                    current, ip = self._begin_guest_fault(request, context, meter)
+                    continue
                 # Native KEY flushes its buffered TX stream before polling.
                 # Hosted UART output is published immediately, so that flush
                 # has no stateful counterpart here.
@@ -5043,7 +5396,7 @@ class MegaForthRuntime:
                     self._fault_xt,
                     context,
                     str(fault),
-                    FaultAbort(fault.report, str(fault)),
+                    FaultAbort(fault.report_for(self.active_core), str(fault)),
                     fault.throw_code,
                 )
                 if self._has_older_dispatch(context):

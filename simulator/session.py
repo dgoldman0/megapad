@@ -540,6 +540,9 @@ class SimulatorSharedMachine(SharedSessionOwner):
                     "quantum_steps": session.semantic_quantum_steps,
                     **session.runtime.native_execution_stats,
                 },
+                "cores": session.runtime.core_status(
+                    core0_steps=session.semantic_steps_total,
+                ),
                 "generation": self._reset_generation,
                 "state": state,
                 "paused": self.paused,

@@ -304,14 +304,16 @@ def test_runtime_fails_closed_without_one_admitted_sysinfo_profile() -> None:
     zero_full = SparseAddressSpace(
         mmio=_SysInfoProfileMMIO(0, num_full=0)
     )
-    with pytest.raises(ValueError, match="one advertised full core"):
+    with pytest.raises(ValueError, match="one to four advertised full cores"):
         MegaForthRuntime(memory=zero_full)
 
-    multicore = SparseAddressSpace(
+    # Microcores, advertised as cores beyond the full ones, wait for their
+    # kernels.
+    microcores = SparseAddressSpace(
         mmio=_SysInfoProfileMMIO(0, num_cores=2, num_full=1)
     )
-    with pytest.raises(ValueError, match="one advertised full core"):
-        MegaForthRuntime(memory=multicore)
+    with pytest.raises(ValueError, match="no microcore cluster"):
+        MegaForthRuntime(memory=microcores)
 
 
 def test_crc_mode_validation_has_range_then_capability_then_owner_priority() -> None:

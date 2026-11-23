@@ -42,24 +42,34 @@ class InstructionFault(ExecutionError):
 
     The runtime routes it like the BIOS instruction-fault handlers: the
     ``FAULT-XT!`` callback receives ``throw_code``, and when there is none or
-    it returns, the runtime prints ``report`` and aborts.
+    it returns, the runtime prints ``report_for(core)`` for the core that
+    faulted and aborts.
     """
 
-    report = b""
+    title = ""
     throw_code = 0
+
+    def report_for(self, core: int) -> bytes:
+        """The BIOS's report line, naming the faulting core."""
+
+        return f"\r\n*** {self.title} CORE={core:02X}\r\n".encode()
+
+    @property
+    def report(self) -> bytes:
+        return self.report_for(0)
 
 
 class IllegalInstructionFault(InstructionFault):
     """The machine raises ``IVEC_ILLEGAL_OP``."""
 
-    report = b"\r\n*** ILLEGAL INSTRUCTION CORE=00\r\n"
+    title = "ILLEGAL INSTRUCTION"
     throw_code = -21  # unsupported operation
 
 
 class DivideByZeroFault(InstructionFault):
     """The machine raises ``IVEC_DIV_ZERO`` (zero divisor or overflow)."""
 
-    report = b"\r\n*** DIVIDE BY ZERO CORE=00\r\n"
+    title = "DIVIDE BY ZERO"
     throw_code = -10  # division by zero
 
 
@@ -74,9 +84,7 @@ class AlignmentFault(InstructionFault):
 
     def __init__(self, address: int, message: str) -> None:
         self.address = address
-        self.report = (
-            f"\r\n*** ALIGNMENT FAULT @ {address:016X} CORE=00\r\n".encode()
-        )
+        self.title = f"ALIGNMENT FAULT @ {address:016X}"
         super().__init__(message)
 
 

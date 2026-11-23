@@ -68,6 +68,9 @@ def _direct_steps(runtime):
 FUSED_BINARY = (b"+", b"-", b"*", b"AND", b"OR", b"XOR", b"LSHIFT", b"RSHIFT",
                 b"=", b"<>", b"U<", b"U>", b"<", b"<=", b">", b">=")
 DIRECT_SOURCE = b" ".join((
+    # The direct path keeps one ordinary page, so the data the body reaches
+    # starts a page of its own, wherever the dictionary stands.
+    b"HERE NEGATE 4095 AND ALLOT",
     b"VARIABLE CELL-A  CREATE BYTES 32 ALLOT  7 VALUE SETTING  5 CONSTANT FIVE",
     b": LEAF ( n -- n' ) DUP 0= IF 1+ EXIT THEN 2* ;",
     b": SCAN ( -- n ) 5 0 DO I 2 = IF I UNLOOP EXIT THEN LOOP 99 ;",

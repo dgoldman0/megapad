@@ -144,6 +144,13 @@ class HostedTimerService:
         else:
             self._counter = (self._counter + count) & UINT32_MASK
 
+    def set_counter(self, value: int) -> None:
+        """Move the count to ``value`` without a compare match, as the
+        cores' rounds do: each turn starts at the round's start, and the
+        round's end moves the count on by its longest turn."""
+
+        self._counter = value & UINT32_MASK
+
     def write_compare(self, value: int) -> None:
         """Atomically retain the low 32 bits of one guest cell."""
 

@@ -25,7 +25,7 @@ from simulator.image_bootstrap import (
     ImageBootstrapPreparation,
     prepare_image_bootstrap,
 )
-from simulator.platform import create_one_core_address_space
+from simulator.platform import Topology, create_address_space
 from simulator.session import (
     DEFAULT_SEMANTIC_QUANTUM_STEPS,
     SEMANTIC_QUANTUM_ENVIRONMENT,
@@ -113,6 +113,13 @@ def build_argument_parser(
     parser = argparse.ArgumentParser(description=description)
     add_storage_options(parser, path_type=Path, boot_required=True)
     parser.add_argument("--socket", default=DEFAULT_SOCKET)
+    parser.add_argument(
+        "--cores",
+        type=int,
+        choices=(1, 2, 3, 4),
+        default=1,
+        help="full cores, which run in rounds (default 1)",
+    )
     parser.add_argument("--ram-kib", type=_positive_int, default=1024)
     parser.add_argument("--ext-mem-mib", type=_nonnegative_int, default=128)
     parser.add_argument("--vram-mib", type=_nonnegative_int, default=4)
@@ -232,7 +239,8 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
             link_pace=args.terminal_link_pace,
         )
 
-    memory = create_one_core_address_space(
+    memory = create_address_space(
+        topology=Topology(full_cores=args.cores),
         bank0_size=args.ram_kib << 10,
         external_size=args.ext_mem_mib << 20,
         vram_size=args.vram_mib << 20,

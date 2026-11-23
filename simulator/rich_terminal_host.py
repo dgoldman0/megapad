@@ -413,7 +413,12 @@ class SimulatorSessionBackend:
                         raise AssertionError(
                             "resumed semantic step count moved backwards"
                         )
-                    semantic_steps = execution.semantic_steps - prior_steps
+                    # The boundary's work: the host dispatch's steps and
+                    # those the machine's other cores ran in their turns.
+                    semantic_steps = (
+                        execution.semantic_steps - prior_steps
+                        + self._runtime.take_other_core_steps()
+                    )
                     if isinstance(execution, (BlockedExecution, YieldedExecution)):
                         self._suspension = execution
                         self._reported_suspension_steps = execution.semantic_steps

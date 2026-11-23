@@ -43,6 +43,10 @@ from simulator.ir import (
     UartReadAttempt,
     WriteOutput,
 )
+from simulator.chiplet import (
+    MAILBOX_ACK as _MAILBOX_ACK,
+    MAILBOX_STATUS as _MAILBOX_STATUS,
+)
 from simulator.memory import MMIO_BASE, MemoryAccessError, SparseAddressSpace
 from simulator.mp64fs import validate_attached_mp64fs
 from simulator.platform import (
@@ -1044,6 +1048,7 @@ def _space(runtime: MegaForthRuntime, _context: ExecutionContext) -> None:
 
 
 def _key_query(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    runtime.require_core0("terminal input")
     context.data.push(forth_flag(runtime.uart_input_available))
 
 
@@ -1272,8 +1277,7 @@ def _spin_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     lock_id = context.data.pop()
     if lock_id >= runtime.spinlocks.lock_count:
         raise ExecutionError("SPIN@ requires a lock ID from 0 through 15")
-    core_id, _task_id = runtime.guest_identity(context)
-    context.data.push(runtime.spinlocks.acquire(lock_id, core_id))
+    context.data.push(runtime.acquire_spinlock(lock_id))
 
 
 def _spin_release(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
@@ -1284,36 +1288,89 @@ def _spin_release(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     runtime.spinlocks.release(lock_id, core_id)
 
 
-def _wake_core_unavailable(context: ExecutionContext) -> None:
+def _full_cores(runtime: MegaForthRuntime) -> int:
+    return runtime.memory.read64(MMIO_BASE + SYSINFO_NUM_FULL)
+
+
+def _wake_core(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    """``WAKE-CORE ( xt core -- )``: the job enters the full core's slot and
+    goes to it by IPI, as the BIOS's word sends it."""
+
     core_id = context.data.peek()
     xt = context.data.peek(1)
-    raise ExecutionError(
-        "WAKE-CORE is unavailable in the one-core hosted profile: no "
-        f"secondary core exists for core ID 0x{core_id:016x}; execution "
-        f"token 0x{xt:016x} and core ID were not consumed"
-    )
-
-
-def _ipi_send_unavailable(context: ExecutionContext) -> None:
-    core_id = context.data.peek()
-    message = context.data.peek(1)
-    raise ExecutionError(
-        "IPI-SEND is unavailable in the one-core hosted profile: no IPI "
-        f"reaches core ID 0x{core_id:016x}; message 0x{message:016x} and "
-        "core ID were not consumed"
-    )
-
-
-def _core_status(context: ExecutionContext) -> None:
-    core_id = context.data.peek()
-    if core_id != 0:
+    cores = runtime.cores
+    if cores is None or core_id >= cores.full_cores or core_id == runtime.active_core:
         raise ExecutionError(
-            "CORE-STATUS accepts only core ID 0 in the one-core hosted "
-            f"profile, got 0x{core_id:016x}; the operand was not consumed"
+            f"WAKE-CORE needs a full core other than the caller's, got core "
+            f"ID 0x{core_id:016x}; execution token 0x{xt:016x} and core ID "
+            "were not consumed"
         )
-    # This reports the secondary-worker dispatch slot, not whether the
-    # primary CPU is currently executing.  Core zero has no such work queued.
-    context.data.replace_top(0)
+    context.data.pop()
+    context.data.pop()
+    cores.wake_core(xt, core_id)
+
+
+def _ipi_send(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    """``IPI-SEND ( x id -- )``: the caller's mailbox word takes ``x``, and
+    the caller signals the participant ``id``: a core, which takes a copy of
+    the word, or a chiplet port."""
+
+    target = context.data.peek()
+    message = context.data.peek(1)
+    table = runtime.memory.mmio.mailbox.table
+    if (
+        target > 0xFF
+        or target == runtime.active_core
+        or not table.is_participant(target)
+    ):
+        raise ExecutionError(
+            "IPI-SEND needs a mailbox participant other than the caller, got "
+            f"ID 0x{target:016x}; message 0x{message:016x} and ID were not "
+            "consumed"
+        )
+    context.data.pop()
+    context.data.pop()
+    runtime.ipi_send(message, target)
+
+
+def _core_status(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    """``CORE-STATUS ( core -- xt|0 )``: the full core's worker slot, the job
+    it was given and has not finished, or zero."""
+
+    core_id = context.data.peek()
+    if core_id >= _full_cores(runtime):
+        raise ExecutionError(
+            "CORE-STATUS needs a full core's ID, got "
+            f"0x{core_id:016x}; the operand was not consumed"
+        )
+    cores = runtime.cores
+    context.data.replace_top(0 if cores is None else cores.job(core_id))
+
+
+def _ipi_status(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    """``IPI-STATUS ( -- mask )``: MBOX_STATUS, the caller's pending signals
+    from IDs 0 to 7."""
+
+    context.data.push(runtime.memory.read8(MMIO_BASE + _MAILBOX_STATUS))
+
+
+def _ipi_ack(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    """``IPI-ACK ( id -- )``: the caller takes the signal from ``id``, as a
+    write of its low byte to MBOX_ACK does."""
+
+    runtime.memory.write8(MMIO_BASE + _MAILBOX_ACK, context.data.pop() & 0xFF)
+
+
+def _mbox_store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    """``MBOX! ( x -- )``: the caller's mailbox data word."""
+
+    runtime.memory.mmio.mailbox.set_data(runtime.active_core, context.data.pop())
+
+
+def _mbox_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    """``MBOX@ ( -- x )``: the caller's mailbox data word."""
+
+    context.data.push(runtime.memory.mmio.mailbox.data(runtime.active_core))
 
 
 def _cluster_enable_store(context: ExecutionContext) -> None:
@@ -1421,7 +1478,7 @@ def _disk_transfer_value(
 
     storage = runtime.storage if storage is None else storage
     core_id, _task_id = runtime.guest_identity(context)
-    if runtime.spinlocks.acquire(2, core_id) != 0:
+    if runtime.acquire_spinlock(2) != 0:
         return 0, STORAGE_RESULT_TIMEOUT
     try:
         operation = (
@@ -1523,7 +1580,7 @@ def _unit_disk_flush_checked(
         context.data.replace_top(STORAGE_RESULT_NO_MEDIA)
         return
     core_id, _task_id = runtime.guest_identity(context)
-    if runtime.spinlocks.acquire(2, core_id) != 0:
+    if runtime.acquire_spinlock(2) != 0:
         status = STORAGE_RESULT_TIMEOUT
     else:
         try:
@@ -1541,7 +1598,7 @@ def _disk_flush_checked(
 ) -> None:
     generation = context.data.peek() if generation_bound else None
     core_id, _task_id = runtime.guest_identity(context)
-    if runtime.spinlocks.acquire(2, core_id) != 0:
+    if runtime.acquire_spinlock(2) != 0:
         status = STORAGE_RESULT_TIMEOUT
     else:
         try:
@@ -2287,8 +2344,8 @@ def install_core(runtime: MegaForthRuntime) -> None:
         ),
         (b"SPIN@", lambda context: _spin_fetch(runtime, context)),
         (b"SPIN!", lambda context: _spin_release(runtime, context)),
-        (b"WAKE-CORE", _wake_core_unavailable),
-        (b"CORE-STATUS", _core_status),
+        (b"WAKE-CORE", lambda context: _wake_core(runtime, context)),
+        (b"CORE-STATUS", lambda context: _core_status(runtime, context)),
         (b"CLUSTER-EN!", _cluster_enable_store),
         (b"CLUSTER-EN@", _push_zero),
         (
@@ -2766,7 +2823,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
                 runtime.diagnostics.icache_misses,
             ),
         ),
-        (b"COREID", _push_zero),
+        (b"COREID", lambda context: context.data.push(runtime.active_core)),
         (b"TASK-ID", _push_zero),
         (b"ENTER-USER", lambda _context: None),
         (b"SYS-EXIT", lambda _context: None),
@@ -3149,9 +3206,8 @@ def install_core(runtime: MegaForthRuntime) -> None:
         lambda context: _dictionary_index_notify_store(runtime, context),
     )
 
-    # IPI-SEND follows.  The one-core profile models no IPI, so like
-    # WAKE-CORE it fails without consuming its message or core ID.
-    runtime.define_primitive(b"IPI-SEND", _ipi_send_unavailable)
+    # IPI-SEND follows.
+    runtime.define_primitive(b"IPI-SEND", lambda context: _ipi_send(runtime, context))
 
     # LITERAL follows: it compiles the top cell into the open definition.
     runtime.define_directive(b"LITERAL", DirectiveKind.LITERAL)
@@ -3335,6 +3391,14 @@ def install_core(runtime: MegaForthRuntime) -> None:
         b"VRAM-SIZE",
         lambda context: _sysinfo_fetch(runtime, context, SYSINFO_VRAM_SIZE),
     )
+
+    # The mailbox words follow, appended so that every earlier word keeps
+    # its execution token: the caller's pending signals, their
+    # acknowledgement, and its data word.
+    runtime.define_primitive(b"IPI-STATUS", lambda context: _ipi_status(runtime, context))
+    runtime.define_primitive(b"IPI-ACK", lambda context: _ipi_ack(runtime, context))
+    runtime.define_primitive(b"MBOX!", lambda context: _mbox_store(runtime, context))
+    runtime.define_primitive(b"MBOX@", lambda context: _mbox_fetch(runtime, context))
 
 
 def _define_accept(runtime: MegaForthRuntime) -> None:

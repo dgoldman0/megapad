@@ -102,6 +102,26 @@ def test_server_cli_builds_the_shared_semantic_facade(tmp_path, monkeypatch) -> 
         prepared.machine.stop()
 
 
+def test_server_cli_runs_the_cores_it_is_given(tmp_path) -> None:
+    image = tmp_path / "desktop-simulator.img"
+    image.write_bytes(_boot_image())
+    parser = build_argument_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--storage", str(image), "--cores", "5"])
+    args = parser.parse_args(
+        ["--storage", str(image), "--socket", str(tmp_path / "s.sock"),
+         "--cores", "2", "--paused"]
+    )
+    prepared = prepare_server(args)
+    try:
+        runtime = prepared.preparation.runtime
+        assert runtime.cores.full_cores == 2
+        status = prepared.machine.status()
+        assert [core["core"] for core in status["cores"]] == [0, 1]
+    finally:
+        prepared.machine.stop()
+
+
 def test_server_cli_rejects_unbound_entry_before_exposing_socket(tmp_path) -> None:
     image = tmp_path / "unbound-simulator.img"
     image.write_bytes(_boot_image(autoexec_body=b"1 AUTO-RUNS +!\n"))

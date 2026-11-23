@@ -78,6 +78,8 @@ enum Opcode : uint32_t {
     // OP_DISK_FLUSH a checked FLUSH. Operand a is a DISK_* shape. The
     // services travel with the program.
     OP_DISK_VALUE, OP_DISK_TRANSFER, OP_DISK_FLUSH,
+    // COREID: the core the program runs for (set_core).
+    OP_COREID,
     // One past the last operation; not one itself.
     OPCODE_LIMIT,
 };
@@ -665,7 +667,7 @@ static bool inline_callback(uint32_t opcode) noexcept {
     case OP_I: case OP_J: case OP_EXECUTE: case OP_RP_FETCH: case OP_CALL_ROUTINE:
         return false;
     default:
-        return opcode <= OP_CALL_ROUTINE;
+        return opcode <= OP_CALL_ROUTINE || opcode == OP_COREID;
     }
 }
 
@@ -1081,6 +1083,14 @@ public:
         return locks_ == nullptr ||
             locks_->owner(FILESYSTEM_LOCK) != megapad::spinlock::SpinlockBank::FREE;
     }
+
+    // The core whose turn runs next, as the runtime switches turns.
+    void set_core(int core) {
+        if (core < 0 || core > 255)
+            throw py::value_error("a core ID is 0 to 255");
+        core_id_ = core;
+    }
+    int core() const noexcept { return core_id_; }
 
     // The CRC service the runtime's CRC words use, or None to leave the
     // words to Python. A run admits them only when its owner says the
@@ -2132,6 +2142,10 @@ private:
             if (!stack.inputs(0)) return false;
             out[0] = opcode == OP_TRUE ? MASK : 0;
             return leave(1);
+        case OP_COREID:
+            if (!stack.inputs(0)) return false;
+            out[0] = static_cast<Cell>(core_id_);
+            return leave(1);
         case OP_SP_FETCH:
             if (!stack.inputs(0)) return false;
             out[0] = path.sp();
@@ -2472,9 +2486,8 @@ private:
     }
 
     // The CRC words, each a call of the service the Python words call too.
-    // The hosted profile has one guest identity, core 0's task 0, as COREID
-    // and TASK-ID say. A word declines before any effect unless its stack
-    // fits.
+    // The caller is the core the program runs for, task 0, as COREID and
+    // TASK-ID say. A word declines before any effect unless its stack fits.
     bool execute_crc(uint32_t opcode, RunState& s, StackOperation& stack) {
         namespace crc = megapad::crc_service;
         const unsigned consumed = opcode == OP_CRC_MODE_STORE || opcode == OP_CRC_INIT_STORE ||
@@ -2482,7 +2495,7 @@ private:
         const unsigned produced = opcode == OP_CRC_FETCH || opcode == OP_CRC_RAW_FINAL_FETCH ? 2 : 1;
         if (!stack.inputs(consumed) || !stack.outputs(produced)) return false;
         const Cell input = consumed ? stack.values[0] : 0;
-        const crc::Identity task{0, 0};
+        const crc::Identity task{static_cast<Cell>(core_id_), 0};
         auto& out = stack.result;
         switch (opcode) {
         case OP_CRC_MODE_STORE: out[0] = crc_->select_mode(task, input); break;
@@ -2607,6 +2620,8 @@ private:
     py::object tile_guard_;
     // The bound CRC service and the Python object that owns it.
     megapad::crc_service::Service* crc_ = nullptr;
+    // The core whose turn the runtime is running; COREID pushes it.
+    int core_id_ = 0;
     py::object crc_owner_;
     // The bound storage services by unit and their Python objects, the
     // memory they move data through and the spinlock bank.
@@ -2634,7 +2649,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
     megapad::platform::register_bindings(module);
     megapad::dictionary::register_bindings(module);
     megapad::walker::register_bindings(module);
-    module.attr("SEMANTIC_API_VERSION") = 14;
+    module.attr("SEMANTIC_API_VERSION") = 15;
     module.attr("MACHINE_STOPPED_CALL") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_CALL));
     module.attr("MACHINE_STOPPED_RESUME") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_RESUME));
     module.attr("MACHINE_CALLBACK") = py::int_(static_cast<uint32_t>(MACHINE_CALLBACK));
@@ -2652,6 +2667,8 @@ PYBIND11_MODULE(_megaforth_native, module) {
         .def_property_readonly("direct_steps", &NativeProgram::direct_steps)
         .def("bind_tile_guard", &NativeProgram::bind_tile_guard, py::arg("guard"))
         .def("bind_crc", &NativeProgram::bind_crc, py::arg("service"))
+        .def("set_core", &NativeProgram::set_core, py::arg("core"))
+        .def_property_readonly("core", &NativeProgram::core)
         .def("bind_storage", &NativeProgram::bind_storage, py::arg("services"),
              py::arg("memory"), py::arg("lock_bank"))
         .def("snapshot_stack", &NativeProgram::snapshot_stack,
@@ -2736,9 +2753,10 @@ PYBIND11_MODULE(_megaforth_native, module) {
     PRIMITIVE("MOVE", OP_MOVE);
     PRIMITIVE("SP@", OP_SP_FETCH); PRIMITIVE("RP@", OP_RP_FETCH);
     PRIMITIVE("UM*", OP_UMULTIPLY);
-    // The original hosted BIOS primitives both push zero. Native admission
-    // remains bound to those installed word objects, never a later namesake.
-    PRIMITIVE("COREID", OP_FALSE); PRIMITIVE("TASK-ID", OP_FALSE);
+    // COREID pushes the core the program runs for, TASK-ID zero. Native
+    // admission remains bound to those installed word objects, never a later
+    // namesake.
+    PRIMITIVE("COREID", OP_COREID); PRIMITIVE("TASK-ID", OP_FALSE);
     PRIMITIVE("I", OP_I); PRIMITIVE("J", OP_J);
     module.attr("PRIMITIVE_OPCODES") = primitives;
 #undef PRIMITIVE

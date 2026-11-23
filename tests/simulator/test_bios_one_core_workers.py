@@ -1,4 +1,10 @@
-"""Focused one-core pseudo-BIOS worker-slot boundary coverage."""
+"""Focused one-core pseudo-BIOS worker-slot boundary coverage.
+
+The one-core profile has no worker: WAKE-CORE has no full core other than
+the caller's to send to, IPI-SEND no participant other than the caller, and
+CORE-STATUS core 0's slot alone. Each fails without consuming its operands
+(tests/simulator/test_multicore_runtime.py covers the cores that exist).
+"""
 
 from __future__ import annotations
 
@@ -48,7 +54,7 @@ def test_core_status_rejects_every_nonzero_uint64_without_consuming_it(
     context.data.push(core_id)
     context.returns.push(0xBEEF)
 
-    with pytest.raises(ExecutionError, match="accepts only core ID 0"):
+    with pytest.raises(ExecutionError, match="needs a full core's ID"):
         runtime.execute("CORE-STATUS", context=context)
 
     assert context.data.snapshot() == (0xCAFE, core_id)
@@ -72,7 +78,7 @@ def test_wake_core_never_resolves_or_runs_an_xt_and_retains_both_operands(
     context.data.push(0 if live_xt else MASK64)
     context.returns.push(0xBEEF)
 
-    with pytest.raises(ExecutionError, match="no secondary core exists"):
+    with pytest.raises(ExecutionError, match="full core other than the caller"):
         runtime.execute("WAKE-CORE", context=context)
 
     assert context.data.snapshot() == (
@@ -109,7 +115,7 @@ def test_worker_words_have_native_order_and_no_hidden_side_effects() -> None:
     context.data.push(0x1234)
     context.data.push(0)
 
-    with pytest.raises(ExecutionError, match="WAKE-CORE is unavailable"):
+    with pytest.raises(ExecutionError, match="full core other than the caller"):
         runtime.execute("WAKE-CORE", context=context)
 
     assert context.data.snapshot() == (0x1234, 0)
@@ -135,7 +141,7 @@ def test_ipi_send_fails_without_consuming_or_signalling(core_id: int) -> None:
     context.data.push(core_id)
     context.returns.push(0xBEEF)
 
-    with pytest.raises(ExecutionError, match="IPI-SEND is unavailable"):
+    with pytest.raises(ExecutionError, match="participant other than the caller"):
         runtime.execute("IPI-SEND", context=context)
 
     assert context.data.snapshot() == (0xCAFE, 0x1234, core_id)

@@ -1,4 +1,4 @@
-"""Chiplet ports of the hosted one-core profile.
+"""Chiplet ports of the hosted profiles.
 
 The ports themselves are the C++ model the emulator uses
 (``shared/accel/chiplet_port.h``, ``docs/chiplet-link.md``), reached through
@@ -9,13 +9,14 @@ which takes aligned 64-bit accesses alone, and the mailbox at ``0x500``,
 whose table the ports ring through, are native devices on the platform's
 table (``simulator/platform.py``).
 
-The hosted profile has no scheduler rounds, interrupts or flag branch, so a
-chiplet steps where the guest can observe it: before each read of a window
-register or of the mailbox's ``STATUS``, and when a dispatch returns to its
-host. A guest that polls ``STATUS`` for ``READY`` or for a port's signal
+A chiplet steps where the guest can observe it: before each read of a
+window register or of the mailbox's ``STATUS``, and when a host call to the
+runtime returns, which on a machine with several cores is the end of a
+round. A guest that polls ``STATUS`` for ``READY`` or for a port's signal
 therefore makes progress, and the outcome depends on the guest's accesses
-alone. A port's signal reaching the guest as an interrupt waits for the
-simulator's multicore work.
+alone. A port's signal wakes a core that sleeps in IDL, and the core takes
+it as the BIOS does (``simulator/cores.py``); the hosted profiles have no
+flag branch.
 """
 
 from __future__ import annotations
@@ -39,9 +40,6 @@ MAILBOX_SEND = MAILBOX_OFFSET + 0x08
 MAILBOX_STATUS = MAILBOX_OFFSET + 0x09
 MAILBOX_ACK = MAILBOX_OFFSET + 0x0A
 
-# The hosted profile has one core, so its ports' IDs start at 1.
-HOSTED_CORE_COUNT = 1
-HOSTED_CORE_ID = 0
 
 
 class ChipletAccessError(ValueError):
@@ -75,19 +73,27 @@ def _native_extension():
 
 
 class HostedChipletPorts:
-    """The hosted profile's chiplet ports and their chiplets."""
+    """The hosted profile's chiplet ports and their chiplets.
 
-    __slots__ = ("_port_count", "_link")
+    The ports' IDs follow the profile's cores: with ``core_count`` cores the
+    first port's ID is ``core_count``.
+    """
 
-    def __init__(self, port_count: int = 1) -> None:
-        if isinstance(port_count, bool) or not isinstance(port_count, int):
-            raise TypeError("port_count must be an integer")
-        if not 1 <= port_count <= 256 - HOSTED_CORE_COUNT:
-            raise ValueError("port IDs must follow the core's in 8 bits")
+    __slots__ = ("_port_count", "_core_count", "_link")
+
+    def __init__(self, port_count: int = 1, *, core_count: int = 1) -> None:
+        for name, value in (("port_count", port_count), ("core_count", core_count)):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an integer")
+        if core_count < 1:
+            raise ValueError("chiplet ports need at least one core")
+        if not 1 <= port_count <= 256 - core_count:
+            raise ValueError("port IDs must follow the cores' in 8 bits")
         # Fail here, where the caller asked for ports, when the model is
         # absent from the build.
         _native_extension()
         self._port_count = port_count
+        self._core_count = core_count
         self._link = None
 
     @property
@@ -95,8 +101,12 @@ class HostedChipletPorts:
         return self._port_count
 
     @property
+    def core_count(self) -> int:
+        return self._core_count
+
+    @property
     def first_port_id(self) -> int:
-        return HOSTED_CORE_COUNT
+        return self._core_count
 
     @property
     def port_count_word(self) -> int:
@@ -126,7 +136,7 @@ class HostedChipletPorts:
             self._link = extension.ChipletLink(
                 dense.buffer_at(base),
                 base,
-                HOSTED_CORE_COUNT,
+                self._core_count,
                 self._port_count,
                 CHIPLET_RANGES,
             )
@@ -138,7 +148,7 @@ class HostedChipletPorts:
                 memory.write_bytes,
                 base,
                 size,
-                HOSTED_CORE_COUNT,
+                self._core_count,
                 self._port_count,
                 CHIPLET_RANGES,
             )
@@ -197,8 +207,9 @@ class HostedChipletPorts:
 
     @property
     def mailbox(self):
-        """The participant table: the core is ID 0, port ``p`` is ``1 + p``.
-        The platform's mailbox works over this same table."""
+        """The participant table: the cores first, then port ``p`` at
+        ``first_port_id + p``. The platform's mailbox works over this same
+        table."""
 
         return self._require_bound().mailbox
 

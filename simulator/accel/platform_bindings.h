@@ -37,6 +37,7 @@
 #include "../../shared/accel/mmio_device.h"
 #include "../../shared/accel/spinlock_bank.h"
 #include "collected.h"
+#include "core_scheduler.h"
 
 namespace megapad::platform {
 namespace py = pybind11;
@@ -777,6 +778,64 @@ inline void register_bindings(py::module_& module) {
         .def("lines", &PlatformTable::lines, py::arg("core"))
         .def_property("requester", &PlatformTable::requester, &PlatformTable::set_requester)
         .def("set_refusal", &PlatformTable::set_refusal, py::arg("handler"));
+
+    namespace sched = megapad::scheduler;
+    py::enum_<sched::State>(module, "CoreState", py::module_local())
+        .value("AWAKE", sched::State::AWAKE)
+        .value("ASLEEP", sched::State::ASLEEP)
+        .value("IDLE", sched::State::IDLE);
+    py::enum_<sched::TurnEnd>(module, "TurnEnd", py::module_local())
+        .value("QUANTUM", sched::TurnEnd::QUANTUM)
+        .value("SPIN", sched::TurnEnd::SPIN)
+        .value("SLEEP", sched::TurnEnd::SLEEP)
+        .value("DONE", sched::TurnEnd::DONE);
+    // A deadline of None is no deadline.
+    const auto deadline_in = [](std::optional<std::uint64_t> deadline) {
+        return deadline ? *deadline : sched::CoreScheduler::NO_DEADLINE;
+    };
+    const auto deadline_out = [](std::uint64_t deadline) -> std::optional<std::uint64_t> {
+        if (deadline == sched::CoreScheduler::NO_DEADLINE)
+            return std::nullopt;
+        return deadline;
+    };
+    py::class_<sched::CoreScheduler>(module, "CoreScheduler", py::module_local())
+        .def(py::init<int, std::uint64_t>(), py::arg("cores"), py::arg("quantum"))
+        .def_property_readonly("cores", &sched::CoreScheduler::cores)
+        .def_property_readonly("quantum", &sched::CoreScheduler::quantum)
+        .def_property_readonly("current", &sched::CoreScheduler::current)
+        .def("state", &sched::CoreScheduler::state, py::arg("core"))
+        .def("deadline",
+             [deadline_out](const sched::CoreScheduler& scheduler, int core) {
+                 return deadline_out(scheduler.deadline(core));
+             },
+             py::arg("core"))
+        .def("steps", &sched::CoreScheduler::steps, py::arg("core"))
+        .def("turns", &sched::CoreScheduler::turns, py::arg("core"))
+        .def("awake", &sched::CoreScheduler::awake, py::arg("core"))
+        .def("any_awake", &sched::CoreScheduler::any_awake)
+        .def("begin_next_turn", &sched::CoreScheduler::begin_next_turn)
+        .def_property_readonly("turn_left", &sched::CoreScheduler::turn_left)
+        .def_property_readonly("turn_used", &sched::CoreScheduler::turn_used)
+        .def("account", &sched::CoreScheduler::account, py::arg("steps"))
+        .def("end_turn",
+             [deadline_in](sched::CoreScheduler& scheduler, sched::TurnEnd reason,
+                           std::optional<std::uint64_t> deadline) {
+                 scheduler.end_turn(reason, deadline_in(deadline));
+             },
+             py::arg("reason"), py::arg("deadline") = py::none())
+        .def_property_readonly("round_started", &sched::CoreScheduler::round_started)
+        .def_property_readonly("round_length", &sched::CoreScheduler::round_length)
+        .def("finish_round", &sched::CoreScheduler::finish_round)
+        .def("wake", &sched::CoreScheduler::wake, py::arg("core"))
+        .def("wake_mask", &sched::CoreScheduler::wake_mask, py::arg("ipi_lines"),
+             py::arg("terminal_input"), py::arg("now_ms"))
+        .def("apply_wakes", &sched::CoreScheduler::apply_wakes, py::arg("ipi_lines"),
+             py::arg("terminal_input"), py::arg("now_ms"))
+        .def_property_readonly(
+            "earliest_deadline",
+            [deadline_out](const sched::CoreScheduler& scheduler) {
+                return deadline_out(scheduler.earliest_deadline());
+            });
 }
 
 }  // namespace megapad::platform

@@ -247,6 +247,10 @@ class HostedPlatform:
             )
         if chiplet is not None and not isinstance(chiplet, HostedChipletPorts):
             raise TypeError("platform chiplet ports must be HostedChipletPorts")
+        if chiplet is not None and chiplet.core_count != topology.core_count:
+            raise ValueError(
+                "the chiplet ports' IDs must follow the topology's cores"
+            )
         services = {
             "aes": aes, "sha3": sha3, "entropy": entropy, "rtc": rtc,
             "audio": HostedAudioService() if audio is None else audio,
@@ -375,8 +379,9 @@ class HostedPlatform:
 _register_input_platform_route(HostedPlatform)
 
 
-def create_one_core_address_space(
+def create_address_space(
     *,
+    topology: Topology = ONE_CORE,
     bank0_size: int = BANK0_DEFAULT_SIZE,
     external_size: int = 0,
     vram_size: int = 0,
@@ -390,14 +395,20 @@ def create_one_core_address_space(
     initial_uptime_ms: int = 0,
     chiplet_ports: int = 0,
 ) -> SparseAddressSpace:
-    """Return guest memory with the one-core platform; sparse unless explicit.
+    """Return guest memory with the platform of ``topology``; sparse unless
+    explicit.
 
     ``chiplet_ports`` gives the profile that many chiplet ports, with their
-    register window. The ports are the native model, as the platform's
-    table and devices are.
+    register window; their IDs follow the topology's cores. The ports are
+    the native model, as the platform's table and devices are.
     """
 
-    chiplet = HostedChipletPorts(chiplet_ports) if chiplet_ports else None
+    if not isinstance(topology, Topology):
+        raise TypeError("topology must be a Topology")
+    chiplet = (
+        HostedChipletPorts(chiplet_ports, core_count=topology.core_count)
+        if chiplet_ports else None
+    )
     platform = HostedPlatform(
         aes=HostedAESService(),
         sha3=HostedSHA3Service(
@@ -413,7 +424,7 @@ def create_one_core_address_space(
             initial_uptime_ms=initial_uptime_ms,
         ),
         chiplet=chiplet,
-        topology=ONE_CORE,
+        topology=topology,
         crypto_capabilities=crypto_capabilities,
     )
     memory = SparseAddressSpace(
@@ -427,6 +438,12 @@ def create_one_core_address_space(
     )
     platform.bind(memory)
     return memory
+
+
+def create_one_core_address_space(**options) -> SparseAddressSpace:
+    """:func:`create_address_space` for one full core."""
+
+    return create_address_space(topology=ONE_CORE, **options)
 
 
 __all__ = [
@@ -450,5 +467,6 @@ __all__ = [
     "PlatformMMIOAccessError",
     "SysInfoAccessError",
     "Topology",
+    "create_address_space",
     "create_one_core_address_space",
 ]

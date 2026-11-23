@@ -48,6 +48,7 @@ setup(
                  "simulator/accel/tacc_service.h",
                  "simulator/accel/tacc_service_bindings.h",
                  "simulator/accel/platform_bindings.h",
+                 "simulator/accel/core_scheduler.h",
                  "shared/accel/mmio_device.h", "shared/accel/mailbox.h",
                  "shared/accel/spinlock_bank.h",
                  "shared/accel/scalar_fp.h", "shared/accel/scalar_fp_bindings.h",

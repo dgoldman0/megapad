@@ -162,6 +162,8 @@ class HybridRuntime:
                  machine_instruction_budget: int | None) -> None:
         if semantic._machine_owner is not None:
             raise RuntimeError("the semantic runtime already has a machine owner")
+        if semantic.cores is not None:
+            raise RuntimeError("machine routines run on the one-core profile alone")
         self.semantic = semantic
         self._native = native
         self._cpu = cpu

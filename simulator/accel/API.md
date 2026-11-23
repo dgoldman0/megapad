@@ -3,7 +3,7 @@
 The extension and its Python owner are built from the same checkout and use
 one current internal interface. Rebuild the extension after changing this
 boundary with `python setup_simulator_accel.py build_ext --inplace --force`.
-The extension exports `SEMANTIC_API_VERSION = 14`; its Python owner checks this
+The extension exports `SEMANTIC_API_VERSION = 15`; its Python owner checks this
 version before admission. An explicit native request rejects older builds;
 automatic selection keeps the reference executor and the Python dictionary
 when the version mismatches. The simulator's CRC and storage services are
@@ -415,9 +415,17 @@ it; the run then admits `OP_CRC_MODE_STORE`, `OP_CRC_RESET`,
 `OP_CRC_RAW_FINAL_FETCH` and `OP_CRC_FINAL_FETCH`, the compiled calls of
 `CRC-MODE!`, `CRC-RESET`, `CRC-INIT!`, `CRC-FEED`, `CRC-FEED-BYTE`, `CRC@`,
 `CRC-RAW-FINAL@` and `CRC-FINAL@`, each costing the two ticks of an
-admitted primitive call and calling the same service as the hosted profile's
-one identity, `(0, 0)`. A word declines before any effect when its stack
-does not fit. A replaced service keeps the words in Python.
+admitted primitive call and calling the same service with the identity
+`(core, 0)`, the core `set_core` names. A word declines before any effect
+when its stack does not fit. A replaced service keeps the words in Python.
+
+## The core a run serves
+
+`set_core(core)` names the core whose turn the runtime runs, 0 to 255, and
+`core` reads it back; the runtime sets it at every turn switch
+(`simulator/cores.py`). `OP_COREID`, the compiled call of `COREID`, pushes
+it, and the CRC words take it as their caller's core. A one-core runtime
+leaves it at 0.
 
 ## Disk words
 
@@ -536,3 +544,23 @@ memory geometry, the crypto capabilities and the chiplet ports' word;
 `SpinlockBank`, the shared model of `shared/accel/spinlock_bank.h`, which
 `simulator/spinlocks.py` exports as `HostedSpinlockBank` and whose window
 the platform does not attach yet.
+
+## Core scheduler
+
+`CoreScheduler(cores, quantum)` is the C++ scheduler of the full cores
+(`core_scheduler.h`, docs/multicore-simulator-plan.md, sections 4.3 and
+4.4). Each core's `state(core)` is a `CoreState`: `AWAKE`, `ASLEEP` in IDL
+with its `deadline(core)` in `MS@` milliseconds or None, or `IDLE`, a worker
+without a job or core 0 without a host dispatch. `begin_next_turn()` gives
+the next turn of the round to the lowest awake core after the last one
+served, or returns -1 at the round's end; `turn_left` and `turn_used`
+measure the running turn against the quantum, `account(steps)` adds to it,
+and `end_turn(reason, deadline=None)` ends it for a `TurnEnd`: `QUANTUM` and
+`SPIN` leave the core awake, `SLEEP` puts it to sleep and `DONE` makes it
+idle. `finish_round()` returns the round's longest turn, which moves the
+clock on. `wake(core)` makes a core awake; `apply_wakes(ipi_lines,
+terminal_input, now_ms)` wakes every sleeping or idle core whose rule holds,
+a raised IPI line (bit n for core n), terminal input for core 0, or a past
+deadline, and `wake_mask` gives the same cores without waking them.
+`steps(core)`, `turns(core)`, `any_awake()` and `earliest_deadline` describe
+the cores for the host.

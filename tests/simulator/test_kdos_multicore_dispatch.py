@@ -242,7 +242,7 @@ def test_one_core_boundary_rejects_dispatch_before_wake_and_waits_core_zero() ->
     wake_context = runtime.new_context()
     wake_context.data.push(noop.xt)
     wake_context.data.push(0)
-    with pytest.raises(ExecutionError, match="WAKE-CORE is unavailable"):
+    with pytest.raises(ExecutionError, match="full core other than the caller"):
         runtime.execute("WAKE-CORE", context=wake_context)
     assert wake_context.data.snapshot() == (noop.xt, 0)
     assert runtime.spinlocks.owners == (None,) * runtime.spinlocks.lock_count
@@ -305,7 +305,7 @@ def test_equal_bound_plain_do_reaches_phantom_core_one(word: str) -> None:
     # NCORES and N-FULL-CORES are both one.  Plain DO does not zero-trip when
     # start equals limit, so strict CORE-STATUS exposes I=1 immediately and
     # keeps this source bug bounded without a wraparound-size execution.
-    with pytest.raises(ExecutionError, match="accepts only core ID 0"):
+    with pytest.raises(ExecutionError, match="needs a full core's ID"):
         runtime.execute(word, context=context, step_budget=500)
 
     assert runtime.drain_uart_output() == b""

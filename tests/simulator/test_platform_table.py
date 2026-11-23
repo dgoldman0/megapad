@@ -252,9 +252,18 @@ def test_system_info_reports_a_topology(full_cores, clusters, cores, enabled, po
     assert (registers[2], registers[3], registers[9], registers[13]) == (
         cores, enabled, full_cores, ports)
     assert platform.mailbox.core_count == cores
-    # Runtime construction still admits one full core alone.
-    with pytest.raises(ValueError, match="exactly one advertised full core"):
-        MegaForthRuntime(memory=memory)
+    # Runtime construction admits full cores alone; microcores wait for
+    # their kernels.
+    if clusters:
+        with pytest.raises(ValueError, match="no microcore cluster"):
+            MegaForthRuntime(memory=memory)
+    else:
+        from simulator.platform import create_address_space
+
+        runtime = MegaForthRuntime(
+            memory=create_address_space(topology=Topology(full_cores, clusters)),
+        )
+        assert runtime.cores.full_cores == full_cores
 
 
 def test_the_mailbox_window_keeps_its_shape():
