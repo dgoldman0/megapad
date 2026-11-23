@@ -308,6 +308,56 @@ VARIABLE SEEN
 
 
 @pytest.mark.parametrize("executor", EXECUTORS)
+def test_the_workers_run_while_a_guest_evaluate_waits_for_them(executor):
+    runtime = _runtime(2, executor)
+    runtime.evaluate(SETUP + b"""
+: LONG ( -- ) 3000 0 DO 1 COUNTER +! LOOP ;
+: LINE ( -- ) S" ' LONG 1 WAKE-CORE  1 WAIT-FOR  COUNTER @ MARK!" EVALUATE ;
+""")
+    # The wait runs inside the guest EVALUATE, which cannot detach to the
+    # host: core 0's turns end in place and the worker takes its turns.
+    runtime.execute("LINE", step_budget=1_000_000)
+    assert _cell(runtime, "COUNTER") == 3000
+    assert _cell(runtime, "MARKS", 0) == 3000
+    assert runtime.cores.scheduler.turns(1) >= 2
+
+
+@pytest.mark.parametrize("executor", EXECUTORS)
+def test_a_sleep_inside_a_guest_evaluate_ends_core_zeros_turn(executor):
+    runtime = _runtime(2, executor)
+    runtime.evaluate(SETUP + b"""
+: LONG ( -- ) 3000 0 DO 1 COUNTER +! LOOP ;
+VARIABLE NAPS
+: NAP-WAIT ( -- ) BEGIN 1 CORE-STATUS WHILE 1 NAPS +! MS@ 1000 + IDLE-UNTIL REPEAT ;
+: LINE ( -- ) S" ' LONG 1 WAKE-CORE  NAP-WAIT  COUNTER @ MARK!" EVALUATE ;
+""")
+    runtime.execute("LINE", step_budget=1_000_000)
+    assert _cell(runtime, "MARKS", 0) == 3000
+    # Each sleep ended core 0's turn and gave the worker its turn, so core 0
+    # slept about once a round instead of spinning through each turn.
+    assert 1 <= _cell(runtime, "NAPS") <= runtime.cores.scheduler.turns(1) + 1
+
+
+def _nested_program(executor: str):
+    runtime = _runtime(4, executor, quantum=300)
+    runtime.evaluate(SETUP + b"""
+: WORK ( -- ) 30 0 DO COREID 1+ COUNTER +! 50 0 DO LOOP LOOP ;
+: SPREAD ( -- ) NCORES 1 ?DO ['] WORK I WAKE-CORE LOOP ;
+: LINE ( -- ) S" SPREAD WORK WAIT-ALL" EVALUATE ;
+""")
+    result = runtime.execute("LINE")
+    memory = runtime.memory.read_bytes(0, 0x100000)
+    steps = [runtime.cores.steps(core) for core in range(4)]
+    return result.semantic_steps, steps, memory, runtime.timer.counter
+
+
+def test_turns_inside_a_guest_evaluate_are_the_same_twice_and_on_both_executors():
+    first = _nested_program("native")
+    assert _nested_program("native") == first
+    assert _nested_program("python") == first
+
+
+@pytest.mark.parametrize("executor", EXECUTORS)
 def test_run_rounds_lets_workers_finish_after_core_zeros_dispatch(executor):
     runtime = _runtime(2, executor)
     runtime.evaluate(SETUP + b"""

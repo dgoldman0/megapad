@@ -135,6 +135,13 @@ class HostedCores:
         # The step meter's count when core 0's open turn in a host
         # evaluation last took its steps (run_word).
         self._open_mark: int | None = None
+        # While core 0's turn runs: its dispatch's meter, the meter's count
+        # when the turn last took its steps, and the count at which the turn
+        # ends, where a dispatch that cannot detach to the host lets the
+        # other cores take their turns in place (preempt_inline).
+        self.turn_meter = None
+        self._turn_mark = 0
+        self.turn_deadline = 0
 
     # -- the cores' state -----------------------------------------------------
 
@@ -383,15 +390,16 @@ class HostedCores:
             if quantum is not None and quantum < budget:
                 budget = quantum
             self.switch_to(0)
-            before = meter.steps
+            self._begin_core0_stint(meter)
             try:
                 suspended = stint(budget)
             except BaseException:
-                scheduler.account(meter.steps - before)
-                scheduler.end_turn(turn_end.DONE)
+                self._end_core0_stint(meter)
+                if scheduler.current == 0:
+                    scheduler.end_turn(turn_end.DONE)
                 self._host_quantum = None
                 raise
-            scheduler.account(meter.steps - before)
+            self._end_core0_stint(meter)
             self.others_ran = False
             if suspended is None:
                 scheduler.end_turn(turn_end.DONE)
@@ -468,7 +476,7 @@ class HostedCores:
                     continue
                 budget = scheduler.turn_left
                 self.switch_to(0)
-                before = meter.steps
+                self._begin_core0_stint(meter)
                 try:
                     if suspended is None:
                         outcome = runtime._execute_guarded(
@@ -486,7 +494,7 @@ class HostedCores:
                         prior, suspended = suspended, None
                         outcome = runtime._resume_scheduled(prior, budget)
                 finally:
-                    scheduler.account(meter.steps - before)
+                    self._end_core0_stint(meter)
                 if outcome is None:
                     # The turn stays open for the evaluator's next word.
                     self._open_mark = meter.steps
@@ -509,6 +517,60 @@ class HostedCores:
                 # context, as cancelling the host's suspension does.
                 runtime._abandon_scheduled(suspended)
             raise
+
+    def _begin_core0_stint(self, meter) -> None:
+        self.turn_meter = meter
+        self._turn_mark = meter.steps
+        self.turn_deadline = meter.steps + self.scheduler.turn_left
+
+    def _end_core0_stint(self, meter) -> None:
+        """Charge core 0's running turn with its steps since it last took
+        them."""
+
+        if self.scheduler.current == 0:
+            self.scheduler.account(meter.steps - self._turn_mark)
+        self._turn_mark = meter.steps
+        self.turn_meter = None
+
+    def preempt_inline(self, meter) -> None:
+        """Core 0's turn ends inside a dispatch that cannot detach to its
+        host, such as a word a guest EVALUATE or the token replayer runs:
+        its quantum is used, or it sleeps in IDLE-UNTIL there. The other
+        cores take the rest of the round's turns in place, with the
+        dispatch stacks of core 0's dispatch put aside, and core 0 goes on
+        in the next round's first turn."""
+
+        runtime = self.runtime
+        scheduler = self.scheduler
+        turn_end = self._turn_end
+        scheduler.account(meter.steps - self._turn_mark)
+        self._turn_mark = meter.steps
+        scheduler.end_turn(
+            turn_end.SPIN if runtime._turn_end_requested else turn_end.QUANTUM
+        )
+        held = (runtime._active_dispatches, runtime._active_input_states)
+        runtime._active_dispatches, runtime._active_input_states = [], []
+        self.turn_meter = None
+        try:
+            self.apply_wakes()
+            while True:
+                core = scheduler.begin_next_turn()
+                if core < 0:
+                    break
+                self._start_turn()
+                self._worker_turn(core)
+                self.apply_wakes()
+            if scheduler.round_started:
+                self._finish_round()
+            self.apply_wakes()
+        finally:
+            runtime._active_dispatches, runtime._active_input_states = held
+            self.switch_to(0)
+        if scheduler.begin_next_turn() != 0:
+            raise AssertionError("core 0's next turn did not come first")
+        self._start_turn()
+        self.turn_meter = meter
+        self.turn_deadline = meter.steps + scheduler.turn_left
 
     def _account_open_turn(self, meter) -> None:
         """Charge core 0's open turn with what it ran between words, such as

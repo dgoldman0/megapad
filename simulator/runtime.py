@@ -5006,6 +5006,16 @@ class MegaForthRuntime:
             and len(self._active_dispatches) == 1
             and self._input_allows_detach()
         )
+        # Where core 0's turn runs in a dispatch that cannot detach, as in a
+        # word a guest EVALUATE runs, the turn ends in place: the other
+        # cores take their turns there (HostedCores.preempt_inline).
+        cores = self._cores
+        inline_turns = (
+            cores is not None
+            and not turn_can_end
+            and cores.turn_meter is meter
+            and cores.active == 0
+        )
         if resume_cursor is not None:
             if word is not None or fault_request is not None:
                 raise AssertionError("resumed dispatch cannot have a new entry target")
@@ -5127,6 +5137,8 @@ class MegaForthRuntime:
                 and self._input_allows_detach()
             ):
                 return _DispatchCursor(current.xt, ip, host_yield=True)
+            if inline_turns and meter.steps >= cores.turn_deadline:
+                cores.preempt_inline(meter)
 
             if ip == 0 and self._try_colon_accelerator(
                 current,
@@ -5169,6 +5181,8 @@ class MegaForthRuntime:
                     and len(self._active_dispatches) == 1
                     and self._input_allows_detach() else None
                 )
+                if native_quantum is None and inline_turns:
+                    native_quantum = cores.turn_deadline
                 owner = self._machine_owner
                 progressed = self._native_execution.run(
                     current, ip, context, meter, native_quantum,
@@ -5265,6 +5279,15 @@ class MegaForthRuntime:
                     self._idle_deadline_ms = deadline
                     return _DispatchCursor(current.xt, ip)
                 if deadline != 0:
+                    if (
+                        inline_turns
+                        and deadline > self.rtc.uptime_ms
+                        and not self._signal_pending()
+                    ):
+                        # The sleep cannot suspend here: core 0's turn ends
+                        # in place, the other cores take theirs, and the
+                        # sleep ends early, as it may.
+                        cores.preempt_inline(meter)
                     # The sleep ends at once, at its deadline or at a pending
                     # IPI request, and takes what is pending, as the BIOS's
                     # IDLE-UNTIL does; a zero deadline never sleeps.

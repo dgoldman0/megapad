@@ -787,9 +787,18 @@ its own wake rule does not hold, and once no other core is awake, an
 `IDLE-UNTIL` ends early, as it may, while an `IDL` without a deadline, such
 as `KEY`'s with no input queued, fails, since nothing could end it. When
 the evaluation returns, core 0's turn ends and the round's other turns run.
-A guest `EVALUATE` runs within the turn of the word that called it, so the
-other cores take no turn until it returns. On one core the evaluation runs
-as the paragraphs above describe.
+On one core the evaluation runs as the paragraphs above describe.
+
+A dispatch that cannot detach to its host, such as a word that a guest
+`EVALUATE`, the token replayer or a primitive's nested call runs, ends
+core 0's turn in place: once the turn's quantum is used, the other cores
+take the rest of the round's turns there, with core 0's dispatch put aside
+on the host's stack, and core 0 goes on in the next round's first turn. An
+`IDLE-UNTIL` there ends core 0's turn the same way and then returns early,
+taking any signal that arrived, so a wait for a worker inside a module load
+or a boot script makes progress a round at a time; an `IDL` without a
+deadline there still fails. The native engine stops at the same step, so
+both executors end the turn at the same place.
 
 Time follows the round. Every turn starts with the Timer at the round's
 start, so `CYCLES` and the Timer's match logic see the round's start plus
