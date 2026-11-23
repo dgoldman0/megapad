@@ -163,6 +163,16 @@ public:
         deadline_[at] = NO_DEADLINE;
     }
 
+    // The core has no work left between its turns: it goes idle, as a turn
+    // that finishes its work leaves it.
+    void rest(int core) {
+        const std::size_t at = index(core);
+        if (current_ == core)
+            throw std::logic_error("the core's turn is running");
+        state_[at] = State::IDLE;
+        deadline_[at] = NO_DEADLINE;
+    }
+
     // The sleeping or idle cores whose wake rule holds, as a mask: a raised
     // IPI line (bit n of `ipi_lines` for core n), terminal input for core 0,
     // or a deadline at or before `now_ms` for a sleeping core.

@@ -3,7 +3,7 @@
 The extension and its Python owner are built from the same checkout and use
 one current internal interface. Rebuild the extension after changing this
 boundary with `python setup_simulator_accel.py build_ext --inplace --force`.
-The extension exports `SEMANTIC_API_VERSION = 15`; its Python owner checks this
+The extension exports `SEMANTIC_API_VERSION = 16`; its Python owner checks this
 version before admission. An explicit native request rejects older builds;
 automatic selection keeps the reference executor and the Python dictionary
 when the version mismatches. The simulator's CRC and storage services are
@@ -558,8 +558,10 @@ measure the running turn against the quantum, `account(steps)` adds to it,
 and `end_turn(reason, deadline=None)` ends it for a `TurnEnd`: `QUANTUM` and
 `SPIN` leave the core awake, `SLEEP` puts it to sleep and `DONE` makes it
 idle. `finish_round()` returns the round's longest turn, which moves the
-clock on. `wake(core)` makes a core awake; `apply_wakes(ipi_lines,
-terminal_input, now_ms)` wakes every sleeping or idle core whose rule holds,
+clock on. `wake(core)` makes a core awake, and `rest(core)` makes idle a
+core whose turn is not running, when its work ended between its turns;
+`apply_wakes(ipi_lines, terminal_input, now_ms)` wakes every sleeping or
+idle core whose rule holds,
 a raised IPI line (bit n for core n), terminal input for core 0, or a past
 deadline, and `wake_mask` gives the same cores without waking them.
 `steps(core)`, `turns(core)`, `any_awake()` and `earliest_deadline` describe

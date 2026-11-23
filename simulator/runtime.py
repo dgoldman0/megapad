@@ -521,6 +521,10 @@ class _EvaluationState:
     # The token recorder's record of the source file this line belongs to,
     # when one is being recorded (simulator/token_recorder.py).
     recording: object | None = None
+    # Whether the words this evaluation executes run in the cores' rounds:
+    # the host's own evaluation on a machine with several cores, which is
+    # core 0's outer interpreter (HostedCores.run_word).
+    rounds: bool = False
 
     @property
     def compiler(self) -> _Compiler | None:
@@ -2168,6 +2172,9 @@ class MegaForthRuntime:
         evaluator.depth_cell.write(0)
 
     def _fail_closed_active_bios_evaluator(self) -> None:
+        if self.active_core != 0:
+            # The BIOS evaluator is core 0's; a worker's failure leaves it.
+            return
         evaluator = self._bios_evaluator
         if evaluator is not None and (
             evaluator.frames
@@ -2566,6 +2573,16 @@ class MegaForthRuntime:
         return any(
             state.context is context for state in self._active_input_states
         )
+
+    def _input_allows_detach(self) -> bool:
+        """Whether no evaluation waits beneath the outer dispatch with a
+        Python continuation that a detached cursor would strand. The one
+        exception is the host's evaluation on a machine with several cores,
+        whose words run in rounds that keep the dispatch they detach
+        (``HostedCores.run_word``)."""
+
+        states = self._active_input_states
+        return not states or (len(states) == 1 and states[0].rounds)
 
     def _has_older_dispatch(self, context: ExecutionContext) -> bool:
         if not self._active_dispatches:
@@ -3069,6 +3086,7 @@ class MegaForthRuntime:
         """Parse an optional word from the active physical input line."""
 
         self._require_session_owner_access("parse the active input")
+        self.require_core0("parsing the input")
         if not self._active_input_states:
             raise ExecutionError("cannot parse a word without an active input line")
         return self._active_input_states[-1].cursor.parse_word()
@@ -3077,6 +3095,7 @@ class MegaForthRuntime:
         """Publish one BIOS ``WORD`` value and then commit its input cursor."""
 
         self._require_session_owner_access("parse into the dictionary")
+        self.require_core0("parsing the input")
         if not self._active_input_states:
             raise ExecutionError(
                 "cannot parse a delimited word without an active input line"
@@ -3181,14 +3200,22 @@ class MegaForthRuntime:
             active_context.returns.pointer_capture_checkpoint()
         )
         has_enclosing_dispatch = self._has_active_dispatch(active_context)
+        rounds = (
+            self._cores is not None
+            and not self._active_dispatches
+            and not self._active_input_states
+        )
         state: _EvaluationState | None = None
         line_count = 0
+        completed = False
         try:
             for line in SourceBuffer(source, name=source_name):
                 line_count += 1
                 cursor = line.cursor()
                 if state is None:
-                    state = _EvaluationState(active_context, cursor, meter)
+                    state = _EvaluationState(
+                        active_context, cursor, meter, rounds=rounds,
+                    )
                 else:
                     state.cursor = cursor
                 self._evaluate_line(state)
@@ -3214,6 +3241,7 @@ class MegaForthRuntime:
                     "conditional compilation has no terminating [THEN]",
                     state.conditional_skip.location,
                 )
+            completed = True
             return EvaluationResult(
                 source_name=source_name,
                 line_count=line_count,
@@ -3296,6 +3324,8 @@ class MegaForthRuntime:
                 if compiler is not None and compiler.temporary:
                     state.compiler = None
                     self._discard_temporary_compiler(compiler, state)
+                if state.rounds:
+                    self._cores.end_evaluation(meter, completed=completed)
             if not has_enclosing_dispatch:
                 active_context.returns.restore_pointer_captures(
                     capture_checkpoint
@@ -3657,6 +3687,26 @@ class MegaForthRuntime:
         blocked.context._lease_for_suspension(handle.sequence)
         return blocked
 
+    def _abandon_scheduled(self, blocked: _SuspendedExecution) -> None:
+        """Unwind a dispatch the core scheduler holds and will not resume,
+        and free its context, as cancelling the host's suspension does."""
+
+        blocked.had_pointer_capture = (
+            blocked.had_pointer_capture
+            or blocked.context.returns.has_pointer_captures_after(
+                blocked.capture_checkpoint
+            )
+        )
+        if blocked.had_pointer_capture:
+            blocked.context._mark_host_control_fault(
+                ExecutionError("semantic suspension abandoned after RP@")
+            )
+        blocked.context.returns.restore(blocked.return_snapshot)
+        blocked.context.returns.restore_pointer_captures(
+            blocked.capture_checkpoint
+        )
+        blocked.context._release_suspension(blocked.handle.sequence)
+
     def _resume_suspension(
         self,
         blocked: _SuspendedExecution,
@@ -3870,8 +3920,19 @@ class MegaForthRuntime:
         ):
             state.compiler.operations.append(Call(word.xt))
             return False
-        self._execute_guarded(word, state.context, state.meter)
+        self._run_evaluated_word(word, state)
         return True
+
+    def _run_evaluated_word(self, word: Word, state: _EvaluationState) -> None:
+        """Run a word the evaluator executes: in the cores' rounds when the
+        evaluation is the host's own on a machine with several cores, so
+        the other cores run beside core 0's interpreter, and otherwise as
+        one dispatch."""
+
+        if state.rounds and not self._active_dispatches:
+            self._cores.run_word(word, state.context, state.meter)
+        else:
+            self._execute_guarded(word, state.context, state.meter)
 
     def _evaluate_found_number(self, number: int, state: _EvaluationState) -> None:
         """What the interpreter does with a number: compile it or push it."""
@@ -4114,10 +4175,8 @@ class MegaForthRuntime:
             # publishes at ``;``, so the check follows here.
             notification = self.take_dictionary_index_notification()
             if notification:
-                self._execute_guarded(
-                    self.dictionary.resolve(notification),
-                    state.context,
-                    state.meter,
+                self._run_evaluated_word(
+                    self.dictionary.resolve(notification), state,
                 )
         elif kind is DirectiveKind.IF:
             compiler.operations.append(BranchZero(0))
@@ -4354,11 +4413,7 @@ class MegaForthRuntime:
                 ),
             )
             self._transient_words[scratch_start] = transient
-            self._execute_guarded(
-                transient,
-                state.context,
-                state.meter,
-            )
+            self._run_evaluated_word(transient, state)
         finally:
             if transient is not None:
                 removed = self._transient_words.pop(transient.xt, None)
@@ -4962,7 +5017,7 @@ class MegaForthRuntime:
                 and quantum_limit is not None
                 and (meter.steps >= quantum_limit or self._turn_end_requested)
                 and len(self._active_dispatches) == 1
-                and not self._active_input_states
+                and self._input_allows_detach()
             ):
                 return _DispatchCursor(current.xt, ip, host_yield=True)
 
@@ -5005,7 +5060,7 @@ class MegaForthRuntime:
                 native_quantum = (
                     quantum_limit if allow_idle
                     and len(self._active_dispatches) == 1
-                    and not self._active_input_states else None
+                    and self._input_allows_detach() else None
                 )
                 owner = self._machine_owner
                 progressed = self._native_execution.run(

@@ -827,6 +827,7 @@ inline void register_bindings(py::module_& module) {
         .def_property_readonly("round_length", &sched::CoreScheduler::round_length)
         .def("finish_round", &sched::CoreScheduler::finish_round)
         .def("wake", &sched::CoreScheduler::wake, py::arg("core"))
+        .def("rest", &sched::CoreScheduler::rest, py::arg("core"))
         .def("wake_mask", &sched::CoreScheduler::wake_mask, py::arg("ipi_lines"),
              py::arg("terminal_input"), py::arg("now_ms"))
         .def("apply_wakes", &sched::CoreScheduler::apply_wakes, py::arg("ipi_lines"),

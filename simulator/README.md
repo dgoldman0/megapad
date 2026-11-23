@@ -39,7 +39,8 @@ The implemented slices provide:
   the profile has;
 - full cores in rounds (`cores.py`, `accel/core_scheduler.h`): with two to
   four full cores a native scheduler gives each awake core turns of 65,536
-  semantic steps in ascending core ID, core 0 runs the host's dispatch, and
+  semantic steps in ascending core ID, core 0 runs the host's dispatch and
+  the words the host's evaluation executes, its outer interpreter, and
   the others run the BIOS worker loop, taking jobs that `WAKE-CORE` or a full
   core's `IPI-SEND` sends them and running each on fresh stacks in the core's
   zone; `CORE-STATUS` reads the worker slots, `IPI-STATUS`, `IPI-ACK`,

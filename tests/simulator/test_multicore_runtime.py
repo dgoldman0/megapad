@@ -207,7 +207,11 @@ VARIABLE QUITS  0 QUITS !  VARIABLE QUIT-CORE  -1 QUIT-CORE !
 @pytest.mark.parametrize("executor", EXECUTORS)
 @pytest.mark.parametrize(
     "body",
-    (b"5 ,", b"8 ALLOT", b"S\" 1 2 +\" EVALUATE", b"KEY DROP", b"KEY? DROP"),
+    (
+        b"5 ,", b"8 ALLOT", b"S\" 1 2 +\" EVALUATE", b"KEY DROP", b"KEY? DROP",
+        # ' parses the next word of core 0's input when it runs.
+        b"' DUP DROP",
+    ),
 )
 def test_a_worker_reaching_core_zeros_services_takes_the_illegal_fault(executor, body):
     runtime = _runtime(2, executor)
@@ -238,6 +242,43 @@ def test_a_workers_ipi_ends_core_zeros_sleep_and_core_zero_takes_it(executor):
     assert _cell(runtime, "MARKS", 1) == 5
     assert _cell(runtime, "MARKS", 0) == 9
     assert runtime.memory.mmio.mailbox.table.pending_mask(0) == 0
+
+
+@pytest.mark.parametrize("executor", EXECUTORS)
+def test_the_workers_run_while_the_host_evaluates_a_line(executor):
+    runtime = _runtime(2, executor)
+    runtime.evaluate(SETUP + b": LONG ( -- ) 3000 0 DO 1 COUNTER +! LOOP ;")
+    # The host's evaluation is core 0's outer interpreter: the worker runs
+    # its job in the rounds between core 0's turns, so the line's wait ends.
+    runtime.evaluate(b"' LONG 1 WAKE-CORE  1 WAIT-FOR  COUNTER @ MARK!",
+                     step_budget=1_000_000)
+    assert _cell(runtime, "COUNTER") == 3000
+    assert _cell(runtime, "MARKS", 0) == 3000
+    assert runtime.cores.job(1) == 0
+    assert [core["state"] for core in runtime.core_status()] == ["idle", "idle"]
+
+
+@pytest.mark.parametrize("executor", EXECUTORS)
+def test_core_zeros_sleep_in_an_evaluated_line_ends_at_a_workers_ipi(executor):
+    runtime = _runtime(2, executor)
+    runtime.evaluate(SETUP + b": RING ( -- ) 500 0 DO LOOP  5 MARK!  0 0 IPI-SEND ;")
+    runtime.evaluate(b"' RING 1 WAKE-CORE  MS@ 1000000 + IDLE-UNTIL  IPI-STATUS 9 + MARK!")
+    assert _cell(runtime, "MARKS", 1) == 5
+    # Core 0 woke at the worker's IPI and took it, as idle_until does.
+    assert _cell(runtime, "MARKS", 0) == 9
+    assert runtime.memory.mmio.mailbox.table.pending_mask(0) == 0
+
+
+@pytest.mark.parametrize("executor", EXECUTORS)
+def test_an_evaluated_idl_that_nothing_can_end_fails_and_frees_core_zero(executor):
+    runtime = _runtime(2, executor)
+    runtime.evaluate(SETUP)
+    # No input is queued and no other core is awake to signal core 0.
+    with pytest.raises(ExecutionError, match="no other core awake"):
+        runtime.evaluate(b"KEY DROP")
+    runtime.evaluate(b"7 MARK!")
+    assert _cell(runtime, "MARKS", 0) == 7
+    assert [core["state"] for core in runtime.core_status()] == ["idle", "idle"]
 
 
 @pytest.mark.parametrize("executor", EXECUTORS)

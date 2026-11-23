@@ -113,6 +113,9 @@ class HostedCores:
         # The other cores' steps since the host last took them.
         self.other_steps = 0
         self._round_start_counter: int | None = None
+        # The step meter's count when core 0's open turn in a host
+        # evaluation last took its steps (run_word).
+        self._open_mark: int | None = None
 
     # -- the cores' state -----------------------------------------------------
 
@@ -334,6 +337,138 @@ class HostedCores:
                 )
                 outcome = suspended
             self.apply_wakes()
+
+    def run_word(self, word, context, meter) -> None:
+        """Run to its end a word that the host's evaluator executes on core 0.
+
+        The evaluator is core 0's outer interpreter: the words it executes
+        run in core 0's turns, and a turn stays open from one word to the
+        next, so the other cores take their turns as they would beside the
+        BIOS's interpreter. The evaluator cannot suspend to its host, so the
+        word's dispatch stays here: a turn that ends at its quantum or at a
+        busy spinlock continues in the next round, and core 0 sleeps in IDL
+        while another core runs and its own wake rule does not hold. Nothing
+        delivers input or moves the clock while the host evaluates, so once
+        no other core is awake an IDLE-UNTIL ends early, as it may, and an
+        IDL without a deadline fails, since nothing could end it.
+        """
+
+        runtime = self.runtime
+        scheduler = self.scheduler
+        turn_end = self._turn_end
+        if scheduler.current == 0:
+            # The open turn takes what core 0 ran since the last word.
+            self._account_open_turn(meter)
+        if scheduler.state(0) == self._idle:
+            scheduler.wake(0)
+        suspended = None
+        after_sleep = False
+        try:
+            while True:
+                core = scheduler.current
+                if core == 0 and not scheduler.turn_left:
+                    scheduler.end_turn(turn_end.QUANTUM)
+                    core = -1
+                if core < 0:
+                    core = scheduler.begin_next_turn()
+                    if core >= 0:
+                        self._start_turn()
+                if core < 0:
+                    if scheduler.round_started:
+                        self._finish_round()
+                    self.apply_wakes()
+                    if not scheduler.any_awake():
+                        if scheduler.deadline(0) is None:
+                            raise ExecutionError(
+                                "IDL in source evaluation has no other core "
+                                "awake to end it; use run_until_blocked on a "
+                                "compiled word"
+                            )
+                        scheduler.wake(0)
+                    continue
+                if core > 0:
+                    self._worker_turn(core)
+                    self.apply_wakes()
+                    continue
+                budget = scheduler.turn_left
+                self.switch_to(0)
+                before = meter.steps
+                try:
+                    if suspended is None:
+                        outcome = runtime._execute_guarded(
+                            word,
+                            context,
+                            meter,
+                            allow_idle=True,
+                            quantum_steps=budget,
+                            publish=False,
+                        )
+                    else:
+                        if after_sleep:
+                            runtime._end_sleep()
+                            after_sleep = False
+                        prior, suspended = suspended, None
+                        outcome = runtime._resume_scheduled(prior, budget)
+                finally:
+                    scheduler.account(meter.steps - before)
+                if outcome is None:
+                    # The turn stays open for the evaluator's next word.
+                    self._open_mark = meter.steps
+                    return
+                suspended = outcome
+                if outcome.cursor.host_yield:
+                    scheduler.end_turn(
+                        turn_end.SPIN if runtime._turn_end_requested
+                        else turn_end.QUANTUM
+                    )
+                else:
+                    scheduler.end_turn(turn_end.SLEEP, runtime._idle_deadline_ms)
+                    after_sleep = True
+                self.apply_wakes()
+        except BaseException:
+            if scheduler.current == 0:
+                self._open_mark = meter.steps
+            if suspended is not None:
+                # Core 0's word will not resume: unwind it and free its
+                # context, as cancelling the host's suspension does.
+                runtime._abandon_scheduled(suspended)
+            raise
+
+    def _account_open_turn(self, meter) -> None:
+        """Charge core 0's open turn with what it ran between words, such as
+        a callback the evaluator ran itself."""
+
+        mark = self._open_mark
+        if mark is not None and meter.steps > mark:
+            self.scheduler.account(meter.steps - mark)
+        self._open_mark = None
+
+    def end_evaluation(self, meter, *, completed: bool) -> None:
+        """The host's evaluation has ended, and core 0's work with it.
+
+        Core 0's turn ends and it goes idle. When the evaluation completed,
+        the other cores take the rest of the round's turns; after a failure
+        the round only ends, and they take their turns in the next one.
+        """
+
+        scheduler = self.scheduler
+        if scheduler.current == 0:
+            self._account_open_turn(meter)
+            scheduler.end_turn(self._turn_end.DONE)
+        elif scheduler.state(0) != self._idle:
+            scheduler.rest(0)
+        self._open_mark = None
+        if completed and scheduler.round_started:
+            while True:
+                core = scheduler.begin_next_turn()
+                if core < 0:
+                    break
+                self._start_turn()
+                self._worker_turn(core)
+                self.apply_wakes()
+        if scheduler.round_started and scheduler.current < 0:
+            self._finish_round()
+        self.switch_to(0)
 
     def run_rounds(self, max_rounds: int | None = None) -> int:
         """Run rounds while core 0 runs no host dispatch, until no core is

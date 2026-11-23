@@ -577,7 +577,9 @@ The host sees one compiled-word suspension at a time, core 0's; the core
 scheduler keeps each worker's job between its turns itself. Interpreted
 source evaluation and a Python primitive's nested public dispatch have
 Python-owned continuations that are not captured by this seam, so reaching
-IDL there fails explicitly and restores the ordinary dispatch guard. A
+IDL there fails explicitly and restores the ordinary dispatch guard; the
+host's own evaluation on several cores sleeps in rounds instead, as the last
+part of this section describes. A
 host-requested resume rejects stack changes to the suspended context while
 no other core has run since it suspended. Once another core has run, the
 comparison is skipped, because on the machine another core may write any
@@ -765,9 +767,21 @@ host-delivered wake for core 0's sleep continues the machine: core 0
 resumes once its own wake rule holds, and otherwise the call runs one round
 of the other cores and returns core 0's sleep under a fresh suspension
 handle. `run_rounds` runs the other cores while core 0 runs no dispatch, as
-the machine runs them while core 0 waits at its prompt. Host evaluation of
-source runs no dispatch, so neither it nor a nested `EVALUATE` gives the
-workers a turn.
+the machine runs them while core 0 waits at its prompt.
+
+The host's own evaluation of source is core 0's outer interpreter. Each
+word it executes runs in core 0's turns, and core 0's turn stays open from
+one word to the next, so the other cores take their turns between core 0's
+as they would beside the BIOS's interpreter, and a line that starts a job
+and waits for it ends. The evaluation cannot suspend to its host, so the
+rounds run inside it: core 0 sleeps in `IDL` while another core is awake and
+its own wake rule does not hold, and once no other core is awake, an
+`IDLE-UNTIL` ends early, as it may, while an `IDL` without a deadline, such
+as `KEY`'s with no input queued, fails, since nothing could end it. When
+the evaluation returns, core 0's turn ends and the round's other turns run.
+A guest `EVALUATE` runs within the turn of the word that called it, so the
+other cores take no turn until it returns. On one core the evaluation runs
+as the paragraphs above describe.
 
 Time follows the round. Every turn starts with the Timer at the round's
 start, so `CYCLES` and the Timer's match logic see the round's start plus
@@ -864,8 +878,9 @@ sender; `MBOX! ( x -- )` and `MBOX@ ( -- x )` write and read the caller's
 mailbox data word. These four follow `VRAM-SIZE` at the frontier.
 
 A worker runs within the limits of KDOS's concurrency contract. The
-compiler, the evaluator, dictionary growth and rollback, and terminal input
-(`KEY`, `KEY?` and the `ACCEPT` built on `KEY`) run on core 0 alone. A
+compiler, the evaluator with its input parsing (`'`, `WORD` and the names
+that defining words take), dictionary growth and rollback, and terminal
+input (`KEY`, `KEY?` and the `ACCEPT` built on `KEY`) run on core 0 alone. A
 worker that reaches one takes the illegal-operation fault, code -21, through
 its fault path, which reports `*** ILLEGAL INSTRUCTION CORE=nn`. Words that
 only read the dictionary, such as `FIND` and `>BODY`, work on every core,
