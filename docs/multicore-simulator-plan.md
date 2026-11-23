@@ -2,7 +2,8 @@
 
 Status: Accepted, 2026-11-22, with the nine decisions of section 10.
 Stages 1 and 2 are built (MegaPad d8016c43; 4ea4bc91, 09a26e8d and
-f317327b). It is the staged plan for Part 3 of the release plan
+f317327b), and stage 3 (1c4563f4 to 49d94ecd, with Akashic 95e081c9).
+It is the staged plan for Part 3 of the release plan
 (`dev/PLAN.md` in fantasy-engine), in which MegaPad's hosted simulator
 becomes the multicore machine MegaPad is. Section 1 describes the simulator
 as it stands, section 2 says what matching the emulator's lock-step can mean
@@ -492,6 +493,23 @@ Tests:
   are compared with today's with `PYTHONHASHSEED` pinned, knowing that code
   placement alone moves them by about 1%.
 
+Built on 2026-11-22. The native `CoreScheduler` and the glue in
+`simulator/cores.py` run the full cores in rounds (1c4563f4). Host
+evaluation became core 0's outer interpreter, whose words run in core 0's
+turns with the turn kept open from word to word (da1ce7a3): until then the
+workers took turns only inside a host dispatch, so a line that started a
+job and waited for it, as LM1's managed-data harness evaluates them, never
+ended. The differential file is `tests/test_multicore_differential.py`
+(3f1947e4); its cases found findings 12 to 14. `create_address_space`
+replaced the one-core factory in MegaPad's 54 callers (c0b3ab83) and
+Akashic's 42 (Akashic 95e081c9), after which the factory went (49d94ecd).
+With one core the runtime builds no scheduler, and a KDOS boot and a
+2,000-iteration dispatch take the same semantic steps and Timer counts on
+d8016c43 and on stage 3, on both executors. Two parts of section 4.3 waited
+for stage 4: input entered at any host boundary rather than only between
+rounds, and a running worker took a chiplet's doorbell at its next turn
+rather than straight after the read that raised it.
+
 ### Stage 4. Per-core engines, contention, chiplets, worker services (3a, 3f)
 
 Builds per-core `FPCSR`, tile engine and accumulator, with `TACC-SEND` and
@@ -638,11 +656,11 @@ boot leaves a microcore's R2 as reset leaves it.
 
 - **LM1's chiplet module, stage 2.** `tests/test_lm1_chiplet.py`, on main
   since d1f0ea17, drives the one-core profile through
-  `create_one_core_address_space(..., chiplet_ports=1)`, `HostedChipletPorts`
-  and `runtime.tile`. The one-core profile keeps port ID 1 and the ports'
-  API. Stage 3's factory rename updates the test's call, and stage 4, which
-  gives each core its own tile engine, keeps core 0's as `runtime.tile` and
-  runs the test's cases on two and four cores as well.
+  `create_address_space(..., chiplet_ports=1)` since stage 3's factory
+  rename (c0b3ab83), `HostedChipletPorts` and `runtime.tile`. The one-core
+  profile keeps port ID 1 and the ports' API. Stage 4, which gives each core
+  its own tile engine, keeps core 0's as `runtime.tile` and runs the test's
+  cases on two and four cores as well.
 - **LM1's chiplet module, stage 3 (managed data).** Its 27 conformance
   tests run through the real code at both ends, in the emulator and the
   simulator (decision B of LM1's `design/chiplet-module.md`). Tests 5, 6,
