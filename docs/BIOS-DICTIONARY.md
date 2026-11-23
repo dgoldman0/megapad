@@ -416,7 +416,7 @@ Four more words of this section have no number in the catalogue:
 | 114 | `VARIABLE` | `( "name" -- )` | | Create word that pushes address of an 8-byte data cell (initialized to 0) |
 | 115 | `CONSTANT` | `( n "name" -- )` | | Create word that pushes n |
 | 116 | `VALUE` | `( x "name" -- )` | | Create word that pushes *contents* of its data cell (19-byte trampoline with `ldn` indirection) |
-| 117 | `TO` | `( x "name" -- )` | ✓ | Store x into VALUE's data cell. State-smart: interpret → store directly; compile → emit inline store code |
+| 117 | `TO` | `( x "name" -- )` | ✓ | Store x into VALUE's data cell. State-smart: interpret → store directly; compile → emit inline store code. A word VALUE did not make is refused with `TO requires a VALUE target, got NAME`, as the simulator refuses it: x stays on the stack, compilation stops and the line ends |
 | 118 | `CREATE` | `( "name" -- )` | | Create word with 30-byte trampoline (runtime pushes data-field addr). Includes 13-byte DOES> slot of zeroes |
 | 119 | `DOES>` | `( -- )` | ✓ | Compile `call does_runtime` + `sep r17`. At runtime, patches latest CREATE'd word's trampoline offset 16–29 with jump to DOES> body |
 | 120 | `IMMEDIATE` | `( -- )` | | Set IMMEDIATE flag (bit 7 of flags byte) on most recent word |

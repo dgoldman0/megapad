@@ -5044,6 +5044,30 @@ class TestBIOS(unittest.TestCase):
         ])
         self.assertIn("8 ", text)
 
+    def test_to_refuses_a_word_that_is_not_a_value(self):
+        """TO refuses a CONSTANT, a VARIABLE and a colon word with the
+        simulator's message.  The refused x stays on the stack, nothing is
+        written (a CONSTANT holding an address used to have x stored
+        there), and a definition being compiled ends as an undefined word
+        ends it."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE TGT  0 TGT !  TGT CONSTANT KT  VARIABLE VV  : CW 1 ;",
+            "42 TO KT",
+            "60 EMIT DEPTH . TGT @ . 62 EMIT",
+            "DROP 43 TO VV",
+            "DROP 44 TO CW",
+            "DROP : BAD-ASSIGN 45 TO KT ;",
+            "60 EMIT DEPTH . TGT @ . VV @ . 62 EMIT",
+            "5 VALUE GOOD  : SET-GOOD TO GOOD ;  9 SET-GOOD  60 EMIT GOOD . 62 EMIT",
+        ])
+        for name in ("KT", "VV", "CW"):
+            self.assertIn(f"TO requires a VALUE target, got {name}", text)
+        self.assertEqual(text.count("TO requires a VALUE target, got KT"), 2)
+        self.assertIn("<1 0 >", text)
+        self.assertIn("<0 0 0 >", text)
+        self.assertIn("<9 >", text)
+
     def test_postpone_immediate(self):
         """POSTPONE of an IMMEDIATE word compiles it instead of executing."""
         sys, buf = self._boot_bios()

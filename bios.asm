@@ -13494,6 +13494,8 @@ w_val_name_done:
 ;   Stores x into the data field of a VALUE word.
 ;   Extracts data_addr from the ldi64 immediate at code+3.
 ;   State-smart: interpret → store directly; compile → emit inline store.
+;   A word that VALUE did not make is refused before x is taken, with the
+;   simulator's message, and the line ends as QUIT ends it.
 w_to:
     ; Parse next word
     ldi64 r11, parse_word
@@ -13506,10 +13508,30 @@ w_to:
     call.l r11
     cmpi r9, 0
     lbreq interp_undefined
+    mov r13, r9               ; the entry, for a refusal's report
 
     ; entry_to_code → R9 = code addr
     ldi64 r11, entry_to_code
     call.l r11
+
+    ; Only VALUE's code has VALUE's 19-byte shape (to_value_shape) and an
+    ; immediate naming the cell that follows it, checked below.
+    ldi64 r12, to_value_shape
+w_to_shape:
+    ld.b r0, r12              ; offset, or 0xFF at the end
+    ldi r1, 0xFF
+    cmp r0, r1
+    lbreq w_to_shape_ok
+    mov r11, r9
+    add r11, r0
+    ld.b r1, r11
+    inc r12
+    ld.b r0, r12              ; the byte VALUE puts there
+    inc r12
+    cmp r0, r1
+    lbrne w_to_refuse
+    lbr w_to_shape
+w_to_shape_ok:
 
     ; Extract data_addr from ldi64 immediate at code+3
     ; The trampoline starts with: F0 60 10 <8-byte LE addr>
@@ -13567,7 +13589,11 @@ w_to:
     lsli r0, 8
     lsli r0, 8
     or r10, r0
-    ; R10 = data_addr
+    ; R10 = data_addr, which for a VALUE is the cell after its code
+    mov r0, r9
+    addi r0, 19
+    cmp r0, r10
+    lbrne w_to_refuse
 
     ; Check STATE
     ldi64 r11, var_state
@@ -13683,6 +13709,43 @@ w_to_compile:
     ldi64 r11, compile_byte
     call.l r11
     ret.l
+
+; TO met a word that VALUE did not make (R13 = its entry).  Without this
+; refusal TO took the immediate at code+3 of any word as a cell address, so
+; `x TO K` wrote x to the address a CONSTANT K held.  The report is the
+; simulator's: "TO requires a VALUE target, got NAME".  x stays on the
+; stack.  As after an undefined word, compilation stops and the line ends.
+w_to_refuse:
+    ldi64 r10, str_to_not_value
+    ldi64 r11, print_str
+    call.l r11
+    mov r9, r13
+    addi r9, 8
+    ld.b r12, r9
+    andi r12, 0x7F
+    inc r9
+    ldi64 r11, print_counted
+    call.l r11
+    ldi64 r11, print_crlf
+    call.l r11
+    ldi r1, 0
+    ldi64 r11, var_state
+    str r11, r1
+    ldi64 r11, var_compile_active
+    str r11, r1
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
+
+; The bytes every VALUE's code has, as (offset, byte) pairs ending at 0xFF:
+;   F0 60 10 <data address>   ldi64 r1, <cell after the code>
+;   50 11                     ldn r1, r1
+;   67 E0 08 54 E1            subi r14, 8; str r14, r1
+;   0E                        ret.l
+to_value_shape:
+    .db 0, 0xF0, 1, 0x60, 2, 0x10
+    .db 11, 0x50, 12, 0x11, 13, 0x67, 14, 0xE0, 15, 0x08, 16, 0x54, 17, 0xE1
+    .db 18, 0x0E
+    .db 0xFF
 
 ; POSTPONE ( "name" -- )  [IMMEDIATE]
 ;   If name is IMMEDIATE: compile a call to it (normal compile).
@@ -26367,6 +26430,8 @@ str_dict_overflow:
 
 str_imm_noname:
     .asciiz "IMMEDIATE after :NONAME\n"
+str_to_not_value:
+    .asciiz "TO requires a VALUE target, got "
 str_no_task_slot:
     .asciiz "no such task slot\n"
 str_nested_def:
