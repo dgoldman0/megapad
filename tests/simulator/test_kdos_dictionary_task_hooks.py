@@ -421,32 +421,48 @@ def test_failing_c_comma_enters_the_hook_before_mutating_dictionary_state(
     assert _handler_cells(runtime)[0] == 0
 
 
-def test_pre_shadow_task_entry_points_fail_without_consuming_arguments(
+def test_pre_shadow_task_entry_points_start_and_stop_slots(
     loaded_hooks: tuple[MegaForthRuntime, dict[str, object]],
 ) -> None:
     runtime, bios_words = loaded_hooks
     target = runtime.find("_KDOS-DICT-FAULT")
     assert target is not None
 
+    # A zero or dead token is refused before the slot changes.
     for name in ("BACKGROUND", "BACKGROUND2", "BACKGROUND3"):
+        for token in (0, 0xDEAD_0000):
+            context = runtime.new_context()
+            context.data.push(token)
+            with pytest.raises(ExecutionError, match="execution token"):
+                runtime.execute(bios_words[name].xt, context=context)
+            assert context.data.snapshot() == (token,)
+            assert context.returns.snapshot() == ()
+    assert runtime.tasks.count() == 0
+
+    for slot, name in ((1, "BACKGROUND"), (2, "BACKGROUND2"), (3, "BACKGROUND3")):
         context = runtime.new_context()
         context.data.push(target.xt)
-        with pytest.raises(ExecutionError, match="cooperative task scheduling"):
-            runtime.execute(bios_words[name].xt, context=context)
-        assert context.data.snapshot() == (target.xt,)
-        assert context.returns.snapshot() == ()
+        runtime.execute(bios_words[name].xt, context=context)
+        assert context.data.snapshot() == ()
+        assert runtime.tasks.is_active(slot)
+    assert runtime.tasks.count() == 3
 
-    for slot in (0, 1, 4):
+    for slot in (0, 4):
         context = runtime.new_context()
         context.data.push(slot)
-        message = "slot must" if slot != 1 else "cooperative task scheduling"
-        with pytest.raises(ExecutionError, match=message):
+        with pytest.raises(ExecutionError, match="slot must"):
             runtime.execute(bios_words["TASK-STOP"].xt, context=context)
         assert context.data.snapshot() == (slot,)
         assert context.returns.snapshot() == ()
+    for slot in (1, 2, 3):
+        context = runtime.new_context()
+        context.data.push(slot)
+        runtime.execute(bios_words["TASK-STOP"].xt, context=context)
+        assert context.data.snapshot() == ()
+        assert not runtime.tasks.is_active(slot)
 
 
-def test_shadow_task_wrappers_expose_only_the_source_order_reached_before_failure(
+def test_shadow_task_wrappers_reset_the_slot_chain_and_reach_the_bios_word(
     loaded_hooks: tuple[MegaForthRuntime, dict[str, object]],
 ) -> None:
     runtime, _bios_words = loaded_hooks
@@ -460,28 +476,27 @@ def test_shadow_task_wrappers_expose_only_the_source_order_reached_before_failur
             runtime.memory.write64(table.body_address + index * 8, value)
         runtime.main_context.data.push(target.xt)
 
-        with pytest.raises(ExecutionError, match="cooperative task scheduling"):
-            runtime.execute(name)
+        runtime.execute(name)
 
         expected = [101, 102, 103, 104]
         expected[slot] = 0
         assert _handler_cells(runtime) == tuple(expected)
-        assert runtime.main_context.data.snapshot() == (target.xt,)
+        assert runtime.main_context.data.snapshot() == ()
         assert runtime.main_context.returns.snapshot() == ()
-        runtime.main_context.data.clear()
+        assert runtime.tasks.is_active(slot)
 
     for index, value in enumerate((201, 202, 203, 204)):
         runtime.memory.write64(table.body_address + index * 8, value)
     runtime.main_context.data.push(2)
 
-    with pytest.raises(ExecutionError, match="cooperative task scheduling"):
-        runtime.execute("TASK-STOP")
+    runtime.execute("TASK-STOP")
 
-    # Source orders cancellation before handler reset.  The unavailable BIOS
-    # seam cannot return, so the reset is intentionally unreachable for now.
-    assert _handler_cells(runtime) == (201, 202, 203, 204)
-    assert runtime.main_context.data.snapshot() == (2, 2)
+    # Source orders cancellation before the slot's handler reset.
+    assert _handler_cells(runtime) == (201, 202, 0, 204)
+    assert runtime.main_context.data.snapshot() == ()
     assert runtime.main_context.returns.snapshot() == ()
+    assert not runtime.tasks.is_active(2)
+    assert runtime.tasks.is_active(1) and runtime.tasks.is_active(3)
 
 
 def test_dictionary_fault_outside_catch_retains_kdos_diagnostic_and_aborts(

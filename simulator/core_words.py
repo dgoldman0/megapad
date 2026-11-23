@@ -2088,11 +2088,15 @@ def _push_diagnostic(context: ExecutionContext, value: int) -> None:
     context.data.push(value)
 
 
-def _task_start_unavailable(
+def _task_start(
     runtime: MegaForthRuntime,
     context: ExecutionContext,
     word_name: str,
+    slot: int,
 ) -> None:
+    """``BACKGROUND``, ``BACKGROUND2`` and ``BACKGROUND3`` ( xt -- ): start XT
+    in the slot afresh (simulator/tasks.py)."""
+
     xt = context.data.peek()
     if xt == 0:
         raise ExecutionError(f"{word_name} requires a nonzero execution token")
@@ -2102,20 +2106,28 @@ def _task_start_unavailable(
         raise ExecutionError(
             f"{word_name} requires a live execution token, got 0x{xt:016x}"
         ) from None
-    raise ExecutionError(
-        f"{word_name} is unavailable until cooperative task scheduling exists; "
-        "the execution token was not consumed"
-    )
+    runtime.tasks.start(slot, xt)
+    context.data.pop()
 
 
-def _task_stop_unavailable(context: ExecutionContext) -> None:
+def _task_stop(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    """``TASK-STOP ( n -- )``: end slot N."""
+
     slot = context.data.peek()
     if slot not in (1, 2, 3):
         raise ExecutionError("TASK-STOP slot must be 1, 2, or 3")
-    raise ExecutionError(
-        "TASK-STOP is unavailable until cooperative task scheduling exists; "
-        "the slot was not consumed"
-    )
+    runtime.tasks.stop(slot)
+    context.data.pop()
+
+
+def _task_query(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    """``TASK? ( n -- 0|1 )``: whether slot N is active, 1 or 0 as the
+    BIOS's word answers; the foreground, slot 0, never is."""
+
+    slot = context.data.peek()
+    if slot not in (0, 1, 2, 3):
+        raise ExecutionError("TASK? slot must be 0 to 3")
+    context.data.replace_top(1 if slot and runtime.tasks.is_active(slot) else 0)
 
 
 def install_core(runtime: MegaForthRuntime) -> None:
@@ -2840,7 +2852,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
             ),
         ),
         (b"COREID", lambda context: context.data.push(runtime.active_core)),
-        (b"TASK-ID", _push_zero),
+        (b"TASK-ID", lambda context: context.data.push(runtime.task_id)),
         (b"ENTER-USER", lambda _context: None),
         (b"SYS-EXIT", lambda _context: None),
         (b"PRIV@", _push_zero),
@@ -2898,29 +2910,17 @@ def install_core(runtime: MegaForthRuntime) -> None:
         ),
         (
             b"BACKGROUND",
-            lambda context: _task_start_unavailable(
-                runtime,
-                context,
-                "BACKGROUND",
-            ),
+            lambda context: _task_start(runtime, context, "BACKGROUND", 1),
         ),
         (
             b"BACKGROUND2",
-            lambda context: _task_start_unavailable(
-                runtime,
-                context,
-                "BACKGROUND2",
-            ),
+            lambda context: _task_start(runtime, context, "BACKGROUND2", 2),
         ),
         (
             b"BACKGROUND3",
-            lambda context: _task_start_unavailable(
-                runtime,
-                context,
-                "BACKGROUND3",
-            ),
+            lambda context: _task_start(runtime, context, "BACKGROUND3", 3),
         ),
-        (b"TASK-STOP", _task_stop_unavailable),
+        (b"TASK-STOP", lambda context: _task_stop(runtime, context)),
         (b"'", lambda context: _tick(runtime, context)),
         (b"EVALUATE", lambda context: runtime.bios_evaluate(context)),
         (
@@ -3418,6 +3418,18 @@ def install_core(runtime: MegaForthRuntime) -> None:
 
     # .S follows, which sandbox contracts print when a stack check fails.
     runtime.define_primitive(b".S", lambda context: _dot_s(runtime, context))
+
+    # The task slots' scheduling words follow: PAUSE runs the next active
+    # slot from the foreground, TASK-YIELD gives the foreground its turn
+    # back, and TASK? and #TASKS report the slots.
+    runtime.define_primitive(b"PAUSE", lambda _context: runtime.tasks.pause())
+    runtime.define_primitive(
+        b"TASK-YIELD", lambda _context: runtime.tasks.task_yield(),
+    )
+    runtime.define_primitive(b"TASK?", lambda context: _task_query(runtime, context))
+    runtime.define_primitive(
+        b"#TASKS", lambda context: context.data.push(runtime.tasks.count()),
+    )
 
 
 def _define_accept(runtime: MegaForthRuntime) -> None:

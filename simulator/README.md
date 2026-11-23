@@ -241,12 +241,13 @@ The implemented slices provide:
 - the optional native semantic executor (`_megaforth_native`), documented in
   [`../docs/simulator-native-execution.md`](../docs/simulator-native-execution.md).
 
-This is deliberately not yet a complete MegaForth environment. Additional
-private task contexts and genuine cooperative scheduling remain pending. The
-loaded KDOS words execute task XTs inline on the caller's stacks; the IDL seam
-blocks and resumes one compiled-word dispatch and cannot turn that registry
-into `PAUSE`, task round-robin, interrupt-vector delivery, DMA timing, or a
-device scheduler.
+This is deliberately not yet a complete MegaForth environment. Core 0 runs
+the BIOS's three cooperative task slots, which `BACKGROUND`, `PAUSE`,
+`TASK-YIELD` and `TASK-STOP` drive on stacks of their own
+(`simulator/tasks.py`, section 5 of the contract), but KDOS's task registry
+still executes its task XTs inline on the caller's stacks, and the IDL seam
+blocks and resumes one compiled-word dispatch without interrupt-vector
+delivery, DMA timing, or a device scheduler.
 Public `SOURCE`, `>IN`, and `STATE`, the remaining RTC calendar/alarm service,
 raw UART MMIO, TX-ring capacity and timing, and raw storage-controller access
 still remain; `[IF]`/`[ELSE]`/`[THEN]`, `MS@`, and the terminal-geometry words
@@ -489,14 +490,12 @@ the standard `-8` result and failure atomicity, checks the zero/returning-hook
 fallback abort, and verifies exact hosted semantic spans that fit do not call
 the hook. The four task wrappers capture distinct, live pre-shadow BIOS XTs.
 The shared source helper changes exactly one selected background handler and
-never slot zero. Each start wrapper reaches that reset before its captured
-BIOS entry reports scheduling unavailable. `TASK-STOP` orders its reset after
-the captured entry, so that reset is deliberately unreachable until
-task cancellation exists.
-At this early prefix boundary the scheduler source has not loaded, so the
-slice makes no task-execution or cadence claim. The later §8 frontier adds its
-synchronous registry/executor, but resumable cooperative task contexts and
-`PAUSE` remain unimplemented.
+never slot zero. Each start wrapper resets the slot's chain and then reaches
+its captured BIOS entry, which starts the slot. `TASK-STOP` orders its reset
+after the captured entry, which ends the slot. At this early prefix boundary
+the KDOS scheduler source has not loaded; the later §8 frontier adds its
+synchronous registry/executor, which runs its tasks inline, apart from the
+BIOS's slots.
 
 Byte-exact logical lines 720 through 855 then load the complete KDOS CRC
 convenience and CRC-diagnostic family. The nine BIOS words retain their
@@ -558,10 +557,12 @@ All checked SHA input, output, and raw-state spans pass through the same
 span must begin at or above the hosted static/dictionary rollback floor and
 end no higher than the active caller's future result-cell boundary
 (`DSP-8`). External, HBW, and VRAM spans must fit wholly in one mapped region.
-The transaction owner remains the BIOS `(COREID,TASK-ID)` pair; every current
-pre-scheduler guest dispatch therefore uses `(0,0)`. An unbacked host scratch
-context borrows the canonical foreground stack boundary rather than creating
-an unbounded guest span.
+The transaction owner remains the BIOS `(COREID,TASK-ID)` pair: `(0,0)` for
+core 0's foreground and `(0,slot)` for one of its task slots. A slot's data
+stack lies below the dictionary, so the span rule refuses every Bank-0 buffer
+a slot names, as the BIOS's does. An unbacked host scratch context borrows
+the canonical foreground stack boundary rather than creating an unbounded
+guest span.
 
 `RANDOM`, `RANDOM8`, and `SEED-RNG` reach one per-runtime decoded TRNG window.
 Its bytes are a repeatable SHA-256-derived stream from an explicit injected

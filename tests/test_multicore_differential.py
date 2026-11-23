@@ -115,16 +115,21 @@ THEN  IWOKE @ .  IPI-STATUS ."""),
 }
 
 
-def _case_word(name: str) -> bytes:
+# What each case of this module prints last: the worker slots, each
+# nonzero while its core has a job.
+WORKER_SLOTS = b"NCORES 0 ?DO I CORE-STATUS 0<> . LOOP"
+
+
+def case_word(name: str) -> bytes:
     return b"_CASE-" + name.upper().encode()
 
 
-def _definition(name: str) -> bytes:
-    _cores, _setup, body = CASES[name]
+def _definition(word: bytes, body: bytes, epilogue: bytes) -> bytes:
+    """The case's word: BODY, then EPILOGUE, printed between markers."""
+
     lines = body.strip().splitlines()
-    slots = b"NCORES 0 ?DO I CORE-STATUS 0<> . LOOP"
-    return (b": " + _case_word(name) + b" ( -- ) 60 EMIT 60 EMIT\n"
-            + b"\n".join(lines) + b"\n" + slots + b" 62 EMIT 62 EMIT ;")
+    return (b": " + word + b" ( -- ) 60 EMIT 60 EMIT\n"
+            + b"\n".join(lines) + b"\n" + epilogue + b" 62 EMIT 62 EMIT ;")
 
 
 def _bios() -> bytes:
@@ -178,11 +183,18 @@ class _Emulator:
         assert position == len(data), "the emulator did not take every line"
         return bytes(self._sent[start:])
 
-    def run(self, name: str) -> bytes:
-        _cores, setup, _body = CASES[name]
-        definitions = setup.strip().splitlines() + _definition(name).splitlines()
+    def run_case(self, word: bytes, setup: bytes, body: bytes,
+                 epilogue: bytes = b"") -> bytes:
+        """Type SETUP and the case's word, then run it: what it printed."""
+
+        definitions = (setup.strip().splitlines()
+                       + _definition(word, body, epilogue).splitlines())
         self.type([line for line in definitions if line.strip()])
-        return _report(self.type([_case_word(name)]))
+        return _report(self.type([word]))
+
+    def run(self, name: str) -> bytes:
+        _cores, setup, body = CASES[name]
+        return self.run_case(case_word(name), setup, body, WORKER_SLOTS)
 
 
 @dataclass(frozen=True)
@@ -210,12 +222,15 @@ class _Simulator:
         self.runtime.evaluate(kdos, source_name="kdos.f")
         self.runtime.drain_uart_output()
 
-    def run(self, name: str) -> _Run:
+    def run_case(self, word: bytes, setup: bytes, body: bytes,
+                 epilogue: bytes = b"") -> _Run:
+        """Evaluate SETUP and the case's word, then run it as a session
+        would: what it printed and the state it left."""
+
         runtime = self.runtime
-        _cores, setup, _body = CASES[name]
-        runtime.evaluate(setup + b"\n" + _definition(name))
+        runtime.evaluate(setup + b"\n" + _definition(word, body, epilogue))
         runtime.drain_uart_output()
-        result = runtime.run_until_blocked(_case_word(name))
+        result = runtime.run_until_blocked(word)
         steps = result.semantic_steps
         while isinstance(result, (BlockedExecution, YieldedExecution)):
             if isinstance(result, YieldedExecution):
@@ -233,6 +248,10 @@ class _Simulator:
             counter=runtime.timer.counter,
             memory=_memory_digest(runtime.memory),
         )
+
+    def run(self, name: str) -> _Run:
+        _cores, setup, body = CASES[name]
+        return self.run_case(case_word(name), setup, body, WORKER_SLOTS)
 
 
 def _memory_digest(memory) -> bytes:

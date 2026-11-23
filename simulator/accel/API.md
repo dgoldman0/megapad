@@ -229,10 +229,11 @@ literal, branch IP, called XT, or data address where applicable;
 `OP_STRING_LITERAL` uses `(a, b)` for the already-resolved address and length.
 Arithmetic, stack, and scalar-memory primitive operations ignore `a` and `b`.
 `CELL+` adds eight with the same unsigned cell wrapping as the reference
-primitive. The original hosted `COREID` and `TASK-ID` callbacks both push zero
-and share the native false opcode. These remain two-tick primitive calls;
-admission binds to the original installed word objects, so later colon or
-host-callback definitions with those names retain their ordinary behavior.
+primitive. The original hosted `COREID` and `TASK-ID` callbacks become
+`OP_COREID` and `OP_TASK_ID`, which push the core and the task a run serves
+(below). These remain two-tick primitive calls; admission binds to the
+original installed word objects, so later colon or host-callback definitions
+with those names retain their ordinary behavior.
 
 `OP_DOES` is a compiled call to a `CREATE ... DOES>` child. `a` is the child's
 body address, and `b` is the index that `does_entry(xt, ip)` returned for the
@@ -419,16 +420,22 @@ it; the run then admits `OP_CRC_MODE_STORE`, `OP_CRC_RESET`,
 `CRC-MODE!`, `CRC-RESET`, `CRC-INIT!`, `CRC-FEED`, `CRC-FEED-BYTE`, `CRC@`,
 `CRC-RAW-FINAL@` and `CRC-FINAL@`, each costing the two ticks of an
 admitted primitive call and calling the same service with the identity
-`(core, 0)`, the core `set_core` names. A word declines before any effect
-when its stack does not fit. A replaced service keeps the words in Python.
+`(core, task)` that `set_core` and `set_task` name. A word declines before
+any effect when its stack does not fit. A replaced service keeps the words
+in Python.
 
-## The core a run serves
+## The core and task a run serves
 
 `set_core(core)` names the core whose turn the runtime runs, 0 to 255, and
 `core` reads it back; the runtime sets it at every turn switch
 (`simulator/cores.py`). `OP_COREID`, the compiled call of `COREID`, pushes
 it, and the CRC words take it as their caller's core. A one-core runtime
-leaves it at 0.
+leaves it at 0. `set_task(task)` names the task slot core 0 runs, from 0
+for its foreground to 3, and `task` reads it back; the runtime sets it as a
+slot's run begins and ends (`simulator/tasks.py`). `OP_TASK_ID`, the
+compiled call of `TASK-ID`, pushes it while the run serves core 0 and 0 for
+any other core, as the BIOS's `TASK-ID` answers, and the CRC words take the
+same value as their caller's task.
 
 ## Disk words
 

@@ -33,6 +33,7 @@ from shared.crypto_caps import (
 )
 from shared.storage import STORAGE_UNIT_TABLE
 from simulator import crc as crc_service
+from simulator.tasks import SLOT_REGION_BYTES, HostedTasks
 from simulator.cores import (
     MAX_FULL_CORES,
     NOT_RUN,
@@ -931,6 +932,13 @@ class MegaForthRuntime:
         # A refused spinlock acquire ends the running turn at the next
         # boundary where its dispatch can suspend.
         self._turn_end_requested = False
+        # Core 0's background task slots (simulator/tasks.py). A slot's
+        # TASK-YIELD detaches the slot's dispatch at its next operation in
+        # the slot's own frame.
+        self._task_yield_requested = False
+        self.tasks = HostedTasks(
+            self, base=dictionary_start - SLOT_REGION_BYTES,
+        )
         # Whether the primitive being called may be called again at the
         # core's next turn, and each core's polls of a held lock so far.
         self._lock_retry_allowed = False
@@ -2267,10 +2275,16 @@ class MegaForthRuntime:
 
         if not isinstance(context, ExecutionContext):
             raise TypeError("context must be an ExecutionContext")
-        # Every dispatch runs on the core whose turn it is.  Host scratch
-        # contexts are not schedulable guest tasks, and until the
-        # cooperative task layer exists every task is task 0.
-        return self.active_core, 0
+        # Every dispatch runs on the core whose turn it is, and on core 0 in
+        # the task slot running there, 0 for the foreground.
+        return self.active_core, self.task_id
+
+    @property
+    def task_id(self) -> int:
+        """TASK-ID: the cooperative slot running on core 0, 0 for its
+        foreground; other cores' are always 0."""
+
+        return self.tasks.active if self.active_core == 0 else 0
 
     # -- the cores' signals and their limits ---------------------------------
 
@@ -2991,13 +3005,20 @@ class MegaForthRuntime:
         latest: int | None = None,
     ) -> None:
         """Refuse a rollback that would remove a word a worker's suspended
-        job runs inside: one whose header lies at or above ``here``, or
-        above the header ``latest`` names."""
+        job or an active task slot runs inside: one whose header lies at or
+        above ``here``, or above the header ``latest`` names."""
 
+        chains = [
+            (f"task slot {slot}", xts)
+            for slot, xts in self.tasks.call_chains()
+        ]
         cores = self._cores
-        if cores is None:
-            return
-        for core, xts in cores.suspended_call_chains():
+        if cores is not None:
+            chains.extend(
+                (f"core {core}'s suspended job", xts)
+                for core, xts in cores.suspended_call_chains()
+            )
+        for owner, xts in chains:
             for xt in xts:
                 word = self.dictionary.live_word(xt)
                 if word is None:
@@ -3007,7 +3028,7 @@ class MegaForthRuntime:
                 ):
                     raise ExecutionError(
                         f"the rollback would remove {word.name!r}, in which "
-                        f"core {core}'s suspended job runs"
+                        f"{owner} runs"
                     )
 
     def new_context(self) -> ExecutionContext:
@@ -3768,15 +3789,18 @@ class MegaForthRuntime:
     def _resume_scheduled(
         self,
         blocked: _SuspendedExecution,
-        quantum_steps: int,
+        quantum_steps: int | None,
+        *,
+        task_slot: bool = False,
     ) -> _SuspendedExecution | None:
-        """Continue a worker's job for one turn: the scheduler's own switch,
-        which leaves the host's suspension alone."""
+        """Continue a dispatch the runtime holds, a worker's job for one turn
+        or a task slot's run: the scheduler's own switch, which leaves the
+        host's suspension alone."""
 
         blocked.context._release_suspension(blocked.handle.sequence)
         blocked.quantum_steps = quantum_steps
         blocked.wake_receipt = None
-        cursor = self._resume_guarded(blocked)
+        cursor = self._resume_guarded(blocked, task_slot=task_slot)
         if cursor is None:
             return None
         handle = self._allocate_suspension_handle()
@@ -4592,11 +4616,13 @@ class MegaForthRuntime:
         quantum_steps: int | None = None,
         machine_quantum_instructions: int | None = None,
         publish: bool = True,
+        task_slot: bool = False,
     ) -> _SuspendedExecution | None:
         """Execute atomically with respect to internal return-stack state.
 
         A suspension is the host's to resume unless ``publish`` is false,
-        as for a worker's job, which the core scheduler holds.
+        as for a worker's job, which the core scheduler holds. A task slot's
+        dispatch (``task_slot``) detaches where the slot calls TASK-YIELD.
         """
 
         context._require_reusable()
@@ -4622,6 +4648,7 @@ class MegaForthRuntime:
                 quantum_limit=(
                     None if quantum_steps is None else meter.steps + quantum_steps
                 ),
+                task_slot=task_slot,
             )
             if cursor is None:
                 completed_successfully = True
@@ -4723,8 +4750,12 @@ class MegaForthRuntime:
     def _resume_guarded(
         self,
         suspended: _SuspendedExecution,
+        *,
+        task_slot: bool = False,
     ) -> _DispatchCursor | _MachineCursor | None:
-        """Continue a detached dispatch under its original host guard."""
+        """Continue a detached dispatch under its original host guard; a
+        task slot's runs nested in the foreground's, as PAUSE runs it, so
+        the machine owner's turn stays the foreground's."""
 
         context = suspended.context
         resume_capture_checkpoint = (
@@ -4735,9 +4766,10 @@ class MegaForthRuntime:
         completed_successfully = False
         primary_error: BaseException | None = None
         cursor: _DispatchCursor | _MachineCursor | None = None
+        machine_outer = not self._active_dispatches
         self._active_dispatches.append(frame)
         try:
-            if self._machine_owner is not None:
+            if machine_outer and self._machine_owner is not None:
                 self._machine_owner.begin_turn(suspended.machine_quantum_instructions)
             cursor = self._execute_top(
                 None,
@@ -4745,12 +4777,13 @@ class MegaForthRuntime:
                 suspended.meter,
                 root_id=suspended.root_id,
                 resume_cursor=suspended.cursor,
-                allow_idle=True,
+                allow_idle=not task_slot,
                 quantum_limit=(
                     None
                     if suspended.quantum_steps is None
                     else suspended.meter.steps + suspended.quantum_steps
                 ),
+                task_slot=task_slot,
             )
             suspended.had_pointer_capture = (
                 suspended.had_pointer_capture
@@ -4840,7 +4873,7 @@ class MegaForthRuntime:
                 context.returns.restore_pointer_captures(
                     suspended.capture_checkpoint
                 )
-            if primary_error is not None or cursor is None:
+            if machine_outer and (primary_error is not None or cursor is None):
                 self._finish_machine_dispatch(primary_error)
             active = self._active_dispatches.pop()
             if active is not frame:
@@ -4991,8 +5024,12 @@ class MegaForthRuntime:
         resume_cursor: _DispatchCursor | _MachineCursor | None = None,
         allow_idle: bool = False,
         quantum_limit: int | None = None,
+        task_slot: bool = False,
     ) -> _DispatchCursor | _MachineCursor | None:
         fault_entry = fault_request is not None
+        # A task slot's dispatch detaches where the slot yields, once control
+        # is back in the slot's own frame (HostedTasks.task_yield).
+        slot_depth = len(self._active_dispatches) if task_slot else None
         # A machine routine may yield its host turn only where an IDL could
         # suspend: the outermost dispatch, outside source evaluation.
         machine_can_yield = (allow_idle and len(self._active_dispatches) == 1
@@ -5139,6 +5176,13 @@ class MegaForthRuntime:
                 return _DispatchCursor(current.xt, ip, host_yield=True)
             if inline_turns and meter.steps >= cores.turn_deadline:
                 cores.preempt_inline(meter)
+            if (
+                slot_depth is not None
+                and self._task_yield_requested
+                and len(self._active_dispatches) == slot_depth
+            ):
+                self._task_yield_requested = False
+                return _DispatchCursor(current.xt, ip, host_yield=True)
 
             if ip == 0 and self._try_colon_accelerator(
                 current,

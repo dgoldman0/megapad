@@ -838,6 +838,21 @@ needs a change in the BIOS, KDOS, the release plan or the contract.
     the latest, so that one BIOS closing run covers it; a BIOS word that
     reads CSR `MBOX`'s whole mask (finding 8) joins that slice if it is
     approved.
+15. **An abort in a background slot leaves the slot behind (run on the
+    emulator).** The BIOS's `forth_quit` resets the return stack and runs
+    the `QUIT-XT!` callback, but it leaves `var_task_active` naming the slot
+    that was running and the slot's entry in `var_task_pcs` in place. On
+    the emulator, a slot that yielded once and then took `ABORT"` left
+    `TASK-ID` answering 1 at the prompt and `1 TASK?` answering 1, so KDOS's
+    `HANDLER` and the CRC and SHA-3 owner records took the foreground for
+    the slot. The next `PAUSE` resumed the slot from the state saved at its
+    last yield, and the line that paused reported `? (not found)`, though
+    every word in it exists; a slot that aborts before it yields stays
+    active the same way, to start again at the next `PAUSE`. The simulator
+    ends the slot and the line, and `TASK-ID` answers 0 (the contract's
+    section 5). On core 0, `forth_quit` zeroing the running slot's entry and
+    then `var_task_active` gives the BIOS the same answer. The fix joins
+    finding 14's in the next slice that changes `bios.asm`.
 
 ## 10. Decisions
 

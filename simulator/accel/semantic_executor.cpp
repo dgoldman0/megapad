@@ -80,6 +80,8 @@ enum Opcode : uint32_t {
     OP_DISK_VALUE, OP_DISK_TRANSFER, OP_DISK_FLUSH,
     // COREID: the core the program runs for (set_core).
     OP_COREID,
+    // TASK-ID: the task slot core 0 runs (set_task), 0 on the other cores.
+    OP_TASK_ID,
     // One past the last operation; not one itself.
     OPCODE_LIMIT,
 };
@@ -667,7 +669,7 @@ static bool inline_callback(uint32_t opcode) noexcept {
     case OP_I: case OP_J: case OP_EXECUTE: case OP_RP_FETCH: case OP_CALL_ROUTINE:
         return false;
     default:
-        return opcode <= OP_CALL_ROUTINE || opcode == OP_COREID;
+        return opcode <= OP_CALL_ROUTINE || opcode == OP_COREID || opcode == OP_TASK_ID;
     }
 }
 
@@ -1091,6 +1093,21 @@ public:
         core_id_ = core;
     }
     int core() const noexcept { return core_id_; }
+
+    // The task slot core 0 runs, 0 for its foreground, as the runtime
+    // enters and leaves a slot (simulator/tasks.py).
+    void set_task(int task) {
+        if (task < 0 || task > 3)
+            throw py::value_error("a task slot is 0 to 3");
+        task_id_ = task;
+    }
+    int task() const noexcept { return task_id_; }
+
+    // TASK-ID as the BIOS answers it: core 0's running slot there, 0 on
+    // every other core, which has no slots.
+    Cell task_identity() const noexcept {
+        return core_id_ == 0 ? static_cast<Cell>(task_id_) : 0;
+    }
 
     // The CRC service the runtime's CRC words use, or None to leave the
     // words to Python. A run admits them only when its owner says the
@@ -2146,6 +2163,10 @@ private:
             if (!stack.inputs(0)) return false;
             out[0] = static_cast<Cell>(core_id_);
             return leave(1);
+        case OP_TASK_ID:
+            if (!stack.inputs(0)) return false;
+            out[0] = task_identity();
+            return leave(1);
         case OP_SP_FETCH:
             if (!stack.inputs(0)) return false;
             out[0] = path.sp();
@@ -2486,7 +2507,7 @@ private:
     }
 
     // The CRC words, each a call of the service the Python words call too.
-    // The caller is the core the program runs for, task 0, as COREID and
+    // The caller is the core and task the program runs for, as COREID and
     // TASK-ID say. A word declines before any effect unless its stack fits.
     bool execute_crc(uint32_t opcode, RunState& s, StackOperation& stack) {
         namespace crc = megapad::crc_service;
@@ -2495,7 +2516,7 @@ private:
         const unsigned produced = opcode == OP_CRC_FETCH || opcode == OP_CRC_RAW_FINAL_FETCH ? 2 : 1;
         if (!stack.inputs(consumed) || !stack.outputs(produced)) return false;
         const Cell input = consumed ? stack.values[0] : 0;
-        const crc::Identity task{static_cast<Cell>(core_id_), 0};
+        const crc::Identity task{static_cast<Cell>(core_id_), task_identity()};
         auto& out = stack.result;
         switch (opcode) {
         case OP_CRC_MODE_STORE: out[0] = crc_->select_mode(task, input); break;
@@ -2622,6 +2643,8 @@ private:
     megapad::crc_service::Service* crc_ = nullptr;
     // The core whose turn the runtime is running; COREID pushes it.
     int core_id_ = 0;
+    // The task slot core 0 runs; TASK-ID pushes it there.
+    int task_id_ = 0;
     py::object crc_owner_;
     // The bound storage services by unit and their Python objects, the
     // memory they move data through and the spinlock bank.
@@ -2669,6 +2692,8 @@ PYBIND11_MODULE(_megaforth_native, module) {
         .def("bind_crc", &NativeProgram::bind_crc, py::arg("service"))
         .def("set_core", &NativeProgram::set_core, py::arg("core"))
         .def_property_readonly("core", &NativeProgram::core)
+        .def("set_task", &NativeProgram::set_task, py::arg("task"))
+        .def_property_readonly("task", &NativeProgram::task)
         .def("bind_storage", &NativeProgram::bind_storage, py::arg("services"),
              py::arg("memory"), py::arg("lock_bank"))
         .def("snapshot_stack", &NativeProgram::snapshot_stack,
@@ -2753,10 +2778,10 @@ PYBIND11_MODULE(_megaforth_native, module) {
     PRIMITIVE("MOVE", OP_MOVE);
     PRIMITIVE("SP@", OP_SP_FETCH); PRIMITIVE("RP@", OP_RP_FETCH);
     PRIMITIVE("UM*", OP_UMULTIPLY);
-    // COREID pushes the core the program runs for, TASK-ID zero. Native
-    // admission remains bound to those installed word objects, never a later
-    // namesake.
-    PRIMITIVE("COREID", OP_COREID); PRIMITIVE("TASK-ID", OP_FALSE);
+    // COREID pushes the core the program runs for and TASK-ID its task.
+    // Native admission remains bound to those installed word objects, never
+    // a later namesake.
+    PRIMITIVE("COREID", OP_COREID); PRIMITIVE("TASK-ID", OP_TASK_ID);
     PRIMITIVE("I", OP_I); PRIMITIVE("J", OP_J);
     module.attr("PRIMITIVE_OPCODES") = primitives;
 #undef PRIMITIVE

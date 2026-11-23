@@ -552,15 +552,14 @@ contracts have an implementation and differential evidence.
 ## 5. Scheduling and time
 
 A machine with several full cores runs them in rounds under a deterministic
-core scheduler, which the last part of this section describes. Within a
-core, the target design calls for a deterministic cooperative task scheduler
-rather than uncontrolled host threads: given the same runnable set, yield
-sequence, clock, entropy, and ingress schedule, public task ordering and
-state must repeat. That task scheduler is not built. The simulator admits
-the unchanged KDOS registry and table-ordered synchronous executor: selected
-task XTs run inline to return on the caller's context. That behavior is
-deterministic, but it is neither host threading nor cooperative task
-scheduling.
+core scheduler, and core 0 runs the BIOS's three cooperative task slots
+beside its foreground; the last two parts of this section describe them.
+Neither uses host threads: given the same runnable set, yield sequence,
+clock, entropy, and ingress schedule, public task ordering and state repeat.
+KDOS's own task registry is a separate layer, which the simulator admits
+unchanged with its table-ordered synchronous executor: selected task XTs run
+inline to return on the caller's context. That behavior is deterministic,
+but it is neither host threading nor cooperative task scheduling.
 
 The simulator does implement the narrower architectural `IDL` boundary
 needed by unchanged source. `run_until_blocked` detaches a compiled-word dispatch after
@@ -677,10 +676,12 @@ unread input.
 
 Task descriptors, registry state, synchronous `SCHEDULE`, and the provisional
 checkpoint are now qualified source semantics. `TASK-STACKS` and the saved
-DSP/RSP fields are inert guest storage: execution never installs them. Active
-per-task data/return stacks, suspension and resumption, priority scheduling,
-task-local exception ownership, genuine `PAUSE`/`TASK-YIELD`, and preemption
-remain unimplemented. The multicore profiles preserve publication order,
+DSP/RSP fields are inert guest storage: execution never installs them. For
+the registry's tasks, active per-task data/return stacks, suspension and
+resumption, priority scheduling, task-local exception ownership, and
+preemption remain unimplemented; the BIOS's task slots, which have their own
+stacks, suspension and exception chains, are a separate mechanism, described
+at the end of this section. The multicore profiles preserve publication order,
 generations, locks, and barriers through the promises of section 2, and they
 do not qualify physical races or arbitration.
 
@@ -813,6 +814,63 @@ Session status reports each core's state, semantic steps, turns, job and
 deadline under `cores`, and the rich-terminal host counts the other cores'
 steps as session progress.
 
+### Cooperative task slots on core 0
+
+Core 0 runs the BIOS's three background slots beside its foreground, task 0
+(`simulator/tasks.py`). `BACKGROUND`, `BACKGROUND2` and `BACKGROUND3`
+`( xt -- )` start a word in slot 1, 2 or 3 on stacks of the BIOS's size, 32
+cells of data stack and 32 of return stack, which lie in the 1,536 bytes
+below the dictionary's start, as the BIOS keeps its slot stacks below its
+own dictionary. A start replaces whatever the slot held, a yielded run
+included; a zero or dead token fails before the slot changes and stays on
+the stack. `PAUSE` in core 0's foreground looks at the slots after the one
+it last ran, wrapping from slot 3 to slot 1, and runs the first active one
+until the slot calls `TASK-YIELD` or its word returns, which ends the slot;
+with no active slot it does nothing. The next `PAUSE` that reaches a yielded
+slot resumes it after its `TASK-YIELD`, with its stacks as it left them.
+`TASK-STOP` `( n -- )` ends slot 1, 2 or 3 and refuses any other number
+without consuming it; a slot that stops itself runs on to its next yield
+and no further. `TASK?` `( n -- 0|1 )` answers 1 while slot n is active,
+`#TASKS` counts the active slots, and `TASK-ID` names the slot that runs, 0
+for the foreground and on every other core. The CRC and SHA-3 owner records
+take `(COREID,TASK-ID)`, so a slot cannot continue the foreground's
+transaction or another slot's, and KDOS's `HANDLER` keeps a `CATCH` chain
+for each slot. The native engine answers `TASK-ID` and the CRC words with
+the running slot, so both executors run the slots alike. Because a slot's
+data stack lies below the dictionary, the checked span rule, which ends a
+Bank 0 span below the caller's stack, refuses every Bank 0 buffer a slot
+names, on the BIOS as here; a slot passes buffers in external memory.
+
+Slots change only at `PAUSE` and `TASK-YIELD`, so the core scheduler's
+policy never enters. A slot's run is a dispatch nested in the foreground's
+`PAUSE`, and its steps count on the foreground's meter and step budget. On
+a machine with several cores the other cores take their turns inside a
+slot's run, as they do inside any dispatch of core 0's that cannot detach,
+so a worker's job progresses while a slot runs. The nesting also bounds
+what a slot may wait on: an `IDLE-UNTIL` in a slot returns early, as it may,
+and an `IDL` without a deadline fails, as in the other dispatches that
+cannot detach, where on the machine either one halts the whole core until
+its wake. A `TASK-YIELD` inside a nested dispatch of the slot, such as a
+word that a guest `EVALUATE` runs, takes effect when control returns to the
+slot's own frame. A dictionary rollback that would remove a word an active
+slot runs inside, or will start, is refused, as for a worker's suspended
+job.
+
+Where the machine would crash, the simulator faults. `PAUSE` in a slot
+takes the illegal-operation fault, -21 to a `CATCH`, where the BIOS's
+`PAUSE` would take the running slot's stacks for the foreground's; so does
+`TASK-YIELD` in the foreground, where the BIOS's yield returns through a
+`PAUSE` that is not running; and so do both words on a worker core, which
+has no slots,
+where the BIOS's `PAUSE` would run one of core 0's slots on the worker and
+race core 0 for its records. An error or `ABORT` in a slot ends the slot
+and the foreground's line that paused, while the BIOS's `QUIT` leaves
+`TASK-ID` naming the slot and the slot's record in place, so the next
+`PAUSE` runs the slot again from its last yield, or from its start if it
+never yielded (finding 15 of `docs/multicore-simulator-plan.md`). A slot's stack overflow raises the
+simulator's stack error and ends the slot, where the BIOS's 32-cell stacks
+run into the next slot's.
+
 ## 6. Platform services
 
 The hosted BIOS/service layer may provide, as separately admitted
@@ -859,7 +917,9 @@ The admitted CRC service implements the six public modes, mode-width seeds,
 least-significant-byte-first cell feeds, byte feeds, raw/final reads, checked
 status values, and the BIOS `(COREID,TASK-ID)` owner record, one for each
 core's own unit, as the BIOS keeps a topology-sized owner table, so each core's
-transaction survives the others' turns. `CRYPTO-CAPS@` and
+transaction survives the others' turns. A task slot on core 0 owns a
+transaction as `(0, slot)`, which neither the foreground nor another slot can
+continue. `CRYPTO-CAPS@` and
 the SysInfo `CRYPTO_CAPS` qword expose the same profile. It does not claim CRC
 instructions, CSRs, hardware arbitration, DMA, or accelerator latency.
 Runtime construction requires that qword to be readable and rejects capability
@@ -1307,8 +1367,8 @@ SHA3/SHAKE modes, their exact rates and domain separators, sequential
 64-byte output windows, staged checked publication, and raw in-place
 Keccak-f[1600] over 25 little-endian lanes. Fixed and extendable-output
 transactions retain their BIOS `(COREID,TASK-ID)` owner until the required
-terminal clear. That identity is the core whose turn it is with task 0, since
-every task is task 0 until a cooperative task layer exists; guest control
+terminal clear. That identity is the core whose turn it is with the task slot
+that core 0 runs, 0 for its foreground and on every other core; guest control
 unwinding does not implicitly release it.
 
 Every nonempty checked input, output, or 200-byte raw-state transfer is
