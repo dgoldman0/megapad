@@ -477,7 +477,7 @@ Four more words of this section have no number in the catalogue:
 ### JIT Compiler (4 words)
 
 The BIOS includes an optional compile-time JIT that inlines native code
-for 31 common primitives instead of emitting `call.l` instructions,
+for 45 common primitives instead of emitting `call.l` instructions,
 compiles uses of constants and created words as their values,
 uses compact literal encodings for small constants, folds small-literal
 + ALU sequences into single immediate instructions, and fuses common
@@ -492,7 +492,7 @@ code.
 | 156 | `JIT-STATS` | `( -- )` | | Print JIT statistics: inlines, folds, peepholes, and bytes saved |
 | 157 | `JIT-RESET` | `( -- )` | | Reset JIT counters and peephole state to zero |
 
-**Inlined primitives (31):** `DUP` `DROP` `SWAP` `OVER` `NIP` `2DROP` `+` `-` `AND` `OR` `XOR` `INVERT` `NEGATE` `@` `!` `CELLS` `CELL+` `>BODY` `0=` `0<>` `0<` `0>` `=` `<>` `U<` `U>` `*` `I` `C@` `1+` `1-`. Each body is the called word's own
+**Inlined primitives (45):** `DUP` `DROP` `SWAP` `OVER` `NIP` `2DROP` `+` `-` `AND` `OR` `XOR` `INVERT` `NEGATE` `@` `!` `CELLS` `CELL+` `>BODY` `0=` `0<>` `0<` `0>` `=` `<>` `U<` `U>` `*` `I` `C@` `1+` `1-` `2DUP` `?DUP` `+!` `ROT` `PICK` `<` `>=` `LSHIFT` `RSHIFT` `C!` `TRUE` `FALSE` `2*` `2/`. Each body is the called word's own
 or one that leaves the same results (`architecture.md`, "JIT Compiler",
 says which differ); calling the word costs 18 cycles more.
 

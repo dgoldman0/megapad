@@ -1274,7 +1274,7 @@ the correct default for pre-privilege firmware.
 
 The BIOS Forth compiler includes an optional **compile-time JIT** that
 replaces `sep r16` + inline-XT call sequences with inlined native
-machine code for 31 common primitives.  This is a *code-size* and
+machine code for 45 common primitives.  This is a *code-size* and
 *runtime* optimisation: each inlined primitive saves the 10-byte STC
 call overhead and eliminates the call/return cycle cost at execution
 time.
@@ -1303,9 +1303,9 @@ optimisations via a one-entry peephole lookback buffer:
    inlined primitive (type 2), the bigram table (`jit_bigram_table`) is
    scanned for a matching pair; on hit, the previous primitive's code
    is rewound and the fused body is emitted.
-3. The compiler scans a 31-entry inline table (`jit_inline_table`) that
+3. The compiler scans a 45-entry inline table (`jit_inline_table`) that
    maps dictionary entry addresses to pre-assembled native byte
-   sequences (3–17 bytes each). Only the BIOS's own words, which lie
+   sequences (3–24 bytes each). Only the BIOS's own words, which lie
    between `d_dup` and `latest_entry`, are looked up; any other word
    skips the scan, and the table is ordered by how often KDOS and the
    Desktop's modules compile each word, so common ones are met first.
@@ -1346,8 +1346,8 @@ trampoline and EXIT took 7 until 2026-11-23):
 | `VARIABLE`, `CREATE`'d data address | 16 | 4 |
 | `VALUE` | 17 | 17 |
 | literal | — | 3 for 0–255, 4 otherwise |
-| inlined primitives | — | `DROP` 1; `DUP` `@` `NIP` `CELLS` `CELL+` `C@` `I` `1+` `1-` 3; `+` `-` `AND` `OR` `XOR` `!` `OVER` 5; `SWAP` 6; `0=` `0<>` `0<` 6; `0>` 7; `=` `<>` `U<` `U>` `*` 8 |
-| primitives the table does not hold | `<` 36, `>=` 37, `2DUP` `PICK` 26, `ROT` 28 | (called) |
+| inlined primitives | — | `DROP` 1; `DUP` `@` `NIP` `CELLS` `CELL+` `C@` `I` `1+` `1-` 3; `+` `-` `AND` `OR` `XOR` `!` `OVER` 5; `SWAP` 6; `0=` `0<>` `0<` 6; `0>` 7; `=` `<>` `U<` `U>` `*` 8; `2*` `2/` `FALSE` 3; `TRUE` 4; `LSHIFT` `RSHIFT` `C!` 5; `?DUP` 5; `+!` 7; `2DUP` `PICK` 8; `<` `>=` 9; `ROT` 10 |
+| primitives the table does not hold | `MIN` `MAX` 34, `/` `MOD` 26, `WITHIN` 30, `2OVER` 28, `2SWAP` 32 | (called) |
 
 Inlining a constant changes a dictionary's size little: a value of
 0–255 takes 8 bytes where the call took 10, a fold 7 where the call and
@@ -1359,7 +1359,7 @@ journey, counted on the simulator and priced with these costs, constant
 uses were 7.0% of the emulator's cycles and created-word pushes 17.1%;
 compiling them as values saves about 19% of the journey's cycles.
 
-**Inlined primitives (31):** `DUP` `DROP` `SWAP` `OVER` `NIP` `2DROP` `+` `-` `AND` `OR` `XOR` `INVERT` `NEGATE` `@` `!` `CELLS` `CELL+` `>BODY` `0=` `0<>` `0<` `0>` `=` `<>` `U<` `U>` `*` `I` `C@` `1+` `1-`
+**Inlined primitives (45):** `DUP` `DROP` `SWAP` `OVER` `NIP` `2DROP` `+` `-` `AND` `OR` `XOR` `INVERT` `NEGATE` `@` `!` `CELLS` `CELL+` `>BODY` `0=` `0<>` `0<` `0>` `=` `<>` `U<` `U>` `*` `I` `C@` `1+` `1-` `2DUP` `?DUP` `+!` `ROT` `PICK` `<` `>=` `LSHIFT` `RSHIFT` `C!` `TRUE` `FALSE` `2*` `2/`
 
 A call to a primitive costs 18 cycles of dispatch before its body runs:
 `sep r16`, the trampoline and NEXT, then the dictionary entry's `ldi64`
@@ -1368,8 +1368,10 @@ code without its `ret.l`, except where a shorter sequence leaves the same
 results: `0=` `0<>` `=` `<>` `U<` `U>` make the true flag with `dec`
 where the primitive loads −1 with an 11-byte `ldi64`; `0<` and `0>`
 branch on the N flag from `cmpi` where the primitive shifts the sign bit
-down; and `I` reads the loop index at RSP+0, since no return addresses
-lie above it in the definition, where the called word reads RSP+16.
+down; `<` and `>=` branch on the N and V flags where the primitive reads
+them from the flags CSR; `+!` uses r0 where the primitive uses r9; and
+`I` reads the loop index at RSP+0, since no return addresses lie above it
+in the definition, where the called word reads RSP+16.
 System tests compare every inlined word with the called one over edge
 values.
 

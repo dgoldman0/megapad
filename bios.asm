@@ -6047,6 +6047,27 @@ jit_inline_table:
     .db 0x20                                   ; dec r0
     .db 0x54, 0xE0                             ; str r14, r0
 
+    ; --- PICK ( xu .. x0 u -- xu .. x0 xu )  18 bytes ---
+    .dq d_pick
+    .db 18
+    .db 0x50, 0x1E                             ; ldn r1, r14
+    .db 0x62, 0xE0, 0x08                       ; addi r14, 8
+    .db 0x68, 0x13                             ; lsli r1, 3
+    .db 0x78, 0xBE                             ; mov r11, r14
+    .db 0x70, 0xB1                             ; add r11, r1
+    .db 0x50, 0x1B                             ; ldn r1, r11
+    .db 0x67, 0xE0, 0x08                       ; subi r14, 8
+    .db 0x54, 0xE1                             ; str r14, r1
+
+    ; --- ?DUP ( x -- 0 | x x )  12 bytes ---
+    .dq d_qdup
+    .db 12
+    .db 0x50, 0x1E                             ; ldn r1, r14
+    .db 0x66, 0x10, 0x00                       ; cmpi r1, 0
+    .db 0x31, 0x05                             ; breq .s
+    .db 0x67, 0xE0, 0x08                       ; subi r14, 8
+    .db 0x54, 0xE1                             ; str r14, r1
+
     ; --- I ( -- n )  the loop index at RSP+0: no return addresses above it  7 bytes ---
     .dq d_i
     .db 7
@@ -6070,6 +6091,17 @@ jit_inline_table:
     .db 0x62, 0xE0, 0x08                  ; addi r14, 8
     .db 0x54, 0xE1                         ; str r14, r1
 
+    ; --- +! ( n addr -- )  r0 where the BIOS uses r9  16 bytes ---
+    .dq d_plus_store
+    .db 16
+    .db 0x50, 0x1E                             ; ldn r1, r14
+    .db 0x62, 0xE0, 0x08                       ; addi r14, 8
+    .db 0x50, 0x7E                             ; ldn r7, r14
+    .db 0x62, 0xE0, 0x08                       ; addi r14, 8
+    .db 0x50, 0x01                             ; ldn r0, r1
+    .db 0x70, 0x07                             ; add r0, r7
+    .db 0x54, 0x10                             ; str r1, r0
+
     ; --- - ( a b -- a-b )  11 bytes ---
     .dq d_minus
     .db 11
@@ -6078,6 +6110,18 @@ jit_inline_table:
     .db 0x50, 0x0E                         ; ldn r0, r14
     .db 0x72, 0x01                         ; sub r0, r1
     .db 0x54, 0xE0                         ; str r14, r0
+
+    ; --- 2DUP ( a b -- a b a b )  19 bytes ---
+    .dq d_2dup
+    .db 19
+    .db 0x50, 0x1E                             ; ldn r1, r14
+    .db 0x78, 0xBE                             ; mov r11, r14
+    .db 0x62, 0xB0, 0x08                       ; addi r11, 8
+    .db 0x50, 0x0B                             ; ldn r0, r11
+    .db 0x67, 0xE0, 0x08                       ; subi r14, 8
+    .db 0x54, 0xE0                             ; str r14, r0
+    .db 0x67, 0xE0, 0x08                       ; subi r14, 8
+    .db 0x54, 0xE1                             ; str r14, r1
 
     ; --- C@ ( addr -- c )  6 bytes ---
     .dq d_cfetch
@@ -6114,6 +6158,36 @@ jit_inline_table:
     .db 0x36, 0x01                             ; brpl .s
     .db 0x20                                   ; dec r0
     .db 0x54, 0xE0                             ; str r14, r0
+
+    ; --- < ( a b -- flag )  N xor V, by branches where the BIOS reads the flags CSR  24 bytes ---
+    .dq d_less
+    .db 24
+    .db 0x50, 0x1E                             ; ldn r1, r14
+    .db 0x62, 0xE0, 0x08                       ; addi r14, 8
+    .db 0x50, 0x7E                             ; ldn r7, r14
+    .db 0x60, 0x00, 0x00                       ; ldi r0, 0
+    .db 0x77, 0x71                             ; cmp r7, r1
+    .db 0x37, 0x05                             ; brvs .v
+    .db 0x36, 0x06                             ; brpl .s
+    .db 0x20                                   ; dec r0
+    .db 0x30, 0x03                             ; br .s
+    .db 0x35, 0x01                             ; brmi .s
+    .db 0x20                                   ; dec r0
+    .db 0x54, 0xE0                             ; str r14, r0
+
+    ; --- ROT ( a b c -- b c a )  22 bytes ---
+    .dq d_rot
+    .db 22
+    .db 0x50, 0x1E                             ; ldn r1, r14
+    .db 0x78, 0xBE                             ; mov r11, r14
+    .db 0x62, 0xB0, 0x08                       ; addi r11, 8
+    .db 0x50, 0x0B                             ; ldn r0, r11
+    .db 0x78, 0x7E                             ; mov r7, r14
+    .db 0x62, 0x70, 0x10                       ; addi r7, 16
+    .db 0x50, 0xD7                             ; ldn r13, r7
+    .db 0x54, 0xED                             ; str r14, r13
+    .db 0x54, 0xB1                             ; str r11, r1
+    .db 0x54, 0x70                             ; str r7, r0
 
     ; --- U< ( a b -- flag )  carry set: a >= b  17 bytes ---
     .dq d_u_lt
@@ -6155,12 +6229,53 @@ jit_inline_table:
     .db 0x21                                   ; dec r1
     .db 0x54, 0xE1                             ; str r14, r1
 
+    ; --- >= ( a b -- flag )  not N xor V  24 bytes ---
+    .dq d_gte
+    .db 24
+    .db 0x50, 0x1E                             ; ldn r1, r14
+    .db 0x62, 0xE0, 0x08                       ; addi r14, 8
+    .db 0x50, 0x7E                             ; ldn r7, r14
+    .db 0x60, 0x00, 0x00                       ; ldi r0, 0
+    .db 0x77, 0x71                             ; cmp r7, r1
+    .db 0x37, 0x05                             ; brvs .v
+    .db 0x35, 0x06                             ; brmi .s
+    .db 0x20                                   ; dec r0
+    .db 0x30, 0x03                             ; br .s
+    .db 0x36, 0x01                             ; brpl .s
+    .db 0x20                                   ; dec r0
+    .db 0x54, 0xE0                             ; str r14, r0
+
+    ; --- FALSE ( -- 0 )  8 bytes ---
+    .dq d_false
+    .db 8
+    .db 0x60, 0x10, 0x00                       ; ldi r1, 0
+    .db 0x67, 0xE0, 0x08                       ; subi r14, 8
+    .db 0x54, 0xE1                             ; str r14, r1
+
     ; --- CELLS ( n -- n*8 )  6 bytes ---
     .dq d_cells
     .db 6
     .db 0x50, 0x1E                         ; ldn r1, r14
     .db 0x68, 0x13                         ; lsli r1, 3
     .db 0x54, 0xE1                         ; str r14, r1
+
+    ; --- C! ( c addr -- )  12 bytes ---
+    .dq d_cstore
+    .db 12
+    .db 0x50, 0x1E                             ; ldn r1, r14
+    .db 0x62, 0xE0, 0x08                       ; addi r14, 8
+    .db 0x50, 0x0E                             ; ldn r0, r14
+    .db 0x62, 0xE0, 0x08                       ; addi r14, 8
+    .db 0x57, 0x10                             ; st.b r1, r0
+
+    ; --- RSHIFT ( x u -- x>>u )  11 bytes ---
+    .dq d_rshift
+    .db 11
+    .db 0x50, 0x1E                             ; ldn r1, r14
+    .db 0x62, 0xE0, 0x08                       ; addi r14, 8
+    .db 0x50, 0x0E                             ; ldn r0, r14
+    .db 0x7C, 0x01                             ; shr r0, r1
+    .db 0x54, 0xE0                             ; str r14, r0
 
     ; --- INVERT ( a -- ~a )  6 bytes ---
     .dq d_invert
@@ -6169,12 +6284,36 @@ jit_inline_table:
     .db 0x79, 0x11                         ; not r1, r1
     .db 0x54, 0xE1                         ; str r14, r1
 
+    ; --- LSHIFT ( x u -- x<<u )  11 bytes ---
+    .dq d_lshift
+    .db 11
+    .db 0x50, 0x1E                             ; ldn r1, r14
+    .db 0x62, 0xE0, 0x08                       ; addi r14, 8
+    .db 0x50, 0x0E                             ; ldn r0, r14
+    .db 0x7B, 0x01                             ; shl r0, r1
+    .db 0x54, 0xE0                             ; str r14, r0
+
+    ; --- TRUE ( -- -1 )  9 bytes ---
+    .dq d_true
+    .db 9
+    .db 0x60, 0x10, 0x00                       ; ldi r1, 0
+    .db 0x21                                   ; dec r1
+    .db 0x67, 0xE0, 0x08                       ; subi r14, 8
+    .db 0x54, 0xE1                             ; str r14, r1
+
     ; --- NEGATE ( n -- -n )  6 bytes ---
     .dq d_negate
     .db 6
     .db 0x50, 0x1E                         ; ldn r1, r14
     .db 0x7A, 0x11                         ; neg r1, r1
     .db 0x54, 0xE1                         ; str r14, r1
+
+    ; --- 2* ( n -- 2n )  6 bytes ---
+    .dq d_two_star
+    .db 6
+    .db 0x50, 0x1E                             ; ldn r1, r14
+    .db 0x68, 0x11                             ; lsli r1, 1
+    .db 0x54, 0xE1                             ; str r14, r1
 
     ; --- XOR ( a b -- a^b )  11 bytes ---
     .dq d_xor
@@ -6184,6 +6323,13 @@ jit_inline_table:
     .db 0x50, 0x0E                         ; ldn r0, r14
     .db 0x76, 0x01                         ; xor r0, r1
     .db 0x54, 0xE0                         ; str r14, r0
+
+    ; --- 2/ ( n -- n/2 )  arithmetic  6 bytes ---
+    .dq d_two_slash
+    .db 6
+    .db 0x50, 0x1E                             ; ldn r1, r14
+    .db 0x6A, 0x11                             ; asri r1, 1
+    .db 0x54, 0xE1                             ; str r14, r1
 
     ; --- CELL+ ( a -- a+8 )  7 bytes ---
     .dq d_cell_plus
@@ -13730,6 +13876,13 @@ w_val_name_done:
     call.l r11
     ret.l
 
+; TO and POSTPONE lie further from interp_undefined than a 16-bit branch
+; reaches, so an undefined name reaches it through this call, which never
+; returns: interp_undefined prints the name and ends the line.
+far_interp_undefined:
+    ldi64 r11, interp_undefined
+    call.l r11
+
 ; TO ( x "name" -- )  [IMMEDIATE]
 ;   Stores x into the data field of a VALUE word.
 ;   Extracts data_addr from the ldi64 immediate at code+3.
@@ -13747,7 +13900,7 @@ w_to:
     ldi64 r11, find_word
     call.l r11
     cmpi r9, 0
-    lbreq interp_undefined
+    lbreq far_interp_undefined
     mov r13, r9               ; the entry, for a refusal's report
 
     ; entry_to_code → R9 = code addr
@@ -14010,7 +14163,7 @@ w_postpone:
     call.l r11
     ; R9 = entry (0 = not found), R1 = flags byte
     cmpi r9, 0
-    lbreq interp_undefined
+    lbreq far_interp_undefined
 
     mov r10, r1               ; save flags in R10
     ; entry_to_code → R9 = code addr
