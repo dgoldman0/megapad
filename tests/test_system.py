@@ -6000,6 +6000,73 @@ class TestBIOS(unittest.TestCase):
         folds = int(m.group(1), 16)
         self.assertGreater(folds, 0, "Expected at least 1 fold from LITERAL +")
 
+    def test_jit_compiles_a_constant_as_its_value(self):
+        """With the JIT on, a use of a CONSTANT compiles as its value: the
+        definition is the size the literal makes, a small value folds into
+        a following + - AND OR XOR, and every width keeps its value."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "0 CONSTANT C0  255 CONSTANT C255  256 CONSTANT C256  -1 CONSTANT CM1",
+            "127 CONSTANT C127  128 CONSTANT C128",
+            "HEX 8000000000000000 CONSTANT CMIN DECIMAL",
+            "JIT-ON",
+            ": SZ ( -- n ) HERE ;",
+            "SZ : AK C255 ; SZ SWAP -  SZ : AL 255 ; SZ SWAP -  60 EMIT = . 62 EMIT",
+            "SZ : FK 10 C127 + ; SZ SWAP -  SZ : FL 10 127 + ; SZ SWAP -  60 EMIT = . 62 EMIT",
+            "SZ : BK C256 ; SZ SWAP -  SZ : BL 256 ; SZ SWAP -  60 EMIT = . 62 EMIT",
+            ": T1 C0 C255 C256 CM1 CMIN ;",
+            ": T2 10 C127 + 10 C128 + 1000 C255 AND 1 C255 OR 3 C255 XOR 300 C127 - ;",
+            ": T3 ['] C256 EXECUTE ;",
+            "JIT-OFF",
+            "SZ : OK C255 ; SZ SWAP -  SZ : OM DUP ; SZ SWAP -  60 EMIT = . 62 EMIT",
+            "60 EMIT T1 . . . . . T2 . . . . . . T3 . 62 EMIT",
+        ])
+        sizes = re.findall(r"<(-?\d+) >", text)
+        # The constant compiles as small, as folded and as wide as the
+        # literal; with the JIT off it is a call, as DUP's is.
+        self.assertEqual(sizes[:4], ["-1", "-1", "-1", "-1"], text)
+        self.assertRegex(
+            text,
+            r"<-9223372036854775808 -1 256 255 0 173 252 255 232 138 137 256 >",
+        )
+
+    def test_jit_compiles_a_created_word_as_its_address(self):
+        """With the JIT on, a use of a VARIABLE or a CREATE'd word compiles
+        as its data address, while a word DOES> patched, or one DOES>
+        re-points later (IS), stays a call that runs its behaviour."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE VA  41 VA !  CREATE CB 3 , 4 ,",
+            ": MK CREATE , DOES> @ 1+ ;  9 MK MD",
+            ": DEFER CREATE ['] DUP , DOES> @ EXECUTE ;  : IS ' >BODY ! ;",
+            "DEFER DF  : SIX 6 ;  ' SIX IS DF",
+            "JIT-ON",
+            ": SZ ( -- n ) HERE ;",
+            "SZ : AV VA ; SZ SWAP -  SZ : AL [ VA ] LITERAL ; SZ SWAP -  60 EMIT = . 62 EMIT",
+            ": U1 VA @ 1+ VA ! VA @ CB @ CB CELL+ @ MD DF ;",
+            "JIT-OFF",
+            ": SEVEN 7 ;  ' SEVEN IS DF",
+            "60 EMIT U1 . . . . . 62 EMIT",
+        ])
+        self.assertIn("<-1 >", text)
+        self.assertIn("<7 10 4 3 42 >", text)
+
+    def test_jit_keeps_calls_while_relocation_is_tracked(self):
+        """While relocation tracking is on, an image is being built: uses of
+        constants and created words stay calls, which it records."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "5 CONSTANT K5  VARIABLE VB",
+            "HERE _RELOC-BUF ! 128 CELLS ALLOT 128 _RELOC-CAP !",
+            "JIT-ON 1 _RELOC-ACTIVE ! 0 _RELOC-COUNT !",
+            ": TR K5 VB ;",
+            "0 _RELOC-ACTIVE ! JIT-OFF",
+            'CR ." [RC=" _RELOC-COUNT @ . ." ]"',
+            "60 EMIT TR VB = . . 62 EMIT",
+        ])
+        self.assertRegex(text, r"\[RC=2\s+\]")
+        self.assertIn("<-1 5 >", text)
+
 
 # ---------------------------------------------------------------------------
 #  Full-TACC BIOS words

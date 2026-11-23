@@ -1315,6 +1315,45 @@ optimisations via a one-entry peephole lookback buffer:
    (`TRUE`), instead of the standard 16-byte `ldi64` + push.
 7. When an IMMEDIATE word executes during compilation (`;`, `IF`, `DO`,
    etc.), the peephole state is flushed to prevent stale matches.
+8. A word the table does not hold goes to `jit_push_value` before it is
+   called. A `CONSTANT`, a `VARIABLE`, and a `CREATE`'d word whose DOES>
+   slot is still unpatched only push a value fixed when the word was
+   made, so a use of one compiles as that value through
+   `jit_compile_literal`, where a following `+ - AND OR XOR` can fold it.
+   The check reads the word's code: `ldi64 r1, v; subi r14, 8;
+   str r14, r1` followed by `sep r17` (a CONSTANT) or `ret.l` at offset
+   16 (a created word before DOES> rewrites that offset). A `VALUE`
+   (`ldn r1, r1` at offset 11), a DOES> child and any other colon word
+   do not match, and a colon word whose whole body is one 64-bit literal
+   pushes that literal too. While `_RELOC-ACTIVE` is set, binimg is
+   building an image: uses stay calls there, so the image records them
+   and moves them when it loads, and binimg can check the constants
+   they reach.
+
+**Cost of one use** (emulator cycles, measured over 10,000-iteration loops
+and traced; a call is `sep r16`, the trampoline and NEXT, 10 cycles, and a
+return through `sep r17`, its trampoline and EXIT, 7 more):
+
+| Construct | Compiled as a call | With the JIT on |
+|---|---|---|
+| colon word, called and returning | 17 | 17 |
+| `CONSTANT` | 21 | 3 for 0–255, 4 otherwise |
+| `CONSTANT` before `+` `-` (below 128) or `AND` `OR` `XOR` (0–255) | 26 with the inlined operator | 3, folded |
+| `VARIABLE`, `CREATE`'d data address | 16 (they return with `ret.l`) | 4 |
+| `VALUE` | 17 | 17 |
+| literal | — | 3 for 0–255, 4 otherwise |
+| inlined primitives | — | `DROP` 1; `DUP` `@` `NIP` `CELLS` `CELL+` 3; `+` `-` `AND` `OR` `XOR` `!` `OVER` 5; `SWAP` 6 |
+| primitives the table does not hold | `1+` `C@` 21, `I` 23, `0=` 24, `*` `U<` `2DUP` 26, `=` 27, `<` 36 | (called) |
+
+Inlining a constant changes a dictionary's size little: a value of
+0–255 takes 8 bytes where the call took 10, a fold 7 where the call and
+the operator took 21, and a wider value 16. A created word's address is
+always a 16-byte literal, so code that uses many grows: KDOS's
+kernel dictionary ends 14,412 bytes later, and the bank-0 heap free
+after boot falls from 113,064 to 98,664 bytes. On the canonical Desktop
+journey, counted on the simulator and priced with these costs, constant
+uses were 7.0% of the emulator's cycles and created-word pushes 17.1%;
+compiling them as values saves about 19% of the journey's cycles.
 
 **Inlined primitives (18):** `DUP` `DROP` `SWAP` `OVER` `NIP` `2DROP`
 `+` `-` `AND` `OR` `XOR` `INVERT` `NEGATE` `@` `!` `CELLS` `CELL+`

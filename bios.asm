@@ -5280,6 +5280,9 @@ compile_ret:
 ;       emitting a 10-byte sep-r16+XT sequence per word reference.
 ;    2. Uses compact literal encodings for values 0–255 (8 bytes
 ;       instead of 16) and TRUE/-1 (9 bytes instead of 16).
+;    3. Compiles a use of a CONSTANT, a VARIABLE or a CREATE'd word
+;       without DOES> as the value it pushes (jit_push_value), except
+;       while relocation tracking builds an image.
 ;
 ;  JIT-ON / JIT-OFF toggle at runtime.  JIT-STATS reports counters.
 ;  The inline table maps dictionary entry addresses to pre-assembled
@@ -5547,6 +5550,26 @@ jit_cw_done:
 jit_cw_not_found:
     ldn r9, r15
     addi r15, 8
+    ; A word that only pushes a value fixed when it was made (a CONSTANT,
+    ; a VARIABLE, a CREATE'd word without DOES>) compiles as that value,
+    ; which a following + - AND OR XOR can then fold.
+    ldi64 r11, jit_push_value
+    call.l r11
+    cmpi r0, 0
+    lbreq jit_cw_fallback
+    ldi64 r11, jit_compile_literal
+    call.l r11
+    ; Stats: one more inline.  jit_compile_literal counted its bytes
+    ; against a 16-byte literal; the use it replaces was a 10-byte call.
+    ldi64 r11, var_jit_inlines
+    ldn r1, r11
+    inc r1
+    str r11, r1
+    ldi64 r11, var_jit_bytes_saved
+    ldn r1, r11
+    subi r1, 6
+    str r11, r1
+    ret.l
 jit_cw_fallback:
     ; Clear peephole state (non-inlinable word)
     ldi r0, 0
@@ -5559,6 +5582,92 @@ jit_cw_fallback:
     ldi64 r11, compile_call
     call.l r11
     ret.l
+
+; ---------------------------------------------------------------------
+;  jit_push_value — the value a word pushes, when its use can be compiled
+;  as that value.
+;  A CONSTANT's code is ldi64 r1, v; subi r14, 8; str r14, r1; sep r17
+;  (F0 60 10 <v> 67 E0 08 54 E1 F4 A1).  A VARIABLE's code, and a
+;  CREATE'd word's until DOES> patches it, is the same push ending in
+;  ret.l (0E at offset 16).  Such a word only pushes v, and v cannot
+;  change: CONSTANT has no data field, a created word's data address is
+;  fixed when it is made, and DOES> patches only the word its defining
+;  word has just created, before any use of it is compiled.  DOES>
+;  rewrites offset 16, VALUE's code has ldn r1, r1 at offset 11, and a
+;  colon word whose body is one 64-bit literal pushes that literal too.
+;  While relocation tracking is on an image is being built: its uses stay
+;  calls, which the image records and moves, and binimg checks the
+;  constants they reach.
+;  Input:  R9 = dictionary entry.  Output: R0 = 1 and R1 = v, or R0 = 0.
+;  Preserves R9.  Clobbers R1, R7, R11, R12, R13.
+; ---------------------------------------------------------------------
+jit_push_value:
+    ldi r0, 0
+    ldi64 r11, var_reloc_active
+    ldn r11, r11
+    cmpi r11, 0
+    lbrne jpv_done
+    ; R12 = code: the entry, its link and flags+length byte, its name
+    mov r12, r9
+    addi r12, 8
+    ld.b r11, r12
+    andi r11, 0x7F
+    inc r12
+    add r12, r11
+    ; The bytes both shapes have, as (offset, byte) pairs ending at 0xFF
+    ldi64 r13, jit_push_shape
+jpv_cmp:
+    ld.b r11, r13
+    ldi r7, 0xFF
+    cmp r11, r7
+    lbreq jpv_end
+    mov r7, r12
+    add r7, r11
+    ld.b r7, r7               ; the code's byte
+    inc r13
+    ld.b r11, r13             ; the shape's byte
+    inc r13
+    cmp r11, r7
+    lbrne jpv_done
+    lbr jpv_cmp
+jpv_end:
+    ; Offset 16: ret.l for a created word, sep r17 for a CONSTANT
+    mov r13, r12
+    addi r13, 16
+    ld.b r11, r13
+    ldi r7, 0x0E
+    cmp r11, r7
+    lbreq jpv_value
+    ldi r7, 0xF4
+    cmp r11, r7
+    lbrne jpv_done
+    inc r13
+    ld.b r11, r13
+    ldi r7, 0xA1
+    cmp r11, r7
+    lbrne jpv_done
+jpv_value:
+    ; R1 = the little-endian immediate at code+3, read a byte at a time
+    ldi r1, 0
+    ldi r7, 8
+jpv_byte:
+    lsli r1, 8
+    mov r13, r12
+    addi r13, 2
+    add r13, r7
+    ld.b r11, r13
+    or r1, r11
+    dec r7
+    cmpi r7, 0
+    lbrne jpv_byte
+    ldi r0, 1
+jpv_done:
+    ret.l
+
+jit_push_shape:
+    .db 0, 0xF0, 1, 0x60, 2, 0x10
+    .db 11, 0x67, 12, 0xE0, 13, 0x08, 14, 0x54, 15, 0xE1
+    .db 0xFF
 
 ; ---------------------------------------------------------------------
 ;  jit_emit_lit_fold — emit fused lit + ALU (7 bytes)

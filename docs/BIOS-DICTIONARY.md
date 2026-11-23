@@ -478,6 +478,7 @@ Four more words of this section have no number in the catalogue:
 
 The BIOS includes an optional compile-time JIT that inlines native code
 for 18 common primitives instead of emitting `call.l` instructions,
+compiles uses of constants and created words as their values,
 uses compact literal encodings for small constants, folds small-literal
 + ALU sequences into single immediate instructions, and fuses common
 two-primitive bigrams into optimised native sequences.  JIT is **off by
@@ -503,6 +504,14 @@ sequence instead of the 16-byte `ldi64` + push.  The constant `-1`
 for `AND`/`OR`/`XOR`) is followed by an ALU word, the pair is fused
 into a single 7-byte immediate instruction (e.g. `3 +` → `addi`).
 Saves 22 bytes per folded pair vs unoptimised compilation.
+
+**Values of words that only push:** A use of a `CONSTANT`, a `VARIABLE`
+or a `CREATE`'d word that DOES> has not patched compiles as the value the
+word pushes, so it costs what a literal costs (3 or 4 cycles, where the
+call cost 21 for a constant and 16 for a created word) and a small value
+folds into a following ALU word. While `_RELOC-ACTIVE` is set (an image
+being built) such uses stay calls. `docs/architecture.md` ("JIT Compiler")
+gives the rule, the cost of each construct and the dictionary sizes.
 
 **Peephole bigrams (6 patterns):** Consecutive inlined primitives are
 checked against a bigram table and replaced with fused native sequences:
