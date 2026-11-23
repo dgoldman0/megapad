@@ -3446,6 +3446,11 @@ def install_core(runtime: MegaForthRuntime) -> None:
         b"IPI-PENDING", lambda context: _ipi_pending(runtime, context),
     )
 
+    # QUIT follows: it ends the line as ABORT does but keeps the data stack,
+    # and in a task slot it ends the slot and gives the foreground its data
+    # stack back, as the BIOS's QUIT does.
+    runtime.define_primitive(b"QUIT", lambda context: runtime.quit_task(context))
+
 
 def _define_accept(runtime: MegaForthRuntime) -> None:
     """``ACCEPT ( addr max -- n )`` as the BIOS's ``w_accept`` runs it.

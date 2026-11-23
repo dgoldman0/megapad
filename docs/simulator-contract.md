@@ -861,11 +861,15 @@ which would take the running slot's stacks for the foreground's,
 `TASK-YIELD` in the foreground, which would return through a `PAUSE` that is
 not running, and both words on a worker core, which has no slots, take the
 illegal-operation fault, -21 to a `CATCH`; the BIOS's words execute an
-unassigned opcode, so the fault takes the machine's own path. An error or
-`ABORT` in a slot ends the slot and the foreground's line that paused, as
-the BIOS's `QUIT` ends the slot that was running, and `TASK-ID` answers 0
-again. A slot's stack overflow raises the simulator's stack error and ends
-the slot, where the BIOS's 32-cell stacks run into the next slot's.
+unassigned opcode, so the fault takes the machine's own path. An error,
+`ABORT` or `QUIT` in a slot ends the slot and the foreground's line that
+paused, as the BIOS's `QUIT` ends the slot that was running, and `TASK-ID`
+answers 0 again. After `QUIT` and after an error that
+the evaluator raises, such as a compile-only word met through `EVALUATE`,
+the foreground keeps the data stack it had when it paused, as the BIOS's
+`QUIT` and diagnostics give it back. A slot's stack overflow raises the
+simulator's stack error and ends the slot, where the BIOS's 32-cell stacks
+run into the next slot's.
 
 ## 6. Platform services
 
@@ -959,6 +963,10 @@ ports, as the BIOS's word reads CSR `MBOX`; a port's ID lies above 7 on the
 standard die, where `IPI-STATUS` never shows it. The chiplets step before
 it, as before a read of `MBOX_STATUS`, so a core that polls either one for
 a port's signal makes progress.
+`QUIT ( -- )` follows `IPI-PENDING` at the frontier. It ends the line as
+`ABORT` does, its return stack cleared and the `QUIT-XT!` callback run, but
+keeps the data stack; in a task slot it ends the slot, and on a worker it
+ends the job, as the BIOS's word does.
 
 A worker runs within the limits of KDOS's concurrency contract. The
 compiler, the evaluator with its input parsing (`'`, `WORD` and the names

@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import pytest
 
-from simulator.errors import ForthAbort
+from simulator.errors import ForthAbort, SourceError
 from tests.test_multicore_differential import (
     _BETWEEN,
     _PROGRAM_COUNTER,
@@ -323,3 +323,43 @@ def test_an_uncaught_misuse_of_the_slot_words_faults_on_the_emulator():
         # The BIOS's report also names the program counter.
         assert MISUSE_FAULT in _PROGRAM_COUNTER.sub(b"", emulator.type([line]))
     assert _between(emulator.type([MISUSE_REPORT])) == MISUSE_EXPECTED
+
+
+# A diagnostic that ends a line and QUIT, each in a slot, end the slot with
+# the line, and the foreground keeps the data stack it had when it paused,
+# 1 2, while the slot's 7 8 go with the slot. The BIOS prints the
+# diagnostic; the simulator's evaluator raises it to its host. Then what the
+# foreground sees, and a PAUSE that finds no slot.
+QUIT_SETUP = b"""VARIABLE TS-AFTER
+: TS-BADDO ( -- ) 7 8 S" DO" EVALUATE ;
+: TS-QUITS ( -- ) 7 8 QUIT ;
+: TS-SHOW ( -- ) DEPTH DUP . 0 ?DO . LOOP ;"""
+QUIT_CASES = {
+    "diagnostic": b"0 TS-AFTER ! 1 2 ' TS-BADDO BACKGROUND PAUSE 9 TS-AFTER !",
+    "quit": b"0 TS-AFTER ! 1 2 ' TS-QUITS BACKGROUND PAUSE 9 TS-AFTER !",
+}
+QUIT_REPORT = (b"60 EMIT 60 EMIT TASK-ID . 1 TASK? . TS-AFTER @ . TS-SHOW "
+               b"PAUSE #TASKS . 62 EMIT 62 EMIT")
+QUIT_EXPECTED = b"0 0 0 2 2 1 0 "
+
+
+@pytest.mark.parametrize("case", tuple(QUIT_CASES))
+@pytest.mark.parametrize("executor", ("native", "python"))
+def test_a_diagnostic_or_quit_in_a_slot_ends_the_slot_on_the_simulator(
+        executor, case):
+    runtime = _Simulator(1, executor, _kdos()).runtime
+    runtime.evaluate(QUIT_SETUP)
+    runtime.drain_uart_output()
+    with pytest.raises(SourceError if case == "diagnostic" else ForthAbort):
+        runtime.evaluate(QUIT_CASES[case])
+    runtime.evaluate(QUIT_REPORT)
+    assert _between(runtime.drain_uart_output()) == QUIT_EXPECTED
+
+
+@pytest.mark.parametrize("case", tuple(QUIT_CASES))
+def test_a_diagnostic_or_quit_in_a_slot_ends_the_slot_on_the_emulator(case):
+    emulator = _Emulator(1, _bios(), _kdos())
+    emulator.type(QUIT_SETUP.splitlines())
+    said = emulator.type([QUIT_CASES[case]])
+    assert (b"compile-only word" in said) == (case == "diagnostic")
+    assert _between(emulator.type([QUIT_REPORT])) == QUIT_EXPECTED

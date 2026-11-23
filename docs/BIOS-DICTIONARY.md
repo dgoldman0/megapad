@@ -464,7 +464,7 @@ Four more words of this section have no number in the catalogue:
 | — | `EVAL-THROW` | `( -- addr )` | | Address of exact source exception code retained for status 5 |
 | — | `EVAL-TOKEN` | `( -- addr len )` | | Stable copy of the failing token; empty for non-token failures |
 | 144 | `>NUMBER` | `( ud addr len -- ud' addr' len' )` | | Convert string chars to number using BASE. Stops at first non-digit. ud treated as single 64-bit value |
-| 145 | `QUIT` | `( -- )` | | Reset return stack, run the `QUIT-XT!` callback if one is installed, enter outer interpreter loop (does not return) |
+| 145 | `QUIT` | `( -- )` | | Reset return stack, end every nested `EVALUATE`, run the `QUIT-XT!` callback if one is installed, enter outer interpreter loop keeping the data stack (does not return); in a background slot, end the slot and give the foreground back its data stack |
 | 557 | `QUIT-XT!` | `( xt -- )` | | Install the callback `QUIT` runs once it has reset the return stack, which `ABORT` and `ABORT"` reach as well; the callback takes and leaves nothing; 0 removes it |
 
 ### Comments (2 words)

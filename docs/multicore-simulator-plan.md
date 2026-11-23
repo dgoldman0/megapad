@@ -792,7 +792,7 @@ boot leaves a microcore's R2 as reset leaves it.
 
 These came out of reading the sources and, where stated, running the
 emulator; findings 12 to 14 came out of stage 3's differential cases, and
-16 to 18 out of the slice that fixed findings 8 and 12 to 15. Each needs a
+16 to 19 out of the slice that fixed findings 8 and 12 to 15. Each needs a
 change in the BIOS, KDOS, the release plan, the contract or the tests.
 
 1. **A chiplet's doorbell to a BIOS worker core misfires (run on the
@@ -959,7 +959,18 @@ change in the BIOS, KDOS, the release plan, the contract or the tests.
     dictionary, until the same check resets it. Sending these diagnostics
     through `forth_quit`, and giving the foreground its data stack back
     when `QUIT` ends a slot, would close both, in the next slice that
-    changes `bios.asm`.
+    changes `bios.asm`. Fixed on 2026-11-23 in the same slice: the
+    diagnostics and `QUIT` reach `forth_quit` through `quit_keep_stack`,
+    which first gives the foreground back the data stack pointer that
+    `PAUSE` saved, and `forth_quit` now ends every nested `EVALUATE` with
+    the line, so a diagnostic inside one no longer keeps its level and
+    return frames. Before, sixteen of them used up `EVALUATE`'s depth for
+    the rest of the session, and on a worker the same branch started a
+    second outer interpreter, leaving core 0 waiting on the job; the job
+    now ends. The simulator gains `QUIT`, which keeps the data stack.
+    `tests/test_task_slots_differential.py` compares `S" DO" EVALUATE` and
+    `QUIT` in a slot on both machines, and `tests/test_bios_line_endings.py`
+    covers the endings on core 0 and on a worker.
 17. **`TASK-STOP` and `TASK?` take any slot number (read from the
     source).** Both index `var_task_pcs` with the cell on the stack
     unchecked, so `TASK-STOP` with a number outside 1 to 3 clears another
@@ -980,6 +991,16 @@ change in the BIOS, KDOS, the release plan, the contract or the tests.
     file last passed whole at d8016c43, before f317327b. The tests need to
     take the lock in the native bank as core 1, which the next change to
     `tests/test_system.py` can do.
+19. **After an `ABORT` or a fault in a slot the machines leave different
+    data stacks (run on both).** The BIOS's `ABORT` and `fault_recover`
+    reset core 0's data stack pointer, so the foreground's data stack is
+    empty afterwards, while the simulator ends only the slot's context and
+    the foreground keeps the data stack it had when it paused: a line
+    `1 2 ' X BACKGROUND PAUSE` whose slot aborts leaves `DEPTH` 0 on the
+    emulator and 2 on the simulator. After `QUIT` and the interpreter's
+    diagnostics both machines keep it (finding 16). Emptying the main
+    context's data stack when an `ABORT` or a fault leaves a slot would make
+    the simulator agree, in its next slice.
 
 ## 10. Decisions
 

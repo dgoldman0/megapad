@@ -2523,6 +2523,23 @@ class MegaForthRuntime:
             quit_callback_ran=self._run_quit_callback(context),
         )
 
+    def quit_task(self, context: ExecutionContext) -> NoReturn:
+        """Perform the BIOS ``QUIT`` for one task and leave to the host.
+
+        As ``abort_task``, but the data stack stays, as QUIT keeps it: the
+        line ends, the return stack is cleared and the ``QUIT-XT!``
+        callback runs. In a task slot the slot ends with the line, and the
+        foreground keeps the data stack it had when it paused, as the BIOS's
+        QUIT gives it back; a worker's job ends.
+        """
+
+        context.returns.clear()
+        raise ForthAbort(
+            "Forth QUIT",
+            origin_context=context,
+            quit_callback_ran=self._run_quit_callback(context),
+        )
+
     def _run_quit_callback(self, context: ExecutionContext) -> bool:
         xt = self._quit_xt
         if xt == 0 or not context.reusable:

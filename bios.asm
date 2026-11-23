@@ -484,6 +484,31 @@ boot_bad_core_topology:
 ; =====================================================================
 ;  QUIT — the outer interpreter
 ; =====================================================================
+
+; quit_keep_stack: QUIT, and the diagnostics that end a line from inside a
+;   word (a compile-only word met in interpretation state, a definition word
+;   out of place, a quotation mismatch, IMMEDIATE after :NONAME), end the
+;   line as QUIT does and keep the data stack.  When a background slot was
+;   running, the data stack pointer is the slot's: take back the
+;   foreground's, which PAUSE saved on the foreground's return stack, before
+;   forth_quit reuses that stack and ends the slot.  A worker goes on to
+;   forth_quit as it is, which ends its job.
+quit_keep_stack:
+    csrr r0, 0x20
+    cmpi r0, 0
+    brne .qks_quit              ; a worker
+    ldi64 r11, var_task_active
+    ldn r0, r11
+    cmpi r0, 0
+    breq .qks_quit              ; core 0's foreground
+    ldi64 r11, var_task0_rsp
+    ldn r11, r11
+    ldn r14, r11                ; the foreground's DSP, as PAUSE saved it
+.qks_quit:
+    ldi64 r11, forth_quit
+    call.l r11
+    halt
+
 forth_quit:
     ; The outer interpreter and the terminal are core 0's: QUIT on a worker
     ; ends its job (worker_quit, which never returns).
@@ -495,6 +520,11 @@ forth_quit:
 .forth_quit_core0:
     ; Reset RSP to top of RAM each time
     mov r15, r2
+    ; Every EVALUATE the line nested ends with it, whichever way the line
+    ; ended, so the next EVALUATE starts from depth zero.
+    ldi r1, 0
+    ldi64 r11, var_eval_depth
+    str r11, r1
     ; Whatever the abandoned return stack held is gone.  ABORT, ABORT" and
     ; QUIT all pass here, so the callback installed with QUIT-XT! runs now:
     ; KDOS drops the exception frames that lived on that stack.
@@ -6010,7 +6040,8 @@ w_colon:
     ldi64 r10, str_nested_def
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_colon_not_compiling:
     ; Clear stale :NONAME flag and JIT peephole state
     ldi r1, 0
@@ -6139,7 +6170,8 @@ w_semicolon:
     ldi64 r10, str_compile_only
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_semi_state_ok:
     ; Guard: must not be inside [: ... ;] quotation
     ldi64 r11, var_quot_depth
@@ -6149,7 +6181,8 @@ w_semi_state_ok:
     ldi64 r10, str_semi_in_quot
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_semi_quot_ok:
     ; Compile ret.l
     ldi64 r11, compile_ret
@@ -6182,7 +6215,8 @@ w_colonnoname:
     ldi64 r10, str_nested_def
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_colonnoname_ok:
     ; Reset JIT peephole state for new definition
     ldi r1, 0
@@ -6776,7 +6810,8 @@ w_do:
     ldi64 r10, str_compile_only
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_do_ok:
     ; Compile at runtime:
     ;   ldn r1, r14       ; index (TOS)          = 50 1E
@@ -6877,7 +6912,8 @@ w_qdo:
     ldi64 r10, str_compile_only
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_qdo_ok:
     ; Compile the DO preamble: pop limit & index, push to RSP
     ;   ldn r1, r14       ; index (TOS)          = 50 1E
@@ -7044,7 +7080,8 @@ w_loop:
     ldi64 r10, str_compile_only
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_loop_ok:
     ; Compile at runtime:
     ;   ldn r1, r15       ; index from RSP
@@ -7360,7 +7397,8 @@ w_unloop:
     ldi64 r10, str_compile_only
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_unloop_ok:
     ldi r1, 0x62
     ldi64 r11, compile_byte
@@ -7396,7 +7434,8 @@ w_plus_loop:
     ldi64 r10, str_compile_only
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_plus_loop_ok:
     ; ldn r7, r14 = 50 7E
     ldi r1, 0x50
@@ -7612,7 +7651,8 @@ w_immediate:
     ldi64 r10, str_imm_noname
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_immediate_ok:
     ldi64 r11, var_latest
     ldn r9, r11               ; R9 = latest entry address
@@ -11458,11 +11498,7 @@ w_abort:
     mov r14, r2               ; reset DSP to ram_size
     lsri r14, 1               ; DSP = ram_size / 2
     mov r15, r2               ; reset RSP to ram_size
-    ; Reset EVALUATE nesting depth so future EVALUATEs work
-    ldi r1, 0
-    ldi64 r11, var_eval_depth
-    str r11, r1
-    ldi64 r11, forth_quit
+    ldi64 r11, forth_quit     ; QUIT resets the EVALUATE depth
     call.l r11                ; jump to QUIT (never returns)
     halt
 
@@ -11805,7 +11841,8 @@ w_leave:
     ldi64 r10, str_compile_only
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_leave_compile:
     ; Compile: addi r15, 16  -- unloop (drop limit+index from RSP)
     ; Encoding: 0x62 0xF0 0x10
@@ -13203,7 +13240,8 @@ w_quote_open:
     ldi64 r10, str_compile_only
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_quote_open_ok:
     ; Emit unconditional forward branch: lbr <placeholder>
     ; LBR unconditional: opcode 0x40, then 16-bit BE offset
@@ -13257,7 +13295,8 @@ w_quote_close:
     ldi64 r10, str_compile_only
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_quote_close_ok:
     ; Pop sentinel and validate
     ldn r1, r14
@@ -13268,7 +13307,8 @@ w_quote_close_ok:
     ldi64 r10, str_quot_mismatch
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_quote_close_sentinel_ok:
     ; Pop fixup_addr
     ldn r9, r14               ; R9 = fixup_addr
@@ -14446,8 +14486,9 @@ w_tnum_done:
 
 ; QUIT ( -- )
 ;   Reset return stack, enter outer interpreter loop. Does not return.
+;   The data stack stays: in a background slot, the foreground's.
 w_quit:
-    ldi64 r11, forth_quit
+    ldi64 r11, quit_keep_stack
     call.l r11
     halt
 
