@@ -33,7 +33,7 @@ MASK64 = (1 << 64) - 1
 COMMAND_WORD = 0x0000_5EED_0000_0002
 
 
-def _bring_up(port_id: int) -> bytes:
+def _bring_up(port_id: int, control: int) -> bytes:
     return f"""
 {WINDOW} CONSTANT CP
 {MBOX} CONSTANT MBOX
@@ -47,7 +47,7 @@ def _bring_up(port_id: int) -> bytes:
     {IMAGE} 0xD8 CP!  40 0xE0 CP!
     {COMMAND} {COMMAND + 0x900} 1 1 LEND
     {REPLY} {REPLY + 0x1000} 3 2 LEND
-    9 0x80 CP!
+    {control} 0x80 CP!
     WAIT-READY ;
 : RING ( -- ) {port_id} MBOX 8 + C! ;
 : SERVED ( -- n ) {REPLY + 8} C@ ;
@@ -63,7 +63,16 @@ CREATE MARKS 4 CELLS ALLOT  MARKS 4 CELLS 0 FILL
 """.encode()
 
 
-def _runtime(cores: int, executor: str, *, quantum: int = 1_000) -> MegaForthRuntime:
+ENABLE, DOORBELL_EN, BORROW_EN = 1, 1 << 3, 1 << 5
+# Port 0's window into the memory its chiplet lends, and the test chiplet's
+# lent range within it; a Bank 0 image for TACC to relay there.
+LENT_WINDOW = 0x0100_0000_0000_0000 + 0x1000
+INITIAL = 0x41400
+COPY_FROM_LENT = 0x100
+
+
+def _runtime(cores: int, executor: str, *, quantum: int = 1_000,
+             borrow: bool = False) -> MegaForthRuntime:
     memory = create_address_space(
         topology=Topology(full_cores=cores),
         bank0_size=1 << 20,
@@ -81,7 +90,8 @@ def _runtime(cores: int, executor: str, *, quantum: int = 1_000) -> MegaForthRun
         memory=memory, execution_backend=executor, turn_quantum_steps=quantum,
     )
     runtime.chiplet_ports.attach_test_chiplet(0)
-    runtime.evaluate(_bring_up(cores))
+    control = ENABLE | DOORBELL_EN | (BORROW_EN if borrow else 0)
+    runtime.evaluate(_bring_up(cores, control))
     runtime.execute("BRING-UP")
     return runtime
 
@@ -153,6 +163,26 @@ def test_while_every_core_sleeps_the_chiplet_steps_until_it_rings(executor):
     # Core 0's sleep took the signal that ended it, as idle_until does.
     assert _cell(runtime, "MARKS", 0) == 0
     assert runtime.memory.read64(REPLY) == ~COMMAND_WORD & MASK64
+
+
+@pytest.mark.parametrize("executor", EXECUTORS)
+@pytest.mark.parametrize("cores", (2, 4))
+def test_a_worker_relays_a_tacc_image_into_the_chiplets_memory(executor, cores):
+    runtime = _runtime(cores, executor, borrow=True)
+    image = bytes((index * 7 + 3) & 0xFF for index in range(256))
+    runtime.memory.write_bytes(INITIAL, image)
+    runtime.evaluate(f"""
+: RJOB ( -- ) TACC-CLAIM? DROP 0 TMODE! TACC-CLEAR
+    {INITIAL} {LENT_WINDOW} TACC-RELAY MARK! TACC-RELEASE ;
+: MAIN ( -- ) ['] RJOB 1 WAKE-CORE 1 WAIT-FOR ;
+""".encode())
+    runtime.execute("MAIN")
+    assert _cell(runtime, "MARKS", 1) == 0  # TACC-RELAY's OK
+    # The chiplet copies the start of its lent memory into its reply.
+    runtime.memory.write_bytes(COMMAND, (COPY_FROM_LENT | 32).to_bytes(8, "little"))
+    runtime.evaluate(b": COPY-BACK ( -- ) ASK-POLLING DROP ;")
+    runtime.execute("COPY-BACK")
+    assert runtime.memory.read_bytes(REPLY + 24, 256) == image
 
 
 def _chiplet_program(executor: str, cores: int):

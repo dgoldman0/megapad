@@ -894,11 +894,16 @@ its fault path, which reports `*** ILLEGAL INSTRUCTION CORE=nn`. Words that
 only read the dictionary, such as `FIND` and `>BODY`, work on every core,
 and a dictionary rollback on core 0 that would remove a word in which a
 worker's suspended job runs is refused. The device services take the active core as
-their requester, but per-core engines and contention inside their native
-paths are not built: the tile engine, its accumulator and `FPCSR` are one
-state for the whole machine, and the checked disk words, which take lock 2,
-report the storage timeout status at once when another core holds it. Using
-those services from two cores at once is outside the claims.
+their requester. Each full core has its own tile engine with its
+accumulator, its own TACC and its own `FPCSR`, as on the machine: the
+runtime's services hold the running core's, and each turn switch puts one
+core's away and brings the next one's in, so a core's tile registers, its
+accumulations and its rounding mode last across the other cores' turns, and
+any full core's `TACC-SEND` or `TACC-RELAY` reaches a chiplet's window.
+Contention inside the native paths is not built yet: the checked disk
+words, which take lock 2, report the storage timeout status at once when
+another core holds it, and using them from two cores at once is outside the
+claims.
 
 Chiplet ports are a separately admitted capability, present when the address
 space is created with `chiplet_ports`. The ports are the C++ model the
@@ -1034,8 +1039,8 @@ peripheral wiring exposes only `COUNT_LO` to `CYCLES` and accepts only
 convergence and qualification are deferred rather than normalized into another
 hosted mode.
 
-The admitted legacy tile service, one state for the whole machine (section
-6), binds `TMODE!`, `TCTRL!`,
+The admitted legacy tile service, the running core's on a machine with
+several (section 6), binds `TMODE!`, `TCTRL!`,
 `TSRC0!`, `TSRC1!`, `TDST!`, `TADD`, `TSUB`, `TAND`, `TOR`, `TXOR`,
 `TMUL`, `TDOT`, `TSUM`, `TMIN`, `TMAX`, `TTRANS`, `TPOPCNT`, `TL1`,
 `TEMIN`, `TEMAX`, `TABS`, `TSUMSQ`, `TMINIDX`, `TMAXIDX`, `TWMUL`,

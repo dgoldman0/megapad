@@ -109,8 +109,8 @@ The implemented slices provide:
   wall-clock VALID byte `EPOCH_STAT` at `+0xB1D`, and BIOS `EPOCH@`;
   deterministic by default, with an explicit monotonic clock binding for the
   live server;
-- a retained semantic tile service, one state for the whole machine, for
-  four integer lane widths plus
+- a retained semantic tile service, each full core's own with its
+  accumulator, TACC and FPCSR, for four integer lane widths plus
   FP16/BF16, the source-required legacy and extended element, reduction,
   index, widening, multiply-accumulate, and transpose operations, low-byte
   control registers, completed-operation accounting, and the ACC/TSRC0/TDST

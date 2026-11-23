@@ -26,8 +26,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from simulator import tacc as tacc_service
 from simulator.errors import ExecutionError, ForthAbort
 from simulator.stacks import DataStack, ReturnStack
+from simulator.tile import HostedTileService
 
 if TYPE_CHECKING:
     from simulator.runtime import MegaForthRuntime
@@ -111,6 +113,17 @@ class HostedCores:
         # A worker's IPI handler takes a chiplet's signal as soon as one of
         # the worker's own accesses steps the chiplet into raising it.
         platform.signal_takers.takers = self._full_mask & ~1
+        # The engines of the cores whose turn is not running: each core's
+        # tile mode, control and source 1, its TACC and its FPCSR, all as at
+        # reset. The BIOS words' scalar service is the one the runtime made.
+        ports = runtime.chiplet_ports
+        link = None if ports is None else ports.link
+        self._tile_states: list[tuple | None] = [None] + [
+            (0, 0, 0, tacc_service.HostedTACCService(runtime.memory, link))
+            for _core in range(1, full_cores)
+        ]
+        self._scalar_float = runtime.scalar_float
+        self._fpcsrs = [0] * full_cores
         # The host's quantum for core 0's dispatch, kept while it runs.
         self._host_quantum: int | None = None
         # Whether another core has run since core 0's dispatch suspended:
@@ -215,13 +228,36 @@ class HostedCores:
     # -- turns ---------------------------------------------------------------
 
     def switch_to(self, core: int) -> None:
-        """Make ``core`` the one whose turn runs."""
+        """Make ``core`` the one whose turn runs: the requester of its
+        accesses, the core COREID names, and the owner of the tile engine,
+        the TACC and FPCSR that its words reach."""
 
+        if core != self.active:
+            self._swap_engines(self.active, core)
         self.active = core
         self._platform_table.requester = core
         native = self.runtime._native_execution
         if native is not None:
             native.program.set_core(core)
+
+    def _swap_engines(self, old: int, new: int) -> None:
+        """Each full core has its own tile engine, TACC and FPCSR, as on the
+        machine. The runtime's services hold the running core's; a turn
+        switch puts the old core's away and brings the new core's in. The
+        accumulator and the tile operand registers are the Field ALU's,
+        which keeps them by core already."""
+
+        tile = self.runtime.tile
+        if isinstance(tile, HostedTileService):
+            self._tile_states[old] = (
+                tile._mode, tile._control, tile._source1, tile._tacc,
+            )
+            (tile._mode, tile._control, tile._source1,
+             tile._tacc) = self._tile_states[new]
+            tile._core_id = new
+        scalar = self._scalar_float
+        self._fpcsrs[old] = scalar._fpcsr
+        scalar._fpcsr = self._fpcsrs[new]
 
     def apply_wakes(self) -> None:
         runtime = self.runtime

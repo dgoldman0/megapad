@@ -875,8 +875,10 @@ class MegaForthRuntime:
             self.system_storage,
             self.user_storage,
         ) = self.storage_units
-        # Core 0's full-width tile accumulator. A store image goes into a
-        # chiplet port's window when the profile has ports.
+        # The tile engine with its full-width accumulator. It holds the
+        # running core's state; on a machine with several cores each core
+        # has its own, which HostedCores swaps in at each turn. A store image
+        # goes into a chiplet port's window when the profile has ports.
         chiplet_ports = self.chiplet_ports
         self.tile = HostedTileService(
             self.memory,
