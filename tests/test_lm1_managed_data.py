@@ -1086,6 +1086,72 @@ def test_allocation_from_two_cores(backend):
     assert got == [-1, 0, 0, 256, -1, 0, -1]
 
 
+# Whether ADDR lies in a chunk OWNER holds with RIGHTS, read under CHIP-LOCK
+# while the other core may grow the chunk table.
+OWNED_WORDS = [
+    ": CHUNK-OF ( addr -- chunk | 0 ) _CHUNK-N 0 ?DO I _CHUNK DUP CK.USED CK@ IF "
+    "DUP CK.BASE CK@ 2 PICK SWAP U< 0= OVER CK.LIMIT CK@ 3 PICK U> AND "
+    "IF NIP UNLOOP EXIT THEN THEN DROP LOOP DROP 0 ;",
+    ": OWNED? ( addr owner rights -- flag ) CHIP-LOCK LOCK ROT CHUNK-OF ?DUP IF "
+    "DUP CK.RIGHTS CK@ ROT = SWAP CK.OWNER CK@ ROT = AND ELSE 2DROP FALSE THEN "
+    "CHIP-LOCK UNLOCK ;",
+]
+
+# Each core lends 64 bytes and makes a pair, a hundred times, each for an
+# owner and rights of its own: core 0 for owner 101, reading only, and a
+# pair of 2 and 4 entries rung to core 0; core 1 for owner 202, reading and
+# writing, and a pair of 8 and 16 entries rung to core 1.  A check finds
+# each lend in its owner's chunk with its rights, and each pair with the
+# capacities, core and port asked, its four parts in its owner's chunks.
+# Each round then gives the owner's memory back, so that the read-only
+# chunks, a range each, never run the port out of ranges.  The pairs' own
+# 200 bytes are kept: two cores given one pair would otherwise free it
+# twice, which loops KDOS's free list on itself.
+LEND_WORDS = OWNED_WORDS + [
+    "VARIABLE TL-BAD0  VARIABLE TL-BAD1  VARIABLE TL-N1  VARIABLE TL-SEEN",
+    ": TL-CHECK ( flag bad -- ) SWAP 0= IF 1 SWAP +! ELSE DROP THEN ;",
+    ": PAIR-OK? ( pair to from notify owner -- flag ) >R >R >R >R "
+    "DUP P.TO-CAP P@ R> = OVER P.FROM-CAP P@ R> = AND OVER P.NOTIFY P@ R> = AND "
+    "OVER P.PORT P@ 0= AND "
+    "OVER P.TO-RING P@ R@ CHIP-READ OWNED? AND OVER P.TO-HEAD P@ R@ CHIP-READ-WRITE OWNED? AND "
+    "OVER P.FROM-RING P@ R@ CHIP-READ-WRITE OWNED? AND OVER P.FROM-HEAD P@ R> CHIP-READ OWNED? AND "
+    "NIP ;",
+    ": TL-LEND0 64 CHIP-READ 101 0 CHIP-LEND-ALLOT IF DROP 1 TL-BAD0 +! EXIT THEN "
+    "101 CHIP-READ OWNED? TL-BAD0 TL-CHECK ;",
+    ": TL-LEND1 64 CHIP-READ-WRITE 202 0 CHIP-LEND-ALLOT IF DROP 1 TL-BAD1 +! EXIT THEN "
+    "202 CHIP-READ-WRITE OWNED? TL-BAD1 TL-CHECK ;",
+    ": TL-PAIR0 2 4 0 101 0 CHIP-PAIR-MAKE IF DROP 1 TL-BAD0 +! EXIT THEN "
+    "2 4 0 101 PAIR-OK? TL-BAD0 TL-CHECK ;",
+    ": TL-PAIR1 8 16 1 202 0 CHIP-PAIR-MAKE IF DROP 1 TL-BAD1 +! EXIT THEN "
+    "8 16 1 202 PAIR-OK? TL-BAD1 TL-CHECK ;",
+    # A round that aborts counts as a bad one, so both cores always finish.
+    ": TL-ROUND0 TL-LEND0 TL-PAIR0 101 0 CHIP-UNLEND-OWNER ;",
+    ": TL-ROUND1 TL-LEND1 TL-PAIR1 202 0 CHIP-UNLEND-OWNER ;",
+    ": C1-LEND 0 TL-BAD1 ! 0 TL-N1 ! 100 0 DO ['] TL-ROUND1 CATCH IF 1 TL-BAD1 +! THEN "
+    "1 TL-N1 +! LOOP TRUE C1-DONE ! ;",
+    ": C0-LEND 0 TL-BAD0 ! TL-N1 @ TL-SEEN ! 100 0 DO ['] TL-ROUND0 CATCH IF 1 TL-BAD0 +! THEN "
+    "LOOP TL-N1 @ TL-SEEN @ - TL-SEEN ! ;",
+]
+
+
+@pytest.mark.parametrize("backend", ALLOC_BACKENDS)
+def test_lending_and_pairs_from_two_cores(backend):
+    """Cores 0 and 1 lend memory and make pairs at once, a hundred of each,
+    each for an owner, rights and pair shape of its own, as two cores do
+    when they make their first managed-data requests together.  Every
+    lend lies in its own owner's chunk with its own rights, every pair has
+    the capacities, core and port its core asked, and the two cores' steps
+    overlapped."""
+    machine = ready(backend, extra=CORE1 + LEND_WORDS)
+    got = machine.run([
+        "' C1-LEND C1 C0-LEND C1-WAIT C1-DONE @ REPORT",
+        "TL-BAD0 @ REPORT TL-BAD1 @ REPORT TL-N1 @ REPORT TL-SEEN @ 0> REPORT",
+        "101 0 CHIP-UNLEND-OWNER 202 0 CHIP-UNLEND-OWNER 101 0 CHIP-LENT-BYTES REPORT "
+        "202 0 CHIP-LENT-BYTES REPORT",
+    ])
+    assert got == [-1, 0, 0, 100, -1, 0, 0]
+
+
 # ---------------------------------------------------------------------------
 #  Lendable memory: the growing region
 # ---------------------------------------------------------------------------
@@ -1103,39 +1169,59 @@ IN_REGION = (": IN-REGION ( -- flag ) TRUE _OBJ-BL @ DUP @ 0 ?DO "
              "LOOP DROP ;")
 # The port's lent ranges in use.
 RANGES_USED = ": RANGES-USED ( -- n ) 0 CHIP-RANGES 0 ?DO I 0 _SLOT-USED? IF 1+ THEN LOOP ;"
+# A chain of vectors that handle H holds: its tail is a vector whose field
+# 1 is nil, and LINK-IN, inside a window, puts a vector of 1024 elements,
+# 8 KiB, at its head; CHAIN counts its links in a window of its own.
+CHAIN_WORDS = [
+    ": START-CHAIN OBJ-OPEN THROW OBJ-NIL 4 OBJ-VECTOR THROW 1 1 OBJ-HANDLE THROW H ! "
+    "OBJ-CLOSE ; START-CHAIN",
+    ": LINK-IN ( -- ) H @ OBJ-GET THROW OBJ-NIL 1024 OBJ-VECTOR THROW "
+    "TUCK 1 OBJ! THROW H @ OBJ-SET THROW ;",
+    ": CHAIN ( -- n ) OBJ-OPEN THROW 0 H @ OBJ-GET THROW "
+    "BEGIN 1 OBJ@ DUP OBJ-NIL <> WHILE OBJ>REF THROW SWAP 1+ SWAP REPEAT DROP OBJ-CLOSE ;",
+]
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_lending_the_heap_grows_past_sixteen_first_blocks(backend):
-    """With a 16 KiB first block, core 0 links 40 vectors of 4096 elements,
-    32 KiB each, into a chain that a handle holds.  The heap grows past
-    sixty-four times its first block, four times the old cap, while the
-    port uses at most five ranges.  Every block lies in the region, whose
-    base is KDOS's XMEM-LIMIT, and after a moving collection the whole
-    chain is still there and LM1 still serves.
-
-    Each vector takes a REGION request of its own.  LM1's chiplet module
-    doubles a core's next region size at each request after an epoch's
-    first, without bound, so some fifty-odd such requests wrap the size to
-    zero, and the empty region it then grants is corrupt to MegaPad; forty
-    stay clear of that."""
+    """With a 16 KiB first block, core 0 links 128 vectors of 8 KiB into a
+    chain that a handle holds, each in a window of its own.  The heap grows
+    past sixty-four times its first block, four times the old cap, while
+    the port uses at most five ranges.  Every block lies in the region,
+    whose base is KDOS's XMEM-LIMIT, and after a moving collection the
+    whole chain is still there and LM1 still serves."""
     machine = ready(backend, "heap_block=0x4000")
-    got = machine.run([
+    got = machine.run(CHAIN_WORDS + [
         IN_REGION,
         RANGES_USED,
-        # The chain's tail is a vector whose field 1 is nil.
-        ": START-CHAIN OBJ-OPEN THROW OBJ-NIL 4 OBJ-VECTOR THROW 1 1 OBJ-HANDLE THROW H ! "
-        "OBJ-CLOSE ; START-CHAIN",
-        ": LINK ( -- ) OBJ-OPEN THROW H @ OBJ-GET THROW OBJ-NIL 4096 OBJ-VECTOR THROW "
-        "TUCK 1 OBJ! THROW H @ OBJ-SET THROW OBJ-CLOSE ;",
-        ": CHAIN ( -- n ) OBJ-OPEN THROW 0 H @ OBJ-GET THROW "
-        "BEGIN 1 OBJ@ DUP OBJ-NIL <> WHILE OBJ>REF THROW SWAP 1+ SWAP REPEAT DROP OBJ-CLOSE ;",
-        ": LINKS ( n -- ) 0 ?DO LINK LOOP ; 40 LINKS CHAIN REPORT",
+        ": LINKS ( n -- ) 0 ?DO OBJ-OPEN THROW LINK-IN OBJ-CLOSE LOOP ; 128 LINKS CHAIN REPORT",
         "_OBJ-HEAP-BYTES 64 0x4000 * > REPORT RANGES-USED 6 < REPORT",
         "_RG-PORT @ REPORT XMEM-LIMIT @ _RG-BASE @ = REPORT IN-REGION REPORT",
         "2 OBJ-COLLECT REPORT CHAIN REPORT IN-REGION REPORT OBJ-ENGINE REPORT REPORT",
     ])
-    assert got == [40, -1, -1, 0, -1, -1, 0, 40, -1, 0, 1]
+    assert got == [128, -1, -1, 0, -1, -1, 0, 128, -1, 0, 1]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_lending_a_long_chain_in_one_epoch(backend):
+    """Core 0 links 128 vectors of 8 KiB in one window, so that every
+    REGION request falls in one epoch, then closes it, lets two
+    collections run and walks the chain in new windows.  LM1's chiplet
+    module doubles a core's next region size at each request after an
+    epoch's first; unbounded, the size wrapped to zero during this window,
+    which asked for a region for each vector, and the region the next hold
+    granted the core was empty, which MegaPad takes as corrupt.  Bounded at
+    a quarter of the heap, the regions hold several vectors each, the
+    chain stays whole, and LM1 still serves the heap."""
+    machine = ready(backend, "heap_block=0x4000")
+    got = machine.run(CHAIN_WORDS + [
+        ": ONE-WINDOW ( n -- ) OBJ-OPEN THROW EPOCH N0 ! 0 ?DO LINK-IN LOOP "
+        "EPOCH N0 @ - REPORT OBJ-CLOSE ;",
+        "128 ONE-WINDOW",
+        "0 OBJ-COLLECT REPORT CHAIN REPORT 2 OBJ-COLLECT REPORT CHAIN REPORT",
+        "OBJ-ENGINE REPORT REPORT",
+    ])
+    assert got == [0, 0, 128, 0, 128, 0, 1]
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

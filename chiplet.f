@@ -378,9 +378,11 @@ VARIABLE _NEW-PORT   VARIABLE _NEW-KIND
 : _ROUND64  ( u -- u' )   63 + -64 AND ;
 
 \ U bytes of zeroed lendable memory for OWNER on PORT, lent with RIGHTS.
+\ The arguments go to the _NEW- variables only once CHIP-LOCK is held,
+\ since every core lends through them.
 : CHIP-LEND-ALLOT  ( u rights owner port -- addr ior )
-    _NEW-PORT ! _NEW-OWNER ! _NEW-RIGHTS ! _ROUND64 _NEW-SIZE !
     CHIP-LOCK LOCK
+    _NEW-PORT ! _NEW-OWNER ! _NEW-RIGHTS ! _ROUND64 _NEW-SIZE !
     _CHUNKS-READY ?DUP IF CHIP-LOCK UNLOCK 0 SWAP EXIT THEN
     _CHUNK-N 0 ?DO
         I _CHUNK DUP CK.USED CK@ OVER CK.KIND CK@ 0= AND
@@ -404,9 +406,9 @@ VARIABLE _NEW-PORT   VARIABLE _NEW-KIND
 
 \ A block of U bytes, a chunk of its own lent for reading and writing.
 : CHIP-LEND-BLOCK  ( u owner port -- addr ior )
+    CHIP-LOCK LOCK
     _NEW-PORT ! _NEW-OWNER ! _ROUND64 _NEW-SIZE !
     CHIP-READ-WRITE _NEW-RIGHTS !  1 _NEW-KIND !
-    CHIP-LOCK LOCK
     _CHUNK-MAKE ?DUP IF NIP CHIP-LOCK UNLOCK 0 SWAP EXIT THEN
     DUP CK.LIMIT CK@ OVER CK.HERE CK!
     CK.BASE CK@
@@ -495,25 +497,32 @@ CREATE _CHIP-SCRATCH  NCORES 3 * _ENTRY * ALLOT
 : _ASK-BUF    ( -- entry )   _TAKE-BUF _ENTRY 2* + ;
 : _ENTRY-CLEAR  ( entry -- )   _ENTRY 0 FILL ;
 
-VARIABLE _MK-TO     VARIABLE _MK-FROM   VARIABLE _MK-NOTIFY
-VARIABLE _MK-OWNER  VARIABLE _MK-PORT   VARIABLE _MK-PAIR
+\ One part of PAIR: U bytes lent with RIGHTS for OWNER on the pair's port.
+: _PAIR-LEND  ( pair u rights owner -- pair addr ior )
+    3 PICK P.PORT P@ CHIP-LEND-ALLOT ;
+
+\ A pair whose part could not be lent goes back; its lent parts stay the
+\ owner's until the owner's memory goes back.
+: _PAIR-UNMAKE  ( pair addr ior -- 0 ior )
+    NIP SWAP _PAIR-SIZE XMEM-FREE-BLOCK 0 SWAP ;
 
 \ A pair for OWNER on PORT whose queues hold TO and FROM entries, and
-\ whose entries the chiplet signals to core NOTIFY.
+\ whose entries the chiplet signals to core NOTIFY.  The arguments go into
+\ the pair as soon as it exists, and OWNER waits on the return stack, so
+\ several cores, or tasks of one core, make pairs at once.
 : CHIP-PAIR-MAKE  ( to from notify owner port -- pair ior )
-    _MK-PORT ! _MK-OWNER ! _MK-NOTIFY ! _MK-FROM ! _MK-TO !
-    _PAIR-SIZE _CHIP-PRIVATE ?DUP IF EXIT THEN _MK-PAIR !
-    _MK-TO @ _MK-PAIR @ P.TO-CAP P!   _MK-FROM @ _MK-PAIR @ P.FROM-CAP P!
-    _MK-NOTIFY @ _MK-PAIR @ P.NOTIFY P!   _MK-PORT @ _MK-PAIR @ P.PORT P!
-    _MK-TO @ 1+ _ENTRY * CHIP-READ _MK-OWNER @ _MK-PORT @ CHIP-LEND-ALLOT
-    ?DUP IF NIP 0 SWAP EXIT THEN _MK-PAIR @ P.TO-RING P!
-    _ENTRY CHIP-READ-WRITE _MK-OWNER @ _MK-PORT @ CHIP-LEND-ALLOT
-    ?DUP IF NIP 0 SWAP EXIT THEN _MK-PAIR @ P.TO-HEAD P!
-    _MK-FROM @ 1+ _ENTRY * CHIP-READ-WRITE _MK-OWNER @ _MK-PORT @ CHIP-LEND-ALLOT
-    ?DUP IF NIP 0 SWAP EXIT THEN _MK-PAIR @ P.FROM-RING P!
-    _ENTRY CHIP-READ _MK-OWNER @ _MK-PORT @ CHIP-LEND-ALLOT
-    ?DUP IF NIP 0 SWAP EXIT THEN _MK-PAIR @ P.FROM-HEAD P!
-    _MK-PAIR @ 0 ;
+    _PAIR-SIZE _CHIP-PRIVATE ?DUP IF >R 2DROP 2DROP 2DROP R> 0 SWAP EXIT THEN
+    TUCK P.PORT P!  SWAP >R
+    TUCK P.NOTIFY P!  TUCK P.FROM-CAP P!  TUCK P.TO-CAP P!
+    DUP P.TO-CAP P@ 1+ _ENTRY * CHIP-READ R@ _PAIR-LEND
+    ?DUP IF _PAIR-UNMAKE R> DROP EXIT THEN OVER P.TO-RING P!
+    _ENTRY CHIP-READ-WRITE R@ _PAIR-LEND
+    ?DUP IF _PAIR-UNMAKE R> DROP EXIT THEN OVER P.TO-HEAD P!
+    DUP P.FROM-CAP P@ 1+ _ENTRY * CHIP-READ-WRITE R@ _PAIR-LEND
+    ?DUP IF _PAIR-UNMAKE R> DROP EXIT THEN OVER P.FROM-RING P!
+    _ENTRY CHIP-READ R@ _PAIR-LEND
+    ?DUP IF _PAIR-UNMAKE R> DROP EXIT THEN OVER P.FROM-HEAD P!
+    R> DROP 0 ;
 
 \ The six-word record that names the pair to the chiplet.
 : CHIP-PAIR-RECORD!  ( pair addr -- )
