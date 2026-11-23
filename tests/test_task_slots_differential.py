@@ -21,13 +21,22 @@ KDOS CATCH tests and from Akashic's coroutine tests. They run in order on
 one machine of each kind, so a case that depends on where PAUSE's
 round-robin scan stands first sets it: a slot that PAUSE runs alone leaves
 the scan's cursor at that slot.
+
+An abort in a slot runs on fresh machines of its own. The simulator ends the
+slot and the line that paused; the BIOS's QUIT leaves TASK-ID naming the
+slot and the slot's record behind, and the next PAUSE resumes stale state
+(finding 15 of the plan). The emulator's half of that case is a strict
+expected failure until the BIOS ends the slot too, so the slice that fixes
+bios.asm shows its fix by removing the mark.
 """
 
 from __future__ import annotations
 
 import pytest
 
+from simulator.errors import ForthAbort
 from tests.test_multicore_differential import (
+    _BETWEEN,
     _Emulator,
     _Simulator,
     _bios,
@@ -215,3 +224,47 @@ def test_the_task_slots_agree_with_the_emulator(machines, name, cores):
     assert first.text == expected
     assert machines("native", cores, copy=1).run_case(word, setup, body) == first
     assert machines("python", cores).run_case(word, setup, body) == first
+
+
+# An abort in slot 1 after one yield, and in slot 2 before any; then what
+# the foreground sees, and a PAUSE that must find no slot to resume.
+ABORT_SETUP = b"""VARIABLE TS-RUNS
+: TS-QUITTER ( -- ) 1 TS-RUNS +! TASK-YIELD 10 TS-RUNS +! TRUE ABORT" slot gave up" ;
+: TS-EARLY ( -- ) 100 TS-RUNS +! TRUE ABORT" slot gave up" ;"""
+ABORT_LINES = (
+    b"0 TS-RUNS ! ' TS-QUITTER BACKGROUND PAUSE PAUSE",
+    b"' TS-EARLY BACKGROUND2 PAUSE",
+)
+ABORT_REPORT = (b"60 EMIT 60 EMIT TASK-ID . 1 TASK? . 2 TASK? . TS-RUNS @ . "
+                b"PAUSE TS-RUNS @ . #TASKS . 62 EMIT 62 EMIT")
+ABORT_EXPECTED = b"0 0 0 111 111 0 "
+
+
+def _between(output: bytes) -> bytes:
+    found = _BETWEEN.search(output)
+    assert found is not None, output[-400:]
+    return found.group(1)
+
+
+@pytest.mark.parametrize("executor", ("native", "python"))
+def test_an_abort_in_a_slot_ends_the_slot_on_the_simulator(executor):
+    runtime = _Simulator(1, executor, _kdos()).runtime
+    runtime.evaluate(ABORT_SETUP)
+    for line in ABORT_LINES:
+        with pytest.raises(ForthAbort):
+            runtime.evaluate(line)
+        assert runtime.drain_uart_output() == b"slot gave up"
+    runtime.evaluate(ABORT_REPORT)
+    assert _between(runtime.drain_uart_output()) == ABORT_EXPECTED
+
+
+@pytest.mark.xfail(
+    strict=True, raises=AssertionError,
+    reason="finding 15: the BIOS's QUIT leaves an aborted slot behind",
+)
+def test_an_abort_in_a_slot_ends_the_slot_on_the_emulator():
+    emulator = _Emulator(1, _bios(), _kdos())
+    emulator.type(ABORT_SETUP.splitlines())
+    for line in ABORT_LINES:
+        assert b"slot gave up" in emulator.type([line])
+    assert _between(emulator.type([ABORT_REPORT])) == ABORT_EXPECTED

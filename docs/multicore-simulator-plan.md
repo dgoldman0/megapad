@@ -623,7 +623,9 @@ on the emulator and on three simulators, on one core and on two: the slot
 words, round-robin order, loop parameters and stacks across yields,
 stopping and replacing slots, `TASK-ID`, the four per-slot `CATCH` cases of
 `tests/test_system.py`, the CRC owner per slot, the span rule, and a
-worker's job running while a slot does, in 6 seconds;
+worker's job running while a slot does, in 6 seconds, and an abort in a
+slot on fresh machines, whose emulator half fails until finding 15 is
+fixed;
 `tests/simulator/test_task_slots.py` covers the stacks' place and size,
 aborts, the faults, rollback and slots on two cores; and Akashic's
 `test_coroutine_on_simulator.py` runs every check of `test_coroutine.py` on
@@ -686,6 +688,15 @@ IPI wakes it. The work is around Desk:
 Work that needs Desk's dispatcher to take jobs from a core other than its
 own, such as borrowed tile work over every idle core, and Desk's frame flag
 belong to their own parts (`docs/chiplet-interconnect-plan.md` §7).
+
+A precondition comes from stage 5. A task slot's run is nested in the
+foreground's `PAUSE`, so inside a slot an `IDL` without a deadline fails, an
+`IDLE-UNTIL` returns early, and a disk word that finds a worker holding
+lock 2 reports the timeout at once. Desk's background work keeps `IDL` and
+disk work out of task slots, or this stage lifts the limit first. No
+shipped Akashic module calls the BIOS's task words today: only
+`concurrency/coroutine.f` does, which no module requires and no image
+profile loads.
 
 Tests: the canonical Desktop journey on one core, as the gate, and on four
 cores; the `desktop-sandbox-modules` journey on four cores on the simulator,
@@ -892,6 +903,13 @@ needs a change in the BIOS, KDOS, the release plan or the contract.
     section 5). On core 0, `forth_quit` zeroing the running slot's entry and
     then `var_task_active` gives the BIOS the same answer. The fix joins
     finding 14's in the next slice that changes `bios.asm`.
+    `tests/test_task_slots_differential.py` holds the case: slot 1 aborts
+    after a yield and slot 2 before one, and the foreground then reads
+    `TASK-ID`, both slots' state and a `PAUSE`. The simulator's half passes;
+    on the emulator `TASK-ID` answers 2, both slots stay active, and the
+    `PAUSE` prints six bytes of stale memory, so that half is a strict
+    expected failure, which the fixing slice turns into a pass by removing
+    the mark.
 
 ## 10. Decisions
 
