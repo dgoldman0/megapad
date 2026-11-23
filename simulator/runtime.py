@@ -861,7 +861,9 @@ class MegaForthRuntime:
             raise ValueError(
                 "SysInfo and hosted SHA capabilities do not agree"
             )
-        self.crc = crc_service.HostedCRCService(crc_capabilities)
+        self.crc = crc_service.HostedCRCService(
+            crc_capabilities, core_count=num_cores,
+        )
         self.aes = platform_mmio.aes
         self.sha3 = platform_mmio.sha3
         if type(self.sha3) is HostedSHA3Service:

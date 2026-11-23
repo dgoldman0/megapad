@@ -3,7 +3,7 @@
 The extension and its Python owner are built from the same checkout and use
 one current internal interface. Rebuild the extension after changing this
 boundary with `python setup_simulator_accel.py build_ext --inplace --force`.
-The extension exports `SEMANTIC_API_VERSION = 17`; its Python owner checks this
+The extension exports `SEMANTIC_API_VERSION = 18`; its Python owner checks this
 version before admission. An explicit native request rejects older builds;
 automatic selection keeps the reference executor and the Python dictionary
 when the version mismatches. The simulator's CRC and storage services are
@@ -405,10 +405,13 @@ word of that run to Python when it returns false.
 
 ## CRC words
 
-The CRC service, `CRCService` (`crc_service.h`), is native: the BIOS
-checked owner record over `shared/accel/crc.h`, the recurrence the
-emulator's CRC unit uses. Python's CRC words call its methods with their
-caller's `(COREID, TASK-ID)`. `bind_crc(service)` gives the program the
+The CRC service, `CRCService(capabilities, core_count=1)`
+(`crc_service.h`), is native: a CRC unit for each core, each with the BIOS's
+checked owner record, over `shared/accel/crc.h`, the recurrence the
+emulator's CRC unit uses. A caller reaches its core's unit, and a core the
+service does not have gets the STATE status. Python's CRC words call its
+methods with their caller's `(COREID, TASK-ID)`; `mode`, `accumulator` and
+`owner` describe core 0's unit and `unit_owner(core)` any core's. `bind_crc(service)` gives the program the
 runtime's service, and `run` takes `crc=True` while the runtime still keeps
 it; the run then admits `OP_CRC_MODE_STORE`, `OP_CRC_RESET`,
 `OP_CRC_INIT_STORE`, `OP_CRC_FEED`, `OP_CRC_FEED_BYTE`, `OP_CRC_FETCH`,

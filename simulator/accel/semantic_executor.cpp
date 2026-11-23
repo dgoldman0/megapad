@@ -2649,7 +2649,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
     megapad::platform::register_bindings(module);
     megapad::dictionary::register_bindings(module);
     megapad::walker::register_bindings(module);
-    module.attr("SEMANTIC_API_VERSION") = 17;
+    module.attr("SEMANTIC_API_VERSION") = 18;
     module.attr("MACHINE_STOPPED_CALL") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_CALL));
     module.attr("MACHINE_STOPPED_RESUME") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_RESUME));
     module.attr("MACHINE_CALLBACK") = py::int_(static_cast<uint32_t>(MACHINE_CALLBACK));

@@ -848,7 +848,9 @@ are not.
 
 The admitted CRC service implements the six public modes, mode-width seeds,
 least-significant-byte-first cell feeds, byte feeds, raw/final reads, checked
-status values, and the BIOS `(COREID,TASK-ID)` owner record. `CRYPTO-CAPS@` and
+status values, and the BIOS `(COREID,TASK-ID)` owner record, one for each
+core's own unit, as the BIOS keeps a topology-sized owner table, so each core's
+transaction survives the others' turns. `CRYPTO-CAPS@` and
 the SysInfo `CRYPTO_CAPS` qword expose the same profile. It does not claim CRC
 instructions, CSRs, hardware arbitration, DMA, or accelerator latency.
 Runtime construction requires that qword to be readable and rejects capability

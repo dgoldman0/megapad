@@ -28,7 +28,7 @@ from simulator.timer import HostedTimerService
 # span a native session's quantum already runs without returning. At 8,192
 # steps the return itself was a fifth to a third of a compute-bound run.
 UNQUANTIZED_NATIVE_INTERVAL_STEPS = 65536
-SEMANTIC_API_VERSION = 17
+SEMANTIC_API_VERSION = 18
 
 
 def load_native_extension(*, required: bool):

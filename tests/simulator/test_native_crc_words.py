@@ -86,14 +86,16 @@ def test_refused_modes_and_words_without_the_engine_report_their_status() -> Non
 
 
 def test_an_engine_another_identity_holds_refuses_every_word() -> None:
+    # Each core has its own CRC unit, so the other identity is another task
+    # on core 0, which the unit's owner record tells apart.
     observation, runtimes = _compare(
         b": RUN 1 CRC-MODE! CRC-RESET 9 CRC-INIT! 5 CRC-FEED 5 CRC-FEED-BYTE "
         b"CRC@ CRC-RAW-FINAL@ CRC-FINAL@ ;",
-        owner=(1, 7),
+        owner=(0, 7),
     )
     assert observation["error"] is None
     assert observation["data"] == (2, 2, 2, 2, 2, 0, 2, 0, 2, 0)
-    assert runtimes[1].crc.owner == (1, 7)
+    assert runtimes[1].crc.owner == (0, 7)
 
 
 def test_without_reflected_modes_raw_fetch_still_releases_a_normal_mode() -> None:

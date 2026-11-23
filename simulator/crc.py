@@ -2,11 +2,12 @@
 
 The service is native code, simulator/accel/crc_service.h: the BIOS checked
 owner record over the recurrence the emulator's CRC unit uses
-(shared/accel/crc.h).  It is the one definition of the CRC words: the Python
+(shared/accel/crc.h), one unit for each full core, as the BIOS keeps one
+owner record a core.  It is the one definition of the CRC words: the Python
 words call it through this binding and the native engine calls it directly.
-The class loads with the simulator's extension on first use.  The initial
-simulator advertises one full guest core and one foreground task, so every
-caller identity is ``(COREID, TASK-ID) = (0, 0)``.
+The class loads with the simulator's extension on first use.  Every task is
+task 0 until a cooperative task layer exists, so a caller's identity is
+``(COREID, 0)``.
 """
 
 from __future__ import annotations

@@ -142,3 +142,56 @@ def test_a_run_with_engines_is_the_same_twice_and_on_both_executors():
     first = _engine_program("native")
     assert _engine_program("native") == first
     assert _engine_program("python") == first
+
+
+# ---------------------------------------------------------------------------
+#  Services keyed by the calling core
+# ---------------------------------------------------------------------------
+#
+# SHA-2 and CRC keep a transaction for each core (CRC for each core and
+# task), so a core's hash survives the other cores' hashes in between.
+
+HASH_SETUP = b"""
+CREATE MSGS 64 ALLOT  CREATE DIGESTS 128 ALLOT
+: MY-MSG ( -- addr ) COREID 16 * MSGS + ;
+: HJOB ( -- ) MY-MSG 16 COREID 65 + FILL
+    SHA256-INIT DROP  MY-MSG 16 SHA256-UPDATE DROP  LONG-BURN
+    COREID 32 * DIGESTS + SHA256-FINAL MARK! ;
+: MAIN ( -- ) NCORES 1 ?DO ['] HJOB I WAKE-CORE LOOP HJOB WAIT-ALL ;
+"""
+
+
+@pytest.mark.parametrize("executor", EXECUTORS)
+@pytest.mark.parametrize("cores", (2, 4))
+def test_each_core_keeps_its_own_sha256_transaction(executor, cores):
+    import hashlib
+
+    runtime = _runtime(cores, executor)
+    runtime.evaluate(HASH_SETUP)
+    runtime.execute("MAIN")
+    digests = runtime.find("DIGESTS").body_address
+    for core in range(cores):
+        assert _cell(runtime, "MARKS", core) == 0
+        expected = hashlib.sha256(bytes([65 + core]) * 16).digest()
+        assert runtime.memory.read_bytes(digests + 32 * core, 32) == expected
+
+
+CRC_JOB = b"""
+: CJOB ( -- ) 0 CRC-MODE! DROP CRC-RESET DROP
+    8 0 DO COREID 1+ I * CRC-FEED LOOP  LONG-BURN  CRC-FINAL@ MARK! ;
+"""
+
+
+def test_each_core_keeps_its_own_crc_transaction():
+    runtime = _runtime(4, "native")
+    runtime.evaluate(CRC_JOB + b": MAIN ( -- ) NCORES 1 ?DO ['] CJOB I WAKE-CORE LOOP CJOB WAIT-ALL ;")
+    runtime.execute("MAIN")
+    interleaved = [_cell(runtime, "MARKS", core) for core in range(4)]
+    # The same feeds one core at a time, with no other core in between.
+    alone = _runtime(4, "native")
+    alone.evaluate(CRC_JOB + b": ONE ( core -- ) ['] CJOB SWAP WAKE-CORE ;")
+    for core in range(1, 4):
+        alone.evaluate(f"{core} ONE {core} WAIT-FOR".encode())
+    alone.execute("CJOB")
+    assert interleaved == [_cell(alone, "MARKS", core) for core in range(4)]
+    assert len(set(interleaved)) == 4
