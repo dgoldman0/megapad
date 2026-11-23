@@ -14,8 +14,9 @@ The module's test hooks (lm1_chiplet.h) reach the model the port attached
 through LM1's binding: a hold kept ACTIVE, a word written as LM1 would
 write it, and a thread of LM1 code started at an address.
 
-Cases that need a second MegaPad core run on the emulator alone, since the
-hosted simulator has one core until the multicore plan's stage 3.
+Cases that need a second MegaPad core run on two full cores of each
+machine: the emulator's lock-step cores, and the hosted simulator's cores
+in rounds (docs/multicore-simulator-plan.md, stage 3).
 
 The emulator's clock follows its cycles and advances to a sleeping core's
 deadline when every core sleeps; the simulator's clock advances by a fixed
@@ -44,7 +45,7 @@ from lm1 import chiplet as lm1_chiplet  # noqa: E402
 
 from asm import assemble  # noqa: E402
 from simulator.errors import ForthAbort  # noqa: E402
-from simulator.platform import create_one_core_address_space  # noqa: E402
+from simulator.platform import Topology, create_address_space  # noqa: E402
 from simulator.runtime import MegaForthRuntime  # noqa: E402
 from system import MegapadSystem  # noqa: E402
 
@@ -163,10 +164,11 @@ class Hosted(_Machine):
 
     name = "simulator"
 
-    def __init__(self, config: str = ""):
+    def __init__(self, config: str = "", cores: int = 1):
         self.hook_id = next(_HOOK_IDS)
-        memory = create_one_core_address_space(bank0_size=1 << 20, external_size=EXT_SIZE,
-                                               chiplet_ports=1)
+        memory = create_address_space(topology=Topology(full_cores=cores),
+                                      bank0_size=1 << 20, external_size=EXT_SIZE,
+                                      chiplet_ports=1)
         runtime = MegaForthRuntime(memory=memory)
         runtime.chiplet_ports.attach_module(0, LIBRARY, "%s,hook_id=%d%s" % (
             BASE_CONFIG, self.hook_id, "," + config if config else ""))
@@ -194,6 +196,9 @@ class Hosted(_Machine):
                 self.runtime.evaluate(line.encode(), step_budget=400_000_000)
             except ForthAbort:
                 pass
+            # As on the emulator, the next line comes once every core is
+            # idle or asleep: the other cores run on while core 0 waits.
+            self.runtime.run_rounds()
         return [int(v) for v in _REPORT.findall(
             self.runtime.drain_uart_output().decode("latin-1"))]
 
@@ -205,6 +210,15 @@ class Hosted(_Machine):
 
 
 BACKENDS = [pytest.param(Emulated, id="emulator"), pytest.param(Hosted, id="simulator")]
+
+
+def _two_core_hosted(config: str = "") -> "Hosted":
+    return Hosted(config, cores=2)
+
+
+# Two full cores of each machine; the emulator's machine has two by default.
+TWO_CORE_BACKENDS = [pytest.param(Emulated, id="emulator"),
+                     pytest.param(_two_core_hosted, id="simulator")]
 
 # Bring LM1 up and let managed data start; report the start's status.
 START = [
@@ -768,7 +782,7 @@ def test_27_shapes(backend):
 
 
 # ---------------------------------------------------------------------------
-#  Several cores: 5, 6, 14, 15, 16 and 17, on the emulator
+#  Several cores: 5, 6, 14, 15, 16 and 17, on two full cores
 # ---------------------------------------------------------------------------
 #
 #  Core 1 runs a word as a BIOS worker (CORE-RUN), and LM1 rings it for its
@@ -790,13 +804,14 @@ CORE1 = [
 ]
 
 
-def two_cores(extra: list[str] | None = None) -> _Machine:
-    machine = ready(Emulated, extra=CORE1 + (extra or []))
+def two_cores(backend, extra: list[str] | None = None) -> _Machine:
+    machine = ready(backend, extra=CORE1 + (extra or []))
     return machine
 
 
-def test_05_a_moving_collection_waits_while_a_window_is_open():
-    machine = two_cores()
+@pytest.mark.parametrize("backend", TWO_CORE_BACKENDS)
+def test_05_a_moving_collection_waits_while_a_window_is_open(backend):
+    machine = two_cores(backend)
     got = machine.run(MAKE_PAIR + [
         "OBJ-OPEN REPORT H @ OBJ-GET THROW R1 ! EPOCH N0 !",
         "' C1-COLLECT2 C1 WAITHELD",
@@ -808,8 +823,9 @@ def test_05_a_moving_collection_waits_while_a_window_is_open():
     assert got == [0, 0, 0, -1, 7, 0, -1, 0, 1] + PAIR_READS
 
 
-def test_06_an_object_lives_while_only_a_window_uses_it():
-    machine = two_cores()
+@pytest.mark.parametrize("backend", TWO_CORE_BACKENDS)
+def test_06_an_object_lives_while_only_a_window_uses_it(backend):
+    machine = two_cores(backend)
     got = machine.run([
         "D-ONE %d OBJ-SHAPE REPORT SH !" % ONE_LEN,
         ": MAKE6 OBJ-OPEN THROW SH @ OBJ-RECORD THROW DUP 1 1 OBJ-HANDLE THROW H ! "
@@ -825,8 +841,9 @@ def test_06_an_object_lives_while_only_a_window_uses_it():
     assert got == [0, 0, 2000, 0, 24]
 
 
-def test_14_several_cores():
-    machine = two_cores()
+@pytest.mark.parametrize("backend", TWO_CORE_BACKENDS)
+def test_14_several_cores(backend):
+    machine = two_cores(backend)
     got = machine.run([
         "D-ONE %d OBJ-SHAPE REPORT SH !" % ONE_LEN,
         "CREATE HS0 8 CELLS ALLOT CREATE HS1 8 CELLS ALLOT VARIABLE C1-MOVED",
@@ -849,8 +866,9 @@ def test_14_several_cores():
     assert got == [0, 0, 0, 16, 2]
 
 
-def test_15_nested_windows():
-    machine = two_cores()
+@pytest.mark.parametrize("backend", TWO_CORE_BACKENDS)
+def test_15_nested_windows(backend):
+    machine = two_cores(backend)
     got = machine.run(MAKE_PAIR + [
         "OBJ-OPEN REPORT OBJ-OPEN REPORT OBJ-CLOSE _REC CR.WINDOW + @ REPORT EPOCH N0 !",
         "' C1-COLLECT2 C1 WAITHELD 200 STEPS",
@@ -861,8 +879,9 @@ def test_15_nested_windows():
     assert got == [0, 0, 0, 1, 0, -1, 0, 0, 1] + PAIR_READS
 
 
-def test_16_polls():
-    machine = two_cores()
+@pytest.mark.parametrize("backend", TWO_CORE_BACKENDS)
+def test_16_polls(backend):
+    machine = two_cores(backend)
     got = machine.run(MAKE_PAIR + [
         "OBJ-OPEN REPORT H @ OBJ-GET THROW R0 ! EPOCH N0 !",
         "OBJ-POLL REPORT EPOCH N0 @ = REPORT",
@@ -872,8 +891,9 @@ def test_16_polls():
     assert got == [0, 0, 0, -1, -1, 1, -1, 7, 0]
 
 
-def test_17_a_region_request_during_a_hold():
-    machine = two_cores()
+@pytest.mark.parametrize("backend", TWO_CORE_BACKENDS)
+def test_17_a_region_request_during_a_hold(backend):
+    machine = two_cores(backend)
     got = machine.run([
         "D-ONE %d OBJ-SHAPE REPORT SH !" % ONE_LEN,
         "VARIABLE BEFORE",
