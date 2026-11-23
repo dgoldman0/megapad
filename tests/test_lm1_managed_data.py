@@ -889,29 +889,46 @@ def test_06_an_object_lives_while_only_a_window_uses_it(backend):
     assert got == [0, 0, 2000, 0, 24]
 
 
+# Core 0 waits, napping, until core 1 says its window is open.
+C0_WAIT = (": C0-WAIT 0 BEGIN 1+ C1-OPEN @ OVER 3000 = OR 0= WHILE "
+           "MS@ 1+ IDLE-UNTIL REPEAT DROP ;")
+# Core 1, inside its window: wait for HELD, then keep the window open MS
+# milliseconds more, counting each ACTIVE seen meanwhile in C1-MOVED.
+C1_HOLD_OPEN = (": C1-HOLD-OPEN ( ms -- ) "
+                "MS@ 1000 + BEGIN _HOLD@ H-HELD AND OVER MS@ U< OR UNTIL DROP "
+                "_HOLD@ H-HELD AND C1-HELD ! "
+                "MS@ + BEGIN _HOLD@ H-ACTIVE AND IF 1 C1-MOVED +! THEN DUP MS@ U< UNTIL DROP ;")
+
+
 @pytest.mark.parametrize("backend", TWO_CORE_BACKENDS)
 def test_14_several_cores(backend):
+    """Cores 0 and 1 make records and handles in windows of their own at
+    once.  Core 1's window opens first; core 0 opens, makes its records and
+    closes, and asks for COLLECT 2.  Core 1 keeps its window open two
+    milliseconds after LM1 sets HELD, well inside a request's deadline, and
+    sees nothing move before it closes.  Both logs are then drained, and
+    every handle of both cores gives its object."""
     machine = two_cores(backend)
     got = machine.run([
         "D-ONE %d OBJ-SHAPE REPORT SH !" % ONE_LEN,
-        "CREATE HS0 8 CELLS ALLOT CREATE HS1 8 CELLS ALLOT VARIABLE C1-MOVED",
+        "CREATE HS0 8 CELLS ALLOT CREATE HS1 8 CELLS ALLOT "
+        "VARIABLE C1-MOVED VARIABLE C1-OPEN VARIABLE C1-HELD",
         ": MAKE-ON ( hs id -- ) 8 0 DO SH @ OBJ-RECORD THROW I INT>OBJ THROW OVER 1 OBJ! THROW "
         "OVER 1 OBJ-HANDLE THROW 2 PICK I CELLS + ! LOOP 2DROP ;",
-        # Core 1 makes its records and keeps its window open a while after
-        # core 0 has closed, watching that nothing moves meanwhile.
-        ": C1-MAKE OBJ-OPEN DROP HS1 2 MAKE-ON HS1 @ OBJ-GET DROP R0 ! 0 C1-MOVED ! "
-        "200000 0 DO _HOLD@ H-ACTIVE AND IF 1 C1-MOVED +! THEN LOOP "
-        "HS1 @ OBJ-GET DROP R0 @ <> IF 1 C1-MOVED +! THEN OBJ-CLOSE TRUE C1-DONE ! ;",
-        "' C1-MAKE C1",
+        C0_WAIT,
+        C1_HOLD_OPEN,
+        ": C1-MAKE OBJ-OPEN DROP HS1 2 MAKE-ON HS1 @ OBJ-GET DROP R0 ! 0 C1-MOVED ! TRUE C1-OPEN ! "
+        "2 C1-HOLD-OPEN HS1 @ OBJ-GET DROP R0 @ <> IF 1 C1-MOVED +! THEN OBJ-CLOSE TRUE C1-DONE ! ;",
         ": MAKE14 OBJ-OPEN THROW HS0 1 MAKE-ON OBJ-CLOSE ;",
-        "MAKE14 2 OBJ-COLLECT REPORT C1-WAIT C1-MOVED @ REPORT",
+        "0 C1-OPEN ! ' C1-MAKE C1 C0-WAIT C1-OPEN @ REPORT MAKE14 2 OBJ-COLLECT REPORT "
+        "C1-WAIT C1-DONE @ REPORT C1-HELD @ 0<> REPORT C1-MOVED @ REPORT",
         ": CHECK14 OBJ-OPEN THROW 0 8 0 DO HS0 I CELLS + @ OBJ-GET THROW 1 OBJ@ OBJ>INT THROW I = IF 1+ THEN "
         "HS1 I CELLS + @ OBJ-GET THROW 1 OBJ@ OBJ>INT THROW I = IF 1+ THEN LOOP REPORT OBJ-CLOSE ;",
         "CHECK14",
         ": DRAINED 0 NCORES 0 DO I _CE * LB.CORES + _OBJ-LB @ + CE.LOG-HEAD + @ I _REC-OF CR.TAIL + @ = "
-        "IF 1+ THEN LOOP ; DRAINED REPORT",
+        "IF 1+ THEN LOOP ; DRAINED REPORT OBJ-ENGINE REPORT REPORT",
     ])
-    assert got == [0, 0, 0, 16, 2]
+    assert got == [0, -1, 0, -1, -1, 0, 16, 2, 0, 1]
 
 
 @pytest.mark.parametrize("backend", TWO_CORE_BACKENDS)
@@ -954,6 +971,38 @@ def test_17_a_region_request_during_a_hold(backend):
         "OBJ-CLOSE C1-WAIT C1-IOR @ REPORT EPOCH N0 @ - REPORT",
     ])
     assert got == [0, 0, 0, -1, -1, 0, -1, 0, 1]
+
+
+@pytest.mark.parametrize("backend", TWO_CORE_BACKENDS)
+def test_28_a_long_window_is_megapads_own_delay(backend):
+    """Core 1 keeps its window open 50 ms after LM1 sets HELD for core 0's
+    COLLECT 2, five times a request's deadline, here 10 ms, and on until
+    LM1 has reported the window in a NOTICE, past WINDOW_LIMIT by LM1's own
+    clock.  The delay is MegaPad's own, so core 0's request waits on rather
+    than failing the function (section 3): nothing moves while the window
+    is open, the collection ends once core 1 closes, and LM1 still serves
+    the heap."""
+    machine = two_cores(backend)
+    got = machine.run([
+        "10 CHIP-DEADLINE !",
+        "D-ONE %d OBJ-SHAPE REPORT SH !" % ONE_LEN,
+        "VARIABLE C1-MOVED VARIABLE C1-OPEN VARIABLE C1-HELD",
+        ": MAKE28 OBJ-OPEN THROW SH @ OBJ-RECORD THROW 5 INT>OBJ THROW OVER 1 OBJ! THROW "
+        "1 1 OBJ-HANDLE THROW H ! OBJ-CLOSE ; MAKE28",
+        C0_WAIT,
+        C1_HOLD_OPEN,
+        # LM1's clock is its module's own, so on the simulator the NOTICE
+        # can come after MegaPad's 50 ms; core 1 waits for it, for at most
+        # two seconds more.
+        ": C1-LONG OBJ-OPEN DROP 0 C1-MOVED ! TRUE C1-OPEN ! 50 C1-HOLD-OPEN "
+        "MS@ 2000 + BEGIN _HOLD@ H-ACTIVE AND IF 1 C1-MOVED +! THEN "
+        "OBJ-NOTICES @ 0<> OVER MS@ U< OR UNTIL DROP OBJ-CLOSE TRUE C1-DONE ! ;",
+        "0 C1-OPEN ! ' C1-LONG C1 C0-WAIT EPOCH N0 ! 2 OBJ-COLLECT REPORT "
+        "C1-WAIT C1-DONE @ REPORT C1-HELD @ 0<> REPORT C1-MOVED @ REPORT EPOCH N0 @ - REPORT",
+        "OBJ-ENGINE REPORT REPORT OBJ-NOTICES @ 0> REPORT OBJ-NOTICE-KIND @ REPORT",
+        ": CHECK28 OBJ-OPEN THROW H @ OBJ-GET THROW 1 OBJ@ OBJ>INT THROW REPORT OBJ-CLOSE ; CHECK28",
+    ])
+    assert got == [0, 0, -1, -1, 0, 1, 0, 1, -1, 1, 5]
 
 
 # ---------------------------------------------------------------------------

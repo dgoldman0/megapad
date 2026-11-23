@@ -263,7 +263,12 @@ When a side breaks its bound:
   The collector waits on, because the window's references depend on it, and
   reports the core in a `NOTICE` (§10). A core that waits on that hold finds
   `HELD` without `ACTIVE` while a window word reads `OPEN`, knows the delay
-  is MegaPad's own, and waits on as well.
+  is MegaPad's own, and waits on as well. So does a core whose `COLLECT`
+  waits for the hold: whenever its request's deadline
+  ([chiplet-link.md](chiplet-link.md) §8) passes while the hold reads so
+  and another core's window reads `OPEN`, the deadline starts again. A
+  collection's deadline thus counts only LM1's own delay, and a long window
+  never ends LM1's service.
 - A hold that stays `ACTIVE`, at one epoch, for more than twice
   `HOLD_LIMIT` is overdue. A core that finds it so fails the function, and
   the module stops LM1 (§11).
@@ -878,7 +883,8 @@ The words return these statuses:
 The function **fails** when LM1 sets `FAILED`; when a hold is overdue or
 stalls before `ACTIVE`, or a core's full log outlives its deadline (§3);
 when one of the port's queues breaks or a request misses its deadline
-([chiplet-link.md](chiplet-link.md) §8); when, from stage 1, the module
+([chiplet-link.md](chiplet-link.md) §8), which for a collection counts only
+LM1's own delay (§3); when, from stage 1, the module
 sets its evidence latch (below); or when the chiplet is reset for any other
 reason, another function's missed deadline among them. The module then
 decides from the state recorded at the failure what the shared heap keeps.
@@ -1322,10 +1328,11 @@ chosen point of its work.
     core 0's `TAIL` reached 32, and never ran more than 8 ahead of
     `LOG_HEAD`; after `COLLECT` 0, all 32 records are live through V.
 14. **Several cores.** Sets up cores 0 and 1 each making records and handles
-    in windows of their own at once, with core 1's window still open after
-    core 0's closes. Does: `COLLECT` 2. Checks: nothing moves until core 1
-    closes; both logs are drained; every handle of both cores gives its
-    object.
+    in windows of their own at once, with core 1's window open first and
+    still open after core 0's closes. Does: core 0 sends `COLLECT` 2, and
+    core 1 closes two milliseconds after `HELD` is set, inside a request's
+    deadline. Checks: nothing moves until core 1 closes; both logs are
+    drained; every handle of both cores gives its object; LM1 still serves.
 15. **Nested windows.** Sets up core 0 with a window, a nested one, and the
     nested one closed again. Does: core 1 sends `COLLECT` 2. Checks: core
     0's window word reads `OPEN` after the inner close; nothing moves until
@@ -1398,6 +1405,12 @@ chosen point of its work.
 27. **Shapes.** Does: registers one description twice, then one with a field
     kind of 15. Checks: the two registrations return the same shape ID, and
     the third fails with `BAD_RECORD`.
+28. **A long window is MegaPad's own delay.** Sets up a request deadline of
+    10 ms, and core 1 keeping a window open 50 ms after `HELD` is set and on
+    until LM1's `NOTICE` has come. Does: core 0 sends `COLLECT` 2 while that
+    window is open. Checks: LM1 reports the window in a `NOTICE`; nothing
+    moves while it is open; the collection ends once core 1 closes, one
+    epoch on; LM1 still serves, and the module records no failure.
 
 ### Recovery
 

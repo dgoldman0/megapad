@@ -329,16 +329,18 @@ VARIABLE _NEW-PORT   VARIABLE _NEW-KIND
 \    rings and the port; MegaPad's counts (TAIL of the queue to the
 \    chiplet, HEAD of the queue from it) and the chiplet's as last read;
 \    the tag of MegaPad's request in flight and its reply; the word that
-\    serves the chiplet's requests ( entry pair -- ), and one that takes
-\    a reply MegaPad does not wait for ( pair -- ).
+\    serves the chiplet's requests ( entry pair -- ), one that takes a
+\    reply MegaPad does not wait for ( pair -- ), and one that says, as a
+\    request's deadline passes, whether its reply waits on MegaPad itself
+\    ( pair -- flag ), so that the request waits on (section 8).
 
 0 CONSTANT P.TO-RING     1 CONSTANT P.TO-HEAD    2 CONSTANT P.FROM-RING
 3 CONSTANT P.FROM-HEAD   4 CONSTANT P.TO-CAP     5 CONSTANT P.FROM-CAP
 6 CONSTANT P.NOTIFY      7 CONSTANT P.PORT       8 CONSTANT P.TAIL
 9 CONSTANT P.HEAD-SEEN   10 CONSTANT P.HEAD      11 CONSTANT P.TAIL-SEEN
 12 CONSTANT P.TAG        13 CONSTANT P.READY     14 CONSTANT P.HANDLER
-15 CONSTANT P.DONE       16 CONSTANT P.REPLY     \ eight cells
-24 CELLS CONSTANT _PAIR-SIZE
+15 CONSTANT P.DONE       16 CONSTANT P.PATIENT   17 CONSTANT P.REPLY
+25 CELLS CONSTANT _PAIR-SIZE                     \ the reply's eight cells last
 
 : P@  ( pair field -- x )   CELLS + @ ;
 : P!  ( x pair field -- )   CELLS + ! ;
@@ -663,8 +665,15 @@ VARIABLE _BOOT-PORT
 \  Requests
 \ =====================================================================
 
+\ Whether the reply PAIR waits for waits on MegaPad itself, by the word
+\ the pair's function named; a pair with none never does.
+: _CHIP-PATIENT?  ( pair -- flag )
+    DUP P.PATIENT P@ ?DUP IF EXECUTE ELSE DROP FALSE THEN ;
+
 \ Wait until PAIR holds the reply MegaPad waits for, serving the port
-\ meanwhile: true when it came before DEADLINE.
+\ meanwhile: true when it came before DEADLINE.  A deadline that passes
+\ while the reply waits on MegaPad itself starts again, so that only the
+\ chiplet's own delay counts against it.
 : _CHIP-AWAIT  ( deadline pair -- flag ior )
     BEGIN
         DUP P.PORT P@ CHIP-DOWN? IF 2DROP FALSE CHIP-E-ABSENT EXIT THEN
@@ -672,7 +681,10 @@ VARIABLE _BOOT-PORT
         DUP P.PORT P@ _CHIP-ACK
         DUP CHIP-PAIR-SERVE ?DUP IF NIP NIP FALSE SWAP EXIT THEN
         DUP P.READY P@ IF 2DROP TRUE 0 EXIT THEN
-        OVER _CHIP-PAST? IF 2DROP FALSE 0 EXIT THEN
+        OVER _CHIP-PAST? IF
+            DUP _CHIP-PATIENT? 0= IF 2DROP FALSE 0 EXIT THEN
+            NIP CHIP-DEADLINE@ SWAP
+        THEN
         OVER _CHIP-NAP
     AGAIN ;
 
@@ -684,7 +696,8 @@ VARIABLE _BOOT-PORT
 \ Send ENTRY as a request on PAIR and wait for its reply, which lands in
 \ the pair's reply entry.  A request that misses its deadline is
 \ cancelled, and when the cancel goes unanswered too the port's service
-\ ends: its functions hear of it and the port is reset.
+\ ends: its functions hear of it and the port is reset.  The deadline
+\ counts only the chiplet's own delay (_CHIP-AWAIT).
 : CHIP-REQUEST  ( entry pair -- ior )
     DUP P.TAG P@ 1+ OVER P.TAG P!  FALSE OVER P.READY P!
     DUP P.TAG P@ 2 PICK E.TAG E!
@@ -845,6 +858,12 @@ _OBJ-CORES-CLEAR
 : _OBJ-ANY-OPEN?  ( -- flag )
     NCORES 0 ?DO I _REC-OF CR.WINDOW + @ W-OPEN = IF TRUE UNLOOP EXIT THEN LOOP
     FALSE ;
+
+\ Whether a core other than this one has its window open.
+: _OBJ-OTHER-OPEN?  ( -- flag )
+    NCORES 0 ?DO
+        I COREID <> IF I _REC-OF CR.WINDOW + @ W-OPEN = IF TRUE UNLOOP EXIT THEN THEN
+    LOOP FALSE ;
 
 \ The handle table's private side: for each slot its generation, owner,
 \ place in the owner's list and serial, in segments shaped as the table's.
@@ -1062,12 +1081,21 @@ DEFER _OBJ-FAIL  ( cause -- )
 \  Requests on a core's own pair (section 10)
 \ =====================================================================
 
+\ Whether the reply this core waits for waits on MegaPad itself: a
+\ collection's, while the hold reads HELD without ACTIVE and another
+\ core's window reads OPEN.  The delay is then MegaPad's own, and the
+\ request waits on (section 3).
+: _OBJ-PATIENT?  ( pair -- flag )
+    DROP _ASK-BUF E-OP _OP-COLLECT <> IF FALSE EXIT THEN
+    _HOLD@ DUP H-HELD AND 0<> SWAP H-ACTIVE AND 0= AND _OBJ-OTHER-OPEN? AND ;
+
 \ This core's pair, made before its first request and named in its
 \ record, where LM1 reads it at the core's first ring.  A core keeps one
 \ request unanswered at a time, so the pair holds two entries each way.
 : _OBJ-PAIR  ( -- pair ior )
     OC.PAIR OC@ ?DUP IF 0 EXIT THEN
     2 2 COREID _OBJ-OWNER _OBJ-PORT @ CHIP-PAIR-MAKE ?DUP IF EXIT THEN
+    ['] _OBJ-PATIENT? OVER P.PATIENT P!
     DUP _REC CR.PAIR + CHIP-PAIR-RECORD!
     DUP OC.PAIR OC! 0 ;
 
@@ -1553,12 +1581,6 @@ VARIABLE _SD
 \ =====================================================================
 \  Windows and holds (section 3)
 \ =====================================================================
-
-\ Whether a core other than this one has its window open.
-: _OBJ-OTHER-OPEN?  ( -- flag )
-    NCORES 0 ?DO
-        I COREID <> IF I _REC-OF CR.WINDOW + @ W-OPEN = IF TRUE UNLOOP EXIT THEN THEN
-    LOOP FALSE ;
 
 \ A held hold that has lasted, at one epoch, more than twice HOLD_LIMIT:
 \ ACTIVE so long, or HELD without ACTIVE so long with no window open,

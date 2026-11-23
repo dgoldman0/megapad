@@ -480,7 +480,11 @@ after that reply.
   it keeps, and places when room appears.
 - MegaPad gives each of its requests a deadline. It cancels a request that
   misses its deadline, and resets the port when the cancel goes unanswered
-  too.
+  too. The deadline counts only the chiplet's own delay: a function can
+  name, for its pair, a test that MegaPad makes when a deadline passes, and
+  while the test finds that the reply waits on MegaPad itself the deadline
+  starts again. Managed data's collections use it, since a hold waits for
+  windows MegaPad keeps open ([managed-data.md](managed-data.md) §3).
 - A port that serves managed data is asked to stop before any reset,
   whatever the reset's cause: MegaPad sets `STOP_REQ`, waits for `STOPPED`
   for at most a request's deadline, and then cancels and resets as above.
