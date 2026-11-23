@@ -15998,6 +15998,19 @@ w_ipi_status:
     str r14, r0
     ret.l
 
+; IPI-PENDING ( -- mask )  every sender whose signal is pending for this core
+;   CSR MBOX's whole 64-bit mask: bit n is set while the participant with
+;   ID n has signalled this core, the cores and, above them, the chiplet
+;   ports.  IPI-STATUS reads the 8-bit MBOX_STATUS, which shows IDs 0 to 7,
+;   so it misses a port whose ID lies above them, as every port's does on
+;   the standard die, whose sixteen cores take IDs 0 to 15.  The CSR path
+;   serves the full cores.
+w_ipi_pending:
+    csrr r0, 0x22
+    subi r14, 8
+    str r14, r0
+    ret.l
+
 ; IPI-ACK ( core -- )  acknowledge IPI from given core
 w_ipi_ack:
     ldn r0, r14
@@ -25895,7 +25908,6 @@ d_tacc_relay:
 
 ; The relocation buffer's capacity appends after it.
 ; === _RELOC-CAP ===
-latest_entry:
 d_reloc_cap:
     .dq d_tacc_relay
     .db 10
@@ -25903,6 +25915,17 @@ d_reloc_cap:
     ldi64 r1, var_reloc_cap
     subi r14, 8
     str r14, r1
+    ret.l
+
+; The whole pending signal mask appends after it.
+; === IPI-PENDING ===
+latest_entry:
+d_ipi_pending:
+    .dq d_reloc_cap
+    .db 11
+    .ascii "IPI-PENDING"
+    ldi64 r11, w_ipi_pending
+    call.l r11
     ret.l
 
 ; =====================================================================

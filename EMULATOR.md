@@ -713,7 +713,7 @@ input loaded by `KYBER-KEYGEN`; `KYBER-ENCAPS` continues to consume the first
 `TIMER!` `TIMER-CTRL!` `TIMER-ACK` `EI!` `DI!` `ISR!`
 
 **Multicore**
-`COREID` `NCORES` `IPI-SEND` `IPI-STATUS` `IPI-ACK`
+`COREID` `NCORES` `IPI-SEND` `IPI-STATUS` `IPI-PENDING` `IPI-ACK`
 `MBOX!` `MBOX@` `SPIN@` `SPIN!` `WAKE-CORE` `CORE-STATUS`
 
 **Cooperative Multitasking**

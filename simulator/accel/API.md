@@ -554,8 +554,10 @@ memory geometry, the crypto capabilities and the chiplet ports' word;
 `SpinlockBank`, the shared model of `shared/accel/spinlock_bank.h`, which
 `simulator/spinlocks.py` exports as `HostedSpinlockBank` and whose window
 the platform does not attach yet. Over a `ChipletLink`, the window device
-and the mailbox step the chiplets before a read of a port register or of
-`STATUS`, and both may share a `SignalTakers`: its `takers` mask names the
+and the mailbox step the chiplets before a read of a port register or of a
+core's pending signals, through `STATUS` or the mailbox's `pending(core)`,
+which returns the core's whole 64-bit pending mask, and both may share a
+`SignalTakers`: its `takers` mask names the
 cores that, as a worker's IPI handler does, acknowledge every port's
 signal that a step inside their own access raises, leaving a full core's
 signal pending for the core scheduler.

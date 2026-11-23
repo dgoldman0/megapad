@@ -663,6 +663,7 @@ handler takes the request, and the sleep acknowledges every IPI pending when
 it ends, from the whole 64-bit mask CSR `MBOX` gives, so a chiplet port's
 doorbell counts even when the port's ID lies above the eight IDs
 `IPI-STATUS` shows. Otherwise the request would hold each later sleep awake.
+Forth reads the same mask with `IPI-PENDING`.
 Another core wakes core 0 with `0 0 IPI-SEND` after it publishes its work,
 and the woken loop checks for that work as usual. An IPI that arrives before
 the sleep starts ends it at once, so none is lost.
@@ -1045,7 +1046,8 @@ were.
 | `COREID` | `( -- n )` | Push this core’s hardware ID (`0` through `NCORES - 1`). Reads CSR 0x20. |
 | `NCORES` | `( -- n )` | Push the total number of hardware cores.  Reads CSR 0x21. |
 | `IPI-SEND` | `( xt core -- )` | Send an IPI to *core*: writes the 64-bit XT into the mailbox data register and triggers the interrupt.  A worker target runs the XT as its next job. |
-| `IPI-STATUS` | `( -- mask )` | Read pending IPI bitmask for this core.  Bit *n* set means an IPI from core *n* is pending. |
+| `IPI-STATUS` | `( -- mask )` | Read pending IPI bitmask for this core from `MBOX_STATUS`.  Bit *n* set means an IPI from core *n* is pending; it shows IDs 0 to 7. |
+| `IPI-PENDING` | `( -- mask )` | Read the whole 64-bit pending mask of CSR `MBOX`: bit *n* is set while the participant with ID *n*, a core or a chiplet port, has signalled this core.  On the standard die every port's ID lies above 7, where only this word shows it. |
 | `IPI-ACK` | `( core -- )` | Acknowledge (clear) the pending IPI from the given core. |
 | `MBOX!` | `( d -- )` | Write a 64-bit value to the mailbox outgoing data register (8 bytes LE). |
 | `MBOX@` | `( -- d )` | Read the 64-bit value from the mailbox incoming data register. |

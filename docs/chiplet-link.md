@@ -267,8 +267,9 @@ the sender itself, is ignored.
 
 A core's pending mask is indexed by ID: bit n is set while the participant
 with ID n has signalled the core. Reading CSR `MBOX` returns all 64 bits,
-with a port's bit at its ID. The 8-bit `MBOX_STATUS` register shows IDs 0
-to 7, which on the standard die are full cores and microcores.
+with a port's bit at its ID, and the BIOS's `IPI-PENDING` gives Forth that
+mask. The 8-bit `MBOX_STATUS` register shows IDs 0 to 7, which on the
+standard die are full cores and microcores.
 
 A sender writes its data and then rings, and a write is complete when its
 response returns, so a doorbell follows the data it announces.
@@ -517,10 +518,12 @@ clock.
   cores are then woken by the usual rule. A chiplet reads and writes memory
   and rings cores only from its step, when no core runs.
 - In the hosted simulator a chiplet steps before each read of a port
-  register or of `MBOX_STATUS`, and when a dispatch returns to its host. The
-  simulator's one core reaches the mailbox by MMIO alone and polls
-  `MBOX_STATUS` for a port's signal. Its ports are absent unless the address
-  space is created with `chiplet_ports`, and its first port has the ID 1.
+  register or of a core's pending signals, through `MBOX_STATUS` or
+  `IPI-PENDING`, and when a dispatch returns to its host. The simulator
+  has no CSRs: its cores reach the mailbox through MMIO and the BIOS's
+  mailbox words, and poll their pending signals for a port's signal. Its
+  ports are absent unless the address space is created with
+  `chiplet_ports`, and its first port has the ID 1.
 - A small core in the emulator reaches the mailbox by CSR as a full core
   does. In the RTL it uses the mailbox's registers (section 10).
 

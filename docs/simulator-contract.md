@@ -953,6 +953,12 @@ sender; `MBOX! ( x -- )` and `MBOX@ ( -- x )` write and read the caller's
 mailbox data word. These four follow `VRAM-SIZE` at the frontier, and `.S`
 follows them, printing the depth between angle brackets and each cell from
 the bottom, signed in `BASE`, as the BIOS's `w_dotS` does.
+`IPI-PENDING ( -- mask )`, which follows `#TASKS` at the frontier, reads
+the caller's whole pending mask, every ID from the cores to the chiplet
+ports, as the BIOS's word reads CSR `MBOX`; a port's ID lies above 7 on the
+standard die, where `IPI-STATUS` never shows it. The chiplets step before
+it, as before a read of `MBOX_STATUS`, so a core that polls either one for
+a port's signal makes progress.
 
 A worker runs within the limits of KDOS's concurrency contract. The
 compiler, the evaluator with its input parsing (`'`, `WORD` and the names

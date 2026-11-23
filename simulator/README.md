@@ -43,8 +43,8 @@ The implemented slices provide:
   the words the host's evaluation executes, its outer interpreter, and
   the others run the BIOS worker loop, taking jobs that `WAKE-CORE` or a full
   core's `IPI-SEND` sends them and running each on fresh stacks in the core's
-  zone; `CORE-STATUS` reads the worker slots, `IPI-STATUS`, `IPI-ACK`,
-  `MBOX!` and `MBOX@` serve the caller's mailbox, a refused `SPIN@` ends the
+  zone; `CORE-STATUS` reads the worker slots, `IPI-STATUS`, `IPI-PENDING`,
+  `IPI-ACK`, `MBOX!` and `MBOX@` serve the caller's mailbox, a refused `SPIN@` ends the
   caller's turn, the Timer follows a round clock, and a worker that reaches
   the compiler, the evaluator, dictionary growth or terminal input takes the
   illegal-operation fault. With one core `WAKE-CORE` rejects every target and

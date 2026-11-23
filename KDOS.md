@@ -641,8 +641,8 @@ The BIOS provides:
 * **Timer & interrupt**: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
 * **Non-blocking input**: KEY? (poll UART RX without blocking)
 * **FSLOAD**: Load and EVALUATE files from MP64FS disk
-* **Multicore**: COREID, NCORES, IPI-SEND, IPI-STATUS, IPI-ACK, MBOX!, MBOX@,
-  SPIN@, SPIN!, WAKE-CORE, CORE-STATUS
+* **Multicore**: COREID, NCORES, IPI-SEND, IPI-STATUS, IPI-PENDING, IPI-ACK,
+  MBOX!, MBOX@, SPIN@, SPIN!, WAKE-CORE, CORE-STATUS
 * **AES-256/128, GCM and CBC**: AES-KEY!, AES-IV!, AES-AAD-LEN!,
   AES-DATA-LEN!, AES-CMD!, AES-STATUS@, AES-KEY-MODE!, AES-DIN!, AES-DOUT@,
   AES-TAG@, AES-TAG!, AES-MODE!, AES-CBC-IV!

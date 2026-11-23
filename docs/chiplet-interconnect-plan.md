@@ -171,7 +171,8 @@ with a CSR write alone (`rtl/periph/mp64_mailbox.v`, `rtl/soc/mp64_soc.v`).
 
 A core's pending mask is indexed by ID and is 64 bits wide through that
 path, which covers the 16 cores and 48 ports. The 8-bit `MBOX_STATUS`
-register shows IDs 0 to 7. The microcores are participants as the full
+register shows IDs 0 to 7, so Forth reads the whole mask with the BIOS's
+`IPI-PENDING`, which `CHIP-WAIT` polls. The microcores are participants as the full
 cores are: a signal to one sets its bit and raises its IPI line, and a
 chiplet's signal raises its flag input too. A microcore reaches the mailbox
 through its registers, since the register path by CSR serves the full cores

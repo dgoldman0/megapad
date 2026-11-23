@@ -572,10 +572,12 @@ DEFER _CHIP-RESET-HOOK   ( port -- )
         DUP _CHIP-NAP
     AGAIN ;
 
-\ Wait for the port's signal, then acknowledge it.
+\ Wait for the port's signal, then acknowledge it.  IPI-PENDING reads the
+\ whole pending mask, where MBOX_STATUS shows IDs 0 to 7 and misses every
+\ port of the standard die, whose sixteen cores take IDs 0 to 15.
 : CHIP-WAIT  ( port -- )
     BEGIN
-        _MBOX-STATUS C@ OVER CHIP-ID 1 SWAP LSHIFT AND 0=
+        IPI-PENDING OVER CHIP-ID 1 SWAP LSHIFT AND 0=
     WHILE 0 IDLE-UNTIL REPEAT
     _CHIP-ACK ;
 

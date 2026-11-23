@@ -72,6 +72,7 @@ def test_rich_terminal_and_geometry_words_extend_the_core_append_only() -> None:
         b"TASK-YIELD",
         b"TASK?",
         b"#TASKS",
+        b"IPI-PENDING",
     )
     assert len(runtime.dictionary.words) == 380 + len(frontier)
     words = runtime.dictionary.words[:-len(frontier)]

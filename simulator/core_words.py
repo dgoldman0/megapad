@@ -1367,6 +1367,15 @@ def _ipi_status(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     context.data.push(runtime.memory.read8(MMIO_BASE + _MAILBOX_STATUS))
 
 
+def _ipi_pending(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    """``IPI-PENDING ( -- mask )``: the caller's pending signals from every
+    ID, the whole mask CSR MBOX gives the BIOS's word, so a chiplet port
+    whose ID lies above 7 shows. The chiplets step first, as before a read
+    of MBOX_STATUS."""
+
+    context.data.push(runtime.memory.mmio.mailbox.pending(runtime.active_core))
+
+
 def _ipi_ack(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     """``IPI-ACK ( id -- )``: the caller takes the signal from ``id``, as a
     write of its low byte to MBOX_ACK does."""
@@ -3429,6 +3438,12 @@ def install_core(runtime: MegaForthRuntime) -> None:
     runtime.define_primitive(b"TASK?", lambda context: _task_query(runtime, context))
     runtime.define_primitive(
         b"#TASKS", lambda context: context.data.push(runtime.tasks.count()),
+    )
+
+    # IPI-PENDING follows, the whole mask of the caller's pending signals
+    # where IPI-STATUS shows IDs 0 to 7.
+    runtime.define_primitive(
+        b"IPI-PENDING", lambda context: _ipi_pending(runtime, context),
     )
 
 
