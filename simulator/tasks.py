@@ -22,15 +22,18 @@ keeps its own slot stacks below its dictionary.
 PAUSE in a slot, TASK-YIELD in the foreground, and either word on a worker
 core take the illegal-operation fault, as the BIOS's words refuse them, and
 the fault's report names the refusal as the BIOS's does. An
-error or ABORT in a slot ends the slot, and the foreground's line that
-paused ends with it, as the BIOS's QUIT ends the slot that was running.
+error, ABORT or QUIT in a slot ends the slot, and the foreground's line that
+paused ends with it, as the BIOS's QUIT ends the slot that was running. As
+on the BIOS, ABORT and a fault empty the foreground's data stack, while QUIT
+and an error the evaluator raises leave it as it was when the foreground
+paused.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from simulator.errors import ExecutionError, TaskWordRefused
+from simulator.errors import ExecutionError, ForthAbort, TaskWordRefused
 from simulator.stacks import DataStack, ReturnStack
 
 if TYPE_CHECKING:
@@ -169,9 +172,10 @@ class HostedTasks:
                 "gives its turn back with TASK-YIELD"
             )
 
-    def pause(self) -> None:
-        """PAUSE: from core 0's foreground, run the next active slot until it
-        yields or ends; with no active slot, nothing."""
+    def pause(self, context) -> None:
+        """PAUSE: from core 0's foreground, whose context is CONTEXT, run
+        the next active slot until it yields or ends; with no active slot,
+        nothing."""
 
         runtime = self.runtime
         self._require_foreground("PAUSE", in_slot=False)
@@ -199,11 +203,17 @@ class HostedTasks:
                 outcome = runtime._resume_scheduled(
                     suspended, None, task_slot=True,
                 )
-        except BaseException:
+        except BaseException as error:
             # An abort or a failure ends the slot; on the machine an ABORT
             # in a slot also ends the foreground's line, as it does here.
             if self._generations[slot] == generation:
                 self._xts[slot] = 0
+            # ABORT, ABORT" and a fault empty the foreground's data stack
+            # too, as the BIOS's ABORT resets core 0's; QUIT and an error
+            # the evaluator raises keep it, as the BIOS's QUIT and its
+            # diagnostics give the foreground back the stack it paused with.
+            if isinstance(error, ForthAbort) and not error.keeps_data_stack:
+                context.data.clear()
             raise
         finally:
             self._enter(0)

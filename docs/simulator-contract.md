@@ -871,7 +871,8 @@ foreground's line that paused, as the BIOS's `QUIT` ends the slot that was
 running, and `TASK-ID` answers 0 again. After `QUIT` and after an error that
 the evaluator raises, such as a compile-only word met through `EVALUATE`,
 the foreground keeps the data stack it had when it paused, as the BIOS's
-`QUIT` and diagnostics give it back. A slot's stack overflow raises the
+`QUIT` and diagnostics give it back; after `ABORT`, `ABORT"` or a fault its
+data stack is empty, as after the BIOS's `ABORT`. A slot's stack overflow raises the
 simulator's stack error and ends the slot, where the BIOS's 32-cell stacks
 run into the next slot's.
 

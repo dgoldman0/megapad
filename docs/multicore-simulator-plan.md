@@ -1018,7 +1018,14 @@ change in the BIOS, KDOS, the release plan, the contract or the tests.
     emulator and 2 on the simulator. After `QUIT` and the interpreter's
     diagnostics both machines keep it (finding 16). Emptying the main
     context's data stack when an `ABORT` or a fault leaves a slot would make
-    the simulator agree, in its next slice.
+    the simulator agree, in its next slice. Fixed on 2026-11-23 in the same
+    slice: the simulator's `PAUSE` empties the foreground's data stack when
+    an `ABORT`, `ABORT"` or fault ends the slot, and keeps it for `QUIT` and
+    the evaluator's errors, whose aborts say so. The same flag lets `QUIT`
+    keep the data stack outside slots too, where the abort paths' reset of
+    their origin used to empty it. The differential file now compares the
+    data stack after each of the four endings in a slot, and after `ABORT`,
+    a fault and `QUIT` outside slots, on the emulator and three simulators.
 
 ## 10. Decisions
 

@@ -105,11 +105,14 @@ class ForthAbort(ExecutionError):
         *,
         origin_context: object | None = None,
         quit_callback_ran: bool = False,
+        keeps_data_stack: bool = False,
     ) -> None:
         self.origin_context = origin_context
         # Whether the callback installed with QUIT-XT! ran once the task's
         # stacks were clear, as BIOS QUIT runs it.
         self.quit_callback_ran = quit_callback_ran
+        # QUIT keeps the data stack; ABORT, ABORT" and a fault empty it.
+        self.keeps_data_stack = keeps_data_stack
         super().__init__(message)
 
     def bind_origin(self, context: object) -> bool:
@@ -118,6 +121,19 @@ class ForthAbort(ExecutionError):
         if self.origin_context is None:
             self.origin_context = context
         return self.origin_context is context
+
+    def reset_origin(self, context) -> bool:
+        """Bind the abort as ``bind_origin`` does and, when CONTEXT is its
+        origin, give it the BIOS word's reset: the return stack cleared, and
+        the data stack too unless the abort is QUIT's. Whether CONTEXT was
+        the origin."""
+
+        if not self.bind_origin(context):
+            return False
+        if not self.keeps_data_stack:
+            context.data.clear()
+        context.returns.clear()
+        return True
 
 
 class StepBudgetExceeded(ExecutionError):

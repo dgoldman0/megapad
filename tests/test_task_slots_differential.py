@@ -325,44 +325,84 @@ def test_an_uncaught_misuse_of_the_slot_words_faults_on_the_emulator():
     assert _between(emulator.type([MISUSE_REPORT])) == MISUSE_EXPECTED
 
 
-# A diagnostic that ends a line and QUIT, each in a slot, end the slot with
-# the line, and the foreground keeps the data stack it had when it paused,
-# 1 2, while the slot's 7 8 go with the slot. The BIOS prints the
-# diagnostic; the simulator's evaluator raises it to its host. Then what the
-# foreground sees, and a PAUSE that finds no slot.
+# Each way a slot can end a line, with 1 2 on the foreground's data stack
+# when it paused and 7 8 on the slot's. The slot ends with the line on both
+# machines. ABORT and a fault empty the foreground's data stack, as Forth's
+# ABORT does; QUIT and a diagnostic that ends a line give the foreground
+# back the stack it paused with. The BIOS prints what each prints; the
+# simulator raises the diagnostic to its host and the others as aborts.
+# Then what the foreground sees, and a PAUSE that finds no slot.
 QUIT_SETUP = b"""VARIABLE TS-AFTER
 : TS-BADDO ( -- ) 7 8 S" DO" EVALUATE ;
 : TS-QUITS ( -- ) 7 8 QUIT ;
+: TS-ABORTS ( -- ) 7 8 TRUE ABORT" slot gave up" ;
+: TS-FAULTS ( -- ) 7 8 1 0 / ;
 : TS-SHOW ( -- ) DEPTH DUP . 0 ?DO . LOOP ;"""
+# name: (the slot's word, what the BIOS prints, what the report prints)
 QUIT_CASES = {
-    "diagnostic": b"0 TS-AFTER ! 1 2 ' TS-BADDO BACKGROUND PAUSE 9 TS-AFTER !",
-    "quit": b"0 TS-AFTER ! 1 2 ' TS-QUITS BACKGROUND PAUSE 9 TS-AFTER !",
+    "diagnostic": (b"TS-BADDO", b"compile-only word", b"0 0 0 2 2 1 0 "),
+    "quit": (b"TS-QUITS", b"", b"0 0 0 2 2 1 0 "),
+    "abort": (b"TS-ABORTS", b"slot gave up", b"0 0 0 0 0 "),
+    "fault": (b"TS-FAULTS", b"*** DIVIDE BY ZERO", b"0 0 0 0 0 "),
 }
+QUIT_LINE = b"0 TS-AFTER ! 1 2 ' %s BACKGROUND PAUSE 9 TS-AFTER !"
 QUIT_REPORT = (b"60 EMIT 60 EMIT TASK-ID . 1 TASK? . TS-AFTER @ . TS-SHOW "
                b"PAUSE #TASKS . 62 EMIT 62 EMIT")
-QUIT_EXPECTED = b"0 0 0 2 2 1 0 "
 
 
 @pytest.mark.parametrize("case", tuple(QUIT_CASES))
-@pytest.mark.parametrize("executor", ("native", "python"))
-def test_a_diagnostic_or_quit_in_a_slot_ends_the_slot_on_the_simulator(
-        executor, case):
-    runtime = _Simulator(1, executor, _kdos()).runtime
-    runtime.evaluate(QUIT_SETUP)
-    runtime.drain_uart_output()
-    with pytest.raises(SourceError if case == "diagnostic" else ForthAbort):
-        runtime.evaluate(QUIT_CASES[case])
-    runtime.evaluate(QUIT_REPORT)
-    assert _between(runtime.drain_uart_output()) == QUIT_EXPECTED
+def test_each_ending_in_a_slot_ends_the_slot_on_the_simulators(case):
+    word, _printed, expected = QUIT_CASES[case]
+    # Two native simulators and the Python one, each from a fresh machine.
+    for executor in ("native", "native", "python"):
+        runtime = _Simulator(1, executor, _kdos()).runtime
+        runtime.evaluate(QUIT_SETUP)
+        runtime.drain_uart_output()
+        with pytest.raises(SourceError if case == "diagnostic" else ForthAbort):
+            runtime.evaluate(QUIT_LINE % word)
+        runtime.drain_uart_output()
+        runtime.evaluate(QUIT_REPORT)
+        assert _between(runtime.drain_uart_output()) == expected, executor
 
 
 @pytest.mark.parametrize("case", tuple(QUIT_CASES))
-def test_a_diagnostic_or_quit_in_a_slot_ends_the_slot_on_the_emulator(case):
+def test_each_ending_in_a_slot_ends_the_slot_on_the_emulator(case):
+    word, printed, expected = QUIT_CASES[case]
     emulator = _Emulator(1, _bios(), _kdos())
     emulator.type(QUIT_SETUP.splitlines())
-    said = emulator.type([QUIT_CASES[case]])
+    said = emulator.type([QUIT_LINE % word])
+    assert printed in said
     assert (b"compile-only word" in said) == (case == "diagnostic")
-    assert _between(emulator.type([QUIT_REPORT])) == QUIT_EXPECTED
+    assert _between(emulator.type([QUIT_REPORT])) == expected
+
+
+# Outside slots the endings are as they were: ABORT and a fault empty the
+# data stack, and QUIT keeps it.
+TOP_LEVEL_ENDINGS = (
+    (b'1 2 TRUE ABORT" gave up"', b"0 "),
+    (b"1 2 1 0 /", b"0 "),
+    (b"1 2 QUIT", b"2 2 1 "),
+)
+TOP_LEVEL_SHOW = b"60 EMIT 60 EMIT TS-SHOW 62 EMIT 62 EMIT"
+
+
+def test_endings_outside_slots_keep_or_empty_the_stack_on_both_machines():
+    emulator = _Emulator(1, _bios(), _kdos())
+    emulator.type(QUIT_SETUP.splitlines())
+    simulators = [_Simulator(1, executor, _kdos()).runtime
+                  for executor in ("native", "native", "python")]
+    for runtime in simulators:
+        runtime.evaluate(QUIT_SETUP)
+        runtime.drain_uart_output()
+    for line, expected in TOP_LEVEL_ENDINGS:
+        emulator.type([line])
+        assert _between(emulator.type([TOP_LEVEL_SHOW])) == expected, line
+        for runtime in simulators:
+            with pytest.raises(ForthAbort):
+                runtime.evaluate(line)
+            runtime.drain_uart_output()
+            runtime.evaluate(TOP_LEVEL_SHOW)
+            assert _between(runtime.drain_uart_output()) == expected, line
 
 
 # TASK-STOP and TASK? refuse a number that names no slot without taking it:

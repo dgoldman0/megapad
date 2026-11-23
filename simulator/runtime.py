@@ -2538,6 +2538,7 @@ class MegaForthRuntime:
             "Forth QUIT",
             origin_context=context,
             quit_callback_ran=self._run_quit_callback(context),
+            keeps_data_stack=True,
         )
 
     def _run_quit_callback(self, context: ExecutionContext) -> bool:
@@ -3413,9 +3414,7 @@ class MegaForthRuntime:
                     capture_checkpoint
                 ):
                     active_context._mark_host_control_fault(exc)
-                if exc.bind_origin(active_context):
-                    active_context.data.clear()
-                    active_context.returns.clear()
+                exc.reset_origin(active_context)
                 raise
             except BaseException as exc:
                 if active_context.returns.has_pointer_captures_after(
@@ -3439,9 +3438,7 @@ class MegaForthRuntime:
                 capture_checkpoint
             ):
                 active_context._mark_host_control_fault(exc)
-            if exc.bind_origin(active_context):
-                active_context.data.clear()
-                active_context.returns.clear()
+            exc.reset_origin(active_context)
             raise
         except BaseException as exc:
             self._fail_closed_active_bios_evaluator()
@@ -4734,12 +4731,9 @@ class MegaForthRuntime:
             self._fail_closed_active_bios_evaluator()
             if context.returns.has_pointer_captures_after(capture_checkpoint):
                 context._mark_host_control_fault(exc)
-            if exc.bind_origin(context):
-                # Normalize a direct host primitive ForthAbort to the same
-                # complete-task reset as the BIOS word.
-                context.data.clear()
-                context.returns.clear()
-            else:
+            # Normalize a direct host primitive ForthAbort to the same
+            # complete-task reset as the BIOS word.
+            if not exc.reset_origin(context):
                 context.returns.restore(return_snapshot)
             raise
         except BaseException as exc:
@@ -4861,10 +4855,7 @@ class MegaForthRuntime:
             )
             if suspended.had_pointer_capture:
                 context._mark_host_control_fault(exc)
-            if exc.bind_origin(context):
-                context.data.clear()
-                context.returns.clear()
-            else:
+            if not exc.reset_origin(context):
                 context.returns.restore(suspended.return_snapshot)
             raise
         except BaseException as exc:
@@ -4934,10 +4925,7 @@ class MegaForthRuntime:
             self._fail_closed_active_bios_evaluator()
             if context.returns.has_pointer_captures_after(capture_checkpoint):
                 context._mark_host_control_fault(exc)
-            if exc.bind_origin(context):
-                context.data.clear()
-                context.returns.clear()
-            else:
+            if not exc.reset_origin(context):
                 context.returns.restore(return_snapshot)
             raise
         except BaseException as exc:

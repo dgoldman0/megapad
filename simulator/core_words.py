@@ -3431,7 +3431,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
     # The task slots' scheduling words follow: PAUSE runs the next active
     # slot from the foreground, TASK-YIELD gives the foreground its turn
     # back, and TASK? and #TASKS report the slots.
-    runtime.define_primitive(b"PAUSE", lambda _context: runtime.tasks.pause())
+    runtime.define_primitive(b"PAUSE", lambda context: runtime.tasks.pause(context))
     runtime.define_primitive(
         b"TASK-YIELD", lambda _context: runtime.tasks.task_yield(),
     )
