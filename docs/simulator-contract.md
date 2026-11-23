@@ -1040,11 +1040,9 @@ sentinel `0xFFFF_FE00_0000_0000`; the simulator maps no storage there, so an
 access fails through the normal unmapped-memory contract. `MICRO?` preserves
 the executable BIOS's unsigned `id >= N-FULL` classification rather than
 performing topology validation: IDs below `N-FULL` are false and every other
-uint64 cell is true, including cells that cannot name a hosted core. The
-BIOS's word answers 255 for true, because `ldi` zero-extends its 8-bit
-immediate, as `RESIZED?` and `RESIZE-DENIED?` do too; that is a BIOS defect
-(finding 14 of `docs/multicore-simulator-plan.md`), and the simulator
-answers the full-width flag of section 2.
+uint64 cell is true, including cells that cannot name a hosted core. Its
+true flag, like those of `RESIZED?` and `RESIZE-DENIED?`, is the full-width
+flag of section 2 on both machines.
 These choices claim source-visible failure and classification behavior only,
 not cluster execution, scratchpad storage, barriers, privilege, or MPU
 enforcement.

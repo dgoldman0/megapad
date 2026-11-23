@@ -2,7 +2,8 @@
 
 The hosted simulator gives the three BIOS words the BIOS's results. Each
 case runs the same Forth on both machines and requires the same report,
-the same bytes in the buffer and the same bytes left unread.
+the same bytes in the buffer and the same bytes left unread. The resize
+flags and .S, appended to the BIOS later, are compared the same way.
 
 ACCEPT ( addr max -- n ) stops at max before it reads a key, ends at a CR
 or an LF that it neither stores nor echoes, drops the last byte stored at
@@ -228,6 +229,25 @@ def test_vram_words_report_the_window_system_info_holds(vram_size) -> None:
     line = b"VRAM-BASE . VRAM-SIZE ."
     assert expected in emulator.numbers(line)
     assert simulator.numbers(line) == expected
+
+
+def test_the_resize_flags_set_every_bit_for_true() -> None:
+    # RESIZED? and RESIZE-DENIED? answer a Forth true flag, as the
+    # simulator's words do; the BIOS's once loaded it from an 8-bit
+    # immediate, which made it 255 (finding 14 of
+    # docs/multicore-simulator-plan.md).
+    emulator, simulator = _Emulator(), _Simulator()
+    emulator.system.uart_geom.host_set_size(100, 40)
+    simulator.runtime.set_terminal_geometry(100, 40)
+    line = b"RESIZED? . RESIZED? ."
+    assert simulator.numbers(line) == b"<-1 0 >"
+    assert b"<-1 0 >" in emulator.numbers(line)
+    # The host refuses a request, as a terminal that cannot take the size
+    # does. tests/simulator/test_bios_terminal_geometry.py refuses one
+    # through the simulator's session host.
+    emulator.numbers(b"90 30 RESIZE-REQUEST")
+    emulator.system.uart_geom.host_deny_resize()
+    assert b"<-1 0 >" in emulator.numbers(b"RESIZE-DENIED? . RESIZE-DENIED? .")
 
 
 @pytest.mark.parametrize("base", (b"DECIMAL", b"HEX"))

@@ -15634,7 +15634,7 @@ w_resized_q:
     ; Clear RESIZED by writing 1 to bit 0 (W1C)
     ldi r1, 0x01
     st.b r11, r1
-    ldi r0, -1                           ; TRUE
+    ldi64 r0, 0xFFFFFFFFFFFFFFFF         ; TRUE, every bit set
     subi r14, 8
     str r14, r0
     ret.l
@@ -15655,7 +15655,7 @@ w_resize_denied_q:
     ; Clear REQ_DENIED by writing 2 to STATUS (W1C)
     ldi r1, 0x02
     st.b r11, r1
-    ldi r0, -1                           ; TRUE
+    ldi64 r0, 0xFFFFFFFFFFFFFFFF         ; TRUE, every bit set
     subi r14, 8
     str r14, r0
     ret.l
@@ -20635,7 +20635,7 @@ w_micro_q:
     cmp r0, r1                          ; compare id with n_full
     ldi r1, 0
     lbrcc micro_q_no                    ; if id < n_full, not micro
-    ldi r1, -1                          ; id >= n_full → true
+    ldi64 r1, 0xFFFFFFFFFFFFFFFF        ; id >= n_full → true, every bit set
 micro_q_no:
     str r14, r1                         ; replace TOS
     ret.l

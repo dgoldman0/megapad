@@ -19,9 +19,8 @@ plain DO from 1 to the core count, which never ends on one core; their
 cases run on two and four cores. KDOS's MSG-SEND stores its arguments in
 shared variables before it takes lock 7, so senders on several cores at
 once race on the emulator; the messages case sends from one worker at a
-time. The BIOS's MICRO? answers 255 for true where the simulator's answers
--1, so the sysinfo case compares its truth (section 9 of the plan records
-both defects).
+time (section 9 of the plan records both defects). The sysinfo case prints
+MICRO?'s flags themselves, which on both machines set every bit for true.
 """
 
 from __future__ import annotations
@@ -52,7 +51,7 @@ _BETWEEN = re.compile(rb"<<(.*?)>>", re.S)
 # name: (minimum cores, definitions, body)
 CASES = {
     "sysinfo": (1, b"", b"""NCORES . N-FULL . N-FULL-CORES . COREID .
-0 MICRO? 0<> . 1 MICRO? 0<> . NCORES MICRO? 0<> ."""),
+0 MICRO? . 1 MICRO? . NCORES MICRO? ."""),
     "cores": (1, b"", b"CORES"),
     "dispatch": (2, b"""
 CREATE DMARKS 4 CELLS ALLOT  DMARKS 4 CELLS 0 FILL

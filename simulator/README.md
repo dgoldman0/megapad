@@ -1901,8 +1901,7 @@ fake completion or register state. `SPAD` still returns the BIOS address
 sentinel `0xFFFF_FE00_0000_0000`, but no memory is mapped there, so a later
 access faults normally. `MICRO?` is the literal unsigned BIOS threshold test:
 IDs below `N-FULL` are false and every other 64-bit cell is true even though
-none names a hosted core. Its true flag is -1, where the BIOS's word answers
-255 (finding 14 of `docs/multicore-simulator-plan.md`).
+none names a hosted core. Its true flag is -1, as the BIOS's word answers.
 
 Several literal source discrepancies remain visible. Both all-core wait words
 use plain `DO` with equal start and limit on one core, so they enter a
