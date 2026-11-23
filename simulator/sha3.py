@@ -39,6 +39,8 @@ SHA3_STATE_DATA = SHA3_OFFSET + 0x58
 
 SHA3_PHASE_IDLE = 0
 SHA3_PHASE_BUSY = 1
+# The hardware spinlock that guards a checked transaction.
+SHA3_LOCK = 8
 SHA3_PHASE_DONE = 2
 SHA3_PHASE_ERROR = 3
 
@@ -241,6 +243,15 @@ class HostedSHA3Service:
         self._checked_mode = 0
         self._checked_phase = 0
         self._checked_window_offset = 0
+        # The hardware spinlock bank whose lock 8 guards a checked
+        # transaction, as the BIOS's _crypto_guard_acquire takes it.
+        self._lock_bank = None
+
+    def bind_lock_bank(self, bank) -> None:
+        """Guard checked transactions with BANK's lock 8, the lock the
+        BIOS takes for them, or with the owner record alone for None."""
+
+        self._lock_bank = bank
 
     def bind_native_permutation(self, permutation: Permutation | None) -> bool:
         """Select an optional value executor without changing guest state.
@@ -414,10 +425,9 @@ class HostedSHA3Service:
             return CRYPTO_STATUS_UNSUPPORTED
         if not 0 <= mode < 4:
             return CRYPTO_STATUS_RANGE
-        if self._checked_owner is not None:
+        if not self._acquire_checked(identity):
             return CRYPTO_STATUS_STATE
 
-        self._checked_owner = identity
         self._checked_kind = SHA3_OWNER_SPONGE
         self._checked_mode = 0
         self._checked_phase = 0
@@ -671,10 +681,9 @@ class HostedSHA3Service:
         checked = self._map_caller_span(span_status(address, 200))
         if checked != CRYPTO_STATUS_OK:
             return checked
-        if self._checked_owner is not None:
+        if not self._acquire_checked(identity):
             return CRYPTO_STATUS_STATE
 
-        self._checked_owner = identity
         self._checked_kind = SHA3_OWNER_RAW
         self._checked_mode = 0
         self._checked_phase = 1
@@ -1163,9 +1172,29 @@ class HostedSHA3Service:
     def _is_checked_owner(self, identity: GuestIdentity) -> bool:
         return self._checked_owner == identity
 
+    def _acquire_checked(self, identity: GuestIdentity) -> bool:
+        """Take lock 8, then publish the owner, as the BIOS's
+        _crypto_guard_acquire does: a lock another core holds, or an owner
+        already published, which keeps the outer transaction's lock, is the
+        STATE status, at once."""
+
+        bank = self._lock_bank
+        if bank is not None and bank.acquire(SHA3_LOCK, identity[0]) != 0:
+            return False
+        if self._checked_owner is not None:
+            return False
+        self._checked_owner = identity
+        return True
+
     def _release_checked(self) -> None:
+        """Unpublish the owner, then release lock 8 as its core."""
+
+        owner = self._checked_owner
         self._checked_owner = None
         self._reset_checked_logical()
+        bank = self._lock_bank
+        if bank is not None and owner is not None:
+            bank.release(SHA3_LOCK, owner[0])
 
     def _reset_checked_logical(self) -> None:
         self._checked_kind = SHA3_OWNER_NONE

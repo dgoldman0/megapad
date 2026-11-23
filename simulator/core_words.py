@@ -1478,7 +1478,7 @@ def _disk_transfer_value(
 
     storage = runtime.storage if storage is None else storage
     core_id, _task_id = runtime.guest_identity(context)
-    if runtime.acquire_spinlock(2) != 0:
+    if runtime.acquire_spinlock_polled(2) != 0:
         return 0, STORAGE_RESULT_TIMEOUT
     try:
         operation = (
@@ -1572,21 +1572,24 @@ def _unit_disk_flush_checked(
     runtime: MegaForthRuntime,
     context: ExecutionContext,
 ) -> None:
-    """( generation unit -- status )."""
+    """( generation unit -- status ).  Both inputs are read before either
+    is consumed, so a call made again at a later turn finds them."""
 
     generation = context.data.peek(1)
-    storage = _storage_unit(runtime, context.data.pop())
+    storage = _storage_unit(runtime, context.data.peek())
     if storage is None:
+        context.data.pop()
         context.data.replace_top(STORAGE_RESULT_NO_MEDIA)
         return
     core_id, _task_id = runtime.guest_identity(context)
-    if runtime.acquire_spinlock(2) != 0:
+    if runtime.acquire_spinlock_polled(2) != 0:
         status = STORAGE_RESULT_TIMEOUT
     else:
         try:
             status = storage.flush_checked(generation=generation)
         finally:
             runtime.spinlocks.release(2, core_id)
+    context.data.pop()
     context.data.replace_top(status)
 
 
@@ -1598,7 +1601,7 @@ def _disk_flush_checked(
 ) -> None:
     generation = context.data.peek() if generation_bound else None
     core_id, _task_id = runtime.guest_identity(context)
-    if runtime.acquire_spinlock(2) != 0:
+    if runtime.acquire_spinlock_polled(2) != 0:
         status = STORAGE_RESULT_TIMEOUT
     else:
         try:

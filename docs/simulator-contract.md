@@ -900,10 +900,13 @@ runtime's services hold the running core's, and each turn switch puts one
 core's away and brings the next one's in, so a core's tile registers, its
 accumulations and its rounding mode last across the other cores' turns, and
 any full core's `TACC-SEND` or `TACC-RELAY` reaches a chiplet's window.
-Contention inside the native paths is not built yet: the checked disk
-words, which take lock 2, report the storage timeout status at once when
-another core holds it, and using them from two cores at once is outside the
-claims.
+The checked disk words poll lock 2 as the BIOS's do. One that finds another
+core holding it ends its turn before it consumes anything and runs again at
+the core's next turn, so the holder runs meanwhile, and after 1,048,576
+such polls, the BIOS's bound, it reports the storage timeout status; where
+the turn cannot end, as in a nested dispatch, it reports the timeout at
+once. The checked SHA-3 words take lock 8 once and report the STATE status
+at once while another core holds it, as the BIOS's do (below).
 
 Chiplet ports are a separately admitted capability, present when the address
 space is created with `chiplet_ports`. The ports are the C++ model the
@@ -1204,20 +1207,25 @@ lock free; guest `THROW` does not release one implicitly. Each acquire and
 release names the core whose turn it is, and a foreign-owner attempt also
 ends the caller's turn, so the holder runs before the caller tries again;
 KDOS's `LOCK`, which polls `SPIN@`, makes progress that way on several
-cores. The words do not admit direct spinlock MMIO, whose window the model
-already serves, and reject IDs outside 0 through 15 instead of reproducing
-the BIOS's unchecked address arithmetic, which can fault or alias another
-device.
+cores. The bank's MMIO window at `0x600` is admitted: lock *n*'s acquire
+byte at `0x600 + 4n` and its release byte after it, with the core whose
+turn it is as requester; a refused acquire there leaves the turn to end at
+its quantum. The words reject IDs outside 0 through 15 instead of
+reproducing the BIOS's unchecked address arithmetic, which can fault or
+alias another device.
 The simulator claims ordered terminal ownership/results, not host-thread
 synchronization, memory fences, fairness, bus arbitration, contention timing,
 interrupt behavior, or physical multicore evidence.
 
-This first bank slice is not yet the backing object for the checked SHA3
-service's internal logical lock-8 owner. The admitted HMAC path touches lock 9
-and then enters SHA3 through its checked ABI, so that separation is not
-observable there. Arbitrary guest manipulation of reserved lock 8, direct
-lock-MMIO/SHA interference, and multicore guard interoperation remain outside
-the current claim and must be unified before those paths are admitted.
+The bank's lock 8 is the checked SHA3 service's guard, as the BIOS's
+`_crypto_guard_acquire` makes it: a checked `SHA3-BEGIN` or raw
+`KECCAK-F1600` takes lock 8 as its core and then publishes its owner,
+reporting STATE at once while another core holds the lock or an owner is
+already published, which keeps the outer transaction's lock, and the
+transaction's end unpublishes the owner and releases lock 8 as the owner's
+core. A guest that takes lock 8 itself therefore holds off every other
+core's transaction, as on the machine. The admitted HMAC path takes lock 9
+through KDOS's `LOCK` and then enters SHA3 through its checked ABI.
 
 The admitted SHA-2 service is runtime-local and keyed by architectural core,
 not task. It implements the checked `SHA256-*`, `SHA512-*` and `SHA384-*`

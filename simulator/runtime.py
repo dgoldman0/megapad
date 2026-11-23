@@ -691,6 +691,29 @@ class _DispatchDone:
 _DISPATCH_DONE = _DispatchDone()
 
 
+class _CallAgain:
+    __slots__ = ()
+
+
+# A primitive found the lock it polls for held by another core: the turn
+# ends at the call, which runs again at the core's next turn.
+_CALL_AGAIN = _CallAgain()
+
+
+class _RetryAtNextTurn(BaseException):
+    """Raised by a primitive, before it consumes anything, whose lock
+    another core holds, where the running turn can end and the call run
+    again (MegaForthRuntime.acquire_spinlock_polled)."""
+
+
+# The polls the BIOS's disk_lock_acquire gives lock 2 before it reports a
+# timeout; each call made again at a later turn is one poll.
+LOCK_POLL_BOUND = 1_048_576
+# The spinlock bank's MMIO window: each lock's acquire and release bytes.
+_SPINLOCK_OFFSET = 0x600
+_SPINLOCK_LIMIT = 0x640
+
+
 @dataclass(slots=True)
 class _SuspendedExecution:
     """Runtime-owned continuation and guard state for one blocked dispatch."""
@@ -848,6 +871,7 @@ class MegaForthRuntime:
         # The profile's chiplet ports, or None when it has none.
         self.chiplet_ports = platform_mmio.chiplet
         self.sha2 = HostedSHA2Service(core_count=num_full)
+        self._spinlocks = None
         self.spinlocks = spinlock_service.HostedSpinlockBank(core_count=num_cores)
         self.field = HostedFieldALUService(core_count=num_cores)
         self.ntt = HostedNTTService()
@@ -905,6 +929,10 @@ class MegaForthRuntime:
         # A refused spinlock acquire ends the running turn at the next
         # boundary where its dispatch can suspend.
         self._turn_end_requested = False
+        # Whether the primitive being called may be called again at the
+        # core's next turn, and each core's polls of a held lock so far.
+        self._lock_retry_allowed = False
+        self._lock_polls = [0] * num_full
         native_extension = None
         if selected_backend != "python":
             from simulator.native_execution import load_native_extension
@@ -1093,6 +1121,27 @@ class MegaForthRuntime:
         if num_full > 1:
             self._cores = HostedCores(
                 self, full_cores=num_full, quantum=turn_quantum_steps,
+            )
+
+    @property
+    def spinlocks(self):
+        """The hardware spinlock bank. SPIN@ and SPIN!, the disk words, the
+        checked SHA-3 service's lock 8 and the bank's MMIO window at 0x600
+        all take their locks from it."""
+
+        return self._spinlocks
+
+    @spinlocks.setter
+    def spinlocks(self, bank) -> None:
+        self._spinlocks = bank
+        if type(self.sha3) is HostedSHA3Service:
+            self.sha3.bind_lock_bank(bank)
+        table = self.memory.mmio.table
+        if table.name_at(_SPINLOCK_OFFSET) == "spinlocks":
+            table.replace("spinlocks", bank)
+        else:
+            table.attach(
+                "spinlocks", bank, ((_SPINLOCK_OFFSET, _SPINLOCK_LIMIT),),
             )
 
     @property
@@ -2263,6 +2312,27 @@ class MegaForthRuntime:
         result = self.spinlocks.acquire(lock_id, self.active_core)
         if result != 0:
             self._turn_end_requested = True
+        return result
+
+    def acquire_spinlock_polled(self, lock_id: int) -> int:
+        """Acquire a spinlock that a BIOS service polls for, as the disk
+        words poll lock 2: 0 once the active core holds it. While another
+        core holds it, a primitive called where the turn can end raises
+        _RetryAtNextTurn, before it has consumed anything, so the turn ends
+        and the call runs again at the core's next turn, up to the BIOS's
+        LOCK_POLL_BOUND polls; elsewhere, and past the bound, 1, which the
+        service reports as the BIOS's timeout."""
+
+        result = self.acquire_spinlock(lock_id)
+        polls = self._lock_polls
+        core = self.active_core
+        if result == 0:
+            polls[core] = 0
+            return 0
+        if self._lock_retry_allowed and polls[core] < LOCK_POLL_BOUND:
+            polls[core] += 1
+            raise _RetryAtNextTurn
+        polls[core] = 0
         return result
 
     def _core0_only(self, what: str) -> str | None:
@@ -4925,6 +4995,15 @@ class MegaForthRuntime:
         # suspend: the outermost dispatch, outside source evaluation.
         machine_can_yield = (allow_idle and len(self._active_dispatches) == 1
                              and not self._active_input_states)
+        # Where a turn of a machine with several cores can end at a call, so
+        # that a primitive polling a held lock runs again at the next turn.
+        turn_can_end = (
+            self._cores is not None
+            and allow_idle
+            and quantum_limit is not None
+            and len(self._active_dispatches) == 1
+            and self._input_allows_detach()
+        )
         if resume_cursor is not None:
             if word is not None or fault_request is not None:
                 raise AssertionError("resumed dispatch cannot have a new entry target")
@@ -5122,6 +5201,7 @@ class MegaForthRuntime:
                     meter=meter,
                     machine_can_yield=machine_can_yield,
                     root_id=root_id,
+                    turn_can_end=turn_can_end,
                 )
                 if type(entered) is _MachineCursor:
                     return entered
@@ -5129,7 +5209,7 @@ class MegaForthRuntime:
                     return None
                 if entered is None:
                     ip += 1
-                else:
+                elif entered is not _CALL_AGAIN:
                     current, ip = entered
             elif isinstance(operation, CallSelf):
                 entered = self._call_from_colon(
@@ -5140,6 +5220,7 @@ class MegaForthRuntime:
                     meter=meter,
                     machine_can_yield=machine_can_yield,
                     root_id=root_id,
+                    turn_can_end=turn_can_end,
                 )
                 if type(entered) is _MachineCursor:
                     return entered
@@ -5147,7 +5228,7 @@ class MegaForthRuntime:
                     return None
                 if entered is None:
                     ip += 1
-                else:
+                elif entered is not _CALL_AGAIN:
                     current, ip = entered
             elif isinstance(operation, StoreValue):
                 value = context.data.peek()
@@ -5353,7 +5434,11 @@ class MegaForthRuntime:
         meter: _StepMeter,
         machine_can_yield: bool = False,
         root_id: int = 0,
-    ) -> tuple[Word, int] | _MachineCursor | _DispatchDone | None:
+        turn_can_end: bool = False,
+    ) -> tuple[Word, int] | _MachineCursor | _DispatchDone | _CallAgain | None:
+        # Only the call's own target may be called again: after EXECUTE has
+        # taken its token, a later target's retry would repeat it.
+        may_call_again = turn_can_end
         while True:
             implementation = target.implementation
             if type(implementation) is RoutineDefinition:
@@ -5381,8 +5466,12 @@ class MegaForthRuntime:
             if not isinstance(implementation, PrimitiveDefinition):
                 break
             meter.tick()
+            self._lock_retry_allowed = may_call_again
+            may_call_again = False
             try:
                 invocation = self._invoke_primitive(implementation, context)
+            except _RetryAtNextTurn:
+                return _CALL_AGAIN
             except _GuestFaultRequest as request:
                 if request.context is not context:
                     raise
@@ -5393,6 +5482,8 @@ class MegaForthRuntime:
                     context,
                     meter,
                 )
+            finally:
+                self._lock_retry_allowed = False
             if invocation is None:
                 return None
             if not isinstance(invocation, Invoke):
