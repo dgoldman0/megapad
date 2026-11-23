@@ -529,6 +529,14 @@ and the queues and offers are specified.
   yet to be read with that in mind. Managed data adds the shared heap's
   blocks, which grow as LM1 asks, and a handle table that grows by segments;
   the allocator keeps them within the port's lent ranges
+  ([managed-data.md](managed-data.md) §16). Decided 2026-11-23: a port
+  lends from one region per kind of access, read-only and read-write, whose
+  range is installed again with new limits as the region grows, so that the
+  shared heap is bounded by memory rather than by the port's ranges; two
+  other ways were not chosen, sizing the heap's first block from the
+  machine's memory and giving a port more ranges in the chip. Not built:
+  where the two regions lie, since KDOS's allocator leaves room for only
+  one region to grow in place, at the top of external memory
   ([managed-data.md](managed-data.md) §16).
 - **A data cache on a production core.** Reads of lent memory would have to
   go around it.

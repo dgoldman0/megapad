@@ -1512,14 +1512,25 @@ Lose branches:
 - **Lendable memory.** `chiplet.f` lends each owner's records from chunks
   of external memory, each chunk lent as one of the port's ranges and each
   new one twice the size of the owner's before it, and gives every heap
-  block a chunk of its own, so that `RETURN` gives one back alone. The
-  port's lent ranges, eight by default, therefore bound the chunks: after
-  boot the control queues hold two and the function's records two, and the
-  first heap block lies in the function's chunk, which leaves four for heap
-  blocks and growing records. A heap that grows by doubling reaches about
-  sixteen times its first block before `GROW` is refused. Whether KDOS's
-  allocator for lendable memory should place blocks inside fewer, larger
-  ranges, or a port should hold more ranges, is still to decide
+  block a chunk of its own, so that `RETURN` gives one back alone; the
+  stand-in's blocks take chunks the same way. The port's lent ranges,
+  eight by default, therefore bound the chunks: after boot the control
+  queues hold two and the function's records two, and the first heap block
+  lies in the function's chunk, which leaves four for heap blocks and
+  growing records. A heap that grows by doubling reaches about sixteen
+  times its first block before `GROW` is refused. Decided 2026-11-23: a
+  port lends from one region per kind of access, read-only and read-write,
+  whose range is installed again with new limits as the region grows,
+  instead of a range for each chunk, so that the heap grows as far as
+  memory allows; read-only and read-write memory stay apart, and a block
+  goes back through the allocator inside its region. The port's models and
+  RTL install a range's base and limit together in one step, so a region's
+  range can grow in place. Not built: where the regions lie is still to
+  settle. KDOS's allocator for external memory grows up from below, so a
+  region can grow in place only at the top of external memory, by lowering
+  `XMEM-LIMIT`, and only one region can lie there; the other region, and
+  each further port's, has room to grow only in memory set aside for it
+  ahead of its need, or in further ranges
   ([chiplet-interconnect-plan.md](chiplet-interconnect-plan.md) §10).
 - **Re-binding word values** (stage 2). Word values that carry LM1's
   compiled entry depend on LM1's private state, like closures and symbols,
