@@ -544,12 +544,17 @@ restores the port with LM1 behind it.
 
 ## 10. Still to specify or build
 
-- **The software of section 8.** Its two ends are KDOS's system module for
-  chiplets, whose general words are listed in
-  [chiplet-interconnect-plan.md](chiplet-interconnect-plan.md) §9, and a
-  chiplet's runtime. Neither exists yet. A test chiplet that speaks the
-  queues comes with the module; the present one takes its addresses from
-  its boot image.
+- **The software of section 8.** MegaPad's end is KDOS's system module for
+  chiplets, `chiplet.f`, whose general words
+  ([chiplet-interconnect-plan.md](chiplet-interconnect-plan.md) §9) write
+  the control block, lend memory from a pool of ranges for each port, make
+  queue pairs, serve offers by class, and send requests with a deadline, a
+  cancel when it passes, and a reset of the port when the cancel goes
+  unanswered or a queue breaks. LM1's end is the stand-in for LM1's runtime
+  in LM1's chiplet module, which offers managed data and serves it
+  ([managed-data.md](managed-data.md)). The test chiplet built into the
+  extensions still takes its addresses from its boot image rather than
+  from the queues.
 - **Classes.** Each function's class number, operations and statuses are
   assigned with the function, LM1's with LM1's layer. The managed-data part
   of that layer is [managed-data.md](managed-data.md), class 1; sandbox
