@@ -829,8 +829,11 @@ until the slot calls `TASK-YIELD` or its word returns, which ends the slot;
 with no active slot it does nothing. The next `PAUSE` that reaches a yielded
 slot resumes it after its `TASK-YIELD`, with its stacks as it left them.
 `TASK-STOP` `( n -- )` ends slot 1, 2 or 3 and refuses any other number
-without consuming it; a slot that stops itself runs on to its next yield
-and no further. `TASK?` `( n -- 0|1 )` answers 1 while slot n is active,
+without consuming it, here with an error to the host and on the BIOS with
+`no such task slot` and the line's end through `QUIT`, which keeps the data
+stack; a slot that stops itself runs on to its next yield and no further.
+`TASK?` `( n -- 0|1 )` answers 1 while slot n is active and 0 for 0, the
+foreground, and refuses any other number as `TASK-STOP` does;
 `#TASKS` counts the active slots, and `TASK-ID` names the slot that runs, 0
 for the foreground and on every other core. The CRC and SHA-3 owner records
 take `(COREID,TASK-ID)`, so a slot cannot continue the foreground's
@@ -856,18 +859,20 @@ slot's own frame. A dictionary rollback that would remove a word an active
 slot runs inside, or will start, is refused, as for a worker's suspended
 job.
 
-Where the machine would crash, the simulator faults. `PAUSE` in a slot
-takes the illegal-operation fault, -21 to a `CATCH`, where the BIOS's
-`PAUSE` would take the running slot's stacks for the foreground's; so does
-`TASK-YIELD` in the foreground, where the BIOS's yield returns through a
-`PAUSE` that is not running; and so do both words on a worker core, which
-has no slots,
-where the BIOS's `PAUSE` would run one of core 0's slots on the worker and
-race core 0 for its records. An error or `ABORT` in a slot ends the slot
-and the foreground's line that paused, while the BIOS's `QUIT` leaves
-`TASK-ID` naming the slot and the slot's record in place, so the next
-`PAUSE` runs the slot again from its last yield, or from its start if it
-never yielded (finding 15 of `docs/multicore-simulator-plan.md`). A slot's stack overflow raises the
+Both machines refuse the words where they cannot run. `PAUSE` in a slot,
+which would take the running slot's stacks for the foreground's,
+`TASK-YIELD` in the foreground, which would return through a `PAUSE` that is
+not running, and both words on a worker core, which has no slots, take the
+illegal-operation fault, -21 to a `CATCH`, whose report names the refusal,
+`*** PAUSE OR TASK-YIELD REFUSED CORE=nn`; the BIOS's words execute FF, which
+the ISA reserves as permanently illegal, so the fault takes the machine's
+own path. An error, `ABORT` or `QUIT` in a slot ends the slot and the
+foreground's line that paused, as the BIOS's `QUIT` ends the slot that was
+running, and `TASK-ID` answers 0 again. After `QUIT` and after an error that
+the evaluator raises, such as a compile-only word met through `EVALUATE`,
+the foreground keeps the data stack it had when it paused, as the BIOS's
+`QUIT` and diagnostics give it back; after `ABORT`, `ABORT"` or a fault its
+data stack is empty, as after the BIOS's `ABORT`. A slot's stack overflow raises the
 simulator's stack error and ends the slot, where the BIOS's 32-cell stacks
 run into the next slot's.
 
@@ -957,6 +962,16 @@ sender; `MBOX! ( x -- )` and `MBOX@ ( -- x )` write and read the caller's
 mailbox data word. These four follow `VRAM-SIZE` at the frontier, and `.S`
 follows them, printing the depth between angle brackets and each cell from
 the bottom, signed in `BASE`, as the BIOS's `w_dotS` does.
+`IPI-PENDING ( -- mask )`, which follows `#TASKS` at the frontier, reads
+the caller's whole pending mask, every ID from the cores to the chiplet
+ports, as the BIOS's word reads CSR `MBOX`; a port's ID lies above 7 on the
+standard die, where `IPI-STATUS` never shows it. The chiplets step before
+it, as before a read of `MBOX_STATUS`, so a core that polls either one for
+a port's signal makes progress.
+`QUIT ( -- )` follows `IPI-PENDING` at the frontier. It ends the line as
+`ABORT` does, its return stack cleared and the `QUIT-XT!` callback run, but
+keeps the data stack; in a task slot it ends the slot, and on a worker it
+ends the job, as the BIOS's word does.
 
 A worker runs within the limits of KDOS's concurrency contract. The
 compiler, the evaluator with its input parsing (`'`, `WORD` and the names
@@ -1044,11 +1059,9 @@ sentinel `0xFFFF_FE00_0000_0000`; the simulator maps no storage there, so an
 access fails through the normal unmapped-memory contract. `MICRO?` preserves
 the executable BIOS's unsigned `id >= N-FULL` classification rather than
 performing topology validation: IDs below `N-FULL` are false and every other
-uint64 cell is true, including cells that cannot name a hosted core. The
-BIOS's word answers 255 for true, because `ldi` zero-extends its 8-bit
-immediate, as `RESIZED?` and `RESIZE-DENIED?` do too; that is a BIOS defect
-(finding 14 of `docs/multicore-simulator-plan.md`), and the simulator
-answers the full-width flag of section 2.
+uint64 cell is true, including cells that cannot name a hosted core. Its
+true flag, like those of `RESIZED?` and `RESIZE-DENIED?`, is the full-width
+flag of section 2 on both machines.
 These choices claim source-visible failure and classification behavior only,
 not cluster execution, scratchpad storage, barriers, privilege, or MPU
 enforcement.
@@ -3105,19 +3118,18 @@ speedup, and leaves all five `PAR-*` variables zero. On two to four cores
 and `P.RUN-PAR` takes the multicore branch described below.
 `tests/test_multicore_differential.py` compares these words, together with
 `ALL-CORES-WAIT`, `BARRIER`, a counter under `LOCK`, run queues,
-`SCHED-ALL`, messages, `CATCH` inside a job, a faulting and an aborting job,
-a worker's IPI ending core 0's `IDLE-UNTIL`, and the SysInfo words, with the
-emulator on one, two and four full cores.
+`SCHED-ALL`, messages, messages sent at once, `CATCH` inside a job, a
+faulting and an aborting job, a worker's IPI ending core 0's `IDLE-UNTIL`,
+and the SysInfo words, with the emulator on one, two and four full cores.
 
-This does not silently repair source defects. `ALL-CORES-WAIT` and
-`ALL-FULL-WAIT` use plain `DO`; with equal start and limit on one core they
-enter a phantom core-1 iteration instead of zero-tripping. Strict
-`CORE-STATUS` makes both and derived `BARRIER` fail promptly there. `LOCK`
-polls the underlying owner lock with non-suspending `YIELD?`, and same-core
-acquisition is depthless. On one core contention cannot progress; on
-several, a refused `SPIN@` ends the caller's turn, so the holder runs and
-can release the lock. No fairness, timing, queueing, or explicit
-memory-fence property is inferred from those wrappers.
+`ALL-CORES-WAIT`, `ALL-FULL-WAIT` and the `BARRIER` built on the first
+count the other cores with `?DO`, so on one core they have none to wait for
+and return at once. `LOCK` polls the underlying owner lock with
+non-suspending `YIELD?`, and same-core acquisition is depthless. On one
+core contention cannot progress; on several, a refused `SPIN@` ends the
+caller's turn, so the holder runs and can release the lock. No fairness,
+timing, queueing, or explicit memory-fence property is inferred from those
+wrappers.
 
 The multicore pipeline branch dispatches at most one initial step
 to each secondary full core, runs all remaining steps on core 0, and waits; it
@@ -3162,17 +3174,10 @@ before XT execution; failure loses that item and leaves later queue entries
 retained.
 
 On two to four cores `SCHED-ALL` sends each worker its queue's first XT,
-drains core 0's queue, then waits for each worker and drains its queue.
-On one core `SCHED-ALL` is not a no-op. Each secondary pass uses plain
-`NCORES 1 DO`; equal bounds enter at index 1 rather than zero-tripping. The
-loop walks dormant tables 1–15 and then unchecked addresses beyond the
-initialized arrays, where arbitrary dictionary bytes may provoke a fault or
-dispatch attempt. Only an uninterrupted full-cell index cycle would reach the
-loop exit. Bounded hosted evidence stops before the core-0 drain and proves
-that queue 0 remains untouched. A populated phantom queue can be popped before
-`CORE-RUN` rejects its ID. `SCHED-BALANCED` and `SCHED-AFFINE` inherit this
-defect and are admitted only for bounded failure/state evidence, not successful
-scheduling.
+drains core 0's queue, then waits for each worker and drains its queue. Its
+two passes over the workers count with `?DO`, so on one core it drains core
+0's queue alone, and `SCHED-BALANCED` and `SCHED-AFFINE`, which end in it,
+complete there too.
 
 Work stealing mutates the same unlocked ring tables synchronously. `BALANCE`
 is a no-op at one full core. Direct `STEAL-FROM`/`WORK-STEAL` can address
@@ -3186,8 +3191,8 @@ and never validate stored core IDs. `SPAWN-ON 0` enqueues first, then, while
 the registry has space, appends a 48-byte READY descriptor with priority 128,
 zero saved stacks/name, and a table/affinity entry. At saturation it still
 queues but publishes no descriptor. `SCHED-AFFINE` queues that already-queued
-READY XT again, marks the descriptor RUNNING before its broken `SCHED-ALL`
-tail, and does not mark it DONE.
+READY XT again, marks the descriptor RUNNING before its `SCHED-ALL` tail,
+which runs both copies, and does not mark it DONE.
 
 Per-core preemption is retained software state, not task preemption.
 `PREEMPT-ON-ALL` writes low-32 `TIME-SLICE`, Timer control 7, and the global
@@ -3203,17 +3208,16 @@ Messages are shared-memory sentinel inboxes, also capacity seven, with no IPI
 or wake notification. On one core the meaningful path is synchronous
 self-send and receive, and broadcast excludes self and returns zero; on
 several, a worker's message reaches another core's inbox under lock 7. IDs
-and table indices are largely unchecked. Global send scratch is written
-before lock 7 and receive scratch is reread after unlocking, so the source
-is not reentrant or made race-free by the lock. Senders on several cores at
-once race: on the four-core emulator, three workers sending core 0 a message
-together delivered core 3's payload three times, while the simulator ran
-each short job within its turn and delivered each payload once (finding 13
-of `docs/multicore-simulator-plan.md`). Successful `MSG-RECV` accidentally retains
-`COREID`, producing `( core type sender payload -1 )`, while its empty path
-returns the documented four zeroes. `MSG-DISPATCH` retains that core beneath
-handler inputs/results. `MSG-FLUSH` consequently returns an initial zero plus
-one `COREID + 1` cell per consumed message rather than a count. Handler store
+and table indices are largely unchecked. `MSG-SEND` stages its arguments in
+global variables only while it holds lock 7, `MSG-RECV` reads a message's
+fields back before it releases the lock, and `MSG-BROADCAST` keeps its
+arguments on its own stack, so senders on several cores at once each
+deliver their own message: on four of the emulator's cores, three workers
+that send core 0 a message, and then broadcast one, at the same moment
+deliver every payload whole, as the simulator does. A successful `MSG-RECV`
+returns `( type sender payload -1 )` and an empty one the documented four
+zeroes, `MSG-DISPATCH` hands a handler `( sender payload type )`, and
+`MSG-FLUSH` returns the count of messages it dropped. Handler store
 has no type bound, and handler lookup accepts negative signed types as less
 than four and can address before the table.
 

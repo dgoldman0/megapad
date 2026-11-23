@@ -348,8 +348,9 @@ FC op DR T        4 bytes   three-operand form (FMA, FMS only)
 - `op[5:0]` is the operation (§8.3).
 
 An undefined operation, a reserved format, or nonzero `T[7:5]` raises
-`IVEC_ILLEGAL_OP`. The unassigned prefixes F7, FD, FE, and FF raise
-`IVEC_ILLEGAL_OP` instead of latching as a silent modifier.
+`IVEC_ILLEGAL_OP`. The unassigned prefixes F7, FD and FE, and FF, which the
+ISA reserves as permanently illegal, raise `IVEC_ILLEGAL_OP` instead of
+latching as a silent modifier.
 
 **8.2 Values in registers.** A D value uses all 64 bits. An S value uses bits
 `[31:0]`: S results write zero to `[63:32]`, and S inputs ignore `[63:32]`.

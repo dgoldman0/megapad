@@ -530,6 +530,9 @@ def _instruction_size(lineno: int, text: str) -> int:
     if mnem_lower in ("idl", "nop", "halt", "reset", "rti", "ret", "dis",
                       "mark", "sav", "seq", "req", "ei", "di", "ret.l", "trap"):
         return 1
+    # -- ILLEGAL: FF, which the ISA reserves as permanently illegal --
+    if mnem_lower == "illegal":
+        return 1
     if mnem_lower == "call.l":
         return 2 + (1 if hi else 0)  # 0x0D + reg byte + optional REX
 
@@ -695,6 +698,11 @@ def _emit_instruction(lineno: int, text: str, pc: int,
     }
     if mnem_lower in sys_map:
         out.append(sys_map[mnem_lower])
+        return out
+
+    # ---- ILLEGAL: FF, permanently illegal (docs/isa-reference.md) ----
+    if mnem_lower == "illegal":
+        out.append(0xFF)
         return out
 
     if mnem_lower == "call.l":

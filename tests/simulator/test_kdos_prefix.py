@@ -21,7 +21,7 @@ PREFIX_FIXTURE = Path(__file__).with_name("fixtures") / "kdos-prefix-39-69.f"
 # blob identity makes an accidental edit distinguishable from an intentional
 # refresh after the ordinary KDOS source changes.
 MEGAPAD_REVISION = "b8e1a7e174fb50d7ea3cb5f5f8d10917ed329ec4"
-KDOS_GIT_BLOB = "a6ecc9dd8f3139a2098b01175780b1d0274b2ab5"
+KDOS_GIT_BLOB = "697814fb813e3f5be8d95b1d30b25d1355b39664"
 PREFIX_FIRST_LINE = 39
 PREFIX_LAST_LINE = 69
 PREFIX_SHA256 = "441836c13652cb8518cfb9f22d8eefc0a2e30090a6e5b624b6c9b23abd939ac4"

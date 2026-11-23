@@ -20,17 +20,20 @@ stacks lie in the 1,536 bytes below the dictionary's start, where the BIOS
 keeps its own slot stacks below its dictionary.
 
 PAUSE in a slot, TASK-YIELD in the foreground, and either word on a worker
-core take the illegal-operation fault, where the machine would crash or run
-core 0's slot on the worker. An error or ABORT in a slot ends the slot, and
-the foreground's line that paused ends with it; the BIOS's QUIT leaves the
-slot's record and TASK-ID behind (finding 15 of the plan).
+core take the illegal-operation fault, as the BIOS's words refuse them, and
+the fault's report names the refusal as the BIOS's does. An
+error, ABORT or QUIT in a slot ends the slot, and the foreground's line that
+paused ends with it, as the BIOS's QUIT ends the slot that was running. As
+on the BIOS, ABORT and a fault empty the foreground's data stack, while QUIT
+and an error the evaluator raises leave it as it was when the foreground
+paused.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from simulator.errors import ExecutionError, IllegalInstructionFault
+from simulator.errors import ExecutionError, ForthAbort, TaskWordRefused
 from simulator.stacks import DataStack, ReturnStack
 
 if TYPE_CHECKING:
@@ -149,27 +152,30 @@ class HostedTasks:
             native.program.set_task(slot)
 
     def _require_foreground(self, word: str, *, in_slot: bool) -> None:
-        """The illegal-operation fault where WORD would crash the machine:
-        on a worker core, where the slots are not, and in the foreground
-        (IN_SLOT false) or a slot (IN_SLOT true), wherever it does not
-        belong."""
+        """The illegal-operation fault where WORD cannot run, as the BIOS's
+        word takes it: on a worker core, where the slots are not, and in
+        the foreground (IN_SLOT false) or a slot (IN_SLOT true), wherever
+        it does not belong."""
 
         runtime = self.runtime
-        runtime.require_core0(f"{word} and the task slots")
+        reason = runtime._core0_only(f"{word} and the task slots")
+        if reason is not None:
+            raise TaskWordRefused(reason)
         if in_slot and self.active == 0:
-            raise IllegalInstructionFault(
+            raise TaskWordRefused(
                 f"{word} runs in a task slot; core 0's foreground has no slot "
                 "to leave"
             )
         if not in_slot and self.active != 0:
-            raise IllegalInstructionFault(
+            raise TaskWordRefused(
                 f"{word} runs in core 0's foreground; task slot {self.active} "
                 "gives its turn back with TASK-YIELD"
             )
 
-    def pause(self) -> None:
-        """PAUSE: from core 0's foreground, run the next active slot until it
-        yields or ends; with no active slot, nothing."""
+    def pause(self, context) -> None:
+        """PAUSE: from core 0's foreground, whose context is CONTEXT, run
+        the next active slot until it yields or ends; with no active slot,
+        nothing."""
 
         runtime = self.runtime
         self._require_foreground("PAUSE", in_slot=False)
@@ -197,11 +203,17 @@ class HostedTasks:
                 outcome = runtime._resume_scheduled(
                     suspended, None, task_slot=True,
                 )
-        except BaseException:
+        except BaseException as error:
             # An abort or a failure ends the slot; on the machine an ABORT
             # in a slot also ends the foreground's line, as it does here.
             if self._generations[slot] == generation:
                 self._xts[slot] = 0
+            # ABORT, ABORT" and a fault empty the foreground's data stack
+            # too, as the BIOS's ABORT resets core 0's; QUIT and an error
+            # the evaluator raises keep it, as the BIOS's QUIT and its
+            # diagnostics give the foreground back the stack it paused with.
+            if isinstance(error, ForthAbort) and not error.keeps_data_stack:
+                context.data.clear()
             raise
         finally:
             self._enter(0)

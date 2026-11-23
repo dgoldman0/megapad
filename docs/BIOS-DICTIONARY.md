@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The `bios.asm` dictionary link chain contains **568** entries.  The numbered
+The `bios.asm` dictionary link chain contains **569** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -464,7 +464,7 @@ Four more words of this section have no number in the catalogue:
 | — | `EVAL-THROW` | `( -- addr )` | | Address of exact source exception code retained for status 5 |
 | — | `EVAL-TOKEN` | `( -- addr len )` | | Stable copy of the failing token; empty for non-token failures |
 | 144 | `>NUMBER` | `( ud addr len -- ud' addr' len' )` | | Convert string chars to number using BASE. Stops at first non-digit. ud treated as single 64-bit value |
-| 145 | `QUIT` | `( -- )` | | Reset return stack, run the `QUIT-XT!` callback if one is installed, enter outer interpreter loop (does not return) |
+| 145 | `QUIT` | `( -- )` | | Reset return stack, end every nested `EVALUATE`, run the `QUIT-XT!` callback if one is installed, enter outer interpreter loop keeping the data stack (does not return); in a background slot, end the slot and give the foreground back its data stack |
 | 557 | `QUIT-XT!` | `( xt -- )` | | Install the callback `QUIT` runs once it has reset the return stack, which `ABORT` and `ABORT"` reach as well; the callback takes and leaves nothing; 0 removes it |
 
 ### Comments (2 words)
@@ -701,14 +701,14 @@ capabilities, and its transfers return `NO_MEDIA` (1).
 | 356 | `RTC-ALARM!` | `( sec min hour -- )` | | Set alarm time (writes ALARM_S/M/H at +0x1A–+0x1C) |
 | 357 | `RTC-ACK` | `( -- )` | | Clear alarm flag (write 0x01 to STATUS at +0x19) |
 
-### Multicore (11 words)
+### Multicore (12 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
 | 209 | `COREID` | `( -- n )` | | Push this core's hardware ID (`0` through `NCORES - 1`). Reads CSR 0x20. |
 | 210 | `NCORES` | `( -- n )` | | Push total number of hardware cores. Reads CSR 0x21. |
 | 211 | `IPI-SEND` | `( xt core -- )` | | Send inter-processor interrupt: writes 64-bit XT to mailbox DATA, then triggers IPI to target core. |
-| 212 | `IPI-STATUS` | `( -- mask )` | | Read pending IPI bitmask for this core (bit N = IPI from core N). MMIO at MBOX_BASE+0x09. |
+| 212 | `IPI-STATUS` | `( -- mask )` | | Read pending IPI bitmask for this core (bit N = IPI from core N), IDs 0–7 only. MMIO at MBOX_BASE+0x09. |
 | 213 | `IPI-ACK` | `( core -- )` | | Acknowledge IPI from the given core. Clears the pending bit. MMIO at MBOX_BASE+0x0A. |
 | 214 | `MBOX!` | `( d -- )` | | Write 64-bit value to mailbox outgoing data register (8 bytes LE at MBOX_BASE+0x00). |
 | 215 | `MBOX@` | `( -- d )` | | Read 64-bit value from mailbox incoming data register (8 bytes LE at MBOX_BASE+0x00). |
@@ -716,6 +716,7 @@ capabilities, and its transfers return `NO_MEDIA` (1).
 | 217 | `SPIN!` | `( n -- )` | | Release spinlock *n* only for its owning physical core; free and foreign-owned release writes are ignored. MMIO at SPINLOCK_BASE + n*4 + 1. |
 | 218 | `WAKE-CORE` | `( xt core -- )` | | Convenience: pre-writes XT into shared worker table, then sends IPI to wake the target core. |
 | 219 | `CORE-STATUS` | `( core -- n )` | | Read worker XT slot for core. Returns 0 if core is idle, non-zero (= pending XT) if busy. |
+| 570 | `IPI-PENDING` | `( -- mask )` | | Every sender whose signal is pending for this core: CSR MBOX's whole 64-bit mask, bit N for the participant with ID N, cores and chiplet ports alike, where `IPI-STATUS` shows IDs 0–7. Reads CSR 0x22, which serves the full cores. |
 
 ### Performance Counters (5 words)
 
@@ -1139,11 +1140,11 @@ secret-boundary qualifications are recorded in
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 311 | `PAUSE` | `( -- )` | | Round-robin yield across all 4 task slots via `SEP R20`; resumes when the next active task yields back |
-| 312 | `TASK-YIELD` | `( -- )` | | Yield from the current background task back to Task 0 via `SEP R20` |
+| 311 | `PAUSE` | `( -- )` | | From core 0's foreground, run the next active slot until it yields or ends; in a slot or on a worker core, the illegal-operation fault (-21) |
+| 312 | `TASK-YIELD` | `( -- )` | | From a running slot, yield back to Task 0 via `SEP R20`; in the foreground or on a worker core, the illegal-operation fault (-21) |
 | 313 | `BACKGROUND` | `( xt -- )` | | Set xt as Task 1 body and start it |
-| 314 | `TASK-STOP` | `( n -- )` | | Stop background task in slot n (1–3), reset to idle |
-| 315 | `TASK?` | `( n -- flag )` | | Return 0 if task slot n (1–3) is idle, 1 if running |
+| 314 | `TASK-STOP` | `( n -- )` | | Stop background task in slot n (1–3), reset to idle; refuse any other n before taking it (`no such task slot`, the line ends as `QUIT` ends it) |
+| 315 | `TASK?` | `( n -- flag )` | | Return 0 if task slot n (1–3) is idle, 1 if running, 0 for the foreground's 0; refuse any other n as `TASK-STOP` does |
 | 316 | `BACKGROUND2` | `( xt -- )` | | Set xt as Task 2 body and start it |
 | 317 | `BACKGROUND3` | `( xt -- )` | | Set xt as Task 3 body and start it |
 | 318 | `#TASKS` | `( -- n )` | | Count active background tasks (0–3) |
@@ -1346,7 +1347,7 @@ catalogue's order.
 | Disk / Storage | 25 |
 | Timer & Interrupts | 9 |
 | RTC / System Clock | 9 |
-| Multicore | 11 |
+| Multicore | 12 |
 | Performance Counters | 5 |
 | CRC Engine and Capability Discovery | 9 |
 | Memory BIST | 5 |
@@ -1377,9 +1378,9 @@ catalogue's order.
 | Checked WOTS Chain | 1 |
 | Terminal Geometry | 6 |
 | Memory Regions and Core Types | 8 |
-| **Catalogued subtotal** | **512** |
+| **Catalogued subtotal** | **513** |
 
-The catalogue lists 512 of the 568 entries in the link chain; the chain in
+The catalogue lists 513 of the 569 entries in the link chain; the chain in
 `bios.asm` holds the rest.
 
 ### All Immediate Words (34)
@@ -1389,12 +1390,13 @@ The catalogue lists 512 of the 568 entries in the link chain; the chain in
 ### Newest Dictionary Chain Segment (last → earlier)
 
 The complete authoritative link chain is the `.dq` chain in `bios.asm`.
-`_RELOC-CAP` closes the newest appended segment, after the words of borrowed
-tile work, the boot's identity, the token replay, the dictionary's code kind,
-the string scan, the QUIT callback and the storage unit words:
+`IPI-PENDING` closes the newest appended segment, after the relocation
+buffer's capacity, the words of borrowed tile work, the boot's identity, the
+token replay, the dictionary's code kind, the string scan, the QUIT callback
+and the storage unit words:
 
 ```
-_RELOC-CAP → TACC-RELAY → TACC-SEND → TAMAC-SCALARS → TAMAC-SCALAR
+IPI-PENDING → _RELOC-CAP → TACC-RELAY → TACC-SEND → TAMAC-SCALARS → TAMAC-SCALAR
 → BOOT-ID → TOKEN-REPLAY → DICT-MACHINE-CODE? → SCAN → QUIT-XT!
 → UNIT-DISK-FLUSH-GEN-CHECKED → UNIT-DISK-WRITE-GEN-CHECKED
 → UNIT-DISK-READ-GEN-CHECKED → UNIT-DISK-CAPS → UNIT-DISK-MEDIA-GEN

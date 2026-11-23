@@ -496,7 +496,7 @@ text.
 | `EVAL-THROW` | `( -- addr )` | Address of the exact source-level exception code retained when the KDOS checked wrapper returns status 5. |
 | `EVAL-TOKEN` | `( -- addr len )` | Stable counted view of the failing token; empty for line/depth/unfinished/throw failures. |
 | `>NUMBER` | `( ud addr len -- ud' addr' len' )` | Convert characters to a number, accumulating into *ud*.  Stops at the first non-digit. |
-| `QUIT` | `( -- )` | Clear the return stack, run the callback installed with `QUIT-XT!`, and enter the outer interpreter loop (the REPL).  Does not return. |
+| `QUIT` | `( -- )` | Clear the return stack, end every `EVALUATE` the line nested, run the callback installed with `QUIT-XT!`, and enter the outer interpreter loop (the REPL), keeping the data stack.  In a background slot it ends the slot and gives the foreground back the data stack it had when it paused.  Does not return. |
 | `QUIT-XT!` | `( xt -- )` | Install the callback `QUIT` runs once it has reset the return stack; 0 removes it, and boot clears it.  `ABORT` and `ABORT"` end in `QUIT`, and so does the recovery after an unhandled machine fault on core 0, so the callback runs for each.  It takes and leaves nothing, and it runs on the core that reset its stack.  KDOS installs one that clears its exception-chain head, since every `CATCH` frame on the abandoned return stack is gone. |
 
 **Example — dynamic evaluation:**
@@ -663,6 +663,7 @@ handler takes the request, and the sleep acknowledges every IPI pending when
 it ends, from the whole 64-bit mask CSR `MBOX` gives, so a chiplet port's
 doorbell counts even when the port's ID lies above the eight IDs
 `IPI-STATUS` shows. Otherwise the request would hold each later sleep awake.
+Forth reads the same mask with `IPI-PENDING`.
 Another core wakes core 0 with `0 0 IPI-SEND` after it publishes its work,
 and the woken loop checks for that work as usual. An IPI that arrives before
 the sleep starts ends it at once, so none is lost.
@@ -676,13 +677,17 @@ line and recovers instead of restarting the machine:
 *** ILLEGAL INSTRUCTION PC=000000000000E090 CORE=00
 *** ALIGNMENT FAULT @ 0000000000000001 PC=000000000000224C CORE=00
 *** DIVIDE BY ZERO PC=0000000000001330 CORE=00
+*** PAUSE OR TASK-YIELD REFUSED PC=000000000000F3A1 CORE=01
 ```
 
 `PC` is the address after the faulting instruction; the alignment fault
 also gives the misaligned address. Illegal instructions include reserved
 `FC` encodings, a floating-point operation that uses a reserved `FPCSR.RM`,
-the unassigned prefixes F7 and FD–FF, and tile operations a format does not
-admit (`docs/floating-point.md`).
+the unassigned prefixes F7, FD and FE, the permanently illegal FF, and tile
+operations a format does not admit (`docs/floating-point.md`). The BIOS
+executes FF on purpose where `PAUSE` or `TASK-YIELD` cannot run (see
+Cooperative Multitasking), and the report names that refusal; it is an
+illegal instruction all the same, with the same code.
 
 Before reporting, the BIOS calls the callback installed with `FAULT-XT!`
 `( xt -- )`, if any, with the fault's standard throw code on the data
@@ -1045,7 +1050,8 @@ were.
 | `COREID` | `( -- n )` | Push this core’s hardware ID (`0` through `NCORES - 1`). Reads CSR 0x20. |
 | `NCORES` | `( -- n )` | Push the total number of hardware cores.  Reads CSR 0x21. |
 | `IPI-SEND` | `( xt core -- )` | Send an IPI to *core*: writes the 64-bit XT into the mailbox data register and triggers the interrupt.  A worker target runs the XT as its next job. |
-| `IPI-STATUS` | `( -- mask )` | Read pending IPI bitmask for this core.  Bit *n* set means an IPI from core *n* is pending. |
+| `IPI-STATUS` | `( -- mask )` | Read pending IPI bitmask for this core from `MBOX_STATUS`.  Bit *n* set means an IPI from core *n* is pending; it shows IDs 0 to 7. |
+| `IPI-PENDING` | `( -- mask )` | Read the whole 64-bit pending mask of CSR `MBOX`: bit *n* is set while the participant with ID *n*, a core or a chiplet port, has signalled this core.  On the standard die every port's ID lies above 7, where only this word shows it. |
 | `IPI-ACK` | `( core -- )` | Acknowledge (clear) the pending IPI from the given core. |
 | `MBOX!` | `( d -- )` | Write a 64-bit value to the mailbox outgoing data register (8 bytes LE). |
 | `MBOX@` | `( -- d )` | Read the 64-bit value from the mailbox incoming data register. |
@@ -1883,15 +1889,33 @@ return stacks.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `PAUSE` | `( -- )` | Round-robin yield across all 4 task slots via `SEP R20`. |
-| `TASK-YIELD` | `( -- )` | Yield from the current background task back to Task 0 via `SEP R20`. |
+| `PAUSE` | `( -- )` | From core 0's foreground, run the next active slot, round-robin from the one last run, until it yields or ends; with none active, nothing. |
+| `TASK-YIELD` | `( -- )` | From a running slot, give the foreground its turn back through `SEP R20`; the next `PAUSE` that reaches the slot resumes it here. |
 | `BACKGROUND` | `( xt -- )` | Set xt as the Task 1 body and start it running. |
-| `TASK-STOP` | `( n -- )` | Stop background task in slot n (1–3), reset to idle. |
-| `TASK?` | `( n -- flag )` | Return 0 if task slot n (1–3) is idle, 1 if running. |
+| `TASK-STOP` | `( n -- )` | Stop background task in slot n (1–3), reset to idle. Any other n is refused before it is taken: `no such task slot`, and the line ends as `QUIT` ends it, keeping the data stack. |
+| `TASK?` | `( n -- flag )` | Return 0 if task slot n (1–3) is idle, 1 if running; 0 for 0, the foreground. Any other n is refused as `TASK-STOP` refuses it. |
 | `BACKGROUND2` | `( xt -- )` | Set xt as the Task 2 body and start it running. |
 | `BACKGROUND3` | `( xt -- )` | Set xt as the Task 3 body and start it running. |
 | `#TASKS` | `( -- n )` | Count active background tasks (0–3). |
 | `TASK-ID` | `( -- n )` | Return the executing cooperative slot on core 0 (0 foreground, 1–3 background); worker cores return 0. |
+
+`PAUSE` belongs to core 0's foreground and `TASK-YIELD` to a running slot.
+`PAUSE` in a slot would save the slot's stacks as the foreground's,
+`TASK-YIELD` in the foreground would return through a `PAUSE` that is not
+running, and a worker core has no slots, so each of these takes the
+illegal-operation fault instead: the words execute FF, which the ISA
+reserves as permanently illegal, the `FAULT-XT!` callback receives -21,
+which KDOS throws to the innermost `CATCH`, and with no `CATCH` the fault is
+reported as `PAUSE OR TASK-YIELD REFUSED` and the line, or the worker's job,
+ends (see Instruction faults). An `ABORT`, an uncaught `THROW` or fault,
+`QUIT`, or a diagnostic that ends a line, such as a compile-only word met
+through `EVALUATE`, in a slot ends the slot together with the foreground's
+line that ran `PAUSE`: `QUIT` runs the `QUIT-XT!` callback while `TASK-ID`
+still names the slot, so KDOS clears the slot's `CATCH` chain and the
+foreground's, and then clears the slot's entry, so `TASK-ID` answers 0 and
+the next `PAUSE` finds nothing of the slot to resume. `ABORT` and a fault
+empty the data stack; `QUIT` and the diagnostics give the foreground back
+the data stack it had when it paused.
 
 ---
 

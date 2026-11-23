@@ -484,6 +484,31 @@ boot_bad_core_topology:
 ; =====================================================================
 ;  QUIT — the outer interpreter
 ; =====================================================================
+
+; quit_keep_stack: QUIT, and the diagnostics that end a line from inside a
+;   word (a compile-only word met in interpretation state, a definition word
+;   out of place, a quotation mismatch, IMMEDIATE after :NONAME), end the
+;   line as QUIT does and keep the data stack.  When a background slot was
+;   running, the data stack pointer is the slot's: take back the
+;   foreground's, which PAUSE saved on the foreground's return stack, before
+;   forth_quit reuses that stack and ends the slot.  A worker goes on to
+;   forth_quit as it is, which ends its job.
+quit_keep_stack:
+    csrr r0, 0x20
+    cmpi r0, 0
+    brne .qks_quit              ; a worker
+    ldi64 r11, var_task_active
+    ldn r0, r11
+    cmpi r0, 0
+    breq .qks_quit              ; core 0's foreground
+    ldi64 r11, var_task0_rsp
+    ldn r11, r11
+    ldn r14, r11                ; the foreground's DSP, as PAUSE saved it
+.qks_quit:
+    ldi64 r11, forth_quit
+    call.l r11
+    halt
+
 forth_quit:
     ; The outer interpreter and the terminal are core 0's: QUIT on a worker
     ; ends its job (worker_quit, which never returns).
@@ -495,6 +520,11 @@ forth_quit:
 .forth_quit_core0:
     ; Reset RSP to top of RAM each time
     mov r15, r2
+    ; Every EVALUATE the line nested ends with it, whichever way the line
+    ; ended, so the next EVALUATE starts from depth zero.
+    ldi r1, 0
+    ldi64 r11, var_eval_depth
+    str r11, r1
     ; Whatever the abandoned return stack held is gone.  ABORT, ABORT" and
     ; QUIT all pass here, so the callback installed with QUIT-XT! runs now:
     ; KDOS drops the exception frames that lived on that stack.
@@ -504,6 +534,25 @@ forth_quit:
     breq forth_quit_no_callback
     call.l r11
 forth_quit_no_callback:
+    ; A background slot that aborts, faults or quits ends here, together
+    ; with the foreground's line that ran PAUSE: its stacks and its place
+    ; are gone, so the slot's entry and the running-slot mark go, and the
+    ; next PAUSE finds nothing of it to resume.  The callback above ran
+    ; first, while TASK-ID still named the slot, so KDOS cleared the slot's
+    ; CATCH chain as well as the foreground's.
+    ldi64 r11, var_task_active
+    ldn r7, r11
+    cmpi r7, 0
+    breq .forth_quit_no_slot
+    ldi64 r11, var_task_pcs
+    mov r1, r7
+    lsli r1, 3
+    add r11, r1
+    ldi r1, 0
+    str r11, r1                 ; var_task_pcs[slot] = 0
+    ldi64 r11, var_task_active
+    str r11, r1                 ; the foreground runs again
+.forth_quit_no_slot:
     ; Restore HERE if a temp IF block was active (prevent dict leak)
     ldi64 r11, var_interp_if_depth
     ldn r0, r11
@@ -5991,7 +6040,8 @@ w_colon:
     ldi64 r10, str_nested_def
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_colon_not_compiling:
     ; Clear stale :NONAME flag and JIT peephole state
     ldi r1, 0
@@ -6120,7 +6170,8 @@ w_semicolon:
     ldi64 r10, str_compile_only
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_semi_state_ok:
     ; Guard: must not be inside [: ... ;] quotation
     ldi64 r11, var_quot_depth
@@ -6130,7 +6181,8 @@ w_semi_state_ok:
     ldi64 r10, str_semi_in_quot
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_semi_quot_ok:
     ; Compile ret.l
     ldi64 r11, compile_ret
@@ -6163,7 +6215,8 @@ w_colonnoname:
     ldi64 r10, str_nested_def
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_colonnoname_ok:
     ; Reset JIT peephole state for new definition
     ldi r1, 0
@@ -6757,7 +6810,8 @@ w_do:
     ldi64 r10, str_compile_only
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_do_ok:
     ; Compile at runtime:
     ;   ldn r1, r14       ; index (TOS)          = 50 1E
@@ -6858,7 +6912,8 @@ w_qdo:
     ldi64 r10, str_compile_only
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_qdo_ok:
     ; Compile the DO preamble: pop limit & index, push to RSP
     ;   ldn r1, r14       ; index (TOS)          = 50 1E
@@ -7025,7 +7080,8 @@ w_loop:
     ldi64 r10, str_compile_only
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_loop_ok:
     ; Compile at runtime:
     ;   ldn r1, r15       ; index from RSP
@@ -7341,7 +7397,8 @@ w_unloop:
     ldi64 r10, str_compile_only
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_unloop_ok:
     ldi r1, 0x62
     ldi64 r11, compile_byte
@@ -7377,7 +7434,8 @@ w_plus_loop:
     ldi64 r10, str_compile_only
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_plus_loop_ok:
     ; ldn r7, r14 = 50 7E
     ldi r1, 0x50
@@ -7593,7 +7651,8 @@ w_immediate:
     ldi64 r10, str_imm_noname
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_immediate_ok:
     ldi64 r11, var_latest
     ldn r9, r11               ; R9 = latest entry address
@@ -11439,11 +11498,7 @@ w_abort:
     mov r14, r2               ; reset DSP to ram_size
     lsri r14, 1               ; DSP = ram_size / 2
     mov r15, r2               ; reset RSP to ram_size
-    ; Reset EVALUATE nesting depth so future EVALUATEs work
-    ldi r1, 0
-    ldi64 r11, var_eval_depth
-    str r11, r1
-    ldi64 r11, forth_quit
+    ldi64 r11, forth_quit     ; QUIT resets the EVALUATE depth
     call.l r11                ; jump to QUIT (never returns)
     halt
 
@@ -11786,7 +11841,8 @@ w_leave:
     ldi64 r10, str_compile_only
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_leave_compile:
     ; Compile: addi r15, 16  -- unloop (drop limit+index from RSP)
     ; Encoding: 0x62 0xF0 0x10
@@ -13184,7 +13240,8 @@ w_quote_open:
     ldi64 r10, str_compile_only
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_quote_open_ok:
     ; Emit unconditional forward branch: lbr <placeholder>
     ; LBR unconditional: opcode 0x40, then 16-bit BE offset
@@ -13238,7 +13295,8 @@ w_quote_close:
     ldi64 r10, str_compile_only
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_quote_close_ok:
     ; Pop sentinel and validate
     ldn r1, r14
@@ -13249,7 +13307,8 @@ w_quote_close_ok:
     ldi64 r10, str_quot_mismatch
     ldi64 r11, print_str
     call.l r11
-    lbr quit_loop
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 w_quote_close_sentinel_ok:
     ; Pop fixup_addr
     ldn r9, r14               ; R9 = fixup_addr
@@ -14427,8 +14486,9 @@ w_tnum_done:
 
 ; QUIT ( -- )
 ;   Reset return stack, enter outer interpreter loop. Does not return.
+;   The data stack stays: in a background slot, the foreground's.
 w_quit:
-    ldi64 r11, forth_quit
+    ldi64 r11, quit_keep_stack
     call.l r11
     halt
 
@@ -14658,10 +14718,22 @@ priv_fault_handler:
 ;  as its aborts do (worker_quit): its own stacks, the QUIT-XT! callback,
 ;  a cleared slot so CORE-STATUS reports it idle, and its idle loop.
 ;
-;  R9 carries the fault kind, an index into fault_names and fault_codes.
+;  R9 carries the fault kind, an index into fault_names and fault_codes:
+;  0 an illegal instruction, 1 an alignment fault, 2 a division by zero,
+;  and 3 PAUSE or TASK-YIELD refused, an illegal instruction too.
 ;
 illegal_op_handler:
     ldi r9, 0
+    ; A PAUSE or TASK-YIELD refused at task_word_refused's ILLEGAL is the
+    ; same fault, -21, under its own name in the report.  The trap frame's
+    ; PC is the address after the faulting byte; R0 and R11 are free here,
+    ; since fault_report never resumes the faulting code.
+    ldn r0, r15
+    ldi64 r11, task_word_refused_resume
+    cmp r0, r11
+    brne .illegal_op_named
+    ldi r9, 3
+.illegal_op_named:
     lbr fault_report
 align_fault_handler:
     ldi r9, 1
@@ -14799,10 +14871,12 @@ fault_names:
     .dq str_fault_illegal
     .dq str_fault_align
     .dq str_fault_divzero
+    .dq str_fault_task_refused
 fault_codes:
     .dq 0xFFFFFFFFFFFFFFEB            ; -21 unsupported operation
     .dq 0xFFFFFFFFFFFFFFE9            ; -23 address alignment exception
     .dq 0xFFFFFFFFFFFFFFF6            ; -10 division by zero
+    .dq 0xFFFFFFFFFFFFFFEB            ; -21: PAUSE or TASK-YIELD refused
 
 ; print_fault_hex64: R1 -> 16 hex chars.  Clobbers R0, R1, R7, and R11;
 ;   the value waits on the return stack while the high half prints.
@@ -15220,7 +15294,19 @@ w_fb_setup:
 ; cooperative, same-core — complementary mechanisms.
 
 ; PAUSE ( -- )  yield to next active background task (no-op if none active)
+;   PAUSE belongs to core 0's foreground.  In a running slot it would save
+;   the slot's stacks as the foreground's, and a worker core has no slots of
+;   its own, so there it would run one of core 0's and race core 0 for the
+;   slot's records.  Both take the illegal-operation fault instead
+;   (task_word_refused).
 w_pause:
+    csrr r0, 0x20
+    cmpi r0, 0
+    lbrne task_word_refused     ; a worker core
+    ldi64 r11, var_task_active
+    ldn r0, r11
+    cmpi r0, 0
+    lbrne task_word_refused     ; a running slot
     ; ---- Find next active task (round-robin scan) ----
     ldi64 r11, var_task_index
     ldn r7, r11                 ; r7 = last-run task index
@@ -15340,9 +15426,33 @@ pause_yield_handler:
 ;   Called by Tasks 1–3 via call.l (dictionary dispatch).  The SEP R20
 ;   freezes R3 at the ret.l; next PAUSE resumes there (via mov r3),
 ;   ret.l returns to the caller inside the background task.
+;   Only a running slot yields.  In core 0's foreground no PAUSE is running
+;   to return to, and a worker core has no slots, so both take the
+;   illegal-operation fault (task_word_refused).
 w_task_yield:
+    csrr r0, 0x20
+    cmpi r0, 0
+    lbrne task_word_refused     ; a worker core
+    ldi64 r11, var_task_active
+    ldn r0, r11
+    cmpi r0, 0
+    lbreq task_word_refused     ; core 0's foreground
     sep  r20                    ; yield to PAUSE handler (R3 freezes at ret.l)
     ret.l                       ; resumes here on next PAUSE; returns to caller
+
+; task_word_refused: PAUSE or TASK-YIELD where it cannot run.  ILLEGAL is
+;   FF, which the ISA reserves as permanently illegal (docs/isa-reference.md),
+;   so the refusal is the machine's own illegal-operation fault: the
+;   FAULT-XT! callback receives -21, which KDOS throws to the innermost
+;   CATCH, and with none the fault is reported and core 0 returns to its
+;   prompt or a worker ends its job (fault_report).  illegal_op_handler
+;   knows this byte by the address after it and names the refusal in the
+;   report.  An installed handler that returns past the byte resumes at the
+;   ret.l, so the word does nothing.
+task_word_refused:
+    illegal
+task_word_refused_resume:
+    ret.l
 
 ; task_setup_slot: shared helper — set up a background task in slot r7
 ;   Entry: r1 = xt, r7 = slot index (1–3)
@@ -15445,8 +15555,14 @@ task_cleanup:
     br   task_cleanup           ; unreachable but safe re-entry
 
 ; TASK-STOP ( n -- )  cancel background task in slot n (1–3)
+;   Any other number names no slot and is refused before the word takes it
+;   (task_slot_refused).
 w_task_stop:
     ldn r7, r14               ; n = slot index
+    mov r0, r7
+    subi r0, 1
+    cmpi r0, 3
+    lbrcs task_slot_refused   ; n - 1 >= 3 unsigned: n is not 1, 2 or 3
     addi r14, 8
     ; Zero var_task_pcs[r7]
     ldi64 r11, var_task_pcs
@@ -15457,9 +15573,13 @@ w_task_stop:
     str r11, r1
     ret.l
 
-; TASK? ( n -- flag )  is background task n active? (1–3)
+; TASK? ( n -- flag )  is background task n active? (1–3; 0, the
+;   foreground, answers 0).  Any other number names no slot and is refused
+;   before the word takes it (task_slot_refused).
 w_task_status:
     ldn r7, r14               ; n = slot index
+    cmpi r7, 4
+    lbrcs task_slot_refused   ; n >= 4 unsigned, every negative n included
     addi r14, 8
     ; Load var_task_pcs[r7]
     ldi64 r11, var_task_pcs
@@ -15474,6 +15594,17 @@ w_task_status:
     subi r14, 8
     str r14, r1
     ret.l
+
+; task_slot_refused: TASK-STOP or TASK? given a number that names no slot.
+;   The number stays on the stack.  The word says so as the interpreter's
+;   other diagnostics do and ends the line through QUIT, keeping the data
+;   stack, as the simulator's word fails without consuming the number.
+task_slot_refused:
+    ldi64 r10, str_no_task_slot
+    ldi64 r11, print_str
+    call.l r11
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 
 ; TASK-ID ( -- n )  current cooperative task slot (0 = foreground/worker)
 ;
@@ -15581,7 +15712,7 @@ w_resized_q:
     ; Clear RESIZED by writing 1 to bit 0 (W1C)
     ldi r1, 0x01
     st.b r11, r1
-    ldi r0, -1                           ; TRUE
+    ldi64 r0, 0xFFFFFFFFFFFFFFFF         ; TRUE, every bit set
     subi r14, 8
     str r14, r0
     ret.l
@@ -15602,7 +15733,7 @@ w_resize_denied_q:
     ; Clear REQ_DENIED by writing 2 to STATUS (W1C)
     ldi r1, 0x02
     st.b r11, r1
-    ldi r0, -1                           ; TRUE
+    ldi64 r0, 0xFFFFFFFFFFFFFFFF         ; TRUE, every bit set
     subi r14, 8
     str r14, r0
     ret.l
@@ -15941,6 +16072,19 @@ ipi_send_loop:
 w_ipi_status:
     ldi64 r11, 0xFFFF_FF00_0000_0509    ; MBOX_STATUS
     ld.b r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; IPI-PENDING ( -- mask )  every sender whose signal is pending for this core
+;   CSR MBOX's whole 64-bit mask: bit n is set while the participant with
+;   ID n has signalled this core, the cores and, above them, the chiplet
+;   ports.  IPI-STATUS reads the 8-bit MBOX_STATUS, which shows IDs 0 to 7,
+;   so it misses a port whose ID lies above them, as every port's does on
+;   the standard die, whose sixteen cores take IDs 0 to 15.  The CSR path
+;   serves the full cores.
+w_ipi_pending:
+    csrr r0, 0x22
     subi r14, 8
     str r14, r0
     ret.l
@@ -20582,7 +20726,7 @@ w_micro_q:
     cmp r0, r1                          ; compare id with n_full
     ldi r1, 0
     lbrcc micro_q_no                    ; if id < n_full, not micro
-    ldi r1, -1                          ; id >= n_full → true
+    ldi64 r1, 0xFFFFFFFFFFFFFFFF        ; id >= n_full → true, every bit set
 micro_q_no:
     str r14, r1                         ; replace TOS
     ret.l
@@ -25842,7 +25986,6 @@ d_tacc_relay:
 
 ; The relocation buffer's capacity appends after it.
 ; === _RELOC-CAP ===
-latest_entry:
 d_reloc_cap:
     .dq d_tacc_relay
     .db 10
@@ -25850,6 +25993,17 @@ d_reloc_cap:
     ldi64 r1, var_reloc_cap
     subi r14, 8
     str r14, r1
+    ret.l
+
+; The whole pending signal mask appends after it.
+; === IPI-PENDING ===
+latest_entry:
+d_ipi_pending:
+    .dq d_reloc_cap
+    .db 11
+    .ascii "IPI-PENDING"
+    ldi64 r11, w_ipi_pending
+    call.l r11
     ret.l
 
 ; =====================================================================
@@ -26213,6 +26367,8 @@ str_dict_overflow:
 
 str_imm_noname:
     .asciiz "IMMEDIATE after :NONAME\n"
+str_no_task_slot:
+    .asciiz "no such task slot\n"
 str_nested_def:
     .asciiz "nested definition\n"
 str_quot_mismatch:
@@ -26237,6 +26393,8 @@ str_privfault:
     .asciiz "\n*** PRIVILEGE FAULT @ "
 str_fault_illegal:
     .asciiz "\n*** ILLEGAL INSTRUCTION"
+str_fault_task_refused:
+    .asciiz "\n*** PAUSE OR TASK-YIELD REFUSED"
 str_fault_align:
     .asciiz "\n*** ALIGNMENT FAULT @ "
 str_fault_divzero:

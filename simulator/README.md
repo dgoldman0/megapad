@@ -43,8 +43,8 @@ The implemented slices provide:
   the words the host's evaluation executes, its outer interpreter, and
   the others run the BIOS worker loop, taking jobs that `WAKE-CORE` or a full
   core's `IPI-SEND` sends them and running each on fresh stacks in the core's
-  zone; `CORE-STATUS` reads the worker slots, `IPI-STATUS`, `IPI-ACK`,
-  `MBOX!` and `MBOX@` serve the caller's mailbox, a refused `SPIN@` ends the
+  zone; `CORE-STATUS` reads the worker slots, `IPI-STATUS`, `IPI-PENDING`,
+  `IPI-ACK`, `MBOX!` and `MBOX@` serve the caller's mailbox, a refused `SPIN@` ends the
   caller's turn, the Timer follows a round clock, and a worker that reaches
   the compiler, the evaluator, dictionary growth or terminal input takes the
   illegal-operation fault. With one core `WAKE-CORE` rejects every target and
@@ -1901,13 +1901,11 @@ fake completion or register state. `SPAD` still returns the BIOS address
 sentinel `0xFFFF_FE00_0000_0000`, but no memory is mapped there, so a later
 access faults normally. `MICRO?` is the literal unsigned BIOS threshold test:
 IDs below `N-FULL` are false and every other 64-bit cell is true even though
-none names a hosted core. Its true flag is -1, where the BIOS's word answers
-255 (finding 14 of `docs/multicore-simulator-plan.md`).
+none names a hosted core. Its true flag is -1, as the BIOS's word answers.
 
-Several literal source discrepancies remain visible. Both all-core wait words
-use plain `DO` with equal start and limit on one core, so they enter a
-phantom core-1 iteration instead of zero-tripping; strict `CORE-STATUS` makes
-`ALL-CORES-WAIT`, `ALL-FULL-WAIT`, and `BARRIER` fail promptly there. `LOCK`
+Both all-core wait words count the other cores with `?DO`, so on one core
+`ALL-CORES-WAIT`, `ALL-FULL-WAIT`, and `BARRIER` return at once. Several
+literal source discrepancies remain visible. `LOCK`
 is a busy spin with non-suspending `YIELD?`; same-core reacquisition
 succeeds without increasing a depth, and one `UNLOCK` releases it. On
 several cores a refused `SPIN@` ends the caller's turn, so the holder runs
@@ -1959,16 +1957,10 @@ queue it sends each XT through `CORE-RUN` and waits with `CORE-WAIT`.
 Dequeue commits before execution, so a throw loses that item and retains
 later items. Each XT must be stack-neutral because the retained core ID sits
 below it. On two to four cores `SCHED-ALL` sends each worker its first XT,
-drains core 0's queue, then waits for and drains each worker's. `SCHED-ALL`
-is unusable at one core: both secondary passes use plain `NCORES 1 DO`.
-Equal bounds enter at phantom core 1 instead of zero-tripping. The loop first
-walks dormant tables 1–15, then unchecked addresses beyond the initialized
-arrays; it can observe arbitrary dictionary bytes and fault or attempt a
-dispatch. Only an uninterrupted full-cell index cycle would reach the loop
-exit. The bounded hosted proof exhausts its step budget before the core-0
-drain and leaves queue 0 untouched. If a phantom queue is populated, it can
-be popped before strict `CORE-RUN` rejects the target. `SCHED-BALANCED` and
-`SCHED-AFFINE` inherit this defect.
+drains core 0's queue, then waits for and drains each worker's. Both of its
+passes over the workers count with `?DO`, so at one core it drains core 0's
+queue alone, and `SCHED-BALANCED` and `SCHED-AFFINE`, which end in it,
+complete as well.
 
 Work stealing is unsynchronized queue motion, not an automatic worker
 facility. `BALANCE` is a no-op with one full core. Direct stealing can move
@@ -1997,15 +1989,13 @@ sticky match or pending IRQ state.
 IPI Messaging is a shared-memory inbox without an IPI or wake notification.
 Self-send/receive is the meaningful one-core path and broadcast excludes self,
 returning zero; on several cores a worker's message reaches another core's
-inbox under lock 7. Staging and receive scratch are global, with send staging
-written before lock 7 and receive results reread after unlock, so the lock does
-not make the path reentrant, and senders on several cores at once race
-(finding 13 of `docs/multicore-simulator-plan.md`). A successful `MSG-RECV` leaks `COREID` below the
-documented four results, producing `( core type sender payload -1 )`; the empty
-path returns exactly four zeroes. That leak propagates through
-`MSG-DISPATCH`, beneath the handler's `sender payload type`, and makes
-`MSG-FLUSH` return an initial zero plus one `COREID + 1` cell per message
-instead of a count. Target IDs and setter message types are unchecked, and
+inbox under lock 7. The global staging and receive variables are touched only
+while lock 7 is held, and broadcast keeps its arguments on its stack, so
+senders on several cores at once each deliver their own message. A
+successful `MSG-RECV` returns `( type sender payload -1 )` and an empty one
+exactly four zeroes, `MSG-DISPATCH` hands a handler `sender payload type`,
+and `MSG-FLUSH` returns a count. Target IDs and setter message types are
+unchecked, and
 negative handler types can index before the table.
 
 The named resource words remain opt-in, depthless physical-core lock wrappers.

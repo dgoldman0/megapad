@@ -3,8 +3,9 @@
 Status: Accepted, 2026-11-22, with the nine decisions of section 10.
 Stages 1 and 2 are built (MegaPad d8016c43; 4ea4bc91, 09a26e8d and
 f317327b), stage 3 (1c4563f4 to 49d94ecd, with Akashic 95e081c9), stage 4
-(d8453449 to 348a482a, with Akashic d82d6e80 to 5da2eea3) and stage 5
-(ee95d589, with Akashic a603041c).
+(d8453449 to 348a482a, with Akashic d82d6e80 to 5da2eea3), stage 5
+(ee95d589, with Akashic a603041c) and stage 9 (Akashic 7cb83d31 to
+7832caa6).
 It is the staged plan for Part 3 of the release plan
 (`dev/PLAN.md` in fantasy-engine), in which MegaPad's hosted simulator
 becomes the multicore machine MegaPad is. Section 1 describes the simulator
@@ -320,7 +321,8 @@ wakes `IDLE-UNTIL`, which acknowledges it; managed data's waits re-read
 memory after waking, as §3 requires. A doorbell to a worker is acknowledged
 as a wake-up. `MBOX_STATUS` shows IDs 0 to 7, which hold a port only while
 the topology has fewer than eight cores; the BIOS's acknowledgements read
-CSR `MBOX`'s whole mask.
+CSR `MBOX`'s whole mask, and Forth reads it with `IPI-PENDING`, which
+`CHIP-WAIT` polls (finding 8).
 
 ### 4.8 Parallel rounds and their commit rule
 
@@ -610,13 +612,27 @@ Built on 2026-11-23 (ee95d589, with Akashic a603041c):
 - Where the machine would crash, the simulator faults: `PAUSE` in a slot,
   `TASK-YIELD` in the foreground, and either word on a worker core take
   the illegal-operation fault. An error or `ABORT` in a slot ends the slot
-  and the line that paused, where the BIOS leaves the slot behind (finding
-  15). Inside a slot, as in the other dispatches that cannot detach, an
-  `IDL` without a deadline fails, an `IDLE-UNTIL` returns early, and a disk
-  word that finds a worker holding lock 2 reports the timeout at once,
-  where the machine halts the whole core or keeps polling.
+  and the line that paused, where the BIOS left the slot behind until
+  714f4ce0 (finding 15). Inside a slot, as in the other dispatches that
+  cannot detach, an `IDL` without a deadline fails, an `IDLE-UNTIL`
+  returns early, and a disk word that finds a worker holding lock 2
+  reports the timeout at once, where the machine halts the whole core or
+  keeps polling.
 - A dictionary rollback that would remove a word an active slot runs
   inside, or will start, is refused, as for a worker's suspended job.
+- 714f4ce0 brought the BIOS level with the simulator. `PAUSE` and
+  `TASK-YIELD` check `COREID` and the running slot and refuse a misplaced
+  call by executing 0xFF, one of the ISA's unassigned opcodes, which the
+  Python and C++ emulators and the RTL all trap as `IVEC_ILLEGAL_OP`, so
+  the refusal takes the BIOS's existing fault path: the `FAULT-XT!`
+  callback receives -21, which KDOS throws to the innermost `CATCH`, and
+  with none the fault is reported and the line, or a worker's job, ends.
+  `forth_quit` ends the slot that was running once the `QUIT-XT!` callback
+  has run (finding 15). The ISA then reserved 0xFF as permanently illegal
+  (decided 2026-11-23), the assembler writes it as `ILLEGAL`, and the
+  report names the refusal, `*** PAUSE OR TASK-YIELD REFUSED`, on both
+  machines: `illegal_op_handler` knows `task_word_refused`'s byte by the
+  trap frame's PC, and the code stays -21.
 
 Tests: `tests/test_task_slots_differential.py` runs fifteen KDOS programs
 on the emulator and on three simulators, on one core and on two: the slot
@@ -624,8 +640,9 @@ words, round-robin order, loop parameters and stacks across yields,
 stopping and replacing slots, `TASK-ID`, the four per-slot `CATCH` cases of
 `tests/test_system.py`, the CRC owner per slot, the span rule, and a
 worker's job running while a slot does, in 6 seconds, and an abort in a
-slot on fresh machines, whose emulator half fails until finding 15 is
-fixed;
+slot on fresh machines, whose emulator half passes since 714f4ce0. That
+commit adds misuse caught by `CATCH` on core 0 and on a worker, and an
+uncaught misuse on core 0 on fresh machines;
 `tests/simulator/test_task_slots.py` covers the stacks' place and size,
 aborts, the faults, rollback and slots on two cores; and Akashic's
 `test_coroutine_on_simulator.py` runs every check of `test_coroutine.py` on
@@ -703,6 +720,51 @@ cores; the `desktop-sandbox-modules` journey on four cores on the simulator,
 with the probe's job shown on a worker, and once on the emulator for
 comparison; the worker profiles of stage 4.
 
+Built on 2026-11-23:
+
+- `physical_desktop_acceptance.py` takes `--cores`, which `accept` checks
+  against the machine shapes the backend runs, and a passing run's
+  `final-guest-diagnostics.json` records each core's state, semantic steps
+  and turns from the server's status (Akashic 8a066e66). `serve` and
+  `accept` already gave the simulator the profile's full cores (stage 4);
+  their help no longer calls `--cores` emulator only. `worker-job.md`
+  describes the simulator beside the emulator.
+- The physical driver has the sandbox check, `--applet sandbox`: Desk with
+  the Agent and Probe on the rich terminal, composed as the emulator's
+  `desktop-sandbox-modules` profile composes them (a8f21ede), and its whole
+  journey (7832caa6), with nothing added to Desk, Probe or the Agent: the
+  Agent's install behind its review, its invoke, its refused wrong input
+  and unknown entry, and its long run; Probe refused, asking, allowed in
+  Desk's access prompt and served; the inspector withdrawing Probe's grant
+  and revoking the module; Desk idle at the end. No product path installs a
+  module without the Agent's review, so the journey takes the review. The
+  journey reads each core's semantic steps from the server's status: on
+  four cores core 1 ran Probe's job and each short invoke in 86,346 steps
+  and the long invoke in 3,068,562, while core 0 painted, and the long
+  run's work beyond the short run's, 2,982,216 steps, showed on core 1.
+  The emulator's journey compares cycle counts on Desk's core as well;
+  core 0's semantic steps over a turn grow with what Desk paints, so the
+  physical journey records them. It passes on one core and on four in
+  about 90 seconds.
+- The journey found a repaint missing in Akashic's applet host (7cb83d31):
+  a shown applet touched between passes, as when the sandbox's poll in
+  Desk's service step completes Probe's request, stayed dirty with no paint
+  due, so on four cores Probe's answer never reached the screen. On one
+  core, and on the emulator's four, the job ends inside the pass whose
+  paint is already due. A shown slot whose instance changed since its last
+  paint now marks the shell dirty. The canonical Desktop journey on one
+  core, with `PYTHONHASHSEED=0` and `--screen-profile`, ran 2,021,077,685
+  guest steps and 81 PRESENTs, against 2,016,509,878 and 81 on the stage 5
+  baseline: +0.23%, within code placement's noise.
+- The canonical Desktop journey passes on four cores, in 132 seconds, with
+  the workers idle: no applet of the canonical Desktop uses the sandbox.
+- Desk's background work runs on full cores through `worker-job.f`, never
+  in a task slot, so stage 5's precondition holds.
+
+The emulator comparison did not run: the author's standing direction
+defers emulator smokes. The stage's closing run and its Desktop journey
+are one combined run with the BIOS and KDOS findings' slice.
+
 ## 6. Order
 
 Stage 1 comes before stage 3. The mailbox's data slots and lines, the IPIs,
@@ -779,8 +841,9 @@ boot leaves a microcore's R2 as reset leaves it.
 ## 9. Findings
 
 These came out of reading the sources and, where stated, running the
-emulator; findings 12 to 14 came out of stage 3's differential cases. Each
-needs a change in the BIOS, KDOS, the release plan or the contract.
+emulator; findings 12 to 14 came out of stage 3's differential cases, and
+16 to 19 out of the slice that fixed findings 8 and 12 to 15. Each needs a
+change in the BIOS, KDOS, the release plan, the contract or the tests.
 
 1. **A chiplet's doorbell to a BIOS worker core misfires (run on the
    emulator).** The worker's IPI handler scans pending senders 0 to 3 only
@@ -837,7 +900,12 @@ needs a change in the BIOS, KDOS, the release plan or the contract.
    or branches on the external flag. With three clusters the ports' IDs
    start at 16, so Forth on any backend learns of a port's doorbell only by
    checking its queues. KDOS's chiplet module (release plan 9a) needs a word
-   for the whole mask.
+   for the whole mask. Fixed in 7521af6d: the BIOS's `IPI-PENDING
+   ( -- mask )` reads CSR `MBOX`, the simulator's reads its native
+   mailbox's mask after stepping the chiplets, as a read of `MBOX_STATUS`
+   does, and `CHIP-WAIT` polls it. `tests/test_ipi_pending_differential.py`
+   puts the test chiplet on a port with ID 16 on both machines, where
+   `CHIP-WAIT` used to run into the step limit.
 9. **The one-core profile's `NUM_BUS_PORTS` differs.** The simulator
    reports 1 and the emulator 4, full cores plus clusters plus three. Only
    the WOTS deadlines read it, and WOTS is absent from the simulator. Stage
@@ -859,7 +927,9 @@ needs a change in the BIOS, KDOS, the release plan or the contract.
     slice's own work, since a change to `kdos.f` reruns almost every unit,
     and no later than the first stage whose release use runs these words.
     None does today: Akashic's `par.f` calls `BARRIER` only with more than
-    one core, where it ends.
+    one core, where it ends. Fixed in 0cffe2b9: the four words count with
+    `?DO`, and every case of `tests/test_multicore_differential.py` runs on
+    one core as well.
 13. **KDOS's messages share their fields between cores (run on the
     emulator).** `MSG-SEND` stores its type, payload and target in the
     shared variables `MS-T`, `MS-P` and `MS-G` before it takes lock 7, and
@@ -876,7 +946,19 @@ needs a change in the BIOS, KDOS, the release plan or the contract.
     stage 3's differential case sends from one worker at a time. The fix
     joins finding 12's in the first slice that changes `kdos.f`, and comes
     no later than the first stage whose release use sends messages from
-    several cores at once.
+    several cores at once. Fixed in 0cffe2b9: `MSG-SEND` stores after
+    `LOCK`, `MSG-RECV` reads before `UNLOCK`, and `MSG-BROADCAST` keeps its
+    arguments on its own stack, since a spinlock's owner reacquires it
+    without depth and the first `MSG-SEND`'s `UNLOCK` would release a lock
+    held around the loop. The differential file's messages-at-once case has
+    three workers send core 0 a message, and then broadcast one, at once on
+    four emulator cores, and every payload arrives whole; the old words
+    delivered one of the three sends intact and one of the three
+    broadcasts. Later in the same slice `MSG-RECV` lost the extra `COREID`
+    cell it left under a message, which the KDOS references recorded as a
+    stack defect against its stated `( -- type sender payload flag )`, so
+    `MSG-DISPATCH` hands a handler exactly `( sender payload type )` and
+    `MSG-FLUSH` returns a count.
 14. **Three BIOS flag words answer 255 for true (run on the emulator).**
     `MICRO?`, `RESIZED?` and `RESIZE-DENIED?` load their true flag with
     `ldi r, -1`, whose 8-bit immediate the machine zero-extends, so they
@@ -887,7 +969,9 @@ needs a change in the BIOS, KDOS, the release plan or the contract.
     The fix belongs to the next slice that changes `bios.asm`, stage 7 at
     the latest, so that one BIOS closing run covers it; a BIOS word that
     reads CSR `MBOX`'s whole mask (finding 8) joins that slice if it is
-    approved.
+    approved. Fixed in 88b16e84: the sysinfo case prints `MICRO?`'s flags,
+    and `tests/test_accept_and_vram_words.py` checks that `RESIZED?` and
+    `RESIZE-DENIED?` answer -1.
 15. **An abort in a background slot leaves the slot behind (run on the
     emulator).** The BIOS's `forth_quit` resets the return stack and runs
     the `QUIT-XT!` callback, but it leaves `var_task_active` naming the slot
@@ -909,7 +993,85 @@ needs a change in the BIOS, KDOS, the release plan or the contract.
     on the emulator `TASK-ID` answers 2, both slots stay active, and the
     `PAUSE` prints six bytes of stale memory, so that half is a strict
     expected failure, which the fixing slice turns into a pass by removing
-    the mark.
+    the mark. Fixed in 714f4ce0: `forth_quit` clears the running slot's
+    entry and then `var_task_active` once the `QUIT-XT!` callback has run,
+    so KDOS clears the slot's `CATCH` chain as well as the foreground's.
+    The case's emulator half passes without its mark.
+16. **Interpreter diagnostics in a slot leave the slot running (run on the
+    emulator).** Several diagnostics that a slot reaches through
+    `EVALUATE` branch straight to `quit_loop` rather than through
+    `forth_quit`: a compile-only word in interpretation state, `;` outside
+    a definition, a nested `:`, a quotation mismatch and `IMMEDIATE` after
+    `:NONAME`. They skip the `QUIT-XT!` callback, the reset of the return
+    stack and, since finding 15's fix lives in `forth_quit`, the end of a
+    running slot. A slot that ran `S" DO" EVALUATE` printed `compile-only word`,
+    after which `TASK-ID` and `1 TASK?` both answered 1 at the prompt and
+    the interpreter ran on the slot's data stack until its overflow check
+    reset it; the simulator ends the slot and the line, as for any error
+    there. `QUIT` in a slot now ends the slot through `forth_quit` but
+    keeps the data stack pointer in the slot's stack, below the
+    dictionary, until the same check resets it. Sending these diagnostics
+    through `forth_quit`, and giving the foreground its data stack back
+    when `QUIT` ends a slot, would close both, in the next slice that
+    changes `bios.asm`. Fixed on 2026-11-23 in the same slice: the
+    diagnostics and `QUIT` reach `forth_quit` through `quit_keep_stack`,
+    which first gives the foreground back the data stack pointer that
+    `PAUSE` saved, and `forth_quit` now ends every nested `EVALUATE` with
+    the line, so a diagnostic inside one no longer keeps its level and
+    return frames. Before, sixteen of them used up `EVALUATE`'s depth for
+    the rest of the session, and on a worker the same branch started a
+    second outer interpreter, leaving core 0 waiting on the job; the job
+    now ends. The simulator gains `QUIT`, which keeps the data stack.
+    `tests/test_task_slots_differential.py` compares `S" DO" EVALUATE` and
+    `QUIT` in a slot on both machines, and `tests/test_bios_line_endings.py`
+    covers the endings on core 0 and on a worker.
+17. **`TASK-STOP` and `TASK?` take any slot number (read from the
+    source).** Both index `var_task_pcs` with the cell on the stack
+    unchecked, so `TASK-STOP` with a number outside 1 to 3 clears another
+    BIOS cell, for 5 to 7 a slot's saved data stack pointer and for -1 the
+    running-slot mark, and `TASK?` reads one; the simulator refuses such a
+    number without consuming it. A bound check that refuses it as the
+    simulator does belongs to the slice of finding 16. Fixed on 2026-11-23
+    in the same slice: `TASK-STOP` refuses a number outside 1 to 3 and
+    `TASK?` one outside 0 to 3 before taking it, printing `no such task
+    slot` and ending the line through `quit_keep_stack`, so the number stays
+    on the stack as the simulator leaves it; a refusal in a slot ends the
+    slot. The differential file refuses 0, 4, 5, 7 and -1 on both machines
+    and then resumes a slot that yielded before them.
+18. **Three system tests no longer contend for the locks they test (run on
+    the emulator).** `TestBIOS::test_disk_checked_lock_contention_times_out_without_issuing`,
+    `TestBIOSWotsCheckpoint3::test_guard_contention_returns_state_without_touching_wots`
+    and `TestKDOSSHA3Checkpoint2::test_hmac_hkdf_lock9_contention_preserves_status_precedence`
+    make a spinlock look held by core 1 through `sys.spinlock.locked[n] =
+    True` and `owner[n] = 1`. Since f317327b moved the emulator's spinlocks
+    onto the shared native model, those two properties build fresh lists
+    from the native bank on each read, so the assignments change nothing,
+    the words under test find the lock free, and all three fail on main
+    (7e015eaa) as on the slice that fixed findings 8 and 12 to 15; the
+    file last passed whole at d8016c43, before f317327b. The tests need to
+    take the lock in the native bank as core 1, which the next change to
+    `tests/test_system.py` can do. Fixed on 2026-11-23 in the same slice:
+    the three tests boot two full cores, since the bank refuses a requester
+    that names no core, and core 1 takes the lock through the emulator's
+    spinlock window, `read8_for_requester(1, 4n)`, as its own access would;
+    no test-only path was needed.
+19. **After an `ABORT` or a fault in a slot the machines leave different
+    data stacks (run on both).** The BIOS's `ABORT` and `fault_recover`
+    reset core 0's data stack pointer, so the foreground's data stack is
+    empty afterwards, while the simulator ends only the slot's context and
+    the foreground keeps the data stack it had when it paused: a line
+    `1 2 ' X BACKGROUND PAUSE` whose slot aborts leaves `DEPTH` 0 on the
+    emulator and 2 on the simulator. After `QUIT` and the interpreter's
+    diagnostics both machines keep it (finding 16). Emptying the main
+    context's data stack when an `ABORT` or a fault leaves a slot would make
+    the simulator agree, in its next slice. Fixed on 2026-11-23 in the same
+    slice: the simulator's `PAUSE` empties the foreground's data stack when
+    an `ABORT`, `ABORT"` or fault ends the slot, and keeps it for `QUIT` and
+    the evaluator's errors, whose aborts say so. The same flag lets `QUIT`
+    keep the data stack outside slots too, where the abort paths' reset of
+    their origin used to empty it. The differential file now compares the
+    data stack after each of the four endings in a slot, and after `ABORT`,
+    a fault and `QUIT` outside slots, on the emulator and three simulators.
 
 ## 10. Decisions
 

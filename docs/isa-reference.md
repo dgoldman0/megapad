@@ -815,7 +815,8 @@ value is stored and consumed by the following instruction.
 | `FA ss DR` | **EXT.DICT** | Dictionary search engine (3-byte self-contained). See below. |
 | `FB ss [operand]` | **EXT.CRYPTO** | Crypto ISA (2–3 byte self-contained; topology depends on unit/core). See below. |
 | `FC op DR [T]` | **EXT.FP** | Scalar FP32/FP64 engine (3–4 byte self-contained). See below. |
-| `F7`, `FD`–`FF` | — | Illegal; raise `IVEC_ILLEGAL_OP`. |
+| `F7`, `FD`, `FE` | — | Unassigned; raise `IVEC_ILLEGAL_OP`. A future extension family that needs more room can take one of them as an escape to a second opcode page. |
+| `FF` | **ILLEGAL** | Permanently illegal: raises `IVEC_ILLEGAL_OP` and will never be assigned. The BIOS executes it to raise the fault on purpose, and all-ones is what blank non-volatile memory or a floating bus reads, so a runaway jump traps; RISC-V reserves its all-ones encodings for the same reason. |
 
 **Double EXT is illegal** — triggers `IVEC_ILLEGAL_OP`.
 
@@ -1090,7 +1091,8 @@ implementation-specific.
 ### EXT.FP — Scalar Floating-Point Engine (FC)
 
 > **Implementation status:** defined in `docs/floating-point.md` §8–§10 and
-> implemented in every backend.  `F7` and `FD`–`FF` trap as `ILLEGAL_OP`.
+> implemented in every backend.  The unassigned `F7`, `FD` and `FE` and the
+> permanently illegal `FF` trap as `ILLEGAL_OP`.
 
 Self-contained scalar IEEE 754 binary32/binary64 instructions operating on
 raw values in the 64-bit GPRs.  There is no separate floating-point register
@@ -1258,7 +1260,7 @@ The IVT is an array of 64-bit handler addresses in memory, starting at
 |--------|----|------|---------|
 | 0 | `IVEC_RESET` | Reset | Hardware/software reset |
 | 1 | `IVEC_NMI` | NMI | Non-maskable interrupt |
-| 2 | `IVEC_ILLEGAL_OP` | Illegal Opcode | Undefined instruction, double EXT |
+| 2 | `IVEC_ILLEGAL_OP` | Illegal Opcode | Undefined instruction, the permanently illegal `FF`, double EXT |
 | 3 | `IVEC_ALIGN_FAULT` | Alignment Fault | Misaligned memory access |
 | 4 | `IVEC_DIV_ZERO` | Division by Zero | DIV/UDIV/MOD/UMOD with Rs=0 |
 | 5 | `IVEC_BUS_FAULT` | Bus Fault | Synchronous response error for an access beyond RAM/MMIO bounds or an unmapped/timeout MMIO access; the fabric sentinel is suppressed before architectural publication |

@@ -641,8 +641,8 @@ The BIOS provides:
 * **Timer & interrupt**: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
 * **Non-blocking input**: KEY? (poll UART RX without blocking)
 * **FSLOAD**: Load and EVALUATE files from MP64FS disk
-* **Multicore**: COREID, NCORES, IPI-SEND, IPI-STATUS, IPI-ACK, MBOX!, MBOX@,
-  SPIN@, SPIN!, WAKE-CORE, CORE-STATUS
+* **Multicore**: COREID, NCORES, IPI-SEND, IPI-STATUS, IPI-PENDING, IPI-ACK,
+  MBOX!, MBOX@, SPIN@, SPIN!, WAKE-CORE, CORE-STATUS
 * **AES-256/128, GCM and CBC**: AES-KEY!, AES-IV!, AES-AAD-LEN!,
   AES-DATA-LEN!, AES-CMD!, AES-STATUS@, AES-KEY-MODE!, AES-DIN!, AES-DOUT@,
   AES-TAG@, AES-TAG!, AES-MODE!, AES-CBC-IV!
@@ -1219,9 +1219,8 @@ currently implement timer preemption.
 one full core. `CORE-RUN` therefore has no valid target, `CORE-WAIT 0` observes
 only an idle worker slot, and `P.RUN-PAR` takes ordinary ordered `P.RUN`
 without dispatch or speedup. Direct `WAKE-CORE` fails rather than inventing a
-worker. Both all-core wait loops use plain `DO`; with equal bounds at one they
-enter phantom core 1, so strict `CORE-STATUS` makes them and `BARRIER` fail
-instead of silently treating them as no-ops. The larger-topology pipeline
+worker. Both all-core wait loops count the other cores with `?DO`, so on one
+core they and `BARRIER` return at once. The larger-topology pipeline
 branch is not round-robin, uses shared scratch, does not check worker
 availability, and can violate ordered dependencies. `P.BENCH-PAR` also leaks
 its input pipeline. Exact provenance and the complete edge contract are in
@@ -1230,19 +1229,17 @@ its input pipeline. Exact provenance and the complete edge contract are in
 **Run-queue through lock discrepancy:** The §8.2–§8.7 source surface is
 executable as one-core state tables, not as a multicore OS. The eight-index
 run queues and inboxes have sentinel-ring capacity seven. `SCHED-CORE 0` runs
-FIFO XTs inline, but both passes in `SCHED-ALL` repeat the equal-bound plain
-`DO` defect. They enter phantom queue tables, then unchecked addresses beyond
-the initialized arrays; bounded hosted execution does not reach the core-0
-drain. Balanced and affinity schedulers inherit that tail. Work stealing is
+FIFO XTs inline, and both passes of `SCHED-ALL` over the other cores count
+with `?DO`, so on one core it drains core 0's queue alone, as the balanced
+and affinity schedulers built on it do. Work stealing is
 unlocked explicit queue motion, and `BALANCE` is a one-core no-op.
 
 `SPAWN-ON` queues before registration, can retain a queue-only XT when the
 task table is full, and produces a READY descriptor which `SCHED-AFFINE`
 queues a second time before marking it RUNNING. Per-core preemption flags are
 manual: Timer control 7 has no ISR-to-flag connection, and checkpointing only
-clears a flag and continues. Messaging is a software inbox without an IPI;
-successful `MSG-RECV` leaks an extra core cell, which propagates through
-dispatch and flush. Named locks are depthless physical-core conventions;
+clears a flag and continues. Messaging is a software inbox without an IPI.
+Named locks are depthless physical-core conventions;
 `WITH-LOCK` strands ownership on exceptional exit. Complete stack effects,
 load provenance, and index hazards are recorded in `docs/kdos-reference.md`
 §8.2–§8.7.

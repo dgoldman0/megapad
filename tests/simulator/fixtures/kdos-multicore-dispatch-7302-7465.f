@@ -66,13 +66,13 @@
 
 \ -- ALL-CORES-WAIT ( -- )  wait for all secondary cores to idle --
 : ALL-CORES-WAIT  ( -- )
-    NCORES 1 DO
+    NCORES 1 ?DO
         I CORE-WAIT
     LOOP ;
 
 \ -- ALL-FULL-WAIT ( -- )  wait for all secondary full cores to idle --
 : ALL-FULL-WAIT  ( -- )
-    N-FULL-CORES 1 DO
+    N-FULL-CORES 1 ?DO
         I CORE-WAIT
     LOOP ;
 

@@ -252,8 +252,9 @@ private:
 };
 
 // The shared mailbox over the table it is given: a ChipletLink's, whose
-// ports then step before each read of STATUS, a MailboxPending's, or one of
-// its own for a core count.
+// ports then step before each read of a core's pending signals, through
+// STATUS or `pending`, a MailboxPending's, or one of its own for a core
+// count.
 class HostedMailbox final : public mailbox::Mailbox {
 public:
     explicit HostedMailbox(int core_count) : Mailbox(core_count) {}
@@ -289,12 +290,20 @@ public:
     std::uint8_t read8(Offset offset, Requester requester) override {
         if (detached_)
             throw mmio::Refused("the mailbox has no table");
-        if (stepped_ != nullptr && offset == STATUS && table().is_core(requester)) {
-            stepped_->window_.step();
-            if (takers_)
-                takers_->take(stepped_->table_, requester);
-        }
+        if (offset == STATUS && table().is_core(requester))
+            step_before_pending(requester);
         return Mailbox::read8(offset, requester);
+    }
+    // The requester's pending signals from every ID, the whole mask that
+    // CSR MBOX reads on the machine, where STATUS shows IDs 0 to 7. A
+    // requester that names no core reads 0.
+    std::uint64_t pending(Requester requester) {
+        if (detached_)
+            throw mmio::Refused("the mailbox has no table");
+        if (!table().is_core(requester))
+            return 0;
+        step_before_pending(requester);
+        return table().pending_mask(requester);
     }
     void write8(Offset offset, std::uint8_t value, Requester requester) override {
         if (detached_)
@@ -317,6 +326,17 @@ public:
     }
 
 private:
+    // The ports catch up before a core reads its pending signals, so a core
+    // that polls for a port's signal makes progress, and a core among the
+    // takers takes at once the port's signal that the step raised for it.
+    void step_before_pending(Requester requester) {
+        if (stepped_ == nullptr)
+            return;
+        stepped_->window_.step();
+        if (takers_)
+            takers_->take(stepped_->table_, requester);
+    }
+
     py::object owner_;
     chiplet::ChipletLink* stepped_ = nullptr;
     std::shared_ptr<SignalTakers> takers_;
@@ -710,6 +730,8 @@ inline void register_bindings(py::module_& module) {
         .def_property_readonly("core_count",
                                [](const HostedMailbox& mailbox) { return mailbox.core_count(); })
         .def("data", [](const HostedMailbox& mailbox, int core) { return mailbox.data(core); },
+             py::arg("core"))
+        .def("pending", [](HostedMailbox& mailbox, int core) { return mailbox.pending(core); },
              py::arg("core"))
         .def("set_data",
              [](HostedMailbox& mailbox, int core, std::uint64_t value) {

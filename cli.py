@@ -126,6 +126,9 @@ def _disasm_one(mem: bytearray | bytes, addr: int, mem_size: int) -> tuple[str, 
     f = (b0 >> 4) & 0xF
     n = b0 & 0xF
 
+    if b0 == 0xFF:
+        # Permanently illegal: it traps and starts nothing after it.
+        return "ILLEGAL", 1
     if f == 0xF:
         # EXT prefix
         b1 = rb(addr + 1)
