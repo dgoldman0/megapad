@@ -4306,9 +4306,8 @@ class MegaForthRuntime:
             )
             state.definitions.append(word)
             state.compiler = None
-            # The BIOS publishes a colon name at ``:`` and makes the index
-            # notification check as that word's last step; this evaluator
-            # publishes at ``;``, so the check follows here.
+            # As in the BIOS, ``;`` publishes the colon name and makes the
+            # index notification check as its last step.
             notification = self.take_dictionary_index_notification()
             if notification:
                 self._run_evaluated_word(
