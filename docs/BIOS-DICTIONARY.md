@@ -477,7 +477,7 @@ Four more words of this section have no number in the catalogue:
 ### JIT Compiler (4 words)
 
 The BIOS includes an optional compile-time JIT that inlines native code
-for 18 common primitives instead of emitting `call.l` instructions,
+for 31 common primitives instead of emitting `call.l` instructions,
 compiles uses of constants and created words as their values,
 uses compact literal encodings for small constants, folds small-literal
 + ALU sequences into single immediate instructions, and fuses common
@@ -492,9 +492,9 @@ code.
 | 156 | `JIT-STATS` | `( -- )` | | Print JIT statistics: inlines, folds, peepholes, and bytes saved |
 | 157 | `JIT-RESET` | `( -- )` | | Reset JIT counters and peephole state to zero |
 
-**Inlined primitives (18):** `DUP` `DROP` `SWAP` `OVER` `NIP` `2DROP`
-`+` `-` `AND` `OR` `XOR` `INVERT` `NEGATE` `@` `!` `CELLS` `CELL+`
-`>BODY`
+**Inlined primitives (31):** `DUP` `DROP` `SWAP` `OVER` `NIP` `2DROP` `+` `-` `AND` `OR` `XOR` `INVERT` `NEGATE` `@` `!` `CELLS` `CELL+` `>BODY` `0=` `0<>` `0<` `0>` `=` `<>` `U<` `U>` `*` `I` `C@` `1+` `1-`. Each body is the called word's own
+or one that leaves the same results (`architecture.md`, "JIT Compiler",
+says which differ); calling the word costs 18 cycles more.
 
 **Compact literal encoding:** Literals 0–255 use an 8-byte `ldi8`
 sequence instead of the 16-byte `ldi64` + push.  The constant `-1`

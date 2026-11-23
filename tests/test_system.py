@@ -6091,6 +6091,60 @@ class TestBIOS(unittest.TestCase):
         self.assertRegex(text, r"\[RC=2\s+\]")
         self.assertIn("<-1 5 >", text)
 
+    # Words the JIT inlines beyond the original 18, each compared with the
+    # called word over edge values: the stack each leaves.
+    _INLINED_UNARY = ["0=", "0<>", "0<", "0>", "1+", "1-"]
+    _INLINED_BINARY = ["=", "<>", "U<", "U>", "*"]
+
+    def _inlined_cases(self):
+        low, high = "-9223372036854775808", "9223372036854775807"
+        edge = [low, high, "-1", "1", "0", "2", "-2"]
+        cases = []
+        for word in self._INLINED_UNARY:
+            cases += [(word, [a]) for a in edge + ["-3", "3"]]
+        for word in self._INLINED_BINARY:
+            cases += [(word, [a, b]) for a in edge for b in edge]
+        return cases
+
+    def test_jit_inlined_primitives_match_the_called_ones(self):
+        """Each primitive the JIT inlines leaves the stack the called BIOS
+        word leaves, at MIN, MAX, plus and minus one and zero, and the
+        memory and loop words read and write as the called ones do."""
+        cases = self._inlined_cases()
+        words = sorted({word for word, _ in cases})
+        lines = [": .ALL ( ... -- ) DEPTH 0 ?DO . LOOP ;", "JIT-ON"]
+        lines += [f": J{i} {w} ;" for i, w in enumerate(words)]
+        lines += [
+            "CREATE CB 16 ALLOT",
+            ": JCF CB C@ CB 1+ C@ CB 2 + C@ ;",
+            ": JI 0 3 -2 DO I + LOOP 0 0 5 0 DO 3 0 DO I + LOOP J + LOOP + ;",
+            "JIT-OFF",
+        ]
+        lines += [f": C{i} {w} ;" for i, w in enumerate(words)]
+        lines += [
+            ": CCF CB C@ CB 1+ C@ CB 2 + C@ ;",
+            ": CI 0 3 -2 DO I + LOOP 0 0 5 0 DO 3 0 DO I + LOOP J + LOOP + ;",
+            "CB 16 0 FILL 255 CB C! 127 CB 1+ C! 128 CB 2 + C!",
+        ]
+        # Each inlined word is in its J word's code: no call (sep r16 = 0xF4).
+        lines += [f"123 EMIT ' J{i} C@ . 125 EMIT" for i in range(len(words))]
+        for word, args in cases:
+            i = words.index(word)
+            a = " ".join(args)
+            lines.append(f"123 EMIT {a} J{i} .ALL 125 EMIT 123 EMIT {a} C{i} .ALL 125 EMIT")
+        lines.append("123 EMIT JCF .ALL 125 EMIT 123 EMIT CCF .ALL 125 EMIT")
+        lines.append("123 EMIT JI .ALL 125 EMIT 123 EMIT CI .ALL 125 EMIT")
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, lines, max_steps=200_000_000)
+        results = re.findall(r"\{([^{}]*)\}", text)
+        firsts, pairs = results[:len(words)], results[len(words):]
+        self.assertEqual(len(pairs), 2 * (len(cases) + 2), text[-2000:])
+        for word, first in zip(words, firsts):
+            self.assertNotEqual(first.split(), ["244"], f"{word} is still called")
+        labels = [f"{w} {a}" for w, a in cases] + ["C@", "I and J"]
+        for label, (inlined, called) in zip(labels, zip(pairs[0::2], pairs[1::2])):
+            self.assertEqual(inlined.split(), called.split(), label)
+
 
 # ---------------------------------------------------------------------------
 #  Full-TACC BIOS words
