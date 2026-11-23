@@ -1888,8 +1888,8 @@ return stacks.
 | `PAUSE` | `( -- )` | From core 0's foreground, run the next active slot, round-robin from the one last run, until it yields or ends; with none active, nothing. |
 | `TASK-YIELD` | `( -- )` | From a running slot, give the foreground its turn back through `SEP R20`; the next `PAUSE` that reaches the slot resumes it here. |
 | `BACKGROUND` | `( xt -- )` | Set xt as the Task 1 body and start it running. |
-| `TASK-STOP` | `( n -- )` | Stop background task in slot n (1–3), reset to idle. |
-| `TASK?` | `( n -- flag )` | Return 0 if task slot n (1–3) is idle, 1 if running. |
+| `TASK-STOP` | `( n -- )` | Stop background task in slot n (1–3), reset to idle. Any other n is refused before it is taken: `no such task slot`, and the line ends as `QUIT` ends it, keeping the data stack. |
+| `TASK?` | `( n -- flag )` | Return 0 if task slot n (1–3) is idle, 1 if running; 0 for 0, the foreground. Any other n is refused as `TASK-STOP` refuses it. |
 | `BACKGROUND2` | `( xt -- )` | Set xt as the Task 2 body and start it running. |
 | `BACKGROUND3` | `( xt -- )` | Set xt as the Task 3 body and start it running. |
 | `#TASKS` | `( -- n )` | Count active background tasks (0–3). |

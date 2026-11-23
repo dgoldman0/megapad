@@ -829,8 +829,11 @@ until the slot calls `TASK-YIELD` or its word returns, which ends the slot;
 with no active slot it does nothing. The next `PAUSE` that reaches a yielded
 slot resumes it after its `TASK-YIELD`, with its stacks as it left them.
 `TASK-STOP` `( n -- )` ends slot 1, 2 or 3 and refuses any other number
-without consuming it; a slot that stops itself runs on to its next yield
-and no further. `TASK?` `( n -- 0|1 )` answers 1 while slot n is active,
+without consuming it, here with an error to the host and on the BIOS with
+`no such task slot` and the line's end through `QUIT`, which keeps the data
+stack; a slot that stops itself runs on to its next yield and no further.
+`TASK?` `( n -- 0|1 )` answers 1 while slot n is active and 0 for 0, the
+foreground, and refuses any other number as `TASK-STOP` does;
 `#TASKS` counts the active slots, and `TASK-ID` names the slot that runs, 0
 for the foreground and on every other core. The CRC and SHA-3 owner records
 take `(COREID,TASK-ID)`, so a slot cannot continue the foreground's

@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import pytest
 
-from simulator.errors import ForthAbort, SourceError
+from simulator.errors import ExecutionError, ForthAbort, SourceError
 from tests.test_multicore_differential import (
     _BETWEEN,
     _PROGRAM_COUNTER,
@@ -363,3 +363,51 @@ def test_a_diagnostic_or_quit_in_a_slot_ends_the_slot_on_the_emulator(case):
     said = emulator.type([QUIT_CASES[case]])
     assert (b"compile-only word" in said) == (case == "diagnostic")
     assert _between(emulator.type([QUIT_REPORT])) == QUIT_EXPECTED
+
+
+# TASK-STOP and TASK? refuse a number that names no slot without taking it:
+# the BIOS says so and ends the line through QUIT, keeping the data stack,
+# and the simulator's words fail to their host. KDOS's TASK-STOP duplicates
+# the number before the BIOS's word sees it, so two copies stay. Slot 1,
+# which yielded once before the refusals, then runs on as before.
+SLOT_NUMBER_SETUP = b"""VARIABLE TS-N
+: TS-COUNTER ( -- ) BEGIN 1 TS-N +! TASK-YIELD AGAIN ;
+: TS-SHOW ( -- ) DEPTH DUP . 0 ?DO . LOOP ;
+0 TS-N ! ' TS-COUNTER BACKGROUND PAUSE"""
+SLOT_NUMBER_REFUSALS = (
+    (b"0 TASK-STOP", b"2 0 0 "),
+    (b"4 TASK-STOP", b"2 4 4 "),
+    (b"5 TASK-STOP", b"2 5 5 "),
+    (b"7 TASK-STOP", b"2 7 7 "),
+    (b"-1 TASK-STOP", b"2 -1 -1 "),
+    (b"4 TASK?", b"1 4 "),
+    (b"7 TASK?", b"1 7 "),
+    (b"-1 TASK?", b"1 -1 "),
+)
+SLOT_NUMBER_SHOW = b"60 EMIT 60 EMIT TS-SHOW 62 EMIT 62 EMIT"
+SLOT_NUMBER_AFTER = (b"60 EMIT 60 EMIT 0 TASK? . PAUSE TS-N @ . 1 TASK? . "
+                     b"TASK-ID . 62 EMIT 62 EMIT")
+SLOT_NUMBER_AFTER_EXPECTED = b"0 2 1 0 "
+
+
+@pytest.mark.parametrize("executor", ("native", "python"))
+def test_the_slot_words_refuse_a_number_naming_no_slot_on_the_simulator(executor):
+    runtime = _Simulator(1, executor, _kdos()).runtime
+    runtime.evaluate(SLOT_NUMBER_SETUP)
+    runtime.drain_uart_output()
+    for line, left in SLOT_NUMBER_REFUSALS:
+        with pytest.raises(ExecutionError, match="slot must be"):
+            runtime.evaluate(line)
+        runtime.evaluate(SLOT_NUMBER_SHOW)
+        assert _between(runtime.drain_uart_output()) == left, line
+    runtime.evaluate(SLOT_NUMBER_AFTER)
+    assert _between(runtime.drain_uart_output()) == SLOT_NUMBER_AFTER_EXPECTED
+
+
+def test_the_slot_words_refuse_a_number_naming_no_slot_on_the_emulator():
+    emulator = _Emulator(1, _bios(), _kdos())
+    emulator.type(SLOT_NUMBER_SETUP.splitlines())
+    for line, left in SLOT_NUMBER_REFUSALS:
+        assert b"no such task slot" in emulator.type([line]), line
+        assert _between(emulator.type([SLOT_NUMBER_SHOW])) == left, line
+    assert _between(emulator.type([SLOT_NUMBER_AFTER])) == SLOT_NUMBER_AFTER_EXPECTED

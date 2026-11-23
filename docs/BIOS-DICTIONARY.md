@@ -1143,8 +1143,8 @@ secret-boundary qualifications are recorded in
 | 311 | `PAUSE` | `( -- )` | | From core 0's foreground, run the next active slot until it yields or ends; in a slot or on a worker core, the illegal-operation fault (-21) |
 | 312 | `TASK-YIELD` | `( -- )` | | From a running slot, yield back to Task 0 via `SEP R20`; in the foreground or on a worker core, the illegal-operation fault (-21) |
 | 313 | `BACKGROUND` | `( xt -- )` | | Set xt as Task 1 body and start it |
-| 314 | `TASK-STOP` | `( n -- )` | | Stop background task in slot n (1–3), reset to idle |
-| 315 | `TASK?` | `( n -- flag )` | | Return 0 if task slot n (1–3) is idle, 1 if running |
+| 314 | `TASK-STOP` | `( n -- )` | | Stop background task in slot n (1–3), reset to idle; refuse any other n before taking it (`no such task slot`, the line ends as `QUIT` ends it) |
+| 315 | `TASK?` | `( n -- flag )` | | Return 0 if task slot n (1–3) is idle, 1 if running, 0 for the foreground's 0; refuse any other n as `TASK-STOP` does |
 | 316 | `BACKGROUND2` | `( xt -- )` | | Set xt as Task 2 body and start it |
 | 317 | `BACKGROUND3` | `( xt -- )` | | Set xt as Task 3 body and start it |
 | 318 | `#TASKS` | `( -- n )` | | Count active background tasks (0–3) |

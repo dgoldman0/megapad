@@ -977,7 +977,13 @@ change in the BIOS, KDOS, the release plan, the contract or the tests.
     BIOS cell, for 5 to 7 a slot's saved data stack pointer and for -1 the
     running-slot mark, and `TASK?` reads one; the simulator refuses such a
     number without consuming it. A bound check that refuses it as the
-    simulator does belongs to the slice of finding 16.
+    simulator does belongs to the slice of finding 16. Fixed on 2026-11-23
+    in the same slice: `TASK-STOP` refuses a number outside 1 to 3 and
+    `TASK?` one outside 0 to 3 before taking it, printing `no such task
+    slot` and ending the line through `quit_keep_stack`, so the number stays
+    on the stack as the simulator leaves it; a refusal in a slot ends the
+    slot. The differential file refuses 0, 4, 5, 7 and -1 on both machines
+    and then resumes a slot that yielded before them.
 18. **Three system tests no longer contend for the locks they test (run on
     the emulator).** `TestBIOS::test_disk_checked_lock_contention_times_out_without_issuing`,
     `TestBIOSWotsCheckpoint3::test_guard_contention_returns_state_without_touching_wots`

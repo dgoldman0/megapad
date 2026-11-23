@@ -15539,8 +15539,14 @@ task_cleanup:
     br   task_cleanup           ; unreachable but safe re-entry
 
 ; TASK-STOP ( n -- )  cancel background task in slot n (1–3)
+;   Any other number names no slot and is refused before the word takes it
+;   (task_slot_refused).
 w_task_stop:
     ldn r7, r14               ; n = slot index
+    mov r0, r7
+    subi r0, 1
+    cmpi r0, 3
+    lbrcs task_slot_refused   ; n - 1 >= 3 unsigned: n is not 1, 2 or 3
     addi r14, 8
     ; Zero var_task_pcs[r7]
     ldi64 r11, var_task_pcs
@@ -15551,9 +15557,13 @@ w_task_stop:
     str r11, r1
     ret.l
 
-; TASK? ( n -- flag )  is background task n active? (1–3)
+; TASK? ( n -- flag )  is background task n active? (1–3; 0, the
+;   foreground, answers 0).  Any other number names no slot and is refused
+;   before the word takes it (task_slot_refused).
 w_task_status:
     ldn r7, r14               ; n = slot index
+    cmpi r7, 4
+    lbrcs task_slot_refused   ; n >= 4 unsigned, every negative n included
     addi r14, 8
     ; Load var_task_pcs[r7]
     ldi64 r11, var_task_pcs
@@ -15568,6 +15578,17 @@ w_task_status:
     subi r14, 8
     str r14, r1
     ret.l
+
+; task_slot_refused: TASK-STOP or TASK? given a number that names no slot.
+;   The number stays on the stack.  The word says so as the interpreter's
+;   other diagnostics do and ends the line through QUIT, keeping the data
+;   stack, as the simulator's word fails without consuming the number.
+task_slot_refused:
+    ldi64 r10, str_no_task_slot
+    ldi64 r11, print_str
+    call.l r11
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 
 ; TASK-ID ( -- n )  current cooperative task slot (0 = foreground/worker)
 ;
@@ -26330,6 +26351,8 @@ str_dict_overflow:
 
 str_imm_noname:
     .asciiz "IMMEDIATE after :NONAME\n"
+str_no_task_slot:
+    .asciiz "no such task slot\n"
 str_nested_def:
     .asciiz "nested definition\n"
 str_quot_mismatch:
