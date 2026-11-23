@@ -184,12 +184,15 @@ class Hosted(_Machine):
 
     name = "simulator"
 
-    def __init__(self, config: str = "", cores: int = 1):
+    def __init__(self, config: str = "", cores: int = 1, quantum: int | None = None):
         self.hook_id = next(_HOOK_IDS)
         memory = create_address_space(topology=Topology(full_cores=cores),
                                       bank0_size=1 << 20, external_size=EXT_SIZE,
                                       chiplet_ports=1)
-        runtime = MegaForthRuntime(memory=memory)
+        # QUANTUM, when given, is the steps of each core's turn in place of
+        # the machine profile's.
+        runtime = MegaForthRuntime(memory=memory, **(
+            {} if quantum is None else {"turn_quantum_steps": quantum}))
         self.memory = memory
         runtime.chiplet_ports.attach_module(0, LIBRARY, "%s,hook_id=%d%s" % (
             BASE_CONFIG, self.hook_id, "," + config if config else ""))
@@ -951,6 +954,87 @@ def test_17_a_region_request_during_a_hold(backend):
         "OBJ-CLOSE C1-WAIT C1-IOR @ REPORT EPOCH N0 @ - REPORT",
     ])
     assert got == [0, 0, 0, -1, -1, 0, -1, 0, 1]
+
+
+# ---------------------------------------------------------------------------
+#  KDOS's allocator from two cores
+# ---------------------------------------------------------------------------
+#
+#  chiplet.f takes its tables and chunks from KDOS's external-memory
+#  allocator on whichever core runs its words, while KDOS's own words
+#  allocate on core 0.  The allocator serializes its state on HEAP-LOCK
+#  (kdos.f, section 1.12a).  The emulator's cores interleave at every
+#  shared access; the simulator's cores here take turns of a few steps, so
+#  that a turn often ends inside an allocator word.
+
+ALLOC_QUANTUM = 7
+
+
+def _two_core_hosted_short_turns(config: str = "") -> "Hosted":
+    return Hosted(config, cores=2, quantum=ALLOC_QUANTUM)
+
+
+ALLOC_BACKENDS = [pytest.param(Emulated, id="emulator"),
+                  pytest.param(_two_core_hosted_short_turns, id="simulator")]
+
+# Each core keeps up to TA-K blocks live in a ring.  A step checks and frees
+# the oldest, then allocates a block of 16 to 208 bytes and fills each cell
+# with a tag of its own core and step.  A block another core was also given
+# shows another tag when it is checked.
+ALLOC_WORDS = [
+    "256 CONSTANT TA-ITER  8 CONSTANT TA-K",
+    "VARIABLE TA-BAD0  VARIABLE TA-BAD1  VARIABLE TA-N1  VARIABLE TA-SEEN",
+    "VARIABLE TA-FLN  VARIABLE TA-FLBAD",
+    "CREATE TA0-ADDR TA-K CELLS ALLOT  CREATE TA0-SIZE TA-K CELLS ALLOT  "
+    "CREATE TA0-TAG TA-K CELLS ALLOT  TA0-ADDR TA-K CELLS 0 FILL",
+    "CREATE TA1-ADDR TA-K CELLS ALLOT  CREATE TA1-SIZE TA-K CELLS ALLOT  "
+    "CREATE TA1-TAG TA-K CELLS ALLOT  TA1-ADDR TA-K CELLS 0 FILL",
+    ": TA-SIZE ( i -- u ) 7 * 13 MOD 1+ 16 * ;",
+    ": TA-FILL ( addr u tag -- ) SWAP 8 / 0 ?DO 2DUP SWAP I CELLS + ! LOOP 2DROP ;",
+    ": TA-BAD ( addr u tag -- n ) SWAP 8 / 0 SWAP 0 ?DO "
+    "2 PICK I CELLS + @ 2 PICK <> IF 1+ THEN LOOP NIP NIP ;",
+    # Core 1 allocates as chiplet.f does, through _CHIP-PRIVATE, and frees
+    # with XMEM-FREE-BLOCK.
+    ": TA1-FREE ( off -- ) DUP TA1-ADDR + @ ?DUP IF "
+    "OVER TA1-SIZE + @ 2 PICK TA1-TAG + @ TA-BAD TA-BAD1 +! "
+    "DUP TA1-ADDR + @ OVER TA1-SIZE + @ XMEM-FREE-BLOCK 0 OVER TA1-ADDR + ! THEN DROP ;",
+    ": TA1-STEP ( i -- ) DUP TA-K MOD CELLS DUP TA1-FREE "
+    "OVER TA-SIZE DUP _CHIP-PRIVATE IF 2DROP 2DROP 1 TA-BAD1 +! EXIT THEN "
+    "2 PICK TA1-ADDR + ! OVER TA1-SIZE + ! SWAP 2000000 + OVER TA1-TAG + ! "
+    "DUP TA1-ADDR + @ OVER TA1-SIZE + @ 2 PICK TA1-TAG + @ TA-FILL DROP 1 TA-N1 +! ;",
+    ": C1-ALLOC TA-ITER 0 DO I TA1-STEP LOOP TA-K 0 DO I CELLS TA1-FREE LOOP TRUE C1-DONE ! ;",
+    # Core 0 allocates through ALLOCATE and FREE.  TA-SEEN counts the blocks
+    # core 1 took while core 0's steps ran.
+    ": TA0-FREE ( off -- ) DUP TA0-ADDR + @ ?DUP IF "
+    "OVER TA0-SIZE + @ 2 PICK TA0-TAG + @ TA-BAD TA-BAD0 +! "
+    "DUP TA0-ADDR + @ FREE 0 OVER TA0-ADDR + ! THEN DROP ;",
+    ": TA0-STEP ( i -- ) DUP TA-K MOD CELLS DUP TA0-FREE "
+    "OVER TA-SIZE DUP ALLOCATE IF 2DROP 2DROP 1 TA-BAD0 +! EXIT THEN "
+    "2 PICK TA0-ADDR + ! OVER TA0-SIZE + ! SWAP 1000000 + OVER TA0-TAG + ! "
+    "DUP TA0-ADDR + @ OVER TA0-SIZE + @ 2 PICK TA0-TAG + @ TA-FILL DROP ;",
+    ": C0-ALLOC TA-N1 @ TA-SEEN ! TA-ITER 0 DO I TA0-STEP LOOP "
+    "TA-K 0 DO I CELLS TA0-FREE LOOP TA-N1 @ TA-SEEN @ - TA-SEEN ! ;",
+    # The free list afterwards: each node lies in external memory below
+    # XMEM-HERE, and holds a size that is a positive multiple of 16.
+    ": TA-WALK 0 TA-FLN ! 0 TA-FLBAD ! XMEM-FL @ BEGIN DUP TA-FLN @ 100000 < AND WHILE "
+    "DUP EXT-MEM-BASE < OVER XMEM-HERE @ >= OR OVER @ 16 < OR OVER @ 15 AND 0<> OR "
+    "IF 1 TA-FLBAD +! DROP 0 ELSE 1 TA-FLN +! 8 + @ THEN REPEAT DROP ;",
+]
+
+
+@pytest.mark.parametrize("backend", ALLOC_BACKENDS)
+def test_allocation_from_two_cores(backend):
+    """Core 1 allocates and frees through chiplet.f's words while core 0
+    does through ALLOCATE and FREE, 256 blocks each.  No block was given to
+    both cores, every block kept its tags until its own core freed it, the
+    two cores' steps overlapped, and the free list is whole."""
+    machine = ready(backend, extra=CORE1 + ALLOC_WORDS)
+    got = machine.run([
+        "' C1-ALLOC C1 C0-ALLOC C1-WAIT C1-DONE @ REPORT",
+        "TA-BAD0 @ REPORT TA-BAD1 @ REPORT TA-N1 @ REPORT TA-SEEN @ 0> REPORT",
+        "TA-WALK TA-FLBAD @ REPORT TA-FLN @ 0> REPORT",
+    ])
+    assert got == [-1, 0, 0, 256, -1, 0, -1]
 
 
 # ---------------------------------------------------------------------------

@@ -116,10 +116,10 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
 
 \ -- Multicore safety guard --
 \   Words that use shared scratch VARIABLEs (A-PREV, A-CURR, AR-SZ,
-\   FL-PREV, etc.) are unsafe under concurrent execution.  ?CORE0
-\   aborts if called from a secondary core, catching accidental
-\   concurrent access at the point of call rather than allowing
-\   silent corruption.  See §8.1 for the concurrency contract.
+\   etc.) are unsafe under concurrent execution.  ?CORE0 aborts if
+\   called from a secondary core, catching accidental concurrent access
+\   at the point of call.  The external-memory allocator serializes its
+\   own scratch on HEAP-LOCK (§1.12a).  See §8.1 for the contract.
 : ?CORE0  ( -- )
     COREID 0<> ABORT" core-0 only: use ARENA-ALLOT on secondary cores" ;
 

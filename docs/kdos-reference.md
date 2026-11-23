@@ -872,10 +872,15 @@ span can be returned and a repeated free can create a self-linked node. Public
 `FREE` also treats every nonzero address at or above `MEM-SIZE` as XMEM and
 reads the prefix first, so its contract is restricted to allocator results.
 `XMEM-FLOOR` protects bulk reset only and is not checked by free insertion.
-Raw XMEM allocation, free, alignment, and reset are unsynchronized and lack
-the intended core-0 guard; XMEM `FREE` is likewise unguarded, while `RESIZE`
-writes shared scratch before its nested allocation guard. These discrepancies
-remain open and are not repaired by hosted execution.
+Raw XMEM allocation, free, alignment, and reset serialize on `HEAP-LOCK`,
+hardware spinlock 3, which each word holds across its reads and writes of
+`XMEM-HERE`, the free list and the list's search scratch, so any core may
+call them; `chiplet.f` allocates through them on whichever core runs its
+words. No caller holds `HEAP-LOCK` around one of them, because a same-core
+reacquire adds no depth and the inner release would end the outer critical
+section. The XMEM branch of `ALLOCATE` keeps its core-0 guard and XMEM
+`FREE` reaches the locked raw free, while `RESIZE` writes shared scratch
+before its nested allocation guard, a discrepancy that remains open.
 
 `XBUF` allocation precedes constant publication and floor advancement, so a
 dictionary fault in between can leak an unprotected block. Reset does not
@@ -2962,8 +2967,11 @@ the message and returns 0 when no handler is registered for its type.
 ### §8.7 Shared Resource Locks
 
 The named constants and acquire/release words are opt-in conventions. They do
-not cause ordinary dictionary, UART, heap, or other named operations to take a
-lock. Hosted tasks all execute as physical core 0 and therefore share one
+not cause ordinary dictionary, UART, or other named operations to take a
+lock. The external-memory allocator's words are the exception in KDOS: they
+take `HEAP-LOCK` themselves (§1.12a), so `HEAP-ACQUIRE` must not wrap them,
+and `HEAP-LOCK` is defined with them rather than with the other lock
+constants. Hosted tasks all execute as physical core 0 and therefore share one
 owner identity. Reacquisition succeeds without adding depth, and one release
 ends the critical section. A wait on a foreign owner cannot make progress
 because `YIELD?` does not switch tasks.

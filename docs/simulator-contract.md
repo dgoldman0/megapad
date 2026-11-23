@@ -3995,8 +3995,8 @@ mounted media, zero modules, balanced stacks, and released locks, followed by
 a checked post-boot definition, allocation/free, CRC32, ring FIFO, and module
 listing. The current regular-load test,
 `tests/simulator/test_kdos_regular_load.py`, loads the present file over
-461 core words and expects 1,562 KDOS publications and 2,015 unique
-bindings; it submits 6,955 lines (225,862 payload bytes, 232,817 CLI UART bytes).
+488 core words and expects 1,562 KDOS publications and 2,042 unique
+bindings; it submits 6,954 lines (225,967 payload bytes, 232,921 CLI UART bytes).
 
 The startup filesystem path is literal. `DISK?` false skips `FS-LOAD` and does
 not clear a stale true `FS-OK`. A successful load stores the exact lowercase

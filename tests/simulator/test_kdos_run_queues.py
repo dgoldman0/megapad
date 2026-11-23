@@ -34,17 +34,17 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-run-queues-7466-8004.f"
+    / "kdos-run-queues-7482-8022.f"
 )
 
-FIRST_LINE = 7466
-LAST_LINE = 8004
-SLICE_BYTES = 17_236
+FIRST_LINE = 7482
+LAST_LINE = 8022
+SLICE_BYTES = 17_474
 SLICE_SHA256 = (
-    "64fe8c21befc5057b3f57017c687ab014511c5e0a56d9db1b91e347c30b6b191"
+    "70aa059f84c12657ab878e633228fdff7b5d75318d597f6351300c84664ebe5a"
 )
-SLICE_GIT_BLOB = "2583a62a57d8db034e5305d3df4305cf6057e91e"
-HOSTED_DICTIONARY_GROWTH = 7_307
+SLICE_GIT_BLOB = "769782ca1703cbf1c87d5330c13f658f50bebef5"
+HOSTED_DICTIONARY_GROWTH = 7_281
 HOSTED_WORD_FIXED_BYTES = 17
 RAW_VARIABLE_BYTES = 4_943
 
@@ -124,7 +124,6 @@ SOURCE_LEDGER = (
     ("CONSTANT", b"DICT-LOCK", 0),
     ("CONSTANT", b"UART-LOCK", 0),
     ("CONSTANT", b"FS-LOCK", 0),
-    ("CONSTANT", b"HEAP-LOCK", 0),
     ("CONSTANT", b"RING-LOCK", 0),
     ("CONSTANT", b"HT-LOCK", 0),
     ("CONSTANT", b"APP-LOCK", 0),
@@ -226,8 +225,8 @@ def test_run_queue_slice_is_exact_linked_and_initializes_only_its_tables() -> No
 
     runtime = _evaluate_run_queues(runtime)
 
-    assert len(SOURCE_LEDGER) == 89
-    assert sum(definer == "CONSTANT" for definer, _name, _body in SOURCE_LEDGER) == 17
+    assert len(SOURCE_LEDGER) == 88
+    assert sum(definer == "CONSTANT" for definer, _name, _body in SOURCE_LEDGER) == 16
     assert sum(definer == "VARIABLE" for definer, _name, _body in SOURCE_LEDGER) == 15
     assert sum(definer == ":" for definer, _name, _body in SOURCE_LEDGER) == 57
     assert sum(

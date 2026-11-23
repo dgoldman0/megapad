@@ -494,12 +494,14 @@ MSG-HINIT
 \  Checked disk/filesystem operations acquire FS-LOCK internally.  Do not
 \  wrap them in FS-ACQUIRE or WITH-LOCK: the hardware recognizes a same-core
 \  reacquire but has no recursion depth, so the inner release would end the
-\  outer critical section early.
+\  outer critical section early.  The external-memory allocator's words
+\  (§1.12a), and ALLOCATE, FREE and RESIZE through them, acquire HEAP-LOCK
+\  internally in the same way, so HEAP-ACQUIRE wraps none of them.
 
 0 CONSTANT DICT-LOCK
 1 CONSTANT UART-LOCK
 2 CONSTANT FS-LOCK
-3 CONSTANT HEAP-LOCK
+\ Lock 3 is HEAP-LOCK, defined with the external-memory allocator (§1.12a).
 4 CONSTANT RING-LOCK
 5 CONSTANT HT-LOCK
 6 CONSTANT APP-LOCK

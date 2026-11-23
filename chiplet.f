@@ -158,7 +158,9 @@ VARIABLE CHIP-DEADLINE   100 CHIP-DEADLINE !
 \  data's heap blocks, is a chunk of its own, which can go back alone.
 \  The port's lent ranges bound how many chunks a port holds at once.
 
-\ Zeroed external memory of MegaPad's own, never lent.
+\ Zeroed external memory of MegaPad's own, never lent.  KDOS's allocator
+\ holds HEAP-LOCK while it changes its state, so any core may take memory
+\ here and give it back with XMEM-FREE-BLOCK.
 : _CHIP-PRIVATE  ( u -- addr ior )
     DUP >R XMEM-ALLOT? ?DUP IF R> DROP EXIT THEN
     DUP R> 0 FILL 0 ;
