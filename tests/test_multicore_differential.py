@@ -90,12 +90,11 @@ VARIABLE SSUM
 : SJOB ( -- ) COREID 1+ 12 LOCK SSUM @ + SSUM ! 12 UNLOCK ;
 """, b"""0 SSUM !  NCORES 0 ?DO ['] SJOB I RQ-PUSH ['] SJOB I RQ-PUSH LOOP
 SCHED-ALL  SSUM @ ."""),
-    # A message MSG-RECV takes leaves the receiving core's ID beneath its
-    # type, sender and payload (section 6 of the simulator contract).
+    # MSG-RECV gives a message's type, sender and payload under its flag.
     "messages": (b"""
 : MJOB ( -- ) MSG-USER COREID 100 * 0 MSG-SEND DROP ;
 """, b"""NCORES 1 ?DO ['] MJOB I CORE-RUN I CORE-WAIT LOOP
-BEGIN MSG-RECV WHILE . . . DROP REPEAT 2DROP DROP"""),
+BEGIN MSG-RECV WHILE . . . REPEAT 2DROP DROP"""),
     # Every worker waits for MGO and then sends core 0 a message, or
     # broadcasts one, at once. Core 0 counts what it takes, the messages
     # whose payload is their sender's ID times 100, and the senders' mask.
@@ -103,7 +102,7 @@ BEGIN MSG-RECV WHILE . . . DROP REPEAT 2DROP DROP"""),
 VARIABLE MGO  VARIABLE MCOUNT  VARIABLE MINTACT  VARIABLE MFROM
 : MTAKE ( -- ) 0 MCOUNT ! 0 MINTACT ! 0 MFROM !
   BEGIN MSG-RECV WHILE OVER 100 * = IF 1 MINTACT +! THEN
-    1 SWAP LSHIFT MFROM @ OR MFROM !  DROP DROP  1 MCOUNT +!
+    1 SWAP LSHIFT MFROM @ OR MFROM !  DROP  1 MCOUNT +!
   REPEAT 2DROP DROP  MCOUNT @ . MINTACT @ . MFROM @ . ;
 : MSENDJOB ( -- ) BEGIN MGO @ UNTIL  MSG-USER COREID 100 * 0 MSG-SEND DROP ;
 : MCASTJOB ( -- ) BEGIN MGO @ UNTIL  MSG-USER COREID 100 * MSG-BROADCAST DROP ;

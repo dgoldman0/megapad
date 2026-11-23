@@ -908,7 +908,11 @@ change in the BIOS, KDOS, the release plan, the contract or the tests.
     three workers send core 0 a message, and then broadcast one, at once on
     four emulator cores, and every payload arrives whole; the old words
     delivered one of the three sends intact and one of the three
-    broadcasts.
+    broadcasts. Later in the same slice `MSG-RECV` lost the extra `COREID`
+    cell it left under a message, which the KDOS references recorded as a
+    stack defect against its stated `( -- type sender payload flag )`, so
+    `MSG-DISPATCH` hands a handler exactly `( sender payload type )` and
+    `MSG-FLUSH` returns a count.
 14. **Three BIOS flag words answer 255 for true (run on the emulator).**
     `MICRO?`, `RESIZED?` and `RESIZE-DENIED?` load their true flag with
     `ldi r, -1`, whose 8-bit immediate the machine zero-extends, so they

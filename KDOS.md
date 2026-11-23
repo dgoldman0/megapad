@@ -1238,9 +1238,8 @@ unlocked explicit queue motion, and `BALANCE` is a one-core no-op.
 task table is full, and produces a READY descriptor which `SCHED-AFFINE`
 queues a second time before marking it RUNNING. Per-core preemption flags are
 manual: Timer control 7 has no ISR-to-flag connection, and checkpointing only
-clears a flag and continues. Messaging is a software inbox without an IPI;
-successful `MSG-RECV` leaks an extra core cell, which propagates through
-dispatch and flush. Named locks are depthless physical-core conventions;
+clears a flag and continues. Messaging is a software inbox without an IPI.
+Named locks are depthless physical-core conventions;
 `WITH-LOCK` strands ownership on exceptional exit. Complete stack effects,
 load provenance, and index hazards are recorded in `docs/kdos-reference.md`
 §8.2–§8.7.

@@ -2951,14 +2951,11 @@ keep their own message. `MSG-BROADCAST` keeps its arguments on its own
 stack. Any fault while a locked path is active can strand the depthless
 lock.
 
-Successful `MSG-RECV` has a source stack defect. Updating `MSG-IHEAD` leaves
-the first `COREID` cell behind, so the actual result is
-`( -- core type sender payload -1 )`; the empty result is still exactly
-`( -- 0 0 0 0 )`. `MSG-DISPATCH` carries that core beneath
-`sender payload type` into a handler and returns it beneath its flag when the
-handler consumes the documented inputs. `MSG-FLUSH` starts with zero, then
-increments each leaked core, returning `( 0 core+1 ... core+1 )` rather than
-one count. On core 0, two messages therefore return `( 0 1 1 )`.
+A successful `MSG-RECV` returns `( -- type sender payload -1 )` and an empty
+inbox `( -- 0 0 0 0 )`. `MSG-DISPATCH` hands a handler
+`( sender payload type )` and returns -1 once the handler has run, or drops
+the message and returns 0 when no handler is registered for its type.
+`MSG-FLUSH` returns the number of messages it dropped.
 `MSG-HANDLER!` has no type bound, while `MSG-HANDLER@` checks only signed
 `type < 4`; negative types can address before the table.
 

@@ -39,11 +39,11 @@ FIXTURE = (
 
 FIRST_LINE = 7466
 LAST_LINE = 8004
-SLICE_BYTES = 17_240
+SLICE_BYTES = 17_236
 SLICE_SHA256 = (
-    "c34479e764c7a6abe904c98887aecd103fe6a3179cd3b3f48e59af3cdc33ad7d"
+    "64fe8c21befc5057b3f57017c687ab014511c5e0a56d9db1b91e347c30b6b191"
 )
-SLICE_GIT_BLOB = "ea1b27113cc0dd72230c2368832d733fd65e21c1"
+SLICE_GIT_BLOB = "2583a62a57d8db034e5305d3df4305cf6057e91e"
 HOSTED_DICTIONARY_GROWTH = 7_307
 HOSTED_WORD_FIXED_BYTES = 17
 RAW_VARIABLE_BYTES = 4_943
@@ -480,7 +480,7 @@ def test_per_core_checkpoint_consumes_only_the_core_zero_table_flag() -> None:
     assert _execute(runtime, "PREEMPT-FLAG@", 1) == (0,)
 
 
-def test_message_receive_preserves_the_accidental_extra_core_cell() -> None:
+def test_message_receive_gives_type_sender_payload_and_flag() -> None:
     runtime = _load_run_queues()
 
     assert _execute(runtime, "MSG-RECV") == (0, 0, 0, 0)
@@ -488,12 +488,12 @@ def test_message_receive_preserves_the_accidental_extra_core_cell() -> None:
     assert runtime.spinlocks.owner(7) is None
     assert _execute(runtime, "MSG-PEEK") == (MASK64,)
     assert _execute(runtime, "MSG-ICOUNT", 0) == (1,)
-    assert _execute(runtime, "MSG-RECV") == (0, 1, 0, 0xBEEF, MASK64)
+    assert _execute(runtime, "MSG-RECV") == (1, 0, 0xBEEF, MASK64)
     assert _execute(runtime, "MSG-PEEK") == (0,)
     assert _execute(runtime, "MSG-ICOUNT", 0) == (0,)
 
 
-def test_message_dispatch_and_flush_propagate_the_leaked_core_cells() -> None:
+def test_message_dispatch_runs_handlers_and_flush_counts_messages() -> None:
     runtime = _load_run_queues()
     runtime.evaluate(
         b"VARIABLE MSG-SEEN-SENDER "
@@ -506,19 +506,20 @@ def test_message_dispatch_and_flush_propagate_the_leaked_core_cells() -> None:
     assert _execute(runtime, "MSG-HANDLER!", _xt(runtime, "MSG-RECORD"), 1) == ()
 
     assert _execute(runtime, "MSG-SEND", 1, 0xCAFE, 0) == (MASK64,)
-    assert _execute(runtime, "MSG-DISPATCH") == (0, MASK64)
+    assert _execute(runtime, "MSG-DISPATCH") == (MASK64,)
     assert (
         _variable(runtime, "MSG-SEEN-SENDER"),
         _variable(runtime, "MSG-SEEN-PAYLOAD"),
         _variable(runtime, "MSG-SEEN-TYPE"),
     ) == (0, 0xCAFE, 1)
     assert _execute(runtime, "MSG-SEND", 3, 0x1234, 0) == (MASK64,)
-    assert _execute(runtime, "MSG-DISPATCH") == (0, 0)
+    assert _execute(runtime, "MSG-DISPATCH") == (0,)
+    assert _execute(runtime, "MSG-ICOUNT", 0) == (0,)
     assert _execute(runtime, "MSG-DISPATCH") == (0,)
 
     assert _execute(runtime, "MSG-SEND", 0, 0x11, 0) == (MASK64,)
     assert _execute(runtime, "MSG-SEND", 2, 0x22, 0) == (MASK64,)
-    assert _execute(runtime, "MSG-FLUSH") == (0, 1, 1)
+    assert _execute(runtime, "MSG-FLUSH") == (2,)
     assert _execute(runtime, "MSG-ICOUNT", 0) == (0,)
     assert _execute(runtime, "MSG-BROADCAST", 1, 0x44) == (0,)
 

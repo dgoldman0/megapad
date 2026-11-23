@@ -1992,12 +1992,10 @@ returning zero; on several cores a worker's message reaches another core's
 inbox under lock 7. The global staging and receive variables are touched only
 while lock 7 is held, and broadcast keeps its arguments on its stack, so
 senders on several cores at once each deliver their own message. A
-successful `MSG-RECV` leaks `COREID` below the
-documented four results, producing `( core type sender payload -1 )`; the empty
-path returns exactly four zeroes. That leak propagates through
-`MSG-DISPATCH`, beneath the handler's `sender payload type`, and makes
-`MSG-FLUSH` return an initial zero plus one `COREID + 1` cell per message
-instead of a count. Target IDs and setter message types are unchecked, and
+successful `MSG-RECV` returns `( type sender payload -1 )` and an empty one
+exactly four zeroes, `MSG-DISPATCH` hands a handler `sender payload type`,
+and `MSG-FLUSH` returns a count. Target IDs and setter message types are
+unchecked, and
 negative handler types can index before the table.
 
 The named resource words remain opt-in, depthless physical-core lock wrappers.

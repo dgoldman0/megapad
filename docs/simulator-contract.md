@@ -3213,11 +3213,10 @@ fields back before it releases the lock, and `MSG-BROADCAST` keeps its
 arguments on its own stack, so senders on several cores at once each
 deliver their own message: on four of the emulator's cores, three workers
 that send core 0 a message, and then broadcast one, at the same moment
-deliver every payload whole, as the simulator does. Successful `MSG-RECV`
-accidentally retains `COREID`, producing `( core type sender payload -1 )`, while its empty path
-returns the documented four zeroes. `MSG-DISPATCH` retains that core beneath
-handler inputs/results. `MSG-FLUSH` consequently returns an initial zero plus
-one `COREID + 1` cell per consumed message rather than a count. Handler store
+deliver every payload whole, as the simulator does. A successful `MSG-RECV`
+returns `( type sender payload -1 )` and an empty one the documented four
+zeroes, `MSG-DISPATCH` hands a handler `( sender payload type )`, and
+`MSG-FLUSH` returns the count of messages it dropped. Handler store
 has no type bound, and handler lookup accepts negative signed types as less
 than four and can address before the table.
 
