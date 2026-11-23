@@ -627,7 +627,11 @@ Built on 2026-11-23 (ee95d589, with Akashic a603041c):
   callback receives -21, which KDOS throws to the innermost `CATCH`, and
   with none the fault is reported and the line, or a worker's job, ends.
   `forth_quit` ends the slot that was running once the `QUIT-XT!` callback
-  has run (finding 15).
+  has run (finding 15). The ISA then reserved 0xFF as permanently illegal
+  (decided 2026-11-23), the assembler writes it as `ILLEGAL`, and the
+  report names the refusal, `*** PAUSE OR TASK-YIELD REFUSED`, on both
+  machines: `illegal_op_handler` knows `task_word_refused`'s byte by the
+  trap frame's PC, and the code stays -21.
 
 Tests: `tests/test_task_slots_differential.py` runs fifteen KDOS programs
 on the emulator and on three simulators, on one core and on two: the slot

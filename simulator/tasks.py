@@ -20,7 +20,8 @@ stacks lie in the 1,536 bytes below the dictionary's start, where the BIOS
 keeps its own slot stacks below its dictionary.
 
 PAUSE in a slot, TASK-YIELD in the foreground, and either word on a worker
-core take the illegal-operation fault, as the BIOS's words refuse them. An
+core take the illegal-operation fault, as the BIOS's words refuse them, and
+the fault's report names the refusal as the BIOS's does. An
 error or ABORT in a slot ends the slot, and the foreground's line that
 paused ends with it, as the BIOS's QUIT ends the slot that was running.
 """
@@ -29,7 +30,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from simulator.errors import ExecutionError, IllegalInstructionFault
+from simulator.errors import ExecutionError, TaskWordRefused
 from simulator.stacks import DataStack, ReturnStack
 
 if TYPE_CHECKING:
@@ -154,14 +155,16 @@ class HostedTasks:
         it does not belong."""
 
         runtime = self.runtime
-        runtime.require_core0(f"{word} and the task slots")
+        reason = runtime._core0_only(f"{word} and the task slots")
+        if reason is not None:
+            raise TaskWordRefused(reason)
         if in_slot and self.active == 0:
-            raise IllegalInstructionFault(
+            raise TaskWordRefused(
                 f"{word} runs in a task slot; core 0's foreground has no slot "
                 "to leave"
             )
         if not in_slot and self.active != 0:
-            raise IllegalInstructionFault(
+            raise TaskWordRefused(
                 f"{word} runs in core 0's foreground; task slot {self.active} "
                 "gives its turn back with TASK-YIELD"
             )

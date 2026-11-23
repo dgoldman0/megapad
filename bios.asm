@@ -14718,10 +14718,22 @@ priv_fault_handler:
 ;  as its aborts do (worker_quit): its own stacks, the QUIT-XT! callback,
 ;  a cleared slot so CORE-STATUS reports it idle, and its idle loop.
 ;
-;  R9 carries the fault kind, an index into fault_names and fault_codes.
+;  R9 carries the fault kind, an index into fault_names and fault_codes:
+;  0 an illegal instruction, 1 an alignment fault, 2 a division by zero,
+;  and 3 PAUSE or TASK-YIELD refused, an illegal instruction too.
 ;
 illegal_op_handler:
     ldi r9, 0
+    ; A PAUSE or TASK-YIELD refused at task_word_refused's ILLEGAL is the
+    ; same fault, -21, under its own name in the report.  The trap frame's
+    ; PC is the address after the faulting byte; R0 and R11 are free here,
+    ; since fault_report never resumes the faulting code.
+    ldn r0, r15
+    ldi64 r11, task_word_refused_resume
+    cmp r0, r11
+    brne .illegal_op_named
+    ldi r9, 3
+.illegal_op_named:
     lbr fault_report
 align_fault_handler:
     ldi r9, 1
@@ -14859,10 +14871,12 @@ fault_names:
     .dq str_fault_illegal
     .dq str_fault_align
     .dq str_fault_divzero
+    .dq str_fault_task_refused
 fault_codes:
     .dq 0xFFFFFFFFFFFFFFEB            ; -21 unsupported operation
     .dq 0xFFFFFFFFFFFFFFE9            ; -23 address alignment exception
     .dq 0xFFFFFFFFFFFFFFF6            ; -10 division by zero
+    .dq 0xFFFFFFFFFFFFFFEB            ; -21: PAUSE or TASK-YIELD refused
 
 ; print_fault_hex64: R1 -> 16 hex chars.  Clobbers R0, R1, R7, and R11;
 ;   the value waits on the return stack while the high half prints.
@@ -15426,16 +15440,18 @@ w_task_yield:
     sep  r20                    ; yield to PAUSE handler (R3 freezes at ret.l)
     ret.l                       ; resumes here on next PAUSE; returns to caller
 
-; task_word_refused: PAUSE or TASK-YIELD where it cannot run.  The byte
-;   below is one of the ISA's unassigned opcodes, which every backend traps
-;   as IVEC_ILLEGAL_OP, so the refusal is the machine's own illegal-operation
-;   fault: the FAULT-XT! callback receives -21, which KDOS throws to the
-;   innermost CATCH, and with none the fault is reported and core 0 returns
-;   to its prompt or a worker ends its job (fault_report).  An installed
-;   handler that returns past the byte resumes at the ret.l, so the word
-;   does nothing.
+; task_word_refused: PAUSE or TASK-YIELD where it cannot run.  ILLEGAL is
+;   FF, which the ISA reserves as permanently illegal (docs/isa-reference.md),
+;   so the refusal is the machine's own illegal-operation fault: the
+;   FAULT-XT! callback receives -21, which KDOS throws to the innermost
+;   CATCH, and with none the fault is reported and core 0 returns to its
+;   prompt or a worker ends its job (fault_report).  illegal_op_handler
+;   knows this byte by the address after it and names the refusal in the
+;   report.  An installed handler that returns past the byte resumes at the
+;   ret.l, so the word does nothing.
 task_word_refused:
-    .db 0xFF
+    illegal
+task_word_refused_resume:
     ret.l
 
 ; task_setup_slot: shared helper — set up a background task in slot r7
@@ -26377,6 +26393,8 @@ str_privfault:
     .asciiz "\n*** PRIVILEGE FAULT @ "
 str_fault_illegal:
     .asciiz "\n*** ILLEGAL INSTRUCTION"
+str_fault_task_refused:
+    .asciiz "\n*** PAUSE OR TASK-YIELD REFUSED"
 str_fault_align:
     .asciiz "\n*** ALIGNMENT FAULT @ "
 str_fault_divzero:

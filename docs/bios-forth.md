@@ -677,13 +677,17 @@ line and recovers instead of restarting the machine:
 *** ILLEGAL INSTRUCTION PC=000000000000E090 CORE=00
 *** ALIGNMENT FAULT @ 0000000000000001 PC=000000000000224C CORE=00
 *** DIVIDE BY ZERO PC=0000000000001330 CORE=00
+*** PAUSE OR TASK-YIELD REFUSED PC=000000000000F3A1 CORE=01
 ```
 
 `PC` is the address after the faulting instruction; the alignment fault
 also gives the misaligned address. Illegal instructions include reserved
 `FC` encodings, a floating-point operation that uses a reserved `FPCSR.RM`,
-the unassigned prefixes F7 and FD–FF, and tile operations a format does not
-admit (`docs/floating-point.md`).
+the unassigned prefixes F7, FD and FE, the permanently illegal FF, and tile
+operations a format does not admit (`docs/floating-point.md`). The BIOS
+executes FF on purpose where `PAUSE` or `TASK-YIELD` cannot run (see
+Cooperative Multitasking), and the report names that refusal; it is an
+illegal instruction all the same, with the same code.
 
 Before reporting, the BIOS calls the callback installed with `FAULT-XT!`
 `( xt -- )`, if any, with the fault's standard throw code on the data
@@ -1899,13 +1903,14 @@ return stacks.
 `PAUSE` in a slot would save the slot's stacks as the foreground's,
 `TASK-YIELD` in the foreground would return through a `PAUSE` that is not
 running, and a worker core has no slots, so each of these takes the
-illegal-operation fault instead: the words execute one of the ISA's
-unassigned opcodes, the `FAULT-XT!` callback receives -21, which KDOS throws
-to the innermost `CATCH`, and with no `CATCH` the fault is reported and the
-line, or the worker's job, ends (see Instruction faults). An `ABORT`, an
-uncaught `THROW` or fault, `QUIT`, or a diagnostic that ends a line, such
-as a compile-only word met through `EVALUATE`, in a slot ends the slot
-together with the foreground's line that ran `PAUSE`: `QUIT` runs the `QUIT-XT!` callback while `TASK-ID`
+illegal-operation fault instead: the words execute FF, which the ISA
+reserves as permanently illegal, the `FAULT-XT!` callback receives -21,
+which KDOS throws to the innermost `CATCH`, and with no `CATCH` the fault is
+reported as `PAUSE OR TASK-YIELD REFUSED` and the line, or the worker's job,
+ends (see Instruction faults). An `ABORT`, an uncaught `THROW` or fault,
+`QUIT`, or a diagnostic that ends a line, such as a compile-only word met
+through `EVALUATE`, in a slot ends the slot together with the foreground's
+line that ran `PAUSE`: `QUIT` runs the `QUIT-XT!` callback while `TASK-ID`
 still names the slot, so KDOS clears the slot's `CATCH` chain and the
 foreground's, and then clears the slot's entry, so `TASK-ID` answers 0 and
 the next `PAUSE` finds nothing of the slot to resume. `ABORT` and a fault

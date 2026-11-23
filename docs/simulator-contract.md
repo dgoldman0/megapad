@@ -863,11 +863,12 @@ Both machines refuse the words where they cannot run. `PAUSE` in a slot,
 which would take the running slot's stacks for the foreground's,
 `TASK-YIELD` in the foreground, which would return through a `PAUSE` that is
 not running, and both words on a worker core, which has no slots, take the
-illegal-operation fault, -21 to a `CATCH`; the BIOS's words execute an
-unassigned opcode, so the fault takes the machine's own path. An error,
-`ABORT` or `QUIT` in a slot ends the slot and the foreground's line that
-paused, as the BIOS's `QUIT` ends the slot that was running, and `TASK-ID`
-answers 0 again. After `QUIT` and after an error that
+illegal-operation fault, -21 to a `CATCH`, whose report names the refusal,
+`*** PAUSE OR TASK-YIELD REFUSED CORE=nn`; the BIOS's words execute FF, which
+the ISA reserves as permanently illegal, so the fault takes the machine's
+own path. An error, `ABORT` or `QUIT` in a slot ends the slot and the
+foreground's line that paused, as the BIOS's `QUIT` ends the slot that was
+running, and `TASK-ID` answers 0 again. After `QUIT` and after an error that
 the evaluator raises, such as a compile-only word met through `EVALUATE`,
 the foreground keeps the data stack it had when it paused, as the BIOS's
 `QUIT` and diagnostics give it back. A slot's stack overflow raises the

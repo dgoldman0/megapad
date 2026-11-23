@@ -119,12 +119,12 @@ def test_pause_in_a_slot_and_task_yield_in_the_foreground_fault(executor):
 ' INNER BACKGROUND""")
     with pytest.raises(ForthAbort):
         runtime.evaluate(b"PAUSE")
-    assert runtime.drain_uart_output() == b"\r\n*** ILLEGAL INSTRUCTION CORE=00\r\n"
+    assert runtime.drain_uart_output() == b"\r\n*** PAUSE OR TASK-YIELD REFUSED CORE=00\r\n"
     assert _said(runtime, b"C @ . 1 TASK? . TASK-ID .") == b"1 0 0 "
 
     with pytest.raises(ForthAbort):
         runtime.evaluate(b"TASK-YIELD 2 C !")
-    assert runtime.drain_uart_output() == b"\r\n*** ILLEGAL INSTRUCTION CORE=00\r\n"
+    assert runtime.drain_uart_output() == b"\r\n*** PAUSE OR TASK-YIELD REFUSED CORE=00\r\n"
     assert _cell(runtime, "C") == 1
 
 
@@ -139,7 +139,7 @@ def test_a_worker_that_reaches_pause_or_task_yield_faults(executor):
 : Y-JOB ( -- ) 100 C +! TASK-YIELD 1000 C +! ;""")
     for job in (b"P-JOB", b"Y-JOB"):
         runtime.evaluate(b"' " + job + b" 1 WAKE-CORE 1 WAIT-FOR")
-        assert runtime.drain_uart_output() == b"\r\n*** ILLEGAL INSTRUCTION CORE=01\r\n"
+        assert runtime.drain_uart_output() == b"\r\n*** PAUSE OR TASK-YIELD REFUSED CORE=01\r\n"
     assert _cell(runtime, "C") == 101
     assert runtime.cores.job(1) == 0
 

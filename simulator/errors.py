@@ -66,6 +66,14 @@ class IllegalInstructionFault(InstructionFault):
     throw_code = -21  # unsupported operation
 
 
+class TaskWordRefused(IllegalInstructionFault):
+    """``PAUSE`` or ``TASK-YIELD`` where it cannot run: the illegal-operation
+    fault, -21, that the BIOS's words raise at their reserved ILLEGAL byte
+    and that its report names as their refusal."""
+
+    title = "PAUSE OR TASK-YIELD REFUSED"
+
+
 class DivideByZeroFault(InstructionFault):
     """The machine raises ``IVEC_DIV_ZERO`` (zero divisor or overflow)."""
 
@@ -131,4 +139,5 @@ __all__ = [
     "SimulatorError",
     "SourceError",
     "StepBudgetExceeded",
+    "TaskWordRefused",
 ]
