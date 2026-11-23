@@ -452,16 +452,6 @@ def create_address_space(
     return memory
 
 
-def create_one_core_address_space(**options) -> SparseAddressSpace:
-    """:func:`create_address_space` for one full core.
-
-    A bridge for Akashic's callers, which move to the general factory in
-    their own repository; MegaPad's callers already use it.
-    """
-
-    return create_address_space(topology=ONE_CORE, **options)
-
-
 __all__ = [
     "BOARD_ID_VERSION",
     "HOSTED_CRYPTO_CAPABILITIES",
@@ -484,5 +474,4 @@ __all__ = [
     "SysInfoAccessError",
     "Topology",
     "create_address_space",
-    "create_one_core_address_space",
 ]
