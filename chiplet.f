@@ -157,6 +157,19 @@ VARIABLE CHIP-DEADLINE   100 CHIP-DEADLINE !
 \  one twice the size of all before it.  A block, such as one of managed
 \  data's heap blocks, is a chunk of its own, which can go back alone.
 \  The port's lent ranges bound how many chunks a port holds at once.
+\
+\  One port holds the growing region instead, for what it lends for
+\  reading and writing once it has asked for it (CHIP-REGION).  The region
+\  lies at the top of external memory, is lent as one range, and grows
+\  down by lowering KDOS's XMEM-LIMIT, so only memory bounds it.  KDOS's
+\  allocator grows up from below, which leaves room for only one region
+\  to grow in place, so only one port can hold it.  The port's read-write
+\  chunks and blocks are then pieces of the region: a new piece takes a
+\  gap a returned one left, or the region grows by it, and as pieces go
+\  back the region shrinks to its lowest piece.  The region's range spans
+\  its gaps, so a returned piece stays open to the chiplet until a piece
+\  of the same port takes it again, zeroed, or the region shrinks past it.
+\  What MegaPad lends for reading keeps its chunks, one range each.
 
 \ Zeroed external memory of MegaPad's own, never lent.  KDOS's allocator
 \ holds HEAP-LOCK while it changes its state, so any core may take memory
@@ -172,16 +185,31 @@ VARIABLE CHIP-DEADLINE   100 CHIP-DEADLINE !
 6 CONSTANT CK.LIMIT  7 CONSTANT CK.HERE   8 CONSTANT CK.RAW
 9 CONSTANT CK.KIND                        \ 0 an arena, 1 a block
 
+\ The chunk table: an entry for each range of each port at first, and
+\ twice as many whenever the region's pieces fill it.  Its users hold
+\ CHIP-LOCK.
 VARIABLE _CHUNKS     0 _CHUNKS !
-: _CHUNK-N  ( -- n )   CHIP-PORTS CHIP-RANGES * ;
+VARIABLE _CHUNK-CAP  0 _CHUNK-CAP !
+: _CHUNK-N  ( -- n )   _CHUNK-CAP @ ;
 : _CHUNK    ( i -- addr )   _CK * _CHUNKS @ + ;
 : CK@  ( chunk field -- x )   CELLS + @ ;
 : CK!  ( x chunk field -- )   CELLS + ! ;
 
 : _CHUNKS-READY  ( -- ior )
     _CHUNKS @ IF 0 EXIT THEN
-    _CHUNK-N 1 MAX _CK * _CHIP-PRIVATE ?DUP IF NIP EXIT THEN
-    _CHUNKS ! 0 ;
+    CHIP-PORTS CHIP-RANGES * 1 MAX DUP _CK * _CHIP-PRIVATE ?DUP IF NIP NIP EXIT THEN
+    _CHUNKS ! _CHUNK-CAP ! 0 ;
+
+: _CHUNKS-GROW  ( -- ior )
+    _CHUNK-CAP @ 2* DUP _CK * _CHIP-PRIVATE ?DUP IF NIP NIP EXIT THEN
+    _CHUNKS @ OVER _CHUNK-CAP @ _CK * MOVE
+    _CHUNKS @ _CHUNK-CAP @ _CK * XMEM-FREE-BLOCK
+    _CHUNKS ! _CHUNK-CAP ! 0 ;
+
+\ The growing region: the port that holds it, or -1; its range; and its
+\ span [_RG-BASE, _RG-TOP), whose base is KDOS's XMEM-LIMIT.
+VARIABLE _RG-PORT   -1 _RG-PORT !
+VARIABLE _RG-SLOT   VARIABLE _RG-BASE   VARIABLE _RG-TOP
 
 \ Each port's image slot while it boots, or -1.
 CREATE _CHIP-IMAGE-SLOT  CHIP-PORTS 1 MAX CELLS ALLOT
@@ -189,6 +217,7 @@ _CHIP-IMAGE-SLOT CHIP-PORTS 1 MAX CELLS -1 FILL
 
 : _SLOT-USED?  ( slot port -- flag )
     2DUP CELLS _CHIP-IMAGE-SLOT + @ = IF 2DROP TRUE EXIT THEN
+    2DUP _RG-PORT @ = SWAP _RG-SLOT @ = AND IF 2DROP TRUE EXIT THEN
     _CHUNK-N 0 ?DO
         I _CHUNK DUP CK.USED CK@ IF
             DUP CK.PORT CK@ 2 PICK = SWAP CK.SLOT CK@ 3 PICK = AND IF
@@ -222,18 +251,108 @@ _CHIP-IMAGE-SLOT CHIP-PORTS 1 MAX CELLS -1 FILL
 VARIABLE _NEW-SIZE   VARIABLE _NEW-RIGHTS   VARIABLE _NEW-OWNER
 VARIABLE _NEW-PORT   VARIABLE _NEW-KIND
 
-\ A new chunk of _NEW-SIZE bytes, 64-byte aligned, zeroed and lent.  The
-\ caller holds CHIP-LOCK.
+\ ---- The growing region; its words' callers hold CHIP-LOCK ----
+
+\ Whether CHUNK is a piece of the region.
+: _RG-PIECE?  ( chunk -- flag )
+    DUP CK.PORT CK@ _RG-PORT @ = SWAP CK.SLOT CK@ _RG-SLOT @ = AND ;
+
+\ Whether [A, A+U) meets a piece of the region.
+: _RG-MEETS?  ( a u -- flag )
+    OVER + SWAP
+    _CHUNK-N 0 ?DO
+        I _CHUNK DUP CK.USED CK@ OVER _RG-PIECE? AND IF
+            DUP CK.BASE CK@ 3 PICK U< SWAP CK.LIMIT CK@ 2 PICK U> AND IF
+                2DROP TRUE UNLOOP EXIT
+            THEN
+        ELSE DROP THEN
+    LOOP 2DROP FALSE ;
+
+\ U bytes in a gap of the region, tried at its base and above each piece,
+\ or 0.
+: _RG-FIT  ( u -- addr | 0 )
+    _RG-BASE @ OVER + _RG-TOP @ U> 0= IF
+        _RG-BASE @ OVER _RG-MEETS? 0= IF DROP _RG-BASE @ EXIT THEN
+    THEN
+    _CHUNK-N 0 ?DO
+        I _CHUNK DUP CK.USED CK@ OVER _RG-PIECE? AND IF
+            CK.LIMIT CK@
+            2DUP + _RG-TOP @ U> 0= IF
+                2DUP SWAP _RG-MEETS? 0= IF NIP UNLOOP EXIT THEN
+            THEN DROP
+        ELSE DROP THEN
+    LOOP DROP 0 ;
+
+\ Lend the region as it now lies, in one step.
+: _RG-LEND  ( -- )
+    _RG-BASE @ _RG-TOP @ CHIP-READ-WRITE _RG-SLOT @ _RG-PORT @ _CHIP-RANGE! ;
+
+\ Grow the region down by U bytes and lend it again: the new piece's
+\ address, or 0 when KDOS's allocator has not U bytes to spare below it.
+: _RG-GROW  ( u -- addr | 0 )
+    _XMEM-ACQUIRE
+    XMEM-LIMIT @ _RG-BASE @ <>  OVER XMEM-LIMIT @ XMEM-HERE @ - U>  OR IF
+        _XMEM-RELEASE DROP 0 EXIT
+    THEN
+    XMEM-LIMIT @ SWAP - DUP XMEM-LIMIT !  _XMEM-RELEASE
+    DUP _RG-BASE !  _RG-LEND ;
+
+\ Once a piece has gone back: raise the region's base to its lowest piece,
+\ giving the memory below back to KDOS, and withdraw the range of a
+\ region that holds no piece.  The port keeps the region.
+: _RG-SHRINK  ( -- )
+    _RG-TOP @
+    _CHUNK-N 0 ?DO
+        I _CHUNK DUP CK.USED CK@ OVER _RG-PIECE? AND IF CK.BASE CK@ MIN ELSE DROP THEN
+    LOOP
+    DUP _RG-BASE @ = IF DROP EXIT THEN
+    _XMEM-ACQUIRE DUP XMEM-LIMIT ! _XMEM-RELEASE
+    DUP _RG-BASE !
+    _RG-TOP @ = IF 0 0 0 _RG-SLOT @ _RG-PORT @ _CHIP-RANGE! ELSE _RG-LEND THEN ;
+
+\ Place CHUNK, the one being made, in the region: in a gap, or where the
+\ region grows by it.
+: _RG-PLACE  ( chunk -- chunk ior )
+    _NEW-SIZE @ _RG-FIT ?DUP 0= IF _NEW-SIZE @ _RG-GROW THEN
+    ?DUP 0= IF DROP 0 CHIP-E-NOMEM EXIT THEN
+    OVER CK.BASE CK!
+    DUP CK.BASE CK@ OVER CK.RAW CK!
+    _RG-SLOT @ OVER CK.SLOT CK!  0 ;
+
+\ Give PORT the growing region for what it lends for reading and writing
+\ from now on.  One port holds it, and keeps it; CHIP-E-NOMEM when another
+\ port holds it or no range is free.
+: CHIP-REGION  ( port -- ior )
+    CHIP-LOCK LOCK
+    _CHUNKS-READY ?DUP IF NIP CHIP-LOCK UNLOCK EXIT THEN
+    _RG-PORT @ 0< 0= IF
+        _RG-PORT @ = IF 0 ELSE CHIP-E-NOMEM THEN CHIP-LOCK UNLOCK EXIT
+    THEN
+    DUP _FREE-SLOT DUP 0< IF 2DROP CHIP-LOCK UNLOCK CHIP-E-NOMEM EXIT THEN
+    _RG-SLOT !  _RG-PORT !
+    _XMEM-ACQUIRE XMEM-LIMIT @ _XMEM-RELEASE DUP _RG-BASE ! _RG-TOP !
+    CHIP-LOCK UNLOCK 0 ;
+
+\ A new chunk of _NEW-SIZE bytes, 64-byte aligned, zeroed and lent: a
+\ piece of the region for a port that holds it and rights to read and
+\ write, otherwise memory of its own lent as one range.  The caller holds
+\ CHIP-LOCK.
 : _CHUNK-MAKE  ( -- chunk ior )
     _CHUNKS-READY ?DUP IF 0 SWAP EXIT THEN
-    _FREE-CHUNK ?DUP 0= IF 0 CHIP-E-NOMEM EXIT THEN
-    _NEW-PORT @ _FREE-SLOT DUP 0< IF 2DROP 0 CHIP-E-NOMEM EXIT THEN
-    ( chunk slot )
-    _NEW-SIZE @ 64 + XMEM-ALLOT? IF 2DROP DROP 0 CHIP-E-NOMEM EXIT THEN
-    ( chunk slot raw )
-    2 PICK CK.RAW CK!
-    OVER CK.SLOT CK!
-    DUP CK.RAW CK@ 63 + -64 AND OVER CK.BASE CK!
+    _FREE-CHUNK ?DUP 0= IF
+        _CHUNKS-GROW ?DUP IF 0 SWAP EXIT THEN  _FREE-CHUNK
+    THEN
+    _NEW-RIGHTS @ CHIP-READ-WRITE = _NEW-PORT @ _RG-PORT @ = AND IF
+        _RG-PLACE ?DUP IF EXIT THEN
+    ELSE
+        _NEW-PORT @ _FREE-SLOT DUP 0< IF 2DROP 0 CHIP-E-NOMEM EXIT THEN
+        ( chunk slot )
+        _NEW-SIZE @ 64 + XMEM-ALLOT? IF 2DROP DROP 0 CHIP-E-NOMEM EXIT THEN
+        ( chunk slot raw )
+        2 PICK CK.RAW CK!
+        OVER CK.SLOT CK!
+        DUP CK.RAW CK@ 63 + -64 AND OVER CK.BASE CK!
+    THEN
     DUP CK.BASE CK@ _NEW-SIZE @ + OVER CK.LIMIT CK!
     DUP CK.BASE CK@ OVER CK.HERE CK!
     _NEW-PORT @ OVER CK.PORT CK!
@@ -242,11 +361,16 @@ VARIABLE _NEW-PORT   VARIABLE _NEW-KIND
     _NEW-KIND @ OVER CK.KIND CK!
     DUP CK.BASE CK@ _NEW-SIZE @ 0 FILL
     TRUE OVER CK.USED CK!
-    DUP CK.BASE CK@ OVER CK.LIMIT CK@ 2 PICK CK.RIGHTS CK@
-    3 PICK CK.SLOT CK@ 4 PICK CK.PORT CK@ _CHIP-RANGE!
+    DUP _RG-PIECE? 0= IF
+        DUP CK.BASE CK@ OVER CK.LIMIT CK@ 2 PICK CK.RIGHTS CK@
+        3 PICK CK.SLOT CK@ 4 PICK CK.PORT CK@ _CHIP-RANGE!
+    THEN
     0 ;
 
-: _CHUNK-DROP  ( chunk -- )   \ the caller holds CHIP-LOCK
+\ A piece of the region goes back to the region; any other chunk is
+\ withdrawn and goes back to KDOS.  The caller holds CHIP-LOCK.
+: _CHUNK-DROP  ( chunk -- )
+    DUP _RG-PIECE? IF _CK 0 FILL _RG-SHRINK EXIT THEN
     DUP CK.SLOT CK@ OVER CK.PORT CK@ >R >R 0 0 0 R> R> _CHIP-RANGE!
     DUP CK.RAW CK@ OVER CK.LIMIT CK@ 2 PICK CK.BASE CK@ - 64 + XMEM-FREE-BLOCK
     _CK 0 FILL ;
@@ -312,13 +436,14 @@ VARIABLE _NEW-PORT   VARIABLE _NEW-KIND
 
 \ The bytes OWNER holds lent on PORT, its blocks included.
 : CHIP-LENT-BYTES  ( owner port -- u )
-    0 _CHUNKS @ 0= IF NIP NIP EXIT THEN
-    _CHUNK-N 0 ?DO
+    CHIP-LOCK LOCK
+    0 _CHUNK-N 0 ?DO
         I _CHUNK DUP CK.USED CK@ OVER CK.PORT CK@ 4 PICK = AND
         OVER CK.OWNER CK@ 5 PICK = AND IF
             DUP CK.LIMIT CK@ SWAP CK.BASE CK@ - +
         ELSE DROP THEN
-    LOOP NIP NIP ;
+    LOOP NIP NIP
+    CHIP-LOCK UNLOCK ;
 
 \ =====================================================================
 \  Queues and queue pairs (docs/chiplet-link.md section 8)
@@ -1214,8 +1339,12 @@ VARIABLE _GR-LEN
 VARIABLE _OF-ENTRY   VARIABLE _OF-PAIR   VARIABLE _OF-MEM   VARIABLE _OF-LEN
 
 \ The grant's pair, the shared heap's first block, and the records of
-\ section 9, all in the function's own lendable memory.
+\ section 9, all in the function's own lendable memory.  The port takes
+\ the growing region first, so that what LM1 writes, the heap's blocks
+\ among it, grows as far as memory allows; a port that cannot have it
+\ lends from chunks.
 : _OBJ-BUILD  ( -- ior )
+    _OBJ-PORT @ CHIP-REGION DROP
     _OF-ENTRY @ E.ARG1 E@ 0xFFFFFFFF AND 2 MAX _NEXT-POW2 DUP
     COREID _OBJ-OWNER _OBJ-PORT @ CHIP-PAIR-MAKE ?DUP IF NIP EXIT THEN
     DUP _OBJ-GRANT !
@@ -1376,9 +1505,9 @@ VARIABLE _RU-HOLD   VARIABLE _RU-MOVE
     0 _OBJ-BL @ DUP @ 0 ?DO DUP I 16 * 24 + + @ ROT + SWAP LOOP DROP ;
 
 \ A new block for the stand-in, of at least BYTES and at least the heap so
-\ far, so that its blocks stay few as LM1's GROW keeps them: taken from
-\ KDOS's allocator for lendable memory, and named on the block list before
-\ any region in it is granted.  The caller holds OBJ-LOCK.
+\ far, so that its blocks stay few as LM1's GROW keeps them: a piece of the
+\ port's growing region, named on the block list before any region in it
+\ is granted.  The caller holds OBJ-LOCK.
 : _SI-BLOCK  ( bytes -- ior )
     _OBJ-HEAP-BYTES MAX _ROUND64 >R
     R@ _OBJ-OWNER _OBJ-PORT @ CHIP-LEND-BLOCK IF DROP R> DROP OBJ-E-NOMEM EXIT THEN

@@ -592,10 +592,11 @@ Lisp by them.
 ## 9. Records in lent memory
 
 The chiplet module keeps its records in lendable memory, lent to LM1 with
-the rights below. As with the link's queues, each record lies in memory that
-only its writer can write ([chiplet-link.md](chiplet-link.md) §8), except
-the handle table and the shared heap, which both chips write under the
-window protocol.
+the rights below; those lent for reading and writing lie in the port's
+growing region (§10). As with the link's queues, each record lies in memory
+that only its writer can write ([chiplet-link.md](chiplet-link.md) §8),
+except the handle table and the shared heap, which both chips write under
+the window protocol.
 
 | Record | Written by | Lent to LM1 for |
 |--------|------------|-----------------|
@@ -826,9 +827,37 @@ other, so a core sends it outside a window.
 
 The shared heap grows in the blocks that `GROW` obtains. LM1 asks for blocks
 that each at least double the heap so far, so a handful of blocks covers any
-size, and KDOS's allocator for lendable memory
-([chiplet-interconnect-plan.md](chiplet-interconnect-plan.md) §9) keeps
-them within the port's lent ranges.
+size, and the port's growing region holds them, so only memory bounds the
+heap.
+
+### Lendable memory
+
+`chiplet.f` lends what MegaPad alone writes from chunks of external memory,
+each lent as one of the port's ranges, an owner's records carved from its
+chunks and each new chunk twice the size of the owner's before it. What LM1
+writes lies in the port's **growing region** instead: LM1's block, the
+handle table's segments, the parts of the pairs that LM1 writes, and the
+shared heap's blocks, the stand-in's among them. The region sits at the top
+of external memory and grows down. A new piece takes a gap that a returned
+one left, or lowers KDOS's `XMEM-LIMIT` by its size, and the region's one
+range is installed again with its new base, which the port's models and RTL
+do in one step ([chiplet-link.md](chiplet-link.md) §3). A block that goes
+back leaves a gap for the next piece that fits, and the region shrinks to
+its lowest piece, giving the memory below it back to KDOS. The region's
+range spans its gaps, so a returned block stays open to LM1 until a piece of
+the same port takes it, zeroed, or the region shrinks past it.
+
+Decided 2026-11-23. Before, each heap block took a range of its own, and
+with eight ranges, of which the control queues and the function's records
+held four, a heap that grows by doubling stopped at about sixteen times its
+first block. Only one port can have a growing region: KDOS's allocator for
+external memory grows up from below, so a region can grow in place only at
+the top of external memory, and only one fits there. Managed data's port
+takes it when LM1 offers the function, and the read-write memory a function
+of another port uses keeps its chunks, bounded by that port's ranges.
+MegaPad's read-only records keep their chunks too: they grow slowly, each
+chunk twice the last, so the ranges left beside the control queues and the
+region give them ample room, and read-only and read-write memory stay apart.
 
 A doorbell keeps its meaning, "look at your queues", and the hold word is
 one more place to look:
@@ -1081,8 +1110,8 @@ module has stopped LM1 (§11), the stand-in:
    zero, with a region in a new block, which it adds to the block list
    first, and never grants free space in the blocks LM1 managed; a core
    keeps the region it already holds until it next takes one. It takes
-   each new block from KDOS's allocator for lendable memory, and keeps the
-   blocks few, as LM1 does with `GROW` (§10), each at least as large as
+   each new block from the port's growing region (§10), and keeps the
+   blocks few, as LM1 does with `GROW`, each at least as large as
    the heap so far, since a restarted LM1 installs each block as a range
    (LM1's `spec/05-memory-gc.md` §12.1).
 2. **Ends an interrupted hold.** Where the rule says so, it stores `HOLD`
@@ -1522,29 +1551,6 @@ Lose branches:
   which §4 fixes only how they name objects, belong to the link's layer for
   jobs, which is still to specify. That layer also says how a task that
   LM1's failure ends is reported (§13).
-- **Lendable memory.** `chiplet.f` lends each owner's records from chunks
-  of external memory, each chunk lent as one of the port's ranges and each
-  new one twice the size of the owner's before it, and gives every heap
-  block a chunk of its own, so that `RETURN` gives one back alone; the
-  stand-in's blocks take chunks the same way. The port's lent ranges,
-  eight by default, therefore bound the chunks: after boot the control
-  queues hold two and the function's records two, and the first heap block
-  lies in the function's chunk, which leaves four for heap blocks and
-  growing records. A heap that grows by doubling reaches about sixteen
-  times its first block before `GROW` is refused. Decided 2026-11-23: a
-  port lends from one region per kind of access, read-only and read-write,
-  whose range is installed again with new limits as the region grows,
-  instead of a range for each chunk, so that the heap grows as far as
-  memory allows; read-only and read-write memory stay apart, and a block
-  goes back through the allocator inside its region. The port's models and
-  RTL install a range's base and limit together in one step, so a region's
-  range can grow in place. Not built: where the regions lie is still to
-  settle. KDOS's allocator for external memory grows up from below, so a
-  region can grow in place only at the top of external memory, by lowering
-  `XMEM-LIMIT`, and only one region can lie there; the other region, and
-  each further port's, has room to grow only in memory set aside for it
-  ahead of its need, or in further ranges
-  ([chiplet-interconnect-plan.md](chiplet-interconnect-plan.md) §10).
 - **Re-binding word values** (stage 2). Word values that carry LM1's
   compiled entry depend on LM1's private state, like closures and symbols,
   so their kinds are entered as ones a restarted LM1 cannot adopt (§9). A

@@ -1087,6 +1087,80 @@ def test_allocation_from_two_cores(backend):
 
 
 # ---------------------------------------------------------------------------
+#  Lendable memory: the growing region
+# ---------------------------------------------------------------------------
+#
+#  Managed data's port holds the growing region (chiplet.f, CHIP-REGION):
+#  what it lends for reading and writing, the heap's blocks among it, lies
+#  at the top of external memory in one range that grows down.  Before,
+#  each block took a range of its own, and with the port's eight ranges a
+#  heap that doubles stopped at about sixteen times its first block.
+
+# Whether every block on the block list lies in the region.
+IN_REGION = (": IN-REGION ( -- flag ) TRUE _OBJ-BL @ DUP @ 0 ?DO "
+             "DUP I 16 * 16 + + @ _RG-BASE @ U< IF NIP FALSE SWAP THEN "
+             "DUP I 16 * 16 + + DUP @ SWAP 8 + @ + _RG-TOP @ U> IF NIP FALSE SWAP THEN "
+             "LOOP DROP ;")
+# The port's lent ranges in use.
+RANGES_USED = ": RANGES-USED ( -- n ) 0 CHIP-RANGES 0 ?DO I 0 _SLOT-USED? IF 1+ THEN LOOP ;"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_lending_the_heap_grows_past_sixteen_first_blocks(backend):
+    """With a 16 KiB first block, core 0 links 40 vectors of 4096 elements,
+    32 KiB each, into a chain that a handle holds.  The heap grows past
+    sixty-four times its first block, four times the old cap, while the
+    port uses at most five ranges.  Every block lies in the region, whose
+    base is KDOS's XMEM-LIMIT, and after a moving collection the whole
+    chain is still there and LM1 still serves.
+
+    Each vector takes a REGION request of its own.  LM1's chiplet module
+    doubles a core's next region size at each request after an epoch's
+    first, without bound, so some fifty-odd such requests wrap the size to
+    zero, and the empty region it then grants is corrupt to MegaPad; forty
+    stay clear of that."""
+    machine = ready(backend, "heap_block=0x4000")
+    got = machine.run([
+        IN_REGION,
+        RANGES_USED,
+        # The chain's tail is a vector whose field 1 is nil.
+        ": START-CHAIN OBJ-OPEN THROW OBJ-NIL 4 OBJ-VECTOR THROW 1 1 OBJ-HANDLE THROW H ! "
+        "OBJ-CLOSE ; START-CHAIN",
+        ": LINK ( -- ) OBJ-OPEN THROW H @ OBJ-GET THROW OBJ-NIL 4096 OBJ-VECTOR THROW "
+        "TUCK 1 OBJ! THROW H @ OBJ-SET THROW OBJ-CLOSE ;",
+        ": CHAIN ( -- n ) OBJ-OPEN THROW 0 H @ OBJ-GET THROW "
+        "BEGIN 1 OBJ@ DUP OBJ-NIL <> WHILE OBJ>REF THROW SWAP 1+ SWAP REPEAT DROP OBJ-CLOSE ;",
+        ": LINKS ( n -- ) 0 ?DO LINK LOOP ; 40 LINKS CHAIN REPORT",
+        "_OBJ-HEAP-BYTES 64 0x4000 * > REPORT RANGES-USED 6 < REPORT",
+        "_RG-PORT @ REPORT XMEM-LIMIT @ _RG-BASE @ = REPORT IN-REGION REPORT",
+        "2 OBJ-COLLECT REPORT CHAIN REPORT IN-REGION REPORT OBJ-ENGINE REPORT REPORT",
+    ])
+    assert got == [40, -1, -1, 0, -1, -1, 0, 40, -1, 0, 1]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_lending_the_region_reuses_and_shrinks(backend):
+    """Three blocks lent on the region's port lie each below the one before,
+    the region's base following them down.  A block given back leaves a gap
+    the next block of its size takes; the lowest given back, the region
+    shrinks to the block above it, and once the owner's memory is all back
+    XMEM-LIMIT stands where it did.  Only one port holds the region."""
+    machine = ready(backend)
+    got = machine.run([
+        "VARIABLE A1 VARIABLE A2 VARIABLE A3 VARIABLE TOP0  XMEM-LIMIT @ TOP0 !",
+        ": LB ( -- addr ) 4096 77 0 CHIP-LEND-BLOCK THROW ;",
+        "LB A1 ! LB A2 ! LB A3 !",
+        "A1 @ A2 @ - REPORT A2 @ A3 @ - REPORT XMEM-LIMIT @ A3 @ = REPORT "
+        "TOP0 @ XMEM-LIMIT @ - REPORT",
+        "A2 @ 0 CHIP-UNLEND-BLOCK LB A2 @ = REPORT",
+        "A3 @ 0 CHIP-UNLEND-BLOCK XMEM-LIMIT @ A2 @ = REPORT",
+        "77 0 CHIP-UNLEND-OWNER XMEM-LIMIT @ TOP0 @ = REPORT",
+        "0 CHIP-REGION REPORT 1 CHIP-REGION REPORT",
+    ])
+    assert got == [4096, 4096, -1, 3 * 4096, -1, -1, -1, 0, -1004]
+
+
+# ---------------------------------------------------------------------------
 #  Recovery's stage 0: the order of a moving hold's writes
 # ---------------------------------------------------------------------------
 
