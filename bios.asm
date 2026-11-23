@@ -14,7 +14,8 @@
 ;  --------------------
 ;    R0  = scratch / CSR operand      (CSR-capable: R0-R7)
 ;    R1  = scratch / argument
-;    R2  = ram_size (set by boot, preserved)
+;    R2  = this core's stack zone top (set by boot, preserved); on
+;          core 0 the top of the RAM the BIOS uses
 ;    R3  = PC  (PSEL=3)
 ;    R4  = subroutine: emit_char
 ;    R5  = subroutine: key_char (blocking)
@@ -63,12 +64,39 @@
 ;    Core 1:  RSP=0xF0000   DSP=0xE8000  (64 KiB zone, split 32K/32K)
 ;    Core 2:  RSP=0xE0000   DSP=0xD8000
 ;    Core 3:  RSP=0xD0000   DSP=0xC8000
+;
+;  Boot derives them from COREID and System Info, since every register is
+;  zero at reset.  Full core n's zone top, kept in R2, is T - n * 64 KiB,
+;  where T is Bank 0's size or 1 MiB, whichever is smaller.  Core 0's
+;  return stack starts at T and its data stack at T / 2; a worker's return
+;  stack starts at its zone top and its data stack 32 KiB below.
 ; =====================================================================
 
 ; === Entry point (address 0x0000) ===
 boot:
-    ; ---- Multicore gate: route secondary cores away ----
     csrr r0, 0x20                       ; R0 = COREID (CSR 0x20)
+
+    ; ---- This full core's zone top in R2 (see the stack layout above) ----
+    ; Microcores keep R2 as reset left it: their stacks and entry come with
+    ; the kernel contract.
+    ldi64 r11, 0xFFFF_FF00_0000_0348    ; SysInfo NUM_FULL
+    ldn r1, r11
+    cmp r0, r1
+    brcs .boot_gate                     ; C=1: COREID >= NUM_FULL
+    ldi64 r11, 0xFFFF_FF00_0000_0308    ; SysInfo BANK0_SIZE
+    ldn r2, r11
+    ldi64 r11, 0x100000
+    cmp r2, r11
+    brcc .boot_zone_top                 ; C=0: Bank 0 is below 1 MiB
+    mov r2, r11
+.boot_zone_top:
+    mov r1, r0
+    ldi r7, 16
+    shl r1, r7                          ; COREID * 64 KiB
+    sub r2, r1
+
+    ; ---- Multicore gate: route secondary cores away ----
+.boot_gate:
     cmpi r0, 0
     breq .boot_primary_core
     ; The BIOS now exceeds LBR's signed 16-bit reach.  Transfer through R10,
@@ -78,10 +106,10 @@ boot:
 .boot_primary_core:
 
     ; ---- Core 0 continues normal BIOS boot ----
-    ; R15 = RSP = ram top
+    ; R15 = RSP = zone top
     mov r15, r2
 
-    ; DSP = ram_size / 2  (data stack grows down from here)
+    ; DSP = zone top / 2  (data stack grows down from here)
     mov r14, r2
     lsri r14, 1
 
@@ -457,6 +485,14 @@ boot_bad_core_topology:
 ;  QUIT — the outer interpreter
 ; =====================================================================
 forth_quit:
+    ; The outer interpreter and the terminal are core 0's: QUIT on a worker
+    ; ends its job (worker_quit, which never returns).
+    csrr r0, 0x20
+    cmpi r0, 0
+    breq .forth_quit_core0
+    ldi64 r11, worker_quit
+    call.l r11
+.forth_quit_core0:
     ; Reset RSP to top of RAM each time
     mov r15, r2
     ; Whatever the abandoned return stack held is gone.  ABORT, ABORT" and
@@ -860,10 +896,11 @@ idle_until:
     or r7, r0
     st.b r11, r7
     idl
-    ; Acknowledge each pending IPI sender.  R0 and R7 are reloaded below.
-    ldi64 r11, 0xFFFF_FF00_0000_0509   ; MBOX_STATUS
-    ld.b r0, r11                ; pending sender mask
-    ldi r7, 0                   ; sender core ID
+    ; Acknowledge each pending IPI sender, from the whole mask CSR MBOX
+    ; gives: a chiplet port's ID can lie above the 8 IDs MBOX_STATUS
+    ; shows.  R0 and R7 are reloaded below.
+    csrr r0, 0x22               ; pending sender mask
+    ldi r7, 0                   ; sender ID
 .iu_ack:
     cmpi r0, 0
     breq .iu_acked
@@ -11390,8 +11427,15 @@ w_talign:
 w_talign_done:
     ret.l
 
-; ABORT ( -- ) clear stacks, return to REPL
+; ABORT ( -- ) clear stacks, return to REPL.  On a worker it ends the job
+; instead (worker_quit): the REPL and the EVALUATE depth are core 0's.
 w_abort:
+    csrr r0, 0x20
+    cmpi r0, 0
+    breq .w_abort_core0
+    ldi64 r11, worker_quit
+    call.l r11                ; never returns
+.w_abort_core0:
     mov r14, r2               ; reset DSP to ram_size
     lsri r14, 1               ; DSP = ram_size / 2
     mov r15, r2               ; reset RSP to ram_size
@@ -14610,9 +14654,9 @@ priv_fault_handler:
 ;  the fault, the address for an alignment fault, the PC after the faulting
 ;  instruction, and the core ID.  Core 0 then recovers as an undefined word
 ;  does, with clean stacks: interpret STATE, a closed temporary IF block,
-;  the EVALUATE depth reset, and the prompt.  A worker core clears its
-;  worker slot so CORE-STATUS reports it idle, resets its stacks, and
-;  returns to its idle loop.
+;  the EVALUATE depth reset, and the prompt.  A worker core ends its job
+;  as its aborts do (worker_quit): its own stacks, the QUIT-XT! callback,
+;  a cleared slot so CORE-STATUS reports it idle, and its idle loop.
 ;
 ;  R9 carries the fault kind, an index into fault_names and fault_codes.
 ;
@@ -14711,7 +14755,7 @@ fault_report:
 fault_recover:
     csrr r0, 0x20
     cmpi r0, 0
-    lbrne .fault_worker
+    lbrne worker_quit                 ; a worker ends its job
 
     ; ---- Core 0: back to the prompt ----
     ldi r1, 0
@@ -14723,18 +14767,31 @@ fault_recover:
     call.l r11
     halt
 
-.fault_worker:
-    ; ---- Worker core: end the job and idle ----
-    ldi r1, 3
-    shl r0, r1                        ; core_id * 8
-    ldi64 r11, worker_xt_table
-    add r11, r0
-    ldi r1, 0
-    str r11, r1                       ; worker_xt[core_id] = 0
+; A worker's job ends here when it faults, aborts or quits: ABORT, ABORT"
+; and QUIT on a worker come here in place of core 0's prompt, and the
+; interpreter state they reset on core 0 stays core 0's.  The worker takes
+; its own stacks again, and the callback installed with QUIT-XT! runs on
+; them, as forth_quit runs it on core 0: KDOS clears this core's exception
+; chain, whose frames died with the abandoned return stack.  The worker
+; then clears its slot, so CORE-STATUS reports it idle, enables interrupts
+; and returns to its idle loop.
+worker_quit:
     mov r15, r2                       ; RSP = zone top
     mov r14, r2
     ldi64 r11, 0x8000
     sub r14, r11                      ; DSP = zone top - 0x8000
+    ldi64 r11, var_quit_xt
+    ldn r11, r11
+    cmpi r11, 0
+    breq .worker_quit_slot
+    call.l r11
+.worker_quit_slot:
+    csrr r0, 0x20
+    lsli r0, 3                        ; core_id * 8
+    ldi64 r11, worker_xt_table
+    add r11, r0
+    ldi r1, 0
+    str r11, r1                       ; worker_xt[core_id] = 0
     ei
     lbr secondary_idle_loop
 
@@ -15594,9 +15651,14 @@ w_resize_request:
 ;  jump here, set up their per-core stacks, install the IVT, enable
 ;  interrupts, and enter IDL waiting for an IPI.
 ;
-;  The IPI handler reads the 64-bit message from the mailbox (an XT to
-;  execute).  If the XT is non-zero the worker loop calls it.  When it
-;  returns the core re-enters IDL.
+;  The IPI handler takes a job only from a full core: the 64-bit message
+;  (an XT to execute) that the mailbox copied from the sender's data word.
+;  Any other signal, a chiplet port's doorbell or a microcore's, is a
+;  wake-up that tells the worker to look at its queues.  The handler
+;  acknowledges every sender pending when it ran, so no signal it has seen
+;  can take it straight back.  If the worker's slot then holds an XT, the
+;  worker loop calls it.  When the job returns, faults, aborts or quits,
+;  the core clears its slot and re-enters IDL.
 ;
 ;  Per-core stack layout (within each core's 64 KiB zone):
 ;    RSP = zone top (R15, grows down)
@@ -15621,7 +15683,7 @@ secondary_core_entry:
     sep r3
 .secondary_core_body:
     ; ---- Set per-core stacks ----
-    ; R2 is already set to per-core stack top by the system
+    ; Boot left this core's zone top in R2.
     ; RSP = R2 (return stack at top of zone)
     mov r15, r2
     ; DSP = R2 - 0x8000 (data stack in lower half of zone)
@@ -15714,10 +15776,16 @@ secondary_idle_loop:
 ; =====================================================================
 ;  IPI Interrupt Handler (IVT slot 8)
 ; =====================================================================
-;  Called when this core receives an inter-processor interrupt.
-;  Reads the mailbox to find who sent the IPI, extracts the 64-bit
-;  message (an XT), stores it in worker_xt_table, ACKs the IPI,
-;  and returns.  The secondary_idle_loop picks up the XT.
+;  Called when this core receives an inter-processor interrupt.  CSR MBOX
+;  gives the whole pending mask, one bit for each participant: the full
+;  cores are IDs 0 to NUM_FULL - 1, the microcores and chiplet ports follow.
+;  When a full core is among the senders, the job is the 64-bit message
+;  (an XT) the mailbox copied into this core's data word, and it goes into
+;  worker_xt_table for secondary_idle_loop to pick up.  Every other signal
+;  is a wake-up.  The handler then acknowledges each sender in the mask it
+;  read, the job's and the wake-ups' alike, and returns.  The IPI line
+;  stays raised while any signal is pending, so a sender left pending would
+;  take the core straight back into this handler.
 ;
 ;  Core 0 runs the Forth REPL with interrupts masked, so this handler
 ;  does not run there: an IPI to core 0 is a wake-up that idle_until
@@ -15738,77 +15806,55 @@ ipi_handler:
     subi r15, 8
     str r15, r12
 
-    ; ---- Read MBOX_STATUS to find which core(s) sent us an IPI ----
-    ldi64 r11, 0xFFFF_FF00_0000_0509    ; MBOX_STATUS
-    ld.b r7, r11                        ; R7 = pending bitmask
+    csrr r7, 0x22                       ; R7 = pending mask (CSR MBOX)
 
-    ; ---- Find the lowest set bit (sender core ID) ----
-    ; Simple scan: check bits 0-3
-    ldi r9, 0                           ; sender = 0
-ipi_find_sender:
-    mov r0, r7
+    ; ---- A job comes only from a full core ----
+    ldi64 r11, 0xFFFF_FF00_0000_0348    ; SysInfo NUM_FULL
+    ldn r9, r11
     ldi r1, 1
-    and r0, r1                          ; test bit 0
-    cmpi r0, 0
-    lbrne ipi_found_sender
-    lsri r7, 1
-    addi r9, 1
-    cmpi r9, 4
-    lbrne ipi_find_sender
-    ; No sender found (shouldn't happen) — bail
-    lbr ipi_handler_done
+    shl r1, r9
+    subi r1, 1                          ; R1 = the full cores' bits
+    and r1, r7
+    cmpi r1, 0
+    breq .ipi_acknowledge
 
-ipi_found_sender:
-    ; R9 = sender core ID
     ; ---- Read 64-bit message (XT) from MBOX_DATA ----
     ldi64 r11, 0xFFFF_FF00_0000_0500    ; MBOX_DATA base
     ; Read 8 bytes (little-endian 64-bit value)
     ldi r0, 0                           ; accumulator
     ldi r12, 0                          ; byte index
-ipi_read_data:
+.ipi_read_data:
     mov r1, r11
     add r1, r12
     ld.b r1, r1                         ; byte[i]
     ; shift byte into position: r1 << (r12 * 8)
-    mov r7, r12
-    ldi r9, 3                           ; shift by 3 to multiply by 8
-    shl r7, r9                          ; r7 = byte_index * 8
-    shl r1, r7                          ; r1 = byte << (i*8)
+    mov r9, r12
+    lsli r9, 3                          ; r9 = byte_index * 8
+    shl r1, r9                          ; r1 = byte << (i*8)
     or r0, r1                           ; accumulate
     addi r12, 1
     cmpi r12, 8
-    lbrne ipi_read_data
-
-    ; R0 = 64-bit XT from mailbox
+    brne .ipi_read_data
 
     ; ---- Store XT in worker_xt_table[my_core_id] ----
     csrr r1, 0x20                       ; my core ID
-    ldi r7, 3
-    shl r1, r7                          ; core_id * 8
+    lsli r1, 3                          ; core_id * 8
     ldi64 r11, worker_xt_table
     add r11, r1
     str r11, r0                         ; worker_xt[core_id] = XT
 
-    ; ---- ACK the IPI from the sender ----
-    ; Re-read STATUS to get sender (we clobbered r9)
-    ldi64 r11, 0xFFFF_FF00_0000_0509    ; MBOX_STATUS
-    ld.b r7, r11                        ; pending mask
-    ldi r9, 0
-ipi_ack_find:
-    mov r0, r7
-    ldi r1, 1
-    and r0, r1
-    cmpi r0, 0
-    lbrne ipi_ack_found
-    lsri r7, 1
-    addi r9, 1
-    cmpi r9, 4
-    lbrne ipi_ack_find
-    lbr ipi_handler_done
-ipi_ack_found:
-    ; R9 = sender core ID — ACK it
+    ; ---- Acknowledge every sender in R7, lowest ID first ----
+.ipi_acknowledge:
     ldi64 r11, 0xFFFF_FF00_0000_050A    ; MBOX_ACK
-    st.b r11, r9                        ; ACK sender
+.ipi_acknowledge_next:
+    cmpi r7, 0
+    breq ipi_handler_done
+    ctz r9, r7                          ; R9 = lowest pending sender
+    st.b r11, r9
+    mov r0, r7
+    subi r0, 1
+    and r7, r0                          ; clear that sender's bit
+    br .ipi_acknowledge_next
 
 ipi_handler_done:
     ; ---- Restore registers ----

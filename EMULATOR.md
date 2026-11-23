@@ -211,7 +211,18 @@ The system layer intercepts any CPU memory operation (8/16/32/64-bit) that
 falls in the MMIO aperture and routes it through the device bus; everything
 else hits RAM.  Accesses to unmapped MMIO offsets raise `BusError`, which
 the SoC layer converts to `TrapError(IVEC_BUS_FAULT)` — matching the RTL
-bus arbiter timeout behaviour.
+bus arbiter timeout behaviour.  Every device answers below offset 2^32, the
+span the RTL's bus decodes as MMIO, so an access higher in the emulator's
+2^39-byte aperture faults the same way on native cores and on cores that
+Python runs.
+
+The mailbox and the spinlocks keep state by requester, and both are the
+models in `shared/accel/mailbox.h` and `shared/accel/spinlock_bank.h`, which
+the hosted simulator attaches as well. The native system owns them, the
+mailbox beside its IPI router: a core reaches them directly, as requester
+under its own ID, with each access preflighted whole (1, 2, 4 or 8 bytes,
+naturally aligned, inside the window), and the Python bus forwards the
+host's accesses, which name their requester, to the same models.
 
 The native TRNG owns its complete `+0x0800`–`+0x081F` window even when it is
 disabled or unhealthy. `STATUS` at `+0x10` exposes only bit 0 (`USABLE`);
@@ -390,8 +401,12 @@ provides an interactive REPL over UART.
 
 ### Boot sequence
 
-1. Initialise RSP (R15 ← ram_size) and DSP (R14 ← ram_size / 2)
-2. Check COREID (CSR 0x20) — secondary cores branch to worker loop
+1. Derive this full core's stack zone top from COREID (CSR 0x20) and System
+   Info, as every register is zero at reset: R2 ← min(BANK0_SIZE, 1 MiB) −
+   COREID × 64 KiB
+2. Check COREID — secondary cores branch to the worker loop, whose stacks
+   start at R2 and 32 KiB below it; core 0 sets RSP (R15 ← R2) and DSP
+   (R14 ← R2 / 2)
 3. Set up UART base in R8, TX ring descriptor pointer in R19, and subroutine
    pointers in R4/R5/R6. Read `UART_CAPS` once: register R19 with
    `TX_RING_BASE` when `TX_RING_BATCH` exists, otherwise select the

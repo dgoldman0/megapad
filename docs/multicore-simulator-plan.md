@@ -1,7 +1,8 @@
 # Multicore simulator plan
 
-Status: Accepted, 2026-11-22, with the nine decisions of section 10. No
-stage is built yet. It is the staged plan for Part 3 of the release plan
+Status: Accepted, 2026-11-22, with the nine decisions of section 10.
+Stages 1 and 2 are built (MegaPad d8016c43; 4ea4bc91, 09a26e8d and
+f317327b). It is the staged plan for Part 3 of the release plan
 (`dev/PLAN.md` in fantasy-engine), in which MegaPad's hosted simulator
 becomes the multicore machine MegaPad is. Section 1 describes the simulator
 as it stands, section 2 says what matching the emulator's lock-step can mean
@@ -227,15 +228,16 @@ at a time.
   interrupt request from an enabled source, which is an IPI for any core,
   UART input for core 0 and the Timer's request while its interrupt is
   enabled, or its `WAKE_MS` deadline. On core 0 the sleep then acknowledges
-  every pending sender, as the BIOS's `idle_until` does.
+  every pending sender in the whole mask, as the BIOS's `idle_until` does.
 - A worker takes a pending IPI at its next operation boundary: straight
   after the operation that raised it when the worker itself is running,
   otherwise at the start of its next turn. The effect follows the BIOS's
-  handler as stage 2 corrects it: a full core's job enters the slot, and any
-  other signal is acknowledged as a wake-up. A worker with a job in its slot
-  runs it on fresh stacks; a job that returns clears the slot; a fault prints
-  the BIOS's report line with the core's ID, clears the slot and leaves the
-  worker idle, and an abort ends the same way once stage 2 lands.
+  handler as stage 2 corrected it: a full core's job enters the slot, and
+  any other signal is acknowledged as a wake-up. A worker with a job in its
+  slot runs it on fresh stacks; a job that returns clears the slot; a fault
+  prints the BIOS's report line with the core's ID, runs the `QUIT-XT!`
+  callback, clears the slot and leaves the worker idle, and an abort or
+  `QUIT` ends the same way.
 - Ingress enters only between rounds, so a scripted ingress schedule gives
   the same run on every host. Inside a turn the host may still settle UART
   output and release its lock, as the Python executor's 8,192-step
@@ -313,8 +315,9 @@ in that core's order, and the two-word protocol of `docs/managed-data.md` §3
 holds as on a machine whose cores have no data cache. A doorbell to core 0
 wakes `IDLE-UNTIL`, which acknowledges it; managed data's waits re-read
 memory after waking, as §3 requires. A doorbell to a worker is acknowledged
-as a wake-up once stage 2 lands. `MBOX_STATUS` shows IDs 0 to 7, which hold
-a port only while the topology has fewer than eight cores.
+as a wake-up. `MBOX_STATUS` shows IDs 0 to 7, which hold a port only while
+the topology has fewer than eight cores; the BIOS's acknowledgements read
+CSR `MBOX`'s whole mask.
 
 ### 4.8 Parallel rounds and their commit rule
 
@@ -402,10 +405,11 @@ of the simulator passes, with the expectations that change because the
 mailbox now answers without ports updated in the same commit. New focused
 tests cover overlap refusal, the requester reaching the device, the lines a
 device drives, and faults outside every window. The shared mailbox and
-spinlock models, as the simulator's extension builds them, answer seeded
+spinlock models, as the simulator's extension builds them, answered seeded
 streams of requester-tagged accesses exactly as the emulator's Python
-`MailboxDevice` and `SpinlockDevice` do (`tests/test_shared_mmio_devices.py`);
-stage 2 builds them into the emulator's extension.
+`MailboxDevice` and `SpinlockDevice` did; stage 2 built them into the
+emulator's extension, and `tests/test_shared_mmio_devices.py` now holds
+both backends to a reference of the two register maps.
 
 ### Stage 2. The BIOS worker loop takes signals and aborts correctly
 
@@ -439,6 +443,22 @@ time through `make test-sequential TEST_PATH=tests/test_system.py K=...`,
 with each class's peak memory noted.
 This stage can run beside stage 1, since they touch different files; their
 closing runs go one at a time.
+
+Built on 2026-11-22. The BIOS change is 4ea4bc91. Its `worker_quit` also
+runs the `QUIT-XT!` callback on the worker's fresh stacks, which a bus fault
+on a worker used to skip, leaving KDOS's exception chain for that core
+pointing into the abandoned stack. Core 0's `idle_until` now acknowledges
+from CSR `MBOX`'s whole mask, since with clusters a port's doorbell has an
+ID above the eight `MBOX_STATUS` shows and used to keep every later sleep
+awake. The emulator's boot stops presetting R2 and still gives a bare
+program a stack pointer. The emulator's move onto the shared models is
+f317327b: its cores decode the mailbox and the spinlocks natively, and the
+Python classes remain as facades on the bus. 09a26e8d makes an access at an
+MMIO offset of 2^32 or more a guest bus fault in the emulator. A native core
+used to reach the device at the offset's low 32 bits, and a core that Python
+runs stopped with a host TypeError. The new tests are
+`tests/test_bios_worker_signals.py`, `tests/test_mmio_aperture_faults.py`
+and the rewritten `tests/test_shared_mmio_devices.py`.
 
 ### Stage 3. Full cores, the scheduler and the worker loop (3a)
 
@@ -600,18 +620,19 @@ logic, and adds a bench program that runs R16 to R31 on a microcore in
 program run on the emulator's microcore and the results compared. Estimate:
 3 to 6 agent hours; the benches run in minutes.
 
-The stacks reach past the microcores. The BIOS reads each core's stack top
-from R2, which the emulator's host-side boot sets for full cores, while the
+The stacks reach past the microcores. The BIOS read each core's stack top
+from R2, which the emulator's host-side boot set for full cores, while the
 RTL clears R2 on every core at reset and the per-core stack tops in
 `rtl/pkg/mp64_pkg.vh` feed no logic. A microcore released from reset also
 starts at address 0 and takes the BIOS's multicore gate into
 `secondary_core_entry`, which loads R16, R17 and R19; on today's RTL
 microcore those loads land in R0, R1 and R3, and R3 is its program counter.
-Stage 2 has boot derive every full core's stacks from `COREID` and SysInfo,
-so that the chip, the emulator and the simulator follow one rule. Microcores
-get theirs the same way, sized from the spill area their kernels need, and
-an entry path of their own in place of the full cores' worker loop; both
-come with the kernel contract (decision 6).
+Stage 2 made boot derive every full core's stacks from `COREID` and SysInfo
+(4ea4bc91), so that the chip, the emulator and the simulator follow one
+rule. Microcores get theirs the same way, sized from the spill area their
+kernels need, and an entry path of their own in place of the full cores'
+worker loop; both come with the kernel contract (decision 6). Until then
+boot leaves a microcore's R2 as reset leaves it.
 
 ## 8. Work in flight that this plan touches
 
@@ -626,17 +647,18 @@ come with the kernel contract (decision 6).
   tests run through the real code at both ends, in the emulator and the
   simulator (decision B of LM1's `design/chiplet-module.md`). Tests 5, 6,
   14, 15 and 16 need a second MegaPad core. On the simulator they need
-  stages 3 and 4. On the emulator they need stage 2 wherever LM1 rings a
-  worker core, which it does whenever a worker's requests use a pair of
-  their own (`docs/managed-data.md` §10 names the core in `NOTIFY`): today
-  that worker re-runs its last job at each doorbell with two full cores and
-  stays in its IPI handler with four. If LM1's stage 3 lands first, its
-  multi-core cases run on the emulator alone until stage 4. Section 4.7
-  gives the order in which LM1 sees each core's store log and window word.
+  stages 3 and 4. On the emulator LM1 rings a worker core whenever a
+  worker's requests use a pair of their own (`docs/managed-data.md` §10
+  names the core in `NOTIFY`), and since stage 2 the worker acknowledges
+  that doorbell as a wake-up; before it, the worker re-ran its last job at
+  each doorbell with two full cores and stayed in its IPI handler with four.
+  If LM1's stage 3 lands first, its multi-core cases run on the emulator
+  alone until stage 4. Section 4.7 gives the order in which LM1 sees each
+  core's store log and window word.
 - **Borrowed tile work** (release plan 9f) serves on a worker core that
   sleeps in `IDLE-UNTIL` until LM1 rings it
-  (`docs/chiplet-interconnect-plan.md` §7). It needs stage 2 on every
-  backend and stage 4's per-core tile engines on the simulator.
+  (`docs/chiplet-interconnect-plan.md` §7). Stage 2 gave it the BIOS's
+  part; on the simulator it needs stage 4's per-core tile engines.
 - **Desk** changes only in stage 9, as section 5 describes.
 - **The full release run** in progress from the mains: this plan's branches
   merge only after it ends.
@@ -660,8 +682,9 @@ emulator. Each needs a change in the BIOS, the release plan or the contract.
    takes it straight back in: in all 60 samples the worker's program counter
    stood inside `ipi_handler`, and its pending mask still read `0x10` at the
    end. Signals from microcores, IDs 4 to 15, take the same path. The check
-   ran on the emulator built from MegaPad d1f0ea17, and stage 2 turns it into
-   a test when it corrects the handler.
+   ran on the emulator built from MegaPad d1f0ea17. Stage 2 corrected the
+   handler and turned the check into `tests/test_bios_worker_signals.py`
+   (4ea4bc91).
 2. **An abort on a worker starts a second interpreter (read from the
    source).**
    `w_abort` sets the return stack to R2 and the data stack to half of R2.
@@ -669,10 +692,11 @@ emulator. Each needs a change in the BIOS, the release plan or the contract.
    0x78000 for core 1, in the region core 0's data stack grows into, and
    `forth_quit` then runs the outer interpreter on the worker, where it reads
    the UART that core 0 serves. KDOS's `THROW` without a handler and its
-   `?CORE0` guard both end in `ABORT`. Worker faults already recover to the
-   idle loop; stage 2 gives aborts the same ending.
+   `?CORE0` guard both end in `ABORT`. Worker faults already recovered to
+   the idle loop; stage 2 gave aborts the same ending (4ea4bc91).
 3. **On the RTL every core starts with R2 at zero (read from the
-   source).** Section 7.
+   source).** Section 7. Stage 2 has boot derive the full cores' stacks
+   itself (4ea4bc91).
 4. **3a's microcore half rested on unscheduled work.** Kernel words, with
    their vocabulary, launch, completion and calling convention, and their
    compilation by the BIOS JIT are open questions in

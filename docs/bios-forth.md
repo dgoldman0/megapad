@@ -660,10 +660,12 @@ its deadline. The BIOS key wait sleeps the same way with no deadline, and
 
 On core 0 an IPI is a wake-up. Core 0 runs with interrupts masked, so no
 handler takes the request, and the sleep acknowledges every IPI pending when
-it ends. Otherwise the request would hold each later sleep awake. Another
-core wakes core 0 with `0 0 IPI-SEND` after it publishes its work, and the
-woken loop checks for that work as usual. An IPI that arrives before the
-sleep starts ends it at once, so none is lost.
+it ends, from the whole 64-bit mask CSR `MBOX` gives, so a chiplet port's
+doorbell counts even when the port's ID lies above the eight IDs
+`IPI-STATUS` shows. Otherwise the request would hold each later sleep awake.
+Another core wakes core 0 with `0 0 IPI-SEND` after it publishes its work,
+and the woken loop checks for that work as usual. An IPI that arrives before
+the sleep starts ends it at once, so none is lost.
 
 ### Instruction faults
 
@@ -704,8 +706,9 @@ no `CATCH`), the BIOS prints the line above and recovers. On core 0 it
 recovers as it does for an undefined word, with clean stacks: interpret
 state, the `EVALUATE` depth reset, interrupts enabled as they were, and the
 prompt. Definitions and variables survive. On a worker core the BIOS ends
-the job, so `CORE-STATUS` reports the core idle, resets the core's stacks,
-and returns it to its idle loop, ready for the next `WAKE-CORE`.
+the job as the worker's aborts do: it resets the core's own stacks, runs the
+`QUIT-XT!` callback on them, clears the core's slot so `CORE-STATUS` reports
+it idle, and returns it to its idle loop, ready for the next `WAKE-CORE`.
 
 A bus fault, an access outside the memory map or one a device does not
 answer, prints its own line:
@@ -1018,11 +1021,30 @@ Secondary cores boot into a worker loop; the primary core dispatches
 work to them via IPI (inter-processor interrupt) through the mailbox
 device.
 
+Boot gives every full core its stacks from `COREID` and System Info, since
+the chip clears every register at reset. Core *n*'s 64 KiB zone ends at
+*T* − *n* × 64 KiB, where *T* is Bank 0's size or 1 MiB, whichever is
+smaller. Core 0's return stack starts at *T* and its data stack at *T* / 2;
+a worker's return stack starts at its zone's end and its data stack 32 KiB
+below.
+
+A worker sleeps until an IPI and takes a job only from a full core: the XT
+that `IPI-SEND` or `WAKE-CORE` placed in the mailbox's data word. Any other
+signal, such as a chiplet port's doorbell, is a wake-up that tells the
+worker to look at its queues, and the worker's handler acknowledges every
+sender pending when it runs, so a doorbell neither starts the worker's last
+job again nor holds the worker in its handler. A job ends when it returns,
+faults, or reaches `ABORT`, `ABORT"` or `QUIT`: the worker then takes its
+own stacks back, runs the `QUIT-XT!` callback, clears its slot, and sleeps.
+The interpreter state those words reset on core 0 belongs to core 0, so a
+worker's abort leaves core 0's session, stacks and `EVALUATE` depth as they
+were.
+
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `COREID` | `( -- n )` | Push this core’s hardware ID (`0` through `NCORES - 1`). Reads CSR 0x20. |
 | `NCORES` | `( -- n )` | Push the total number of hardware cores.  Reads CSR 0x21. |
-| `IPI-SEND` | `( xt core -- )` | Send an IPI to *core*: writes the 64-bit XT into the mailbox data register and triggers the interrupt.  The target core’s IPI handler will EXECUTE the XT. |
+| `IPI-SEND` | `( xt core -- )` | Send an IPI to *core*: writes the 64-bit XT into the mailbox data register and triggers the interrupt.  A worker target runs the XT as its next job. |
 | `IPI-STATUS` | `( -- mask )` | Read pending IPI bitmask for this core.  Bit *n* set means an IPI from core *n* is pending. |
 | `IPI-ACK` | `( core -- )` | Acknowledge (clear) the pending IPI from the given core. |
 | `MBOX!` | `( d -- )` | Write a 64-bit value to the mailbox outgoing data register (8 bytes LE). |

@@ -1375,17 +1375,15 @@ class MegapadSystem:
             ),
             chiplet_ports=self._native_system.chiplet_port_count_word,
         )
+        # The native system owns the mailbox and the spinlocks; these put
+        # their windows on the Python bus and give the host its views.
         self.mailbox = MailboxDevice(
+            self._native_system,
             num_cores=self.num_cores,
             num_ports=self.num_chiplet_ports,
         )
-        self.mailbox.attach_ipi_router(
-            pending_mask=self._native_system.ipi_pending_mask,
-            pending_snapshot=self._native_system.ipi_pending_snapshot,
-            send=self._native_system.ipi_send,
-            acknowledge=self._native_system.ipi_ack,
-        )
-        self.spinlock = SpinlockDevice(num_cores=self.num_cores)
+        self.spinlock = SpinlockDevice(
+            self._native_system, num_cores=self.num_cores)
         self.ntt = NTTDevice()
         self.kem = KemDevice()
         # FB is now handled natively by C++ accelerator — use proxy
@@ -2797,14 +2795,16 @@ class MegapadSystem:
 
             cpu.pc = entry
 
-            # Per-core stack tops (match FPGA layout)
+            # The RTL clears every register at reset, and the BIOS derives
+            # each full core's stacks from COREID and System Info.  A bare
+            # program that runs without the BIOS still finds a stack pointer
+            # here, at the BIOS's zone tops on a 1 MiB machine.
             if i < len(CORE_STACK_TOPS) and self.ram_size >= CORE_STACK_TOPS[0]:
                 sp = CORE_STACK_TOPS[i]
             else:
                 # Small RAM or >4 cores: divide equally
                 sp = self.ram_size - i * (self.ram_size // self.num_cores)
             cpu.regs[cpu.spsel] = sp
-            cpu.regs[2] = sp  # R2 (X) also usable as stack
 
             cpu.halted = False
             cpu.idle = False
