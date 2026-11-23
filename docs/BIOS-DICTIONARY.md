@@ -533,9 +533,13 @@ of compiled code.
 
 While `_RELOC-ACTIVE` is nonzero, the compiler records the address of each
 64-bit immediate that carries a dictionary address: the inline XT of every
-compiled call, the XT that `[']` compiles, the data-field address in the code
-of `CREATE` and `VARIABLE`, and the address `DOES>` patches in. Numeric
-literals are not recorded. Entry *i* is stored at `_RELOC-BUF` + 8*i* only
+compiled call, the XT that `[']` compiles and the one a non-immediate
+`POSTPONE` compiles, the data-field address in the code of `CREATE`,
+`VARIABLE` and `VALUE`, the cell address a compiled `TO` stores through, and
+the address `DOES>` patches in. Numeric literals are not recorded, and
+neither is a `CONSTANT`'s value: the compiler cannot tell an address from a
+number there, so `binimg` refuses an image in which a constant holds an
+address inside the image. Entry *i* is stored at `_RELOC-BUF` + 8*i* only
 while `_RELOC-COUNT` is below `_RELOC-CAP`, compared as unsigned cells, so the
 compiler never writes past the caller's buffer however much code it compiles.
 That matters because Akashic's `binimg` places the code it tracks directly

@@ -5682,6 +5682,27 @@ class TestBIOS(unittest.TestCase):
         self.assertEqual(int(rc.group(1)), 1,
                          "CREATE should record exactly 1 reloc")
 
+    def test_reloc_tracks_value_to_and_postpone(self):
+        """VALUE records its cell's address in its code, a compiled TO the
+        cell it stores through, and a non-immediate POSTPONE the XT it
+        compiles (beside its call to the BIOS helper), so an image's own
+        addresses move with it when it loads elsewhere."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "HERE _RELOC-BUF ! 128 CELLS ALLOT 128 _RELOC-CAP !",
+            "1 _RELOC-ACTIVE ! 0 _RELOC-COUNT !",
+            "5 VALUE ZV",
+            ": ZSET TO ZV ;",
+            ": ZP POSTPONE DUP ; IMMEDIATE",
+            "0 _RELOC-ACTIVE !",
+            'CR ." [RC=" _RELOC-COUNT @ . ." ]"',
+            ": SLOT ( i -- value ) CELLS _RELOC-BUF @ + @ @ ;",
+            'CR ." [CELL=" 0 SLOT \' ZV 19 + = . 1 SLOT \' ZV 19 + = .'
+            ' ." XT=" 2 SLOT \' DUP = . ." ]"',
+        ])
+        self.assertRegex(text, r"\[RC=4\s+\]")
+        self.assertRegex(text, r"\[CELL=-1\s+-1\s+XT=-1\s+\]")
+
     def test_reloc_buf_contents_valid(self):
         """Recorded reloc offsets point into dictionary space."""
         sys, buf = self._boot_bios()

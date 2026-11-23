@@ -13486,6 +13486,13 @@ w_val_name_done:
     mov r1, r13
     ldi64 r11, dict_cache_seed
     call.l r11
+    ; --- reloc tracking: the ldi64 immediate naming the data cell, at
+    ; code+3 = HERE-24, moves with an image as CREATE's does ---
+    ldi64 r11, var_here
+    ldn r1, r11
+    subi r1, 24
+    ldi64 r11, reloc_record
+    call.l r11
     ldi64 r11, dict_index_notify
     call.l r11
     ret.l
@@ -13701,6 +13708,12 @@ w_to_compile:
     andi r1, 0xFF
     ldi64 r11, compile_byte
     call.l r11
+    ; --- reloc tracking: the cell address just emitted, at HERE-8 ---
+    ldi64 r11, var_here
+    ldn r1, r11
+    subi r1, 8
+    ldi64 r11, reloc_record
+    call.l r11
     ; str r11, r1: 54 B1
     ldi r1, 0x54
     ldi64 r11, compile_byte
@@ -13781,6 +13794,12 @@ w_postpone:
     ; Step 1: compile_literal(code_addr) — pushes code_addr onto stack at runtime
     mov r1, r9
     ldi64 r11, compile_literal
+    call.l r11
+    ; --- reloc tracking: the XT literal's immediate, at HERE-13, as ['] ---
+    ldi64 r11, var_here
+    ldn r1, r11
+    subi r1, 13
+    ldi64 r11, reloc_record
     call.l r11
     ; Step 2: compile_call(postpone_helper) — calls helper that does the compile
     ldi64 r1, postpone_helper
