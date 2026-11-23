@@ -1000,7 +1000,11 @@ change in the BIOS, KDOS, the release plan, the contract or the tests.
     (7e015eaa) as on the slice that fixed findings 8 and 12 to 15; the
     file last passed whole at d8016c43, before f317327b. The tests need to
     take the lock in the native bank as core 1, which the next change to
-    `tests/test_system.py` can do.
+    `tests/test_system.py` can do. Fixed on 2026-11-23 in the same slice:
+    the three tests boot two full cores, since the bank refuses a requester
+    that names no core, and core 1 takes the lock through the emulator's
+    spinlock window, `read8_for_requester(1, 4n)`, as its own access would;
+    no test-only path was needed.
 19. **After an `ABORT` or a fault in a slot the machines leave different
     data stacks (run on both).** The BIOS's `ABORT` and `fault_recover`
     reset core 0's data stack pointer, so the foreground's data stack is

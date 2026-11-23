@@ -1618,16 +1618,17 @@ class TestBIOS(unittest.TestCase):
                     )
 
     def _boot_bios(self, ram_kib=256, storage_image=None, ext_mem_mib=0,
-                   **unit_images):
-        # Fast path: restore from snapshot (default 256K, no storage)
+                   num_cores=1, **unit_images):
+        # Fast path: restore from snapshot (default 256K, no storage, one core)
         if (ram_kib == 256 and storage_image is None
                 and not unit_images
                 and ext_mem_mib == 0
+                and num_cores == 1
                 and self.__class__._bios_snapshot is not None):
             return self._boot_bios_fast()
-        # Slow path: fresh boot (non-default RAM size or storage)
+        # Slow path: fresh boot (non-default RAM size, storage or cores)
         sys = make_system(ram_kib=ram_kib, storage_image=storage_image,
-                          ext_mem_mib=ext_mem_mib,
+                          ext_mem_mib=ext_mem_mib, num_cores=num_cores,
                           **unit_images)
         buf = capture_uart(sys)
         sys.load_binary(0, self.bios_code)
@@ -2996,15 +2997,16 @@ class TestBIOS(unittest.TestCase):
             path = f.name
             f.write(b"\x51" * (2048 * SECTOR_SIZE))
         try:
-            sys, buf = self._boot_bios(storage_image=path)
+            sys, buf = self._boot_bios(storage_image=path, num_cores=2)
             for _ in range(20):
                 if sys.cpu.idle:
                     break
                 sys.run_batch(100_000)
             self.assertTrue(sys.cpu.idle)
             completion = sys.storage.completion
-            sys.spinlock.locked[2] = True
-            sys.spinlock.owner[2] = 1
+            # Core 1, idle in its worker loop, holds the disk lock, taken in
+            # the native bank as its own access to the lock takes it.
+            self.assertEqual(sys.spinlock.read8_for_requester(1, 2 * 4), 0)
 
             text = self._run_forth(sys, buf, [
                 "VARIABLE contended-buf 512 ALLOT",
@@ -16158,8 +16160,8 @@ class TestBIOSWotsCheckpoint3(unittest.TestCase):
         self._bios_harness.setUp()
         self._bios_labels = self._bios_harness._bios_labels
 
-    def _boot_bios(self):
-        return self._bios_harness._boot_bios()
+    def _boot_bios(self, num_cores=1):
+        return self._bios_harness._boot_bios(num_cores=num_cores)
 
     @staticmethod
     def _reference(context, start, steps):
@@ -16953,7 +16955,9 @@ class TestBIOSWotsCheckpoint3(unittest.TestCase):
 
     def test_guard_contention_returns_state_without_touching_wots(self):
         """The portable guard is one nonblocking attempt after preflight."""
-        sys_obj, buf = self._boot_bios()
+        # Core 1, idle in its worker loop, holds the guard, taken in the
+        # native bank as its own access to the lock takes it.
+        sys_obj, buf = self._boot_bios(num_cores=2)
         context = self._context_fixture()
         sys_obj.cpu.mem[
             self._CONTEXT_ADDR:self._CONTEXT_ADDR + 64
@@ -16961,8 +16965,7 @@ class TestBIOSWotsCheckpoint3(unittest.TestCase):
         sys_obj.cpu.mem[
             self._DEST_ADDR:self._DEST_ADDR + 16
         ] = bytes((0xA5,)) * 16
-        sys_obj.spinlock.locked[8] = True
-        sys_obj.spinlock.owner[8] = 1
+        self.assertEqual(sys_obj.spinlock.read8_for_requester(1, 8 * 4), 0)
         before = bytes(sys_obj.wots.read8(index) for index in range(32))
 
         text = self._run_forth_cycle(sys_obj, buf, [
@@ -18136,7 +18139,8 @@ class TestKDOSSHA3Checkpoint2(_KDOSTestBase):
     def _assert_byte(self, text, marker, expected):
         self.assertIn(f"{marker}={expected} ", text)
 
-    def _run_kdos_inspected(self, extra_lines, *, mutate_system=None):
+    def _run_kdos_inspected(self, extra_lines, *, mutate_system=None,
+                            num_cores=1):
         """Run the shared snapshot while retaining the device state.
 
         The ordinary fixture deliberately returns only UART text.  Lock
@@ -18149,6 +18153,7 @@ class TestKDOSSHA3Checkpoint2(_KDOSTestBase):
         sys_obj = make_system(
             ram_kib=1024,
             ext_mem_mib=KDOS_TEST_EXT_MEM_MIB,
+            num_cores=num_cores,
         )
         buf = capture_uart(sys_obj)
         sys_obj.cpu.mem[:len(mem_bytes)] = mem_bytes
@@ -18375,11 +18380,11 @@ class TestKDOSSHA3Checkpoint2(_KDOSTestBase):
         def remove_sha3_and_contend_lock9(sys_obj):
             sys_obj.sysinfo.crypto_caps = 0
             sys_obj.sysinfo._regs[0x60] = 0
-            # The fixture executes only requester 0.  Seed a distinct owner
-            # directly so its nonblocking attempts observe genuine contention
-            # without waking a worker core.
-            sys_obj.spinlock.locked[9] = True
-            sys_obj.spinlock.owner[9] = 1
+            # Core 1 holds lock 9, taken in the native bank as its own access
+            # to the lock takes it, so core 0's nonblocking attempts meet
+            # genuine contention.  Core 1 only boots into its worker loop:
+            # the snapshot restores core 0 alone.
+            self.assertEqual(sys_obj.spinlock.read8_for_requester(1, 9 * 4), 0)
 
         text, sys_obj = self._run_kdos_inspected([
             "VARIABLE D0  DEPTH D0 !",
@@ -18391,7 +18396,7 @@ class TestKDOSSHA3Checkpoint2(_KDOSTestBase):
             '."  K256E=" -1 1 -1 1 -1 HKDF-SHA256-EXTRACT .',
             '."  K256X=" -1 -1 1 1 -1 HKDF-SHA256-EXPAND .',
             '."  DEPTH-OK=" DEPTH D0 @ = .',
-        ], mutate_system=remove_sha3_and_contend_lock9)
+        ], mutate_system=remove_sha3_and_contend_lock9, num_cores=2)
 
         self.assertIn("CAPS=0 ", text)
         for marker in ("H3", "K3E", "K3X"):
