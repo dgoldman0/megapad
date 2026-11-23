@@ -988,6 +988,19 @@ def _dot(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     runtime.write_uart_bytes(rendered + b" ")
 
 
+def _dot_s(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    """``.S ( -- )`` as the BIOS's ``w_dotS`` prints it: the depth between
+    angle brackets and a space, then each cell from the bottom, signed in
+    BASE with a space after it."""
+
+    base = runtime.numeric_base
+    cells = context.data.snapshot()
+    runtime.write_uart_bytes(
+        b"<" + _format_signed_cell(len(cells), base) + b"> "
+        + b"".join(_format_signed_cell(cell, base) + b" " for cell in cells)
+    )
+
+
 def _unsigned_dot(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     rendered = _format_unsigned_cell(context.data.pop(), runtime.numeric_base)
     runtime.write_uart_bytes(rendered + b" ")
@@ -3402,6 +3415,9 @@ def install_core(runtime: MegaForthRuntime) -> None:
     runtime.define_primitive(b"IPI-ACK", lambda context: _ipi_ack(runtime, context))
     runtime.define_primitive(b"MBOX!", lambda context: _mbox_store(runtime, context))
     runtime.define_primitive(b"MBOX@", lambda context: _mbox_fetch(runtime, context))
+
+    # .S follows, which sandbox contracts print when a stack check fails.
+    runtime.define_primitive(b".S", lambda context: _dot_s(runtime, context))
 
 
 def _define_accept(runtime: MegaForthRuntime) -> None:

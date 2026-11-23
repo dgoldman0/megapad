@@ -67,6 +67,7 @@ def test_rich_terminal_and_geometry_words_extend_the_core_append_only() -> None:
         b"IPI-ACK",
         b"MBOX!",
         b"MBOX@",
+        b".S",
     )
     assert len(runtime.dictionary.words) == 380 + len(frontier)
     words = runtime.dictionary.words[:-len(frontier)]

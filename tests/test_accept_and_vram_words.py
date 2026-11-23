@@ -228,3 +228,14 @@ def test_vram_words_report_the_window_system_info_holds(vram_size) -> None:
     line = b"VRAM-BASE . VRAM-SIZE ."
     assert expected in emulator.numbers(line)
     assert simulator.numbers(line) == expected
+
+
+@pytest.mark.parametrize("base", (b"DECIMAL", b"HEX"))
+def test_dot_s_prints_the_depth_and_each_cell_as_the_bios_does(base) -> None:
+    # Fresh machines, so the stack holds only what the line leaves on it.
+    emulator, simulator = _Emulator(), _Simulator()
+    line = base + b" 7 -2 300 .S DROP DROP DROP DECIMAL"
+    expected = simulator.numbers(line)
+    assert expected.startswith(b"<<3> 7 -2 ")
+    # The emulator's output also holds its echo of the typed line.
+    assert expected in emulator.numbers(line)

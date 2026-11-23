@@ -894,7 +894,9 @@ core's signal to a worker is a job, as the BIOS's handler takes it, and any
 other signal is a wake-up. `IPI-STATUS ( -- mask )` reads `MBOX_STATUS`, the
 caller's pending senders 0 to 7, and `IPI-ACK ( id -- )` acknowledges one
 sender; `MBOX! ( x -- )` and `MBOX@ ( -- x )` write and read the caller's
-mailbox data word. These four follow `VRAM-SIZE` at the frontier.
+mailbox data word. These four follow `VRAM-SIZE` at the frontier, and `.S`
+follows them, printing the depth between angle brackets and each cell from
+the bottom, signed in `BASE`, as the BIOS's `w_dotS` does.
 
 A worker runs within the limits of KDOS's concurrency contract. The
 compiler, the evaluator with its input parsing (`'`, `WORD` and the names

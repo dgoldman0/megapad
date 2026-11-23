@@ -157,6 +157,7 @@ def prepare_image_bootstrap(
     semantic_step_budget: int | None = None,
     execution_backend: str | None = None,
     runtime: MegaForthRuntime | None = None,
+    session: bool = True,
 ) -> ImageBootstrapPreparation:
     """Construct and prepare a runtime from one explicit memory/storage pair.
 
@@ -174,7 +175,9 @@ def prepare_image_bootstrap(
     executor must already have been selected during construction.
     STORAGE is the boot disk.  SETTINGS_STORAGE, SYSTEM_STORAGE and
     USER_STORAGE are the disks of the other storage units; None leaves a unit
-    without a medium.
+    without a medium.  With SESSION false the boot script does its work and
+    returns without binding a live entry, as a contract profile's script
+    does, and the preparation's root_xt is 0.
     """
 
     if not isinstance(memory, SparseAddressSpace):
@@ -279,17 +282,18 @@ def prepare_image_bootstrap(
         or runtime.find(_SESSION_ROOT) is not root
     ):
         raise autoexec_error("autoexec replaced the simulator session boundary")
-    selected_xt = runtime.memory.read64(entry.body_address)
-    if selected_xt == unbound_entry_xt:
-        raise autoexec_error("autoexec did not bind the simulator session entry")
-    try:
-        selected = runtime.dictionary.resolve(selected_xt)
-    except KeyError as exc:
-        raise autoexec_error(
-            "autoexec bound an invalid simulator session entry"
-        ) from exc
-    if isinstance(selected.implementation, DirectiveDefinition):
-        raise autoexec_error("autoexec bound a non-executable simulator session entry")
+    if session:
+        selected_xt = runtime.memory.read64(entry.body_address)
+        if selected_xt == unbound_entry_xt:
+            raise autoexec_error("autoexec did not bind the simulator session entry")
+        try:
+            selected = runtime.dictionary.resolve(selected_xt)
+        except KeyError as exc:
+            raise autoexec_error(
+                "autoexec bound an invalid simulator session entry"
+            ) from exc
+        if isinstance(selected.implementation, DirectiveDefinition):
+            raise autoexec_error("autoexec bound a non-executable simulator session entry")
     # Ordinary checked source preserves data-stack effects for following
     # source and the live entry. Splitting preparation must preserve those
     # values too, rather than imposing a new empty-data-stack boot ABI.
@@ -301,7 +305,7 @@ def prepare_image_bootstrap(
 
     return ImageBootstrapPreparation(
         runtime=runtime,
-        root_xt=root.xt,
+        root_xt=root.xt if session else 0,
         boot_filename=boot_file.name,
         geometry=geometry,
         source_bytes=len(source),
