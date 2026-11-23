@@ -37,6 +37,9 @@ MAX_FULL_CORES = 4
 # A turn's quantum in semantic steps, fixed in the machine profile and the
 # same for both executors (decision 2 of the plan).
 TURN_QUANTUM_STEPS = 65_536
+# The steps a chiplet may take in one visit while every core sleeps: the
+# emulator's IDLE_STEP_LIMIT (emulator/accel/mp64_accel.cpp).
+REST_STEP_LIMIT = 4096
 # Each full core's stack zone, its return stack in the upper half and its
 # data stack in the lower, as bios.asm lays them out.
 STACK_ZONE_BYTES = 0x10000
@@ -105,6 +108,9 @@ class HostedCores:
         self.mailbox = platform.mailbox
         self.table = self.mailbox.table
         self._platform_table = platform.table
+        # A worker's IPI handler takes a chiplet's signal as soon as one of
+        # the worker's own accesses steps the chiplet into raising it.
+        platform.signal_takers.takers = self._full_mask & ~1
         # The host's quantum for core 0's dispatch, kept while it runs.
         self._host_quantum: int | None = None
         # Whether another core has run since core 0's dispatch suspended:
@@ -260,6 +266,35 @@ class HostedCores:
         self._round_start_counter = None
         if start is not None:
             self.runtime.timer.set_counter(start + length)
+        # The chiplets step at the end of each round (plan section 4.7), and
+        # the input the host gave during the round arrives.
+        ports = self.runtime.chiplet_ports
+        if ports is not None:
+            ports.step()
+        self.runtime._admit_staged_uart_input()
+
+    @property
+    def round_open(self) -> bool:
+        """Whether a round is under way: a turn runs or the round has
+        served one and not yet ended."""
+
+        scheduler = self.scheduler
+        return scheduler.current >= 0 or scheduler.round_started
+
+    def _rest_chiplets(self) -> None:
+        """While every core sleeps, step the chiplets until they rest or
+        ring a core, at most REST_STEP_LIMIT times, as the emulator steps
+        them while its cores sleep. Stepping moves no clock, so a deadline
+        is no reason to stop."""
+
+        ports = self.runtime.chiplet_ports
+        if ports is None:
+            return
+        raised = self.ipi_lines()
+        for _ in range(REST_STEP_LIMIT):
+            more = ports.step()
+            if self.ipi_lines() & ~raised or not more:
+                return
 
     def start_host(self, stint, meter, quantum_steps: int | None):
         """Begin core 0's host dispatch and run the machine with it.
@@ -295,6 +330,8 @@ class HostedCores:
                 if scheduler.round_started:
                     self._finish_round()
                 if outcome is not NOT_RUN or not scheduler.awake(0):
+                    if not scheduler.any_awake():
+                        self._rest_chiplets()
                     return outcome
                 # Core 0's turn has not come in this call: the next round
                 # begins with it.
@@ -377,6 +414,9 @@ class HostedCores:
                     if scheduler.round_started:
                         self._finish_round()
                     self.apply_wakes()
+                    if not scheduler.any_awake():
+                        self._rest_chiplets()
+                        self.apply_wakes()
                     if not scheduler.any_awake():
                         if scheduler.deadline(0) is None:
                             raise ExecutionError(
@@ -469,6 +509,8 @@ class HostedCores:
         if scheduler.round_started and scheduler.current < 0:
             self._finish_round()
         self.switch_to(0)
+        if completed and not scheduler.any_awake():
+            self._rest_chiplets()
 
     def run_rounds(self, max_rounds: int | None = None) -> int:
         """Run rounds while core 0 runs no host dispatch, until no core is
@@ -484,7 +526,12 @@ class HostedCores:
             raise ExecutionError("core 0 is running a host dispatch")
         rounds = 0
         self.apply_wakes()
-        while scheduler.any_awake() and (max_rounds is None or rounds < max_rounds):
+        while max_rounds is None or rounds < max_rounds:
+            if not scheduler.any_awake():
+                self._rest_chiplets()
+                self.apply_wakes()
+                if not scheduler.any_awake():
+                    break
             while True:
                 core = scheduler.begin_next_turn()
                 if core < 0:

@@ -1040,6 +1040,10 @@ class MegaForthRuntime:
         self._machine_owner = None
         self._next_dispatch_root_id = 1
         self._uart_input: deque[int] = deque()
+        # Input the host gives while a round of a machine with several cores
+        # is under way, which reaches the RX FIFO at the round's end, so
+        # input enters only between rounds (plan section 4.3).
+        self._uart_staged = bytearray()
         self._uart_output = bytearray()
         if install_core_words:
             from simulator.core_words import install_core
@@ -1288,9 +1292,10 @@ class MegaForthRuntime:
 
     @property
     def uart_input_pending(self) -> int:
-        """Return the number of bytes waiting in the hosted UART RX FIFO."""
+        """Return the number of bytes waiting in the hosted UART RX FIFO,
+        with those that reach it at the end of the round under way."""
 
-        return len(self._uart_input)
+        return len(self._uart_input) + len(self._uart_staged)
 
     def inject_uart_input(self, payload: bytes) -> None:
         """Append one validated byte string to the hosted UART RX FIFO."""
@@ -1302,7 +1307,19 @@ class MegaForthRuntime:
     def _append_uart_input(self, payload: bytes) -> None:
         if not isinstance(payload, bytes):
             raise TypeError("UART input payload must be bytes")
-        self._uart_input.extend(payload)
+        cores = self._cores
+        if cores is not None and cores.round_open:
+            self._uart_staged.extend(payload)
+        else:
+            self._uart_input.extend(payload)
+
+    def _admit_staged_uart_input(self) -> None:
+        """A round has ended: the input the host gave during it reaches the
+        RX FIFO."""
+
+        if self._uart_staged:
+            self._uart_input.extend(self._uart_staged)
+            self._uart_staged.clear()
 
     def _session_inject_uart_input(self, token: object, payload: bytes) -> None:
         """Append UART input for the exact owning session backend."""
@@ -1323,9 +1340,12 @@ class MegaForthRuntime:
             raise TypeError("UART input discard count must be an integer")
         if count < 0:
             raise ValueError("UART input discard count must not be negative")
-        if count > len(self._uart_input):
+        if count > len(self._uart_input) + len(self._uart_staged):
             raise ValueError("UART input discard count exceeds pending input")
-        for _ in range(count):
+        staged = min(count, len(self._uart_staged))
+        if staged:
+            del self._uart_staged[-staged:]
+        for _ in range(count - staged):
             self._uart_input.pop()
 
     def _session_discard_uart_input_tail(
@@ -3366,15 +3386,19 @@ class MegaForthRuntime:
         return result
 
     def _step_chiplets(self, result):
-        """Step the attached chiplets as a dispatch returns to its host.
+        """Step the attached chiplets as a one-core dispatch returns to its
+        host.
 
-        The hosted profile has no scheduler rounds. Its chiplets step here
+        The one-core profile has no scheduler rounds. Its chiplets step here
         and before the guest reads a port register or the mailbox status
-        (``simulator/chiplet.py``).
+        (``simulator/chiplet.py``). On a machine with several cores they
+        step at the end of each round instead, and while every core sleeps
+        (``HostedCores``), at points that do not depend on where the host
+        services the machine.
         """
 
         ports = self.chiplet_ports
-        if ports is not None:
+        if ports is not None and self._cores is None:
             ports.step()
         return result
 

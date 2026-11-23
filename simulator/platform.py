@@ -217,7 +217,7 @@ class HostedPlatform:
 
     __slots__ = (
         "_table", "_topology", "_crypto_capabilities", "_chiplet",
-        "_sysinfo", "_mailbox", "_bound", "__weakref__",
+        "_sysinfo", "_mailbox", "_signal_takers", "_bound", "__weakref__",
     )
 
     def __init__(
@@ -267,6 +267,7 @@ class HostedPlatform:
         self._chiplet = chiplet
         self._sysinfo = None
         self._mailbox = None
+        self._signal_takers = None
         self._bound = False
 
     @staticmethod
@@ -310,14 +311,17 @@ class HostedPlatform:
             chiplet_ports=0 if chiplet is None else chiplet.port_count_word,
         )
         self.audio.bind(memory)
+        # The cores that take a chiplet's signal at once when it arrives in
+        # one of their own accesses; the core scheduler names the workers.
+        self._signal_takers = extension.SignalTakers()
         if chiplet is None:
             mailbox = extension.Mailbox(self._topology.core_count)
         else:
             chiplet.bind(memory)
-            mailbox = extension.Mailbox(chiplet.link)
+            mailbox = extension.Mailbox(chiplet.link, self._signal_takers)
             self._table.attach(
                 "chiplet",
-                extension.ChipletWindowDevice(chiplet.link),
+                extension.ChipletWindowDevice(chiplet.link, self._signal_takers),
                 ((CHIPLET_OFFSET, CHIPLET_LIMIT),),
             )
         self._table.attach("sysinfo", sysinfo, ((SYSINFO_OFFSET, SYSINFO_LIMIT),))
@@ -360,6 +364,14 @@ class HostedPlatform:
         """The native mailbox, once the platform is bound."""
 
         return self._mailbox
+
+    @property
+    def signal_takers(self):
+        """The native set of cores that take a chiplet's signal at once,
+        once the platform is bound: a bit for each core whose IPI handler
+        acknowledges a signal that arrives during its own access."""
+
+        return self._signal_takers
 
     @property
     def chiplet(self) -> HostedChipletPorts | None:

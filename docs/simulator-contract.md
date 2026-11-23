@@ -747,7 +747,11 @@ suspends. The other cores run the BIOS's worker loop. At the start of each
 turn, and when its sleep in `IDL` ends, a worker takes its pending signals
 as the BIOS's IPI handler does: when a full core has signalled it, its
 mailbox data word becomes the job in its slot, and every pending signal is
-acknowledged, so a chiplet's doorbell is a wake-up. A worker with a job runs
+acknowledged, so a chiplet's doorbell is a wake-up. A chiplet's signal that
+one of the worker's own accesses steps the chiplet into raising, while the
+worker runs, is acknowledged at once, as the handler takes it before the
+worker's next instruction; core 0 keeps such a signal pending until it
+acknowledges it or sleeps. A worker with a job runs
 it on fresh stacks in the core's 64 KiB zone, where `bios.asm` places them.
 The zones lie below Bank 0's top or 1 MiB, whichever is lower: core *n*'s
 zone has its top *n* × 64 KiB below that limit, its return stack starts at
@@ -767,7 +771,11 @@ host-delivered wake for core 0's sleep continues the machine: core 0
 resumes once its own wake rule holds, and otherwise the call runs one round
 of the other cores and returns core 0's sleep under a fresh suspension
 handle. `run_rounds` runs the other cores while core 0 runs no dispatch, as
-the machine runs them while core 0 waits at its prompt.
+the machine runs them while core 0 waits at its prompt. Input the host
+gives while a round is under way, as it can between the host calls that a
+shorter host quantum makes inside core 0's turn, reaches the RX FIFO at the
+round's end, so input enters only between rounds and a scripted input
+schedule runs alike on both executors.
 
 The host's own evaluation of source is core 0's outer interpreter. Each
 word it executes runs in core 0's turns, and core 0's turn stays open from
@@ -915,10 +923,15 @@ admission of a chiplet's memory requests against lent ranges with its
 refusal record, the traffic through lent external memory and the pending
 state of doorbells are compatibility claims. Arbitration, `QOS` and latency
 are outside them. A chiplet steps before each read of a port register or of
-`MBOX_STATUS` and when a dispatch returns to its host, so a guest that polls
-makes progress and the outcome depends on its accesses alone. A port's
-doorbell raises its target's IPI line, which `MBOX_STATUS` shows: on core 0
-it ends a sleep in `IDL` (section 5), and a worker takes it as a wake-up.
+`MBOX_STATUS`, so a guest that polls makes progress. On one core it also
+steps when a dispatch returns to its host. On several it steps at the end of
+each round instead, and while every core sleeps, until it rests or rings a
+core, at most 4,096 steps at a time, as the emulator steps its chiplets
+while its cores sleep; stepping moves no clock, and none of these points
+depends on where the host services the machine. A port's doorbell raises its target's IPI line, which
+`MBOX_STATUS` shows: on core 0 it ends a sleep in `IDL` (section 5), and a
+worker takes it as a wake-up, at once when the worker's own access raised
+it.
 
 Each port also has a window into memory its chiplet lends: port `p`'s is the
 2^48 bytes at `0x0100_0000_0000_0000 + p × 2^48`. `TACC-STORE` sends an

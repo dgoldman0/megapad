@@ -13,7 +13,12 @@ import pytest
 
 from simulator.errors import ExecutionError
 from simulator.platform import Topology, create_address_space
-from simulator.runtime import BlockedExecution, IdleWake, MegaForthRuntime
+from simulator.runtime import (
+    BlockedExecution,
+    IdleWake,
+    MegaForthRuntime,
+    YieldedExecution,
+)
 
 EXECUTORS = ("python", "native")
 QUANTUM = 1_000
@@ -279,6 +284,27 @@ def test_an_evaluated_idl_that_nothing_can_end_fails_and_frees_core_zero(executo
     runtime.evaluate(b"7 MARK!")
     assert _cell(runtime, "MARKS", 0) == 7
     assert [core["state"] for core in runtime.core_status()] == ["idle", "idle"]
+
+
+@pytest.mark.parametrize("executor", EXECUTORS)
+def test_input_given_during_a_round_arrives_at_its_end(executor):
+    runtime = _runtime(2, executor)
+    runtime.evaluate(SETUP + b"""
+VARIABLE SEEN
+: WATCH ( -- ) BEGIN KEY? 0= WHILE REPEAT  CYCLES SEEN !  KEY MARK! ;
+""")
+    start = runtime.timer.counter
+    # The host's quantum ends a tenth of the way into core 0's turn.
+    result = runtime.run_until_blocked("WATCH", quantum_steps=QUANTUM // 10)
+    assert isinstance(result, YieldedExecution)
+    runtime.inject_uart_input(b"Z")
+    assert runtime.uart_input_pending == 1
+    while isinstance(result, YieldedExecution):
+        result = runtime.resume_yielded(result.suspension)
+    assert _cell(runtime, "MARKS", 0) == ord("Z")
+    # The input reached the FIFO when the round ended, after core 0's whole
+    # turn of QUANTUM steps, and not where the host's quantum stopped.
+    assert _cell(runtime, "SEEN") >= start + QUANTUM
 
 
 @pytest.mark.parametrize("executor", EXECUTORS)

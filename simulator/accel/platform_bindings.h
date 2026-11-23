@@ -154,6 +154,24 @@ private:
 //  The chiplet port window and the mailbox
 // ---------------------------------------------------------------------------
 
+// The requesters that take a signal at once when a chiplet raises it inside
+// one of their own accesses, as a worker's IPI handler does on the machine:
+// a bit for each such core. Core 0 keeps its signals pending until it
+// acknowledges them or sleeps, and so does every core outside the mask.
+struct SignalTakers {
+    std::uint64_t takers = 0;
+
+    // A chiplet stepped inside an access by `requester`. A taker
+    // acknowledges every port's signal; a full core's signal is a job,
+    // which the worker takes at the start of its next turn, so it stays.
+    void take(chiplet::MailboxPending& table, Requester requester) const {
+        if (requester < 0 || requester >= 64 || ((takers >> requester) & 1) == 0)
+            return;
+        for (int port = 0; port < table.port_count(); ++port)
+            table.acknowledge(requester, table.port_id(port));
+    }
+};
+
 // The port window at 0xE00 over a ChipletLink. Its registers are 64 bits
 // wide and take aligned 64-bit accesses alone. The chiplets step before the
 // guest looks at a register, and a register written takes its eight bytes
@@ -163,8 +181,9 @@ public:
     static constexpr Offset OFFSET = 0xE00;
     static constexpr Offset LIMIT = OFFSET + chiplet::ChipletWindow::SIZE;
 
-    explicit ChipletWindowDevice(py::object link)
-        : link_(&link.cast<chiplet::ChipletLink&>()), owner_(std::move(link)) {}
+    ChipletWindowDevice(py::object link, std::shared_ptr<SignalTakers> takers)
+        : link_(&link.cast<chiplet::ChipletLink&>()), owner_(std::move(link)),
+          takers_(std::move(takers)) {}
 
     Verdict preflight(Offset offset, unsigned width, bool, Requester) override {
         if (width != 8 || offset % 8 != 0 || !mmio::inside(offset, width, OFFSET, LIMIT))
@@ -172,12 +191,15 @@ public:
         return Verdict::admit();
     }
 
-    std::uint8_t read8(Offset offset, Requester) override {
+    std::uint8_t read8(Offset offset, Requester requester) override {
         require_byte(offset);
         const unsigned index = static_cast<unsigned>(offset & 7);
         chiplet::ChipletLink& link = this->link();
-        if (index == 0)
+        if (index == 0) {
             link.window_.step();
+            if (takers_)
+                takers_->take(link.table_, requester);
+        }
         const std::uint64_t value =
             link.window_.read64(static_cast<unsigned>((offset & ~Offset{7}) - OFFSET));
         return static_cast<std::uint8_t>(value >> (8 * index));
@@ -224,6 +246,7 @@ private:
 
     chiplet::ChipletLink* link_;
     py::object owner_;
+    std::shared_ptr<SignalTakers> takers_;
     std::array<std::uint8_t, 8> latch_{};
     std::optional<Offset> latch_base_;
 };
@@ -237,12 +260,14 @@ public:
     HostedMailbox(chiplet::MailboxPending* table, py::object owner)
         : Mailbox(table), owner_(std::move(owner)) {}
 
-    static std::shared_ptr<HostedMailbox> over(py::object owner) {
+    static std::shared_ptr<HostedMailbox> over(
+        py::object owner, std::shared_ptr<SignalTakers> takers = nullptr) {
         if (py::isinstance<chiplet::ChipletLink>(owner)) {
             auto& link = owner.cast<chiplet::ChipletLink&>();
             auto made = std::make_shared<HostedMailbox>(&link.table_, owner);
-            chiplet::ChipletLink* stepped = &link;
-            made->set_before_status([stepped] { stepped->window_.step(); });
+            // The ports step in read8, where the requester is known.
+            made->stepped_ = &link;
+            made->takers_ = std::move(takers);
             return made;
         }
         if (py::isinstance<chiplet::MailboxPending>(owner)) {
@@ -264,6 +289,11 @@ public:
     std::uint8_t read8(Offset offset, Requester requester) override {
         if (detached_)
             throw mmio::Refused("the mailbox has no table");
+        if (stepped_ != nullptr && offset == STATUS && table().is_core(requester)) {
+            stepped_->window_.step();
+            if (takers_)
+                takers_->take(stepped_->table_, requester);
+        }
         return Mailbox::read8(offset, requester);
     }
     void write8(Offset offset, std::uint8_t value, Requester requester) override {
@@ -282,12 +312,14 @@ public:
     void gc_clear() noexcept {
         if (owner_)
             detached_ = true;
-        set_before_status(nullptr);
+        stepped_ = nullptr;
         py::object owner = std::move(owner_);
     }
 
 private:
     py::object owner_;
+    chiplet::ChipletLink* stepped_ = nullptr;
+    std::shared_ptr<SignalTakers> takers_;
     bool detached_ = false;
 };
 
@@ -639,28 +671,35 @@ inline void register_bindings(py::module_& module) {
         .def_property_readonly_static("OFFSET", [](py::object) { return SysInfo::OFFSET; })
         .def_property_readonly_static("SIZE", [](py::object) { return SysInfo::SIZE; });
 
+    py::class_<SignalTakers, std::shared_ptr<SignalTakers>>(
+        module, "SignalTakers", py::module_local())
+        .def(py::init<>())
+        .def_readwrite("takers", &SignalTakers::takers);
+
     py::class_<ChipletWindowDevice, mmio::Device, std::shared_ptr<ChipletWindowDevice>>(
         module, "ChipletWindowDevice", py::module_local(),
         collected::setup<ChipletWindowDevice>())
-        .def(py::init([](py::object link) {
+        .def(py::init([](py::object link, std::shared_ptr<SignalTakers> takers) {
                  if (!py::isinstance<chiplet::ChipletLink>(link))
                      throw py::type_error("the chiplet window is made over a ChipletLink");
-                 return std::make_shared<ChipletWindowDevice>(std::move(link));
+                 return std::make_shared<ChipletWindowDevice>(std::move(link),
+                                                              std::move(takers));
              }),
-             py::arg("link"));
+             py::arg("link"), py::arg("takers") = nullptr);
 
     py::class_<HostedMailbox, mmio::Device, std::shared_ptr<HostedMailbox>>(
         module, "Mailbox", py::module_local(), collected::setup<HostedMailbox>())
-        .def(py::init([](py::object over) -> std::shared_ptr<HostedMailbox> {
+        .def(py::init([](py::object over, std::shared_ptr<SignalTakers> takers)
+                          -> std::shared_ptr<HostedMailbox> {
                  if (py::isinstance<py::int_>(over) && !py::isinstance<py::bool_>(over)) {
                      const int cores = over.cast<int>();
                      if (cores < 1 || cores > 256)
                          throw py::value_error("a mailbox serves 1 to 256 cores");
                      return std::make_shared<HostedMailbox>(cores);
                  }
-                 return HostedMailbox::over(std::move(over));
+                 return HostedMailbox::over(std::move(over), std::move(takers));
              }),
-             py::arg("over"))
+             py::arg("over"), py::arg("takers") = nullptr)
         .def_property_readonly(
             "table", [](HostedMailbox& mailbox) -> chiplet::MailboxPending& {
                 return mailbox.table();

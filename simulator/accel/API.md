@@ -3,7 +3,7 @@
 The extension and its Python owner are built from the same checkout and use
 one current internal interface. Rebuild the extension after changing this
 boundary with `python setup_simulator_accel.py build_ext --inplace --force`.
-The extension exports `SEMANTIC_API_VERSION = 16`; its Python owner checks this
+The extension exports `SEMANTIC_API_VERSION = 17`; its Python owner checks this
 version before admission. An explicit native request rejects older builds;
 automatic selection keeps the reference executor and the Python dictionary
 when the version mismatches. The simulator's CRC and storage services are
@@ -543,7 +543,12 @@ memory geometry, the crypto capabilities and the chiplet ports' word;
 `MailboxPending`, or a table of its own for a core count; and
 `SpinlockBank`, the shared model of `shared/accel/spinlock_bank.h`, which
 `simulator/spinlocks.py` exports as `HostedSpinlockBank` and whose window
-the platform does not attach yet.
+the platform does not attach yet. Over a `ChipletLink`, the window device
+and the mailbox step the chiplets before a read of a port register or of
+`STATUS`, and both may share a `SignalTakers`: its `takers` mask names the
+cores that, as a worker's IPI handler does, acknowledge every port's
+signal that a step inside their own access raises, leaving a full core's
+signal pending for the core scheduler.
 
 ## Core scheduler
 
