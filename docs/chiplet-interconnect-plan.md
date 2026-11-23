@@ -16,8 +16,10 @@ in its own memory, was decided on 2026-11-20 (release plan decision 38). The
 BIOS words it runs on are built, in the emulator and the simulator alike;
 the service, its operation and LM1's side are not. Managed data, LM1's
 second use, was decided the same day as [managed-data.md](managed-data.md)
-specifies it, recovery after an LM1 failure included, and none of it is
-built. This note records how chiplets attach to MegaPad in
+specifies it, recovery after an LM1 failure included. MegaPad's side of it
+is built in the chiplet system module, `chiplet.f`, beside the general
+words of §9, and LM1's side in the stand-in for LM1's runtime in LM1's
+chiplet module; recovery is built as far as its stage 0. This note records how chiplets attach to MegaPad in
 Leviathan: the contract every chiplet meets, how the chips share memory, how
 they signal and exchange work, and how LM1, the first chiplet, runs sandbox
 jobs, managed data and borrowed tile work over the link. It schedules no
@@ -466,12 +468,18 @@ The general chiplet words are a MegaPad system module in the pattern of
 | `CHIP-WAIT` | `( port -- )` | Wait for its signal with the flag branch, then acknowledge |
 | `CHIP-FAULT@` | `( port -- addr info )` | Read and clear the refusal record |
 
-The names and stack orders are a first draft, to settle when the module is
-written. Above them a Leviathan vocabulary names what the machine offers and
-never which chip does it: finding a function by its class, putting work on a
-queue and taking a result, and over those the sandbox, managed-data and
-tile-work words. Its word list follows the queue and offer formats of
-[chiplet-link.md](chiplet-link.md) §8.
+`chiplet.f`, at MegaPad's root, builds these words with these names and
+stack orders. Beside them it lends memory to a port from a pool of ranges
+(`CHIP-LEND-ALLOT`, `CHIP-LEND-BLOCK`, `CHIP-UNLEND-BLOCK`,
+`CHIP-UNLEND-OWNER`), makes queue pairs (`CHIP-PAIR-MAKE`,
+`CHIP-PAIR-RECORD!`), sends requests and replies on them (`CHIP-REQUEST`,
+`CHIP-REPLY`, `CHIP-PUT`), and serves a port's offers by class
+(`CHIP-CLASS!`, `CHIP-SERVE`). Above them a Leviathan vocabulary names what
+the machine offers and never which chip does it: finding a function by its
+class, putting work on a queue and taking a result, and over those the
+sandbox, managed-data and tile-work words. Its word list follows the queue
+and offer formats of [chiplet-link.md](chiplet-link.md) §8; the
+managed-data words are built.
 - **LM1's spec:** external I/O, boot, the memory map, roots, the write
   barrier, safepoints, capability mode as a required part, the memory LM1
   lends MegaPad for writing, and borrowed tile work in place of its sidekick
