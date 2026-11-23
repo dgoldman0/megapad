@@ -1028,3 +1028,45 @@ def test_recovery_l1_failed_loses_the_heap_and_its_memory_waits_for_the_reset(ba
     # LM1's private work goes on: the port is not reset for FAILED, and the
     # memory goes back only once the chiplet is.
     assert got == [-1102, 1, 0, -1102, -1102, -1102, 0, -1, 0, 0, 1, 0]
+
+
+# ---------------------------------------------------------------------------
+#  The fixes: waits LM1 leaves unended (the first parts of recovery's A2)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_fix_a_hold_that_stalls_before_active_is_overdue(backend):
+    """LM1 stops just after it stores HELD, with no window open.  A core
+    that opens a window finds HELD without ACTIVE, no window word reading
+    OPEN, for more than twice HOLD_LIMIT, and treats the hold as overdue:
+    until recovery's stage 1 the heap is lost, cause 4, with LM1 held in
+    reset and the function's memory back with KDOS."""
+    machine = ready(backend, "hold_limit=100000")
+    machine.lm1.md_hold(lm1_chiplet.MD_HOLD_STALLS)
+    got = machine.run([
+        "WAITHELD _HOLD@ H-ACTIVE AND REPORT OBJ-OPEN REPORT",
+        "OBJ-ENGINE REPORT REPORT _P-CTRL 0 CHIP@ _CTRL-RESET-HOLD AND 0<> REPORT OBJ-MEMORY REPORT",
+    ])
+    assert got == [0, -1102, 4, 0, -1, 0]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_fix_a_full_log_outlives_its_deadline(backend):
+    """LM1 stops draining while core 0 waits inside its window on a full
+    log.  Past a request's deadline the core fails the function, cause 5;
+    the store that waited returns OBJ-E-FAILED, and once the window closes
+    the function's memory goes back to KDOS."""
+    machine = ready(backend, extra=["8 OBJ-LOG-ENTRIES !"])
+    assert machine.run([
+        ": MAKEV OBJ-OPEN THROW OBJ-NIL 32 OBJ-VECTOR THROW 1 1 OBJ-HANDLE THROW H ! OBJ-CLOSE ;",
+        "MAKEV 0 OBJ-COLLECT REPORT",
+        "D-ONE %d OBJ-SHAPE REPORT SH !" % ONE_LEN,
+    ]) == [0, 0]
+    machine.lm1.md_drain(False)
+    got = machine.run([
+        ": FILLF 0 N0 ! OBJ-OPEN THROW 32 0 DO SH @ OBJ-RECORD ?DUP IF NIP N0 ! LEAVE THEN "
+        "H @ OBJ-GET THROW I 1+ OBJ! ?DUP IF N0 ! LEAVE THEN LOOP "
+        "_HOLD@ H-HELD AND REPORT OBJ-MEMORY 0> REPORT OBJ-CLOSE ;",
+        "FILLF N0 @ REPORT OBJ-ENGINE REPORT REPORT OBJ-MEMORY REPORT",
+    ])
+    assert got == [0, -1, -1102, 5, 0, 0]
