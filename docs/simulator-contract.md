@@ -159,8 +159,9 @@ The simulator claims compatibility for:
   APT-1 frames, UIDL data, and application data;
 - ordinary Akashic UIDL/TUI, CELL fallback, rich publication, acknowledgement,
   and input lifecycles; and
-- deterministic simulator replay when the initial state, capability profile,
-  clock, entropy, and ingress schedule are the same.
+- deterministic simulator replay when the initial state, capability profile
+  with its full cores and turn quantum, clock, entropy, and ingress schedule
+  are the same.
 
 The simulator does not claim compatibility for:
 
@@ -175,6 +176,22 @@ The simulator does not claim compatibility for:
   RTL behavior, FPGA behavior, or physical-display evidence;
 - emulator snapshot compatibility; or
 - execution of native MF64 dictionary images.
+
+A machine profile has one to four full cores and no microcore cluster, and
+section 5 describes how its cores run. Three promises carry the claims above
+across cores. First, a run's results depend only on its initial state,
+machine profile, clock policy, entropy and ingress schedule: the Python and
+native executors give the same results, and the host never decides which
+core wins. Second, each semantic operation changes memory as one unbroken
+run of the BIOS's accesses would, and cores change only between operations,
+so every run equals an interleaving the architecture permits, in every byte
+but code, return addresses and absolute dictionary addresses. Third, for a
+program whose outcome follows from its synchronization, through mailbox
+jobs, the worker slots, spinlocks, IPIs and the per-core buffers of KDOS's
+concurrency contract, the guest-visible results equal the emulator's on one,
+two and four full cores. A program whose cores race gets one fixed outcome
+per profile, which may differ from the emulator's lock-step; such races stay
+outside the claims, with the physical multicore races listed above.
 
 Portable binary data remains portable even when executable machine artifacts
 do not.  A disk image, filesystem record, network packet, APT frame, UIDL
@@ -396,7 +413,7 @@ The admitted hosted BIOS vocabulary includes `EVALUATE`, the early
 physical input's raw bytes, including carriage returns, with a maximum length
 of 255. LF-delimited multi-line input belongs to KDOS
 `SOURCE-EVALUATE-CHECKED`. An overlength request rejects before reading the
-guest address. The one-core compiler, open-definition state, and compile-time
+guest address. Core 0's compiler, open-definition state, and compile-time
 control stack persist across normal evaluator calls, permitting definitions
 and conditionals to span inputs.
 
@@ -534,46 +551,57 @@ contracts have an implementation and differential evidence.
 
 ## 5. Scheduling and time
 
-The target design calls for a deterministic cooperative scheduler rather than
-uncontrolled host threads: given the same runnable set, yield sequence, clock,
-entropy, and ingress schedule, public task ordering and state must repeat. The
-current one-core profile does not implement that target scheduler. It admits
+A machine with several full cores runs them in rounds under a deterministic
+core scheduler, which the last part of this section describes. Within a
+core, the target design calls for a deterministic cooperative task scheduler
+rather than uncontrolled host threads: given the same runnable set, yield
+sequence, clock, entropy, and ingress schedule, public task ordering and
+state must repeat. That task scheduler is not built. The simulator admits
 the unchanged KDOS registry and table-ordered synchronous executor: selected
 task XTs run inline to return on the caller's context. That behavior is
 deterministic, but it is neither host threading nor cooperative task
 scheduling.
 
-It does implement the narrower architectural `IDL` boundary needed by
-unchanged source. `run_until_blocked` detaches a compiled-word dispatch after
+The simulator does implement the narrower architectural `IDL` boundary
+needed by unchanged source. `run_until_blocked` detaches a compiled-word dispatch after
 the semantic IDL operation while retaining its exact next instruction,
 ordered return stack, root identity, pointer-capture guard, and original step
 meter. The context and dictionary remain leased until cancellation or resume.
 A runtime-issued, one-shot receipt bound to that exact suspension and an
 explicit host-delivered interrupt or DMA wake is required before execution
-continues. The wake is a semantic host event attestation; this profile does
+continues. The wake is a semantic host event attestation; the simulator does
 not claim interrupt vectoring, an ISR, a DMA engine, latency, fairness, or
 physical timing.
 
-Only one compiled-word suspension is admitted at a time. Interpreted source
-evaluation and a Python primitive's nested public dispatch have Python-owned
-continuations that are not captured by this seam, so reaching IDL there fails
-explicitly and restores the ordinary dispatch guard. A suspended context
-rejects stack changes at resume, and dictionary mutation is rejected while a
-suspension is detached. Resumption retains the original cumulative step
-budget rather than silently granting a fresh quantum. This is an IDL
+The host sees one compiled-word suspension at a time, core 0's; the core
+scheduler keeps each worker's job between its turns itself. Interpreted
+source evaluation and a Python primitive's nested public dispatch have
+Python-owned continuations that are not captured by this seam, so reaching
+IDL there fails explicitly and restores the ordinary dispatch guard. A
+host-requested resume rejects stack changes to the suspended context while
+no other core has run since it suspended. Once another core has run, the
+comparison is skipped, because on the machine another core may write any
+memory, a sleeping core's stacks included; the return stack's continuation
+checks still refuse a corrupted return. Dictionary mutation is rejected while
+core 0's suspension is detached. Resumption retains the original cumulative
+step budget rather than silently granting a fresh quantum. This is an IDL
 block/wake contract, not BIOS `PAUSE` or KDOS task scheduling.
 
 `IDLE-UNTIL ( deadline-ms -- )` and `IDLE-MS ( ms -- )` follow `FAULT-XT!` at
 the frontier. `IDLE-UNTIL` is one semantic operation that pops the deadline.
 In a compiled-word dispatch that can suspend, it blocks at the IDL boundary
 with the deadline recorded (`idle_deadline_ms`); the backend then resumes it
-when UART input arrives or the RTC uptime reaches the deadline
-(`idle_wake_due`). The shared owner waits for input or that deadline instead
-of polling. When the deadline has passed, or the dispatch cannot suspend (source
+when UART input arrives, an IPI reaches core 0, or the RTC uptime reaches the
+deadline (`idle_wake_due`). The sleep then takes every signal pending for
+core 0, as the BIOS's `idle_until` acknowledges every sender. On a machine
+with several cores, `idle_wake_due` also holds while another core is awake or
+due to wake, and `idle_deadline_ms` is the earliest deadline among the
+sleeping cores. The shared owner waits for input or that deadline instead of
+polling. When the deadline has passed, or the dispatch cannot suspend (source
 evaluation or a nested host dispatch), it continues at once, which the BIOS
 contract allows since the word may return early. `IDLE-MS` adds `MS@` with
-saturation and tail-calls `IDLE-UNTIL`; 0 returns at once. The simulator has no
-NIC or IPI wake source, so only input and the deadline end the wait.
+saturation and tail-calls `IDLE-UNTIL`; 0 returns at once. The simulator has
+no NIC wake source.
 
 The session host also has a distinct runnable execution boundary. A caller may
 pass `quantum_steps` to `run_until_blocked`; between safe outer semantic IR
@@ -583,7 +611,9 @@ or a fresh cumulative watchdog budget. Genuine `IDL` continues to require its
 own wake receipt. Synchronous primitives, source evaluation, and colon
 accelerators finish before this boundary, so the quantum is not a hard
 wall-time deadline. This does not change `YIELD?`, task scheduling, or the
-ordinary guest source.
+ordinary guest source. On a machine with several cores the host's quantum
+bounds core 0's part of a host call, as the last part of this section
+describes.
 
 `SimulatorMachineSession` selects a configurable host quantum. The
 constructor's `semantic_quantum_steps` wins; otherwise the
@@ -648,9 +678,9 @@ checkpoint are now qualified source semantics. `TASK-STACKS` and the saved
 DSP/RSP fields are inert guest storage: execution never installs them. Active
 per-task data/return stacks, suspension and resumption, priority scheduling,
 task-local exception ownership, genuine `PAUSE`/`TASK-YIELD`, and preemption
-remain unimplemented. A future multicore profile must preserve publication
-order, generations, locks, and barriers, but it still does not qualify
-physical races or arbitration.
+remain unimplemented. The multicore profiles preserve publication order,
+generations, locks, and barriers through the promises of section 2, and they
+do not qualify physical races or arbitration.
 
 Two clock policies are supported:
 
@@ -686,6 +716,72 @@ derives time from semantic steps. Calendar, alarm, control/status, and physical
 cycle pacing remain outside this surface. Simulator ticks are diagnostics,
 not MP64 cycles.
 
+### Full cores and rounds
+
+A machine profile names one to four full cores (`Topology(full_cores=n)` in
+`simulator/platform.py`); `megapad.py --mode simulator` and the simulator's
+server take `--cores`. With one core the runtime runs core 0's dispatch as
+the paragraphs above describe, and nothing below adds a semantic step. With
+more, `simulator/cores.py` runs the cores in rounds under the native
+`CoreScheduler` of `simulator/accel/core_scheduler.h`, which decides whose
+turn comes next and when a sleeping core wakes, while thin glue runs each
+turn on the runtime's dispatcher.
+
+A round visits the awake cores in ascending core ID. A turn runs until the
+core has used the turn quantum, sleeps in `IDL`, finds a spinlock that
+another core holds, or ends its work. The quantum is 65,536 semantic steps,
+part of the machine profile and the same for both executors. A core woken
+during a round takes its turn in that round when its ID comes after the
+core whose turn woke it, and in the next round otherwise. Each core is
+awake, asleep in `IDL` with an optional `MS@` deadline, or idle: a worker
+with an empty slot, or core 0 with no host dispatch. A sleeping or idle core
+wakes when its IPI line rises, a sleeping core also at its deadline, and
+core 0 also when terminal input is waiting; core 0 wakes only while it has a
+host dispatch to continue.
+
+Core 0 runs the host's dispatch, the one a session or a caller of
+`run_until_blocked` started, and its turns end where that dispatch
+suspends. The other cores run the BIOS's worker loop. At the start of each
+turn, and when its sleep in `IDL` ends, a worker takes its pending signals
+as the BIOS's IPI handler does: when a full core has signalled it, its
+mailbox data word becomes the job in its slot, and every pending signal is
+acknowledged, so a chiplet's doorbell is a wake-up. A worker with a job runs
+it on fresh stacks in the core's 64 KiB zone, where `bios.asm` places them.
+The zones lie below Bank 0's top or 1 MiB, whichever is lower: core *n*'s
+zone has its top *n* × 64 KiB below that limit, its return stack starts at
+the zone's top, and its data stack 32 KiB below it. Core 0's zone is the top
+one, with its return stack in the zone's 64 KiB and its data stack starting
+at half the zone's top, Bank 0's midpoint when Bank 0 is 1 MiB. A job that
+returns clears the slot and leaves the worker idle. A fault prints the
+BIOS's report line with the core's ID, such as `*** DIVIDE BY ZERO
+CORE=01`, runs the `QUIT-XT!` callback, clears the slot and leaves the
+worker idle, and `ABORT` or `ABORT"` ends a job the same way once it has
+printed what it prints. Section 6 gives the services a worker may reach.
+
+A host call returns at the end of the round in which core 0's turn ended,
+or inside core 0's turn when the host's quantum is the shorter, as the
+Python executor's 8,192 steps are; the next call continues that turn. A
+host-delivered wake for core 0's sleep continues the machine: core 0
+resumes once its own wake rule holds, and otherwise the call runs one round
+of the other cores and returns core 0's sleep under a fresh suspension
+handle. `run_rounds` runs the other cores while core 0 runs no dispatch, as
+the machine runs them while core 0 waits at its prompt. Host evaluation of
+source runs no dispatch, so neither it nor a nested `EVALUATE` gives the
+workers a turn.
+
+Time follows the round. Every turn starts with the Timer at the round's
+start, so `CYCLES` and the Timer's match logic see the round's start plus
+the core's own steps, and the round's end moves the Timer on by its longest
+turn. With one awake core this is the one-core rule, one tick per semantic
+operation, and with four busy cores time advances by one quantum per round.
+Within a round a core can read a value that another core wrote at a later
+local time, so `CYCLES` values compare only within one core. The RTC's
+uptime still moves only by host advancement.
+
+Session status reports each core's state, semantic steps, turns, job and
+deadline under `cores`, and the rich-terminal host counts the other cores'
+steps as session progress.
+
 ## 6. Platform services
 
 The hosted BIOS/service layer may provide, as separately admitted
@@ -719,7 +815,7 @@ any byte moves. System Info, the mailbox and the chiplet port window are
 native devices; AES, SHA-3, the TRNG, the RTC and the audio output are the
 Python services described below, attached through the table's adapter, and
 assigning one of them on the platform puts the new service in the same
-windows. This profile's one requester is core 0.
+windows. An access's requester is the core whose turn it is (section 5).
 
 An unsupported service advertises an absent capability and returns the
 existing unsupported or absent status when its ABI has one; otherwise it
@@ -735,24 +831,51 @@ the SysInfo `CRYPTO_CAPS` qword expose the same profile. It does not claim CRC
 instructions, CSRs, hardware arbitration, DMA, or accelerator latency.
 Runtime construction requires that qword to be readable and rejects capability
 bits without an admitted service; missing or malformed SysInfo never enables a
-host fallback implicitly. Runtime construction likewise requires the admitted
-one-core topology qwords to report exactly one full core. System Info is built
-from the profile's topology and the address space's geometry, and reports
-`NUM_BUS_PORTS` as the emulator does, full cores plus clusters plus the NIC,
-disk and WOTS requesters, which is 4 here; only the WOTS deadlines read it,
-and WOTS is not admitted.
+host fallback implicitly. Runtime construction likewise requires the
+topology qwords to report one to four full cores, every core a full core,
+with no microcore cluster. System Info is built from the profile's topology
+and the address space's geometry, and reports `NUM_BUS_PORTS` as the
+emulator does, full cores plus clusters plus the NIC, disk and WOTS
+requesters, which is the full cores plus 3 here; only the WOTS deadlines
+read it, and WOTS is not admitted.
 
-That topology has no synthetic secondary worker. `CORE-STATUS` accepts only
-core ID zero and replaces it with zero, meaning the core-0 secondary-worker
-dispatch slot is idle; it is not a claim that the CPU itself is stopped.
-Out-of-topology IDs fail without consuming their operand. `WAKE-CORE` always
-fails without consuming either XT or core ID, because no valid secondary
-target exists. It never resolves or executes the XT and creates no host thread,
-worker slot, mailbox, IPI, asynchronous completion, or hidden no-op success.
-`IPI-SEND`, which follows `DICT-INDEX-NOTIFY!` at the frontier, fails the same
-way for every core ID, without consuming its message or core operand: no IPI
-exists in this profile, so it cannot wake a core. Code that only another core
-runs, such as a worker telling core 0 its job is done, may still name it.
+`COREID` answers the core whose turn it is, and `NCORES`, `N-FULL` and
+`N-FULL-CORES` the profile's full cores. `CORE-STATUS ( core -- xt|0 )` reads
+a full core's worker slot: the job it was sent and has not finished, or
+zero. A worker's slot empties when its job ends; core 0 has no worker loop,
+so a job sent to core 0 stays in its slot, and zero there says nothing about
+whether core 0 itself runs. An ID at or beyond the full cores fails without
+consuming its operand. `WAKE-CORE ( xt core -- )` puts the job in the
+target's slot and sends it by IPI, as the BIOS's word does: the caller's
+mailbox data word takes the XT and the target's IPI line rises. It fails
+without consuming either operand when the target is the caller or no full
+core, so on one core every ID fails, and it never resolves or executes the
+XT itself.
+
+`IPI-SEND ( x id -- )`, which follows `DICT-INDEX-NOTIFY!` at the frontier,
+stores `x` in the caller's mailbox data word and signals the participant
+`id`: a full core, which takes a copy of the word, or a chiplet port. It
+fails without consuming either operand when `id` is the caller, above 255
+or no participant, so on one core without ports every ID fails. A full
+core's signal to a worker is a job, as the BIOS's handler takes it, and any
+other signal is a wake-up. `IPI-STATUS ( -- mask )` reads `MBOX_STATUS`, the
+caller's pending senders 0 to 7, and `IPI-ACK ( id -- )` acknowledges one
+sender; `MBOX! ( x -- )` and `MBOX@ ( -- x )` write and read the caller's
+mailbox data word. These four follow `VRAM-SIZE` at the frontier.
+
+A worker runs within the limits of KDOS's concurrency contract. The
+compiler, the evaluator, dictionary growth and rollback, and terminal input
+(`KEY`, `KEY?` and the `ACCEPT` built on `KEY`) run on core 0 alone. A
+worker that reaches one takes the illegal-operation fault, code -21, through
+its fault path, which reports `*** ILLEGAL INSTRUCTION CORE=nn`. Words that
+only read the dictionary, such as `FIND` and `>BODY`, work on every core,
+and a dictionary rollback on core 0 that would remove a word in which a
+worker's suspended job runs is refused. The device services take the active core as
+their requester, but per-core engines and contention inside their native
+paths are not built: the tile engine, its accumulator and `FPCSR` are one
+state for the whole machine, and the checked disk words, which take lock 2,
+report the storage timeout status at once when another core holds it. Using
+those services from two cores at once is outside the claims.
 
 Chiplet ports are a separately admitted capability, present when the address
 space is created with `chiplet_ports`. The ports are the C++ model the
@@ -760,26 +883,27 @@ emulator uses (`shared/accel/chiplet_port.h`, `docs/chiplet-link.md`), so
 asking for them requires the native extension. With ports, SysInfo's
 `CHIPLET_PORTS` qword at `+0x70` holds the port window's `PORT_COUNT`, the
 window at MMIO offset `0xE00` admits aligned 64-bit accesses, and the
-mailbox works over the participant table the ports ring through. The first
-port has the ID 1, the ID after the one core's. Without ports the qword reads
-zero and the port window lies outside every admitted window.
+mailbox works over the participant table the ports ring through. The ports'
+IDs follow the cores, as on the emulator: the first port's ID is the
+profile's core count, 1 with one core and 4 with four. Without ports the
+qword reads zero and the port window lies outside every admitted window.
 
 The mailbox window at `0x500` is admitted in every profile, as the machine
 always has its mailbox. It is the shared model of `shared/accel/mailbox.h`:
 the requester's data word at `+0` to `+7`, `MBOX_SEND` at `+8`, which also
 copies the sender's word to a core it signals, `MBOX_STATUS` at `+9` for IDs
 0 to 7 and `MBOX_ACK` at `+A`, in accesses of 1, 2, 4 or 8 naturally aligned
-bytes; every other byte reads 0 and ignores writes. Without ports this
-profile's one core has no participant to signal. The register values, the
+bytes; every other byte reads 0 and ignores writes. Every full core and
+every port is a participant, so only a one-core profile without ports has no
+participant for core 0 to signal. The register values, the
 admission of a chiplet's memory requests against lent ranges with its
 refusal record, the traffic through lent external memory and the pending
 state of doorbells are compatibility claims. Arbitration, `QOS` and latency
 are outside them. A chiplet steps before each read of a port register or of
 `MBOX_STATUS` and when a dispatch returns to its host, so a guest that polls
 makes progress and the outcome depends on its accesses alone. A port's
-signal reaches the guest through `MBOX_STATUS`; its delivery as an interrupt
-or through a flag branch belongs to the simulator's multicore work, and
-`IPI-SEND` keeps the behaviour described above.
+doorbell raises its target's IPI line, which `MBOX_STATUS` shows: on core 0
+it ends a sleep in `IDL` (section 5), and a worker takes it as a wake-up.
 
 Each port also has a window into memory its chiplet lends: port `p`'s is the
 2^48 bytes at `0x0100_0000_0000_0000 + p × 2^48`. `TACC-STORE` sends an
@@ -810,8 +934,12 @@ cluster register domain.
 sentinel `0xFFFF_FE00_0000_0000`; the simulator maps no storage there, so an
 access fails through the normal unmapped-memory contract. `MICRO?` preserves
 the executable BIOS's unsigned `id >= N-FULL` classification rather than
-performing topology validation. With `N-FULL = 1`, ID zero is false and every
-other uint64 cell is true, including cells that cannot name a hosted core.
+performing topology validation: IDs below `N-FULL` are false and every other
+uint64 cell is true, including cells that cannot name a hosted core. The
+BIOS's word answers 255 for true, because `ldi` zero-extends its 8-bit
+immediate, as `RESIZED?` and `RESIZE-DENIED?` do too; that is a BIOS defect
+(finding 14 of `docs/multicore-simulator-plan.md`), and the simulator
+answers the full-width flag of section 2.
 These choices claim source-visible failure and classification behavior only,
 not cluster execution, scratchpad storage, barriers, privilege, or MPU
 enforcement.
@@ -878,7 +1006,8 @@ peripheral wiring exposes only `COUNT_LO` to `CYCLES` and accepts only
 convergence and qualification are deferred rather than normalized into another
 hosted mode.
 
-The admitted one-core legacy tile service binds `TMODE!`, `TCTRL!`,
+The admitted legacy tile service, one state for the whole machine (section
+6), binds `TMODE!`, `TCTRL!`,
 `TSRC0!`, `TSRC1!`, `TDST!`, `TADD`, `TSUB`, `TAND`, `TOR`, `TXOR`,
 `TMUL`, `TDOT`, `TSUM`, `TMIN`, `TMAX`, `TTRANS`, `TPOPCNT`, `TL1`,
 `TEMIN`, `TEMAX`, `TABS`, `TSUMSQ`, `TMINIDX`, `TMAXIDX`, `TWMUL`,
@@ -1038,11 +1167,14 @@ all take their locks from it. A
 free or same-owner acquire returns 0, a foreign-owner attempt returns 1, and
 only the owner can release. Reacquisition is depthless, so one release frees a
 lock after any number of same-core successes. Construction/reset starts every
-lock free; guest `THROW` does not release one implicitly. The current slice
-needs only valid lock 9 through the pseudo-BIOS words. It does not admit direct
-spinlock MMIO, whose window the model already serves, and rejects IDs outside
-0 through 15 instead of reproducing the BIOS's unchecked address arithmetic,
-which can fault or alias another device.
+lock free; guest `THROW` does not release one implicitly. Each acquire and
+release names the core whose turn it is, and a foreign-owner attempt also
+ends the caller's turn, so the holder runs before the caller tries again;
+KDOS's `LOCK`, which polls `SPIN@`, makes progress that way on several
+cores. The words do not admit direct spinlock MMIO, whose window the model
+already serves, and reject IDs outside 0 through 15 instead of reproducing
+the BIOS's unchecked address arithmetic, which can fault or alias another
+device.
 The simulator claims ordered terminal ownership/results, not host-thread
 synchronization, memory fences, fairness, bus arbitration, contention timing,
 interrupt behavior, or physical multicore evidence.
@@ -1121,8 +1253,9 @@ SHA3/SHAKE modes, their exact rates and domain separators, sequential
 64-byte output windows, staged checked publication, and raw in-place
 Keccak-f[1600] over 25 little-endian lanes. Fixed and extendable-output
 transactions retain their BIOS `(COREID,TASK-ID)` owner until the required
-terminal clear. In the current one-core pre-scheduler profile that identity is
-always `(0,0)`; guest control unwinding does not implicitly release it.
+terminal clear. That identity is the core whose turn it is with task 0, since
+every task is task 0 until a cooperative task layer exists; guest control
+unwinding does not implicitly release it.
 
 Every nonempty checked input, output, or 200-byte raw-state transfer is
 qualified as one complete caller-managed span before its first guest-memory
@@ -1669,8 +1802,9 @@ The BIOS validates physical geometry, not allocator ownership or disjointness;
 a caller can bind over live XMEM data or dictionary headers and rebuild will
 clear that span. Disable clears diagnostics but intentionally leaves old table
 bytes. `DICT-INDEX@` is four sequential BIOS loads rather than an epoch-retried
-multicore snapshot; the hosted one-core profile returns one stable state and
-does not claim that stronger hardware behavior. KDOS sizes from `XMEM-FREE`,
+multicore snapshot; the hosted word is one semantic operation, which returns
+one stable state on every profile, and does not claim that stronger hardware
+behavior. KDOS sizes from `XMEM-FREE`,
 which counts only virgin bump-tail capacity, not reclaimed nodes.
 
 KDOS sets `_DICT-INDEX-DONE` before allocation and installation. A status-1
@@ -1687,8 +1821,9 @@ current-HERE, allocator-ownership, index-overlap, or minimum-capacity rule.
 Invalid input consumes both arguments and enters `DICT-FAULT-XT!` before the
 old pair changes. `DICT-BOUNDS-OFF` clears the pair without moving `HERE`.
 The hardware's limit-first publication ordering is not independently
-observable in the one-core hosted profile; hosted callers see only the stable
-old, disabled, or complete new state.
+observable in the hosted profiles, where the word is one semantic operation;
+hosted callers on every core see only the stable old, disabled, or complete
+new state.
 
 Exact unchanged `kdos.f` lines 2489 through 2638 define and execute the
 complete userland lifecycle. Loading the slice only publishes its 18 words and
@@ -1776,7 +1911,7 @@ one-shot wake contract above; treating IDL as a no-op or ordinary cooperative
 task yield is outside the contract. Public memory-backed `STATE`, general raw
 native-code emission, and executing a `]` compiled while already in compile
 state remain pending; that unsupported `]` form fails during source
-compilation. Persistent one-core compiler state across evaluator calls is now
+compilation. Core 0's persistent compiler state across evaluator calls is now
 part of the semantic BIOS prerequisite above.
 
 Exact current lines 2861 through 3049 contain 189 LF records and 7,084 bytes,
@@ -2844,26 +2979,33 @@ storage, RTC, or IDL operation and leaves the public data and return stacks
 empty. The enabled retained Timer counter may advance only through ordinary
 semantic evaluation metering.
 
-The topology contract remains one full core. `COREID` and both core counts are
-one-core values. `CORE-STATUS` accepts only ID 0 and returns zero for its idle
-worker slot; that result does not say that the executing primary is idle.
-`WAKE-CORE` always fails without consuming the XT and core operands, creates
-no worker, and never resolves or executes the XT. Thus unchanged `CORE-RUN`
-has no valid target: it rejects core 0 as self and every negative or
-above-range value as invalid before `WAKE-CORE`. `CORE-WAIT 0` returns,
-`CORES` lists only core 0 as self/running, and `P.RUN-PAR` takes ordinary
-ordered `P.RUN`; it dispatches nothing, provides no parallel speedup, and
-leaves all five `PAR-*` variables zero.
+`COREID` and both core counts follow the profile's full cores, and
+`CORE-STATUS` and `WAKE-CORE` behave as section 6 describes. On one core,
+unchanged `CORE-RUN` has no valid target: it rejects core 0 as self and every
+negative or above-range value as invalid before `WAKE-CORE`. `CORE-WAIT 0`
+returns, `CORES` lists only core 0 as self/running, and `P.RUN-PAR` takes
+ordinary ordered `P.RUN`; it dispatches nothing, provides no parallel
+speedup, and leaves all five `PAR-*` variables zero. On two to four cores
+`CORE-RUN` sends its job to a worker through `WAKE-CORE`, `CORE-WAIT` polls
+`CORE-STATUS` until the job has ended, `CORES` lists each worker's state,
+and `P.RUN-PAR` takes the multicore branch described below.
+`tests/test_multicore_differential.py` compares these words, together with
+`ALL-CORES-WAIT`, `BARRIER`, a counter under `LOCK`, run queues,
+`SCHED-ALL`, messages, `CATCH` inside a job, a faulting and an aborting job,
+a worker's IPI ending core 0's `IDLE-UNTIL`, and the SysInfo words, with the
+emulator on one, two and four full cores.
 
 This does not silently repair source defects. `ALL-CORES-WAIT` and
-`ALL-FULL-WAIT` use plain `DO`; with equal start and limit at one they enter a
-phantom core-1 iteration instead of zero-tripping. Strict `CORE-STATUS` makes
-both and derived `BARRIER` fail promptly. `LOCK` polls the underlying owner
-lock with non-suspending `YIELD?`; same-core acquisition is depthless and
-contention cannot progress on this profile. No fairness, timing, queueing, or
-explicit memory-fence property is inferred from those wrappers.
+`ALL-FULL-WAIT` use plain `DO`; with equal start and limit on one core they
+enter a phantom core-1 iteration instead of zero-tripping. Strict
+`CORE-STATUS` makes both and derived `BARRIER` fail promptly there. `LOCK`
+polls the underlying owner lock with non-suspending `YIELD?`, and same-core
+acquisition is depthless. On one core contention cannot progress; on
+several, a refused `SPIN@` ends the caller's turn, so the holder runs and
+can release the lock. No fairness, timing, queueing, or explicit
+memory-fence property is inferred from those wrappers.
 
-The source-only multicore pipeline branch dispatches at most one initial step
+The multicore pipeline branch dispatches at most one initial step
 to each secondary full core, runs all remaining steps on core 0, and waits; it
 is neither round-robin nor worker reuse. Shared `PAR-P`/`PAR-N` make it
 non-reentrant, while `PAR-PIPE`/`PAR-STEP`/`PAR-CORE` are dead. It does not
@@ -2897,13 +3039,17 @@ Run queues are eight-index sentinel rings with capacity seven. Empty state is
 head equal to tail; pop and clear do not erase slots, and XT zero can be
 enqueued although consumers cannot distinguish it from an empty result.
 Address/count operations validate neither core IDs nor mutable indices. The
-qualified execution domain is canonical indices and core 0. `SCHED-CORE 0`
-dequeues FIFO and executes each nonzero XT synchronously on the caller's
-stacks. The core ID remains below the XT, so bodies must be stack-neutral.
-Dequeue commits before XT execution; failure loses that item and leaves later
-queue entries retained.
+qualified execution domain is canonical indices and the profile's full
+cores. `SCHED-CORE 0` dequeues FIFO and executes each nonzero XT
+synchronously on the caller's stacks. The core ID remains below the XT, so
+bodies must be stack-neutral. For a worker's queue, `SCHED-CORE` sends each
+XT through `CORE-RUN` and waits for it with `CORE-WAIT`. Dequeue commits
+before XT execution; failure loses that item and leaves later queue entries
+retained.
 
-`SCHED-ALL` is not a one-core no-op. Each secondary pass uses plain
+On two to four cores `SCHED-ALL` sends each worker its queue's first XT,
+drains core 0's queue, then waits for each worker and drains its queue.
+On one core `SCHED-ALL` is not a no-op. Each secondary pass uses plain
 `NCORES 1 DO`; equal bounds enter at index 1 rather than zero-tripping. The
 loop walks dormant tables 1–15 and then unchecked addresses beyond the
 initialized arrays, where arbitrary dictionary bytes may provoke a fault or
@@ -2940,11 +3086,16 @@ gate and all 16 flags, and neither resets nor acknowledges sticky match or
 pending IRQ state.
 
 Messages are shared-memory sentinel inboxes, also capacity seven, with no IPI
-or wake notification. The one-core qualified path is synchronous self-send
-and receive; broadcast excludes self and returns zero. IDs and table indices
-are largely unchecked. Global send scratch is written before lock 7 and
-receive scratch is reread after unlocking, so the source is not reentrant or
-made race-free by the lock. Successful `MSG-RECV` accidentally retains
+or wake notification. On one core the meaningful path is synchronous
+self-send and receive, and broadcast excludes self and returns zero; on
+several, a worker's message reaches another core's inbox under lock 7. IDs
+and table indices are largely unchecked. Global send scratch is written
+before lock 7 and receive scratch is reread after unlocking, so the source
+is not reentrant or made race-free by the lock. Senders on several cores at
+once race: on the four-core emulator, three workers sending core 0 a message
+together delivered core 3's payload three times, while the simulator ran
+each short job within its turn and delivered each payload once (finding 13
+of `docs/multicore-simulator-plan.md`). Successful `MSG-RECV` accidentally retains
 `COREID`, producing `( core type sender payload -1 )`, while its empty path
 returns the documented four zeroes. `MSG-DISPATCH` retains that core beneath
 handler inputs/results. `MSG-FLUSH` consequently returns an initial zero plus
@@ -2953,10 +3104,11 @@ has no type bound, and handler lookup accepts negative signed types as less
 than four and can address before the table.
 
 Named resource locks are opt-in wrappers around physical-core ownership, not
-proof that the named subsystems acquire them. All hosted semantic tasks share
-core ID 0. Same-core acquisition is depthless, one release ends a nested
-critical section, and a foreign-owner wait cannot progress through the
-non-suspending checkpoint. `WITH-LOCK` balances its `>R`/`R>` sequence and
+proof that the named subsystems acquire them. All hosted semantic tasks on a
+core share its core ID. Same-core acquisition is depthless, one release ends
+a nested critical section, and a foreign-owner wait cannot progress through
+the non-suspending checkpoint on one core; on several, the refused acquire
+ends the waiter's turn and the owner runs. `WITH-LOCK` balances its `>R`/`R>` sequence and
 releases only on normal return; a throw or abort strands ownership. Static
 `LOCK-INFO` labels are not live lock state and omit the later networking lock
 12.
@@ -3706,9 +3858,11 @@ semantic-BIOS tests pin ordinary anonymous interpret `IF`: true/false and
 nested branches, calls into ordinary colon definitions, compiled string
 literals, continuation across checked `EVALUATE` calls, survival of a
 pre-checkpoint definition across that boundary, finish/reset state,
-compile-both-branches lookup, and cleanup after an unfinished source. The
-admitted exactly-one-full-core profile executes only the false
-multicore-banner branch; this is not multicore startup evidence.
+compile-both-branches lookup, and cleanup after an unfinished source. These
+tests run the one-core profile, which executes only the false
+multicore-banner branch. The two- and four-core simulators of
+`tests/test_multicore_differential.py` run the true branch while loading
+KDOS without comparing its text, so neither is multicore startup evidence.
 
 The already-run pre-decision bounded regular-load selector applied the CLI
 blank/pure-comment filter to its pinned 9,894-line, 341,355-byte file and
@@ -3967,8 +4121,8 @@ backend defect is not promoted into the semantic contract merely because it
 is executable: the X25519 slice, for example, uses published RFC vectors and
 the agreeing native C++/standalone-RTL value while recording the Python
 emulator mismatch. A comparison starts from the same source revisions, copied
-initial media, declared one-core capability profile, deterministic clock and
-entropy, and timestamped ingress script.
+initial media, declared capability profile with its full cores,
+deterministic clock and entropy, and timestamped ingress script.
 
 Claimed comparisons include:
 
@@ -3979,8 +4133,11 @@ Claimed comparisons include:
 - APT decoded frames and, with freshness pinned, exact bytes;
 - canonical CELL and retained-terminal state, revisions, acknowledgement, and
   input ordering;
-- VFS-visible files, metadata, and post-flush media bytes; and
-- Desk, Pad, and Daybook state and ordinary interactions.
+- VFS-visible files, metadata, and post-flush media bytes;
+- Desk, Pad, and Daybook state and ordinary interactions; and
+- for a program whose synchronization fixes its outcome, on one, two and
+  four full cores, its output, the buffers it owns and the final worker
+  slots (`tests/test_multicore_differential.py`).
 
 Post-flush media comparison is required future vertical-acceptance evidence,
 not a result claimed by the present focused rich-terminal integration. Current
@@ -3988,8 +4145,11 @@ filesystem coverage is limited to semantic ordering, injected flush failure,
 and generation-stale no-effect behavior.
 
 Comparisons exclude absolute dictionary addresses, compiled native bytes,
-PC/register state, instruction/cycle counters, backend snapshots, and physical
-timing.
+PC/register state, instruction/cycle counters, each core's steps, backend
+snapshots, physical timing, and the outcome of a program whose cores race.
+The simulator's own determinism is checked apart from the emulator: the same
+multicore case run twice and on both executors must leave the same memory,
+output, clock and per-core steps.
 
 Every admitted feature receives a focused semantic test and, where an emulator
 equivalent exists, a differential vector.  The independent APT byte and state

@@ -734,26 +734,28 @@ needs a change in the BIOS, KDOS, the release plan or the contract.
     Stage 1 gives every profile one.
 11. **The parallel plan's commit rule can be narrower.** Section 4.8 states
     the rule that exactly reproduces the sequential order, with its proof.
-12. **KDOS's waits on the other cores never end on one core (read from the
-    source).** `ALL-CORES-WAIT`, `ALL-FULL-WAIT`, `BARRIER` and `SCHED-ALL`
-    count with a plain `DO` from 1 to the core count. On one core the limit
-    equals the start, and `DO` runs its body until the index wraps, asking
-    `CORE-WAIT` about cores the machine does not have. `?DO` gives the
-    one-core case its natural meaning, nothing to wait for. Stage 3's
-    differential cases run these words on two and four cores.
+12. **KDOS's waits on the other cores never end on one core.**
+    `ALL-CORES-WAIT`, `ALL-FULL-WAIT`, `BARRIER` and `SCHED-ALL` count with
+    a plain `DO` from 1 to the core count. On one core the limit equals the
+    start, and `DO` runs its body until the index wraps, asking `CORE-WAIT`
+    about cores the machine does not have; the contract's KDOS paragraphs
+    record this from the one-core qualification. `?DO` gives the one-core
+    case its natural meaning, nothing to wait for. Stage 3's differential
+    cases run these words on two and four cores.
 13. **KDOS's messages share their fields between cores (run on the
     emulator).** `MSG-SEND` stores its type, payload and target in the
     shared variables `MS-T`, `MS-P` and `MS-G` before it takes lock 7, and
     `MSG-RECV` reads a message's fields back from `MR-T`, `MR-S` and `MR-P`
     after it has released the lock; `MSG-BROADCAST` keeps its arguments in
-    `MB-T` and `MB-P` with no lock at all. Three workers that each sent core
-    0 a message at once on the four-core emulator delivered three messages
-    carrying core 3's payload, 900 in all where 600 was sent. The simulator
-    ran each short job within its turn, so its sends did not interleave and
-    it delivered 600. Storing after `LOCK` and reading before `UNLOCK`
-    closes the race, and per-core variables would serve `MSG-BROADCAST`. No
-    Akashic module uses KDOS's message words, and stage 3's differential
-    case sends from one worker at a time.
+    `MB-T` and `MB-P` with no lock at all. The contract's KDOS paragraphs
+    record the race from the source, and the emulator shows its effect:
+    three workers that each sent core 0 a message at once on four cores
+    delivered three messages carrying core 3's payload, 900 in all where
+    600 was sent. The simulator ran each short job within its turn, so its
+    sends did not interleave and it delivered 600. Storing after `LOCK` and
+    reading before `UNLOCK` closes the race, and per-core variables would
+    serve `MSG-BROADCAST`. No Akashic module uses KDOS's message words, and
+    stage 3's differential case sends from one worker at a time.
 14. **Three BIOS flag words answer 255 for true (run on the emulator).**
     `MICRO?`, `RESIZED?` and `RESIZE-DENIED?` load their true flag with
     `ldi r, -1`, whose 8-bit immediate the machine zero-extends, so they

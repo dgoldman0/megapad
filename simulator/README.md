@@ -28,20 +28,26 @@ The implemented slices provide:
   refused, and every access reaches the device that holds its first byte, with
   its requester, preflight first and then byte by byte; Python services attach
   through the table's adapter;
-- a read-only one-full-core SysInfo device, built from the profile's
-  topology, whose direct MMIO registers and BIOS topology words read the same
-  registers and report the actual sparse memory geometry, now advertising the
-  admitted `0x7` crypto profile: CRC, checked SHA3/SHAKE streaming, and raw
-  Keccak-f[1600];
+- a read-only SysInfo device, built from the profile's topology of one to
+  four full cores, whose direct MMIO registers and BIOS topology words read
+  the same registers and report the actual sparse memory geometry, now
+  advertising the admitted `0x7` crypto profile: CRC, checked SHA3/SHAKE
+  streaming, and raw Keccak-f[1600];
 - the machine's mailbox in every profile, the native model shared with the
   emulator (`shared/accel/mailbox.h`): the requester's data word, `SEND`,
-  `STATUS` and `ACK`, over the table the chiplet ports ring through when the
-  profile has ports;
-- an explicit one-core worker capability boundary: `CORE-STATUS 0` reports an
-  idle secondary-worker slot, other IDs are rejected, and `WAKE-CORE` rejects
-  every request without consuming or executing its XT because no secondary
-  core exists; `IPI-SEND` likewise rejects every request without consuming
-  its operands, because the profile models no IPI;
+  `STATUS` and `ACK`, over the table of full cores and the chiplet ports
+  the profile has;
+- full cores in rounds (`cores.py`, `accel/core_scheduler.h`): with two to
+  four full cores a native scheduler gives each awake core turns of 65,536
+  semantic steps in ascending core ID, core 0 runs the host's dispatch, and
+  the others run the BIOS worker loop, taking jobs that `WAKE-CORE` or a full
+  core's `IPI-SEND` sends them and running each on fresh stacks in the core's
+  zone; `CORE-STATUS` reads the worker slots, `IPI-STATUS`, `IPI-ACK`,
+  `MBOX!` and `MBOX@` serve the caller's mailbox, a refused `SPIN@` ends the
+  caller's turn, the Timer follows a round clock, and a worker that reaches
+  the compiler, the evaluator, dictionary growth or terminal input takes the
+  illegal-operation fault. With one core `WAKE-CORE` rejects every target and
+  the runtime runs core 0 alone, as before;
 - an explicit no-cluster boundary: the cluster-enable mask remains zero,
   barriers and cluster MPU state are unavailable, `SPAD` returns the native
   sentinel without inventing storage, and `MICRO?` retains the BIOS unsigned
@@ -68,9 +74,10 @@ The implemented slices provide:
   address, and neither the search order nor `LATEST` changes; the token runs
   through `EXECUTE`, `DEFER`/`IS` and `DOES>` for as long as its code slot
   stands, on both executors, in the reference interpreter;
-- a runtime-owned one-core IDL suspension boundary with opaque continuation
-  handles, one-shot interrupt/DMA wake receipts, cumulative step budgets,
-  cancellation, and original return-stack guard restoration;
+- a runtime-owned IDL suspension boundary for core 0's host dispatch, with
+  opaque continuation handles, one-shot interrupt/DMA wake receipts,
+  cumulative step budgets, cancellation, and original return-stack guard
+  restoration; `IDLE-UNTIL` wakes on input, an IPI or its deadline;
 - numeric `HERE`/`LATEST` checkpoint rollback with live-ancestry and contiguous
   reclaimed-zone validation, binding restoration, and stale-byte retention;
 - the installable BIOS dictionary-fault callback, including the dynamic
@@ -101,7 +108,8 @@ The implemented slices provide:
   wall-clock VALID byte `EPOCH_STAT` at `+0xB1D`, and BIOS `EPOCH@`;
   deterministic by default, with an explicit monotonic clock binding for the
   live server;
-- a retained one-core semantic tile service for four integer lane widths plus
+- a retained semantic tile service, one state for the whole machine, for
+  four integer lane widths plus
   FP16/BF16, the source-required legacy and extended element, reduction,
   index, widening, multiply-accumulate, and transpose operations, low-byte
   control registers, completed-operation accounting, and the ACC/TSRC0/TDST
@@ -179,7 +187,7 @@ The implemented slices provide:
 - an exact-record bootstrap loader that supplies a shadowable `REQUIRE` before
   KDOS exists, with nested budgets, cycle detection, and registry-only failure
   cleanup;
-- the one-core semantic BIOS evaluator: raw guest `EVALUATE` through 255 bytes,
+- core 0's semantic BIOS evaluator: raw guest `EVALUATE` through 255 bytes,
   checked statuses and diagnostics, persistent cross-call compiler/control
   state, ordinary anonymous interpret-mode `IF`/`ELSE`/`THEN`, explicit
   finish/reset/unwind, raw-token bracketed conditional compilation, bytewise
@@ -211,12 +219,13 @@ The implemented slices provide:
   checkpoint binding;
 - unchanged KDOS Timer Preemption Setup through the ordinary retained Timer
   ABI, including its software gate and final deferred checkpoint rebinding;
-- unchanged KDOS Multicore Dispatch on the explicit one-full-core BIOS
-  profile, including status/introspection, spinlock wrappers, and the ordinary
-  sequential pipeline fallback without a fabricated worker or speedup;
+- unchanged KDOS Multicore Dispatch on one to four full cores, including
+  status/introspection, spinlock wrappers, and the ordinary sequential
+  pipeline fallback on one core without a fabricated worker or speedup;
 - unchanged KDOS per-core queues, work stealing, affinity, per-core flag
   polling, software message inboxes, and named lock wrappers through §8.7,
-  qualified as one-core state machines rather than multicore execution;
+  qualified as one-core state machines, with their multicore use compared
+  against the emulator by `tests/test_multicore_differential.py`;
 - unchanged KDOS cluster-control and MPU failure behavior, complete §9 ANSI
   screens, §10 Data Port bindings, Dashboard and Help publication, and §15
   Pipeline Bundle tracking/declarative words plus §18 Ring Buffer primitives
@@ -532,7 +541,7 @@ host substitutions or hard-coded simulator capacities.
 
 Byte-exact logical lines 1072 through 1216 load the complete unchanged KDOS
 SHA3/SHAKE and random-helper section and its 26 ordinary source definitions.
-The one-core SysInfo profile now reports `CRYPTO_CAPS = 0x7`: bit 0 is the
+The SysInfo profile now reports `CRYPTO_CAPS = 0x7`: bit 0 is the
 admitted reflected/raw CRC service, bit 1 is checked SHA3/SHAKE streaming, and
 bit 2 is raw Keccak-f[1600]. Bit 3 remains clear because the hosted WOTS chain
 has not been admitted. Acceptance covers SHA3-256, SHA3-512, SHAKE128,
@@ -844,7 +853,8 @@ prove allocator ownership or disjointness, and rebuild clears the supplied
 span. Disable leaves old bytes, `DICT-INDEX@` is not a coherent multicore
 snapshot in hardware, and KDOS's early DONE publication makes an otherwise
 unreachable post-allocation status-1 failure nontransactional. Hosted
-one-core execution preserves the visible table/state contract without claiming
+execution, where the word is one semantic operation, preserves the visible
+table/state contract without claiming
 hardware-cache timing or multicore seqlock behavior.
 
 Exact logical lines 2425 through 2574 now run the complete KDOS userland
@@ -958,7 +968,7 @@ Guest `EVALUATE` consumes one physical input's supplied bytes rather than
 normalizing carriage returns and accepts at most 255 bytes. Direct LF-containing
 input remains outside this primitive; KDOS `SOURCE-EVALUATE-CHECKED` owns
 physical-line splitting. A 256-byte request is rejected before reading its
-address. The ordinary one-core compiler and its control-flow stack persist
+address. Core 0's ordinary compiler and its control-flow stack persist
 across successful calls, so a colon definition and its conditionals may span
 several evaluator inputs.
 
@@ -1865,17 +1875,22 @@ Load invokes no core, lock, UART, storage, RTC, or IDL service and leaves both
 stacks empty; ordinary semantic evaluation alone can advance the enabled
 Timer counter.
 
-The hosted profile deliberately remains one full core. `CORE-STATUS 0`
-reports an idle worker slot, not a stopped primary, while direct `WAKE-CORE`
-fails without consuming its XT/core operands because no secondary execution
-context exists. Consequently source `CORE-RUN` rejects self, negative, and
-above-range core IDs before reaching the BIOS boundary; `CORE-WAIT 0` returns
-immediately; `CORES` reports only core 0; and `P.RUN-PAR` executes ordinary
-`P.RUN` in source order. It leaves every `PAR-*` variable zero and makes no
-concurrency or speedup claim. `PAR-PIPE`, `PAR-STEP`, and `PAR-CORE` are never
-read by this source block despite its wrapper commentary.
+On one full core, `CORE-STATUS 0` reports an idle worker slot, not a stopped
+primary, while direct `WAKE-CORE` fails without consuming its XT/core
+operands because no other full core exists. Consequently source `CORE-RUN`
+rejects self, negative, and above-range core IDs before reaching the BIOS
+boundary; `CORE-WAIT 0` returns immediately; `CORES` reports only core 0;
+and `P.RUN-PAR` executes ordinary `P.RUN` in source order. It leaves every
+`PAR-*` variable zero and makes no concurrency or speedup claim. On two to
+four full cores `CORE-RUN` sends its job to a worker, `CORE-WAIT` polls the
+worker's slot until the job ends, `CORES` lists each worker's state, and
+`P.RUN-PAR` takes the multicore branch below.
+`tests/test_multicore_differential.py` compares these words and the rest of
+KDOS's multicore surface with the emulator on one, two and four full cores.
+`PAR-PIPE`, `PAR-STEP`, and `PAR-CORE` are never read by this source block
+despite its wrapper commentary.
 
-That topology also has no micro-core cluster. `CLUSTER-EN@` therefore returns
+The hosted profiles have no micro-core cluster. `CLUSTER-EN@` therefore returns
 zero; `CLUSTER-EN!` consumes zero as an idempotent disable but rejects every
 nonzero mask before consuming it. The direct hosted SysInfo window remains
 read-only and reports the same zero capability mask. Barrier and cluster-MPU
@@ -1883,18 +1898,21 @@ words fail without changing their caller-visible stacks rather than reporting
 fake completion or register state. `SPAD` still returns the BIOS address
 sentinel `0xFFFF_FE00_0000_0000`, but no memory is mapped there, so a later
 access faults normally. `MICRO?` is the literal unsigned BIOS threshold test:
-with `N-FULL = 1`, zero is false and every other 64-bit cell is true even
-though none names a hosted core.
+IDs below `N-FULL` are false and every other 64-bit cell is true even though
+none names a hosted core. Its true flag is -1, where the BIOS's word answers
+255 (finding 14 of `docs/multicore-simulator-plan.md`).
 
 Several literal source discrepancies remain visible. Both all-core wait words
-use plain `DO` with equal start and limit on this profile, so they enter a
+use plain `DO` with equal start and limit on one core, so they enter a
 phantom core-1 iteration instead of zero-tripping; strict `CORE-STATUS` makes
-`ALL-CORES-WAIT`, `ALL-FULL-WAIT`, and `BARRIER` fail promptly. `LOCK` is a
-busy spin with non-suspending `YIELD?`; same-core reacquisition succeeds
-without increasing a depth, and one `UNLOCK` releases it. There is no
-contention-progress, fairness, timing, or explicit memory-fence contract.
+`ALL-CORES-WAIT`, `ALL-FULL-WAIT`, and `BARRIER` fail promptly there. `LOCK`
+is a busy spin with non-suspending `YIELD?`; same-core reacquisition
+succeeds without increasing a depth, and one `UNLOCK` releases it. On
+several cores a refused `SPIN@` ends the caller's turn, so the holder runs
+and can release the lock; there is no fairness, timing, or explicit
+memory-fence contract.
 
-The unexecuted multicore `P.RUN-PAR` branch is not round-robin: it assigns at
+The multicore `P.RUN-PAR` branch is not round-robin: it assigns at
 most one step to each secondary full core, runs all remaining steps on core 0,
 then waits. Shared `PAR-P`/`PAR-N` make it non-reentrant; it does not check
 worker availability or validate XTs/descriptors and can violate dependencies
@@ -1930,13 +1948,16 @@ with usable capacity seven. Pop, clear, and receive advance indices but retain
 stale slot bytes. A zero XT can be queued even though dequeue cannot
 distinguish it from empty for several consumers. Queue, affinity, flag, and
 message addressors generally do not validate their indices; focused hosted
-qualification therefore uses canonical table bounds and only actual core 0
-for execution.
+qualification therefore uses canonical table bounds and only the profile's
+actual full cores for execution.
 
 `SCHED-CORE 0` is useful but synchronous: it dequeues FIFO XTs and executes
-them inline on the caller's stacks and exception context. Dequeue commits
-before execution, so a throw loses that item and retains later items. Each XT
-must be stack-neutral because the retained core ID sits below it. `SCHED-ALL`
+them inline on the caller's stacks and exception context. For a worker's
+queue it sends each XT through `CORE-RUN` and waits with `CORE-WAIT`.
+Dequeue commits before execution, so a throw loses that item and retains
+later items. Each XT must be stack-neutral because the retained core ID sits
+below it. On two to four cores `SCHED-ALL` sends each worker its first XT,
+drains core 0's queue, then waits for and drains each worker's. `SCHED-ALL`
 is unusable at one core: both secondary passes use plain `NCORES 1 DO`.
 Equal bounds enter at phantom core 1 instead of zero-tripping. The loop first
 walks dormant tables 1–15, then unchecked addresses beyond the initialized
@@ -1973,9 +1994,11 @@ sticky match or pending IRQ state.
 
 IPI Messaging is a shared-memory inbox without an IPI or wake notification.
 Self-send/receive is the meaningful one-core path and broadcast excludes self,
-returning zero. Staging and receive scratch are global, with send staging
+returning zero; on several cores a worker's message reaches another core's
+inbox under lock 7. Staging and receive scratch are global, with send staging
 written before lock 7 and receive results reread after unlock, so the lock does
-not make the path reentrant. A successful `MSG-RECV` leaks `COREID` below the
+not make the path reentrant, and senders on several cores at once race
+(finding 13 of `docs/multicore-simulator-plan.md`). A successful `MSG-RECV` leaks `COREID` below the
 documented four results, producing `( core type sender payload -1 )`; the empty
 path returns exactly four zeroes. That leak propagates through
 `MSG-DISPATCH`, beneath the handler's `sender payload type`, and makes
@@ -1985,8 +2008,8 @@ negative handler types can index before the table.
 
 The named resource words remain opt-in, depthless physical-core lock wrappers.
 They do not prove that dictionary, UART, heap, or other ordinary operations
-acquire those locks, and separate semantic tasks on hosted core 0 are the same
-owner. Nested acquisition adds no depth, so one inner release ends the outer
+acquire those locks, and separate semantic tasks on one hosted core are the
+same owner. Nested acquisition adds no depth, so one inner release ends the outer
 critical section. `WITH-LOCK` releases only after normal XT return; a throw or
 abort strands ownership. Its return-stack use is balanced on the normal path
 and is not inside a `DO` loop. `LOCK-INFO` prints static assignments rather

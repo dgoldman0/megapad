@@ -2902,9 +2902,11 @@ class MegaForthRuntime:
     def new_context(self) -> ExecutionContext:
         """Return an unbacked host scratch context.
 
-        The canonical one-core guest stack geometry belongs to
-        :attr:`main_context`.  Additional guest tasks will require explicit,
-        caller-owned stack arenas rather than silently aliasing that storage.
+        Core 0's guest stack geometry belongs to :attr:`main_context`, and a
+        worker's jobs run on fresh stacks in its own zone
+        (``simulator/cores.py``).  Additional guest tasks will require
+        explicit, caller-owned stack arenas rather than silently aliasing that
+        storage.
         """
 
         return ExecutionContext()

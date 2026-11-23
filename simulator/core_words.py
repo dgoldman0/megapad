@@ -1377,8 +1377,8 @@ def _cluster_enable_store(context: ExecutionContext) -> None:
     mask = context.data.peek()
     if mask != 0:
         raise ExecutionError(
-            "CLUSTER-EN! cannot enable micro-core clusters in the one-core "
-            f"hosted profile, got mask 0x{mask:016x}; the mask was not "
+            "CLUSTER-EN! cannot enable micro-core clusters, which the hosted "
+            f"profiles do not have, got mask 0x{mask:016x}; the mask was not "
             "consumed"
         )
     context.data.pop()
