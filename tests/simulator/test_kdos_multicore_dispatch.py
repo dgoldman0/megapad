@@ -35,11 +35,11 @@ FIXTURE = (
 
 FIRST_LINE = 7302
 LAST_LINE = 7465
-SLICE_BYTES = 5_709
+SLICE_BYTES = 5_711
 SLICE_SHA256 = (
-    "2ee729d76154212656586916c4ebca88f634a1d7a6a0bcbcc1ba79a9b68f9d0a"
+    "b4056181eb22d8881956282cbf4c9d06e778e2a4ed42eb29a952e86bc69f75f6"
 )
-SLICE_GIT_BLOB = "1a5d411f178fb60788092d6dc255a395b6ab7062"
+SLICE_GIT_BLOB = "4ccc3fa5e85482b799e1e20c0f557c012ba4d879"
 HOSTED_DICTIONARY_GROWTH = 415
 HOSTED_WORD_FIXED_BYTES = 17
 VARIABLE_BODY_BYTES = 8
@@ -298,14 +298,13 @@ def test_parallel_pipeline_words_are_sequential_fallbacks_without_speedup() -> N
     "word",
     ("ALL-CORES-WAIT", "ALL-FULL-WAIT", "BARRIER"),
 )
-def test_equal_bound_plain_do_reaches_phantom_core_one(word: str) -> None:
+def test_the_waits_find_no_other_core_on_the_one_core_profile(word: str) -> None:
     runtime = _load_multicore_dispatch()
     context = runtime.new_context()
 
-    # NCORES and N-FULL-CORES are both one.  Plain DO does not zero-trip when
-    # start equals limit, so strict CORE-STATUS exposes I=1 immediately and
-    # keeps this source bug bounded without a wraparound-size execution.
-    with pytest.raises(ExecutionError, match="needs a full core's ID"):
-        runtime.execute(word, context=context, step_budget=500)
-
+    # NCORES and N-FULL-CORES are both one.  ?DO runs no iteration when its
+    # start equals its limit, so the word asks CORE-STATUS about no core and
+    # returns at once (finding 12 of docs/multicore-simulator-plan.md).
+    runtime.execute(word, context=context, step_budget=500)
+    assert context.data.snapshot() == ()
     assert runtime.drain_uart_output() == b""

@@ -106,7 +106,7 @@ RQ-INIT       \ initialise at load time
 \   then drains core 0's queue locally.
 : SCHED-ALL  ( -- )
     \ First pass: kick one task to each secondary core
-    NCORES 1 DO
+    NCORES 1 ?DO
         I RQ-EMPTY? 0= IF
             I RQ-POP I CORE-RUN      \ dispatch first task
         THEN
@@ -114,7 +114,7 @@ RQ-INIT       \ initialise at load time
     \ Drain core 0's queue locally while secondaries work
     0 SCHED-CORE
     \ Wait for all secondary cores and drain their remaining tasks
-    NCORES 1 DO
+    NCORES 1 ?DO
         I CORE-WAIT                  \ wait for current task
         I SCHED-CORE                 \ drain remaining tasks
     LOOP ;
@@ -400,8 +400,8 @@ MSG-INIT
 VARIABLE MS-T   VARIABLE MS-P   VARIABLE MS-G
 
 : MSG-SEND  ( type payload target -- flag )
-    MS-G !  MS-P !  MS-T !
     MSG-SLOCK LOCK
+    MS-G !  MS-P !  MS-T !
     MS-G @ MSG-IFULL? IF  MSG-SLOCK UNLOCK  0 EXIT  THEN
     MS-G @ DUP CELLS MSG-ITAIL + @  SWAP MSG-ISLOT
     MS-T @  OVER !  CELL+
@@ -422,8 +422,8 @@ VARIABLE MR-T   VARIABLE MR-S   VARIABLE MR-P
     @     MR-P !
     COREID DUP CELLS MSG-IHEAD + @  1+  MSG-DEPTH MOD
     COREID CELLS MSG-IHEAD + !
-    MSG-SLOCK UNLOCK
-    MR-T @ MR-S @ MR-P @ -1 ;
+    MR-T @ MR-S @ MR-P @
+    MSG-SLOCK UNLOCK -1 ;
 
 : MSG-PEEK  ( -- flag )
     COREID MSG-IEMPTY? INVERT ;
@@ -448,16 +448,16 @@ MSG-HINIT
     ROT DUP MSG-HANDLER@
     DUP IF  EXECUTE -1  ELSE  DROP DROP DROP DROP 0  THEN ;
 
-VARIABLE MB-T   VARIABLE MB-P
+\ The arguments stay on the caller's stack, which no other core shares.
 
 : MSG-BROADCAST  ( type payload -- n )
-    MB-P !  MB-T !
     0
     NCORES 0 DO
         I COREID <> IF
-            MB-T @ MB-P @ I MSG-SEND IF  1+  THEN
+            2 PICK 2 PICK I MSG-SEND IF  1+  THEN
         THEN
-    LOOP ;
+    LOOP
+    NIP NIP ;
 
 : MSG-FLUSH  ( -- n )
     0

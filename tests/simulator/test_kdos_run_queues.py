@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 
 from shared.cells import MASK64
-from simulator.errors import ExecutionError, ForthAbort, StepBudgetExceeded
-from simulator.ir import Do
+from simulator.errors import ExecutionError, ForthAbort
+from simulator.ir import QuestionDo
 from simulator.runtime import ColonDefinition, MegaForthRuntime
 from tests.simulator.test_kdos_aes import (
     KDOS_GIT_BLOB,
@@ -39,14 +39,14 @@ FIXTURE = (
 
 FIRST_LINE = 7466
 LAST_LINE = 8004
-SLICE_BYTES = 17_203
+SLICE_BYTES = 17_240
 SLICE_SHA256 = (
-    "4e36452b9d65c41843f8b015065303375efae8667824c5bf606c30da6af32625"
+    "c34479e764c7a6abe904c98887aecd103fe6a3179cd3b3f48e59af3cdc33ad7d"
 )
-SLICE_GIT_BLOB = "022981afa233362debb10678b250ac044d8454d9"
-HOSTED_DICTIONARY_GROWTH = 7_365
+SLICE_GIT_BLOB = "ea1b27113cc0dd72230c2368832d733fd65e21c1"
+HOSTED_DICTIONARY_GROWTH = 7_307
 HOSTED_WORD_FIXED_BYTES = 17
-RAW_VARIABLE_BYTES = 4_959
+RAW_VARIABLE_BYTES = 4_943
 
 SOURCE_LEDGER = (
     ("CONSTANT", b"RQ-DEPTH", 0),
@@ -118,8 +118,6 @@ SOURCE_LEDGER = (
     (":", b"MSG-HANDLER!", 0),
     (":", b"MSG-HANDLER@", 0),
     (":", b"MSG-DISPATCH", 0),
-    ("VARIABLE", b"MB-T", 8),
-    ("VARIABLE", b"MB-P", 8),
     (":", b"MSG-BROADCAST", 0),
     (":", b"MSG-FLUSH", 0),
     (":", b"MSG-INFO", 0),
@@ -149,8 +147,6 @@ PLAIN_ZERO_VARIABLES = (
     "MR-T",
     "MR-S",
     "MR-P",
-    "MB-T",
-    "MB-P",
 )
 ARRAY_INITIALIZERS = (
     ("RQ-SLOTS", 1_024, 0x00),
@@ -230,9 +226,9 @@ def test_run_queue_slice_is_exact_linked_and_initializes_only_its_tables() -> No
 
     runtime = _evaluate_run_queues(runtime)
 
-    assert len(SOURCE_LEDGER) == 91
+    assert len(SOURCE_LEDGER) == 89
     assert sum(definer == "CONSTANT" for definer, _name, _body in SOURCE_LEDGER) == 17
-    assert sum(definer == "VARIABLE" for definer, _name, _body in SOURCE_LEDGER) == 17
+    assert sum(definer == "VARIABLE" for definer, _name, _body in SOURCE_LEDGER) == 15
     assert sum(definer == ":" for definer, _name, _body in SOURCE_LEDGER) == 57
     assert sum(
         HOSTED_WORD_FIXED_BYTES + len(name) + body
@@ -265,7 +261,7 @@ def test_run_queue_slice_is_exact_linked_and_initializes_only_its_tables() -> No
 
     assert sum(size for _name, size, _fill in ARRAY_INITIALIZERS) + (
         len(PLAIN_ZERO_VARIABLES) * 8
-    ) == 4_896
+    ) == 4_880
     for name, initialized_bytes, fill in ARRAY_INITIALIZERS:
         word = runtime.find(name)
         assert word is not None
@@ -396,22 +392,27 @@ def test_core_zero_queue_is_fifo_with_seven_slot_capacity_and_wraparound() -> No
     assert _execute(runtime, "RQ-POP", 0) == (_xt(runtime, "RQ-FIRST"),)
 
 
-def test_sched_all_plain_do_cannot_zero_trip_on_the_one_core_profile() -> None:
+def test_sched_all_drains_core_zero_alone_on_the_one_core_profile() -> None:
     runtime = _load_run_queues()
     sched_all = runtime.find("SCHED-ALL")
     assert sched_all is not None
     assert isinstance(sched_all.implementation, ColonDefinition)
+    # Both passes over the other cores count them with ?DO, which runs no
+    # iteration on one core (finding 12 of docs/multicore-simulator-plan.md).
     assert sum(
-        isinstance(operation, Do)
+        isinstance(operation, QuestionDo)
         for operation in sched_all.implementation.operations
     ) == 2
 
-    noop = runtime.define_primitive("SCHED-ALL-NOOP", lambda _context: None)
-    assert _execute(runtime, "RQ-PUSH", noop.xt, 0) == ()
+    runs = []
+    task = runtime.define_primitive("SCHED-ALL-TASK", lambda _context: runs.append(1))
+    assert _execute(runtime, "RQ-PUSH", task.xt, 0) == ()
+    assert _execute(runtime, "RQ-PUSH", task.xt, 0) == ()
     context = runtime.new_context()
-    with pytest.raises(StepBudgetExceeded, match="80-step budget"):
-        runtime.execute("SCHED-ALL", context=context, step_budget=80)
-    assert _execute(runtime, "RQ-COUNT", 0) == (1,)
+    runtime.execute("SCHED-ALL", context=context, step_budget=2_000)
+    assert context.data.snapshot() == ()
+    assert len(runs) == 2
+    assert _execute(runtime, "RQ-COUNT", 0) == (0,)
     assert runtime.drain_uart_output() == b""
 
 
@@ -447,13 +448,13 @@ def test_one_core_stealing_balancing_and_spawn_affinity_are_literal() -> None:
     assert _execute(runtime, "RQ-COUNT", 0) == (1,)
     assert _descriptor(runtime, descriptor) == (1, 128, noop, 0, 0, 0)
 
-    with pytest.raises(StepBudgetExceeded, match="200-step budget"):
-        runtime.execute(
-            "SCHED-AFFINE",
-            context=runtime.new_context(),
-            step_budget=200,
-        )
-    assert _execute(runtime, "RQ-COUNT", 0) == (2,)
+    # SCHED-AFFINE queues the READY XT a second time, marks the descriptor
+    # RUNNING, and SCHED-ALL runs both copies on core 0; nothing marks the
+    # descriptor DONE.
+    context = runtime.new_context()
+    runtime.execute("SCHED-AFFINE", context=context, step_budget=5_000)
+    assert context.data.snapshot() == ()
+    assert _execute(runtime, "RQ-COUNT", 0) == (0,)
     assert _descriptor(runtime, descriptor) == (2, 128, noop, 0, 0, 0)
 
 

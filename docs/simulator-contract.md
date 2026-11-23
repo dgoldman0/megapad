@@ -3105,19 +3105,18 @@ speedup, and leaves all five `PAR-*` variables zero. On two to four cores
 and `P.RUN-PAR` takes the multicore branch described below.
 `tests/test_multicore_differential.py` compares these words, together with
 `ALL-CORES-WAIT`, `BARRIER`, a counter under `LOCK`, run queues,
-`SCHED-ALL`, messages, `CATCH` inside a job, a faulting and an aborting job,
-a worker's IPI ending core 0's `IDLE-UNTIL`, and the SysInfo words, with the
-emulator on one, two and four full cores.
+`SCHED-ALL`, messages, messages sent at once, `CATCH` inside a job, a
+faulting and an aborting job, a worker's IPI ending core 0's `IDLE-UNTIL`,
+and the SysInfo words, with the emulator on one, two and four full cores.
 
-This does not silently repair source defects. `ALL-CORES-WAIT` and
-`ALL-FULL-WAIT` use plain `DO`; with equal start and limit on one core they
-enter a phantom core-1 iteration instead of zero-tripping. Strict
-`CORE-STATUS` makes both and derived `BARRIER` fail promptly there. `LOCK`
-polls the underlying owner lock with non-suspending `YIELD?`, and same-core
-acquisition is depthless. On one core contention cannot progress; on
-several, a refused `SPIN@` ends the caller's turn, so the holder runs and
-can release the lock. No fairness, timing, queueing, or explicit
-memory-fence property is inferred from those wrappers.
+`ALL-CORES-WAIT`, `ALL-FULL-WAIT` and the `BARRIER` built on the first
+count the other cores with `?DO`, so on one core they have none to wait for
+and return at once. `LOCK` polls the underlying owner lock with
+non-suspending `YIELD?`, and same-core acquisition is depthless. On one
+core contention cannot progress; on several, a refused `SPIN@` ends the
+caller's turn, so the holder runs and can release the lock. No fairness,
+timing, queueing, or explicit memory-fence property is inferred from those
+wrappers.
 
 The multicore pipeline branch dispatches at most one initial step
 to each secondary full core, runs all remaining steps on core 0, and waits; it
@@ -3162,17 +3161,10 @@ before XT execution; failure loses that item and leaves later queue entries
 retained.
 
 On two to four cores `SCHED-ALL` sends each worker its queue's first XT,
-drains core 0's queue, then waits for each worker and drains its queue.
-On one core `SCHED-ALL` is not a no-op. Each secondary pass uses plain
-`NCORES 1 DO`; equal bounds enter at index 1 rather than zero-tripping. The
-loop walks dormant tables 1–15 and then unchecked addresses beyond the
-initialized arrays, where arbitrary dictionary bytes may provoke a fault or
-dispatch attempt. Only an uninterrupted full-cell index cycle would reach the
-loop exit. Bounded hosted evidence stops before the core-0 drain and proves
-that queue 0 remains untouched. A populated phantom queue can be popped before
-`CORE-RUN` rejects its ID. `SCHED-BALANCED` and `SCHED-AFFINE` inherit this
-defect and are admitted only for bounded failure/state evidence, not successful
-scheduling.
+drains core 0's queue, then waits for each worker and drains its queue. Its
+two passes over the workers count with `?DO`, so on one core it drains core
+0's queue alone, and `SCHED-BALANCED` and `SCHED-AFFINE`, which end in it,
+complete there too.
 
 Work stealing mutates the same unlocked ring tables synchronously. `BALANCE`
 is a no-op at one full core. Direct `STEAL-FROM`/`WORK-STEAL` can address
@@ -3186,8 +3178,8 @@ and never validate stored core IDs. `SPAWN-ON 0` enqueues first, then, while
 the registry has space, appends a 48-byte READY descriptor with priority 128,
 zero saved stacks/name, and a table/affinity entry. At saturation it still
 queues but publishes no descriptor. `SCHED-AFFINE` queues that already-queued
-READY XT again, marks the descriptor RUNNING before its broken `SCHED-ALL`
-tail, and does not mark it DONE.
+READY XT again, marks the descriptor RUNNING before its `SCHED-ALL` tail,
+which runs both copies, and does not mark it DONE.
 
 Per-core preemption is retained software state, not task preemption.
 `PREEMPT-ON-ALL` writes low-32 `TIME-SLICE`, Timer control 7, and the global
@@ -3203,14 +3195,14 @@ Messages are shared-memory sentinel inboxes, also capacity seven, with no IPI
 or wake notification. On one core the meaningful path is synchronous
 self-send and receive, and broadcast excludes self and returns zero; on
 several, a worker's message reaches another core's inbox under lock 7. IDs
-and table indices are largely unchecked. Global send scratch is written
-before lock 7 and receive scratch is reread after unlocking, so the source
-is not reentrant or made race-free by the lock. Senders on several cores at
-once race: on the four-core emulator, three workers sending core 0 a message
-together delivered core 3's payload three times, while the simulator ran
-each short job within its turn and delivered each payload once (finding 13
-of `docs/multicore-simulator-plan.md`). Successful `MSG-RECV` accidentally retains
-`COREID`, producing `( core type sender payload -1 )`, while its empty path
+and table indices are largely unchecked. `MSG-SEND` stages its arguments in
+global variables only while it holds lock 7, `MSG-RECV` reads a message's
+fields back before it releases the lock, and `MSG-BROADCAST` keeps its
+arguments on its own stack, so senders on several cores at once each
+deliver their own message: on four of the emulator's cores, three workers
+that send core 0 a message, and then broadcast one, at the same moment
+deliver every payload whole, as the simulator does. Successful `MSG-RECV`
+accidentally retains `COREID`, producing `( core type sender payload -1 )`, while its empty path
 returns the documented four zeroes. `MSG-DISPATCH` retains that core beneath
 handler inputs/results. `MSG-FLUSH` consequently returns an initial zero plus
 one `COREID + 1` cell per consumed message rather than a count. Handler store

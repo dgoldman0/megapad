@@ -14,13 +14,16 @@ Each case also runs on a second native simulator and on the Python
 executor, and the three simulators must agree exactly: memory, output, the
 clock and each core's semantic steps.
 
-KDOS's ALL-CORES-WAIT, ALL-FULL-WAIT, BARRIER and SCHED-ALL count with a
-plain DO from 1 to the core count, which never ends on one core; their
-cases run on two and four cores. KDOS's MSG-SEND stores its arguments in
-shared variables before it takes lock 7, so senders on several cores at
-once race on the emulator; the messages case sends from one worker at a
-time (section 9 of the plan records both defects). The sysinfo case prints
-MICRO?'s flags themselves, which on both machines set every bit for true.
+Every case runs on one core as well: KDOS's ALL-CORES-WAIT, ALL-FULL-WAIT,
+BARRIER and SCHED-ALL count the other cores with ?DO, so on one core they
+have none to wait for and return at once. KDOS's message words touch their
+shared variables only while they hold lock 7, and MSG-BROADCAST keeps its
+arguments on its own stack, so in the messages-at-once case every worker
+sends core 0 a message, and then broadcasts one, at the same moment, and
+each payload must arrive intact; on four of the emulator's cores, which
+run in lock-step, the senders contend for the lock (findings 12 and 13 of
+the plan). The sysinfo case prints MICRO?'s flags themselves, which on
+both machines set every bit for true.
 """
 
 from __future__ import annotations
@@ -48,27 +51,27 @@ EXTERNAL_MIB = 64
 _PROGRAM_COUNTER = re.compile(rb" PC=[0-9A-F]{16}")
 _BETWEEN = re.compile(rb"<<(.*?)>>", re.S)
 
-# name: (minimum cores, definitions, body)
+# name: (definitions, body)
 CASES = {
-    "sysinfo": (1, b"", b"""NCORES . N-FULL . N-FULL-CORES . COREID .
+    "sysinfo": (b"", b"""NCORES . N-FULL . N-FULL-CORES . COREID .
 0 MICRO? . 1 MICRO? . NCORES MICRO? ."""),
-    "cores": (1, b"", b"CORES"),
-    "dispatch": (2, b"""
+    "cores": (b"", b"CORES"),
+    "dispatch": (b"""
 CREATE DMARKS 4 CELLS ALLOT  DMARKS 4 CELLS 0 FILL
 : DJOB ( -- ) COREID 10 + COREID CELLS DMARKS + ! ;
 """, b"""NCORES 1 ?DO ['] DJOB I CORE-RUN LOOP  ALL-CORES-WAIT
 4 0 DO I CELLS DMARKS + @ . LOOP  BARRIER  ALL-FULL-WAIT"""),
-    "wait": (1, b"""
+    "wait": (b"""
 CREATE WMARKS 4 CELLS ALLOT  WMARKS 4 CELLS 0 FILL
 : WJOB ( -- ) 500 0 DO LOOP COREID 1+ COREID CELLS WMARKS + ! ;
 """, b"""NCORES 1 ?DO ['] WJOB I CORE-RUN LOOP  NCORES 1 ?DO I CORE-WAIT LOOP
 4 0 DO I CELLS WMARKS + @ . LOOP"""),
-    "lock": (1, b"""
+    "lock": (b"""
 VARIABLE LCOUNT
 : LJOB ( -- ) 300 0 DO 12 LOCK LCOUNT @ 1+ LCOUNT ! 12 UNLOCK LOOP ;
 """, b"""0 LCOUNT !  NCORES 1 ?DO ['] LJOB I CORE-RUN LOOP  LJOB
 NCORES 1 ?DO I CORE-WAIT LOOP  LCOUNT @ ."""),
-    "pipeline": (1, b"""
+    "pipeline": (b"""
 CREATE PMARKS 4 CELLS ALLOT  PMARKS 4 CELLS 0 FILL
 : PSTEP0 ( -- ) COREID 1+ 0 CELLS PMARKS + ! ;
 : PSTEP1 ( -- ) COREID 1+ 1 CELLS PMARKS + ! ;
@@ -77,35 +80,49 @@ CREATE PMARKS 4 CELLS ALLOT  PMARKS 4 CELLS 0 FILL
 4 PIPELINE DPIPE
 ' PSTEP0 DPIPE P.ADD  ' PSTEP1 DPIPE P.ADD  ' PSTEP2 DPIPE P.ADD  ' PSTEP3 DPIPE P.ADD
 """, b"""DPIPE P.RUN-PAR  4 0 DO I CELLS PMARKS + @ . LOOP"""),
-    "queues": (1, b"""
+    "queues": (b"""
 VARIABLE QSUM
 : QJOB ( -- ) COREID 1+ QSUM +! ;
 """, b"""0 QSUM !  NCORES 0 ?DO ['] QJOB I RQ-PUSH ['] QJOB I RQ-PUSH LOOP
 NCORES 0 ?DO I RQ-COUNT . LOOP  NCORES 0 ?DO I SCHED-CORE LOOP  QSUM @ ."""),
-    "sched-all": (2, b"""
+    "sched-all": (b"""
 VARIABLE SSUM
 : SJOB ( -- ) COREID 1+ 12 LOCK SSUM @ + SSUM ! 12 UNLOCK ;
 """, b"""0 SSUM !  NCORES 0 ?DO ['] SJOB I RQ-PUSH ['] SJOB I RQ-PUSH LOOP
 SCHED-ALL  SSUM @ ."""),
     # A message MSG-RECV takes leaves the receiving core's ID beneath its
     # type, sender and payload (section 6 of the simulator contract).
-    "messages": (1, b"""
+    "messages": (b"""
 : MJOB ( -- ) MSG-USER COREID 100 * 0 MSG-SEND DROP ;
 """, b"""NCORES 1 ?DO ['] MJOB I CORE-RUN I CORE-WAIT LOOP
 BEGIN MSG-RECV WHILE . . . DROP REPEAT 2DROP DROP"""),
-    "catch": (1, b"""
+    # Every worker waits for MGO and then sends core 0 a message, or
+    # broadcasts one, at once. Core 0 counts what it takes, the messages
+    # whose payload is their sender's ID times 100, and the senders' mask.
+    "messages-at-once": (b"""
+VARIABLE MGO  VARIABLE MCOUNT  VARIABLE MINTACT  VARIABLE MFROM
+: MTAKE ( -- ) 0 MCOUNT ! 0 MINTACT ! 0 MFROM !
+  BEGIN MSG-RECV WHILE OVER 100 * = IF 1 MINTACT +! THEN
+    1 SWAP LSHIFT MFROM @ OR MFROM !  DROP DROP  1 MCOUNT +!
+  REPEAT 2DROP DROP  MCOUNT @ . MINTACT @ . MFROM @ . ;
+: MSENDJOB ( -- ) BEGIN MGO @ UNTIL  MSG-USER COREID 100 * 0 MSG-SEND DROP ;
+: MCASTJOB ( -- ) BEGIN MGO @ UNTIL  MSG-USER COREID 100 * MSG-BROADCAST DROP ;
+: MALL ( xt -- ) 0 MGO !  NCORES 1 ?DO DUP I CORE-RUN LOOP DROP  1 MGO !
+  ALL-CORES-WAIT  MTAKE ;
+""", b"""['] MSENDJOB MALL  ['] MCASTJOB MALL  MSG-INIT"""),
+    "catch": (b"""
 VARIABLE CRESULT
 : THROWER ( -- ) 42 THROW ;
 : CJOB ( -- ) ['] THROWER CATCH CRESULT ! ;
 """, b"""NCORES 1 ?DO 0 CRESULT ! ['] CJOB I CORE-RUN I CORE-WAIT CRESULT @ . LOOP"""),
-    "fault": (1, b"""
+    "fault": (b"""
 CREATE FMARKS 4 CELLS ALLOT  FMARKS 4 CELLS 0 FILL
 : FJOB ( -- ) 1 COREID CELLS FMARKS + !  1 0 / DROP  2 COREID CELLS FMARKS + ! ;
 : AJOB ( -- ) 3 COREID CELLS FMARKS + !  TRUE ABORT" worker gave up"
   4 COREID CELLS FMARKS + ! ;
 """, b"""NCORES 1 ?DO ['] FJOB I CORE-RUN I CORE-WAIT LOOP  4 0 DO I CELLS FMARKS + @ . LOOP
 NCORES 1 ?DO ['] AJOB I CORE-RUN I CORE-WAIT LOOP  4 0 DO I CELLS FMARKS + @ . LOOP"""),
-    "wake": (1, b"""
+    "wake": (b"""
 VARIABLE IWOKE
 : IJOB ( -- ) 0 0 IPI-SEND ;
 """, b"""0 IWOKE !  NCORES 1 > IF
@@ -117,6 +134,15 @@ THEN  IWOKE @ .  IPI-STATUS ."""),
 # What each case of this module prints last: the worker slots, each
 # nonzero while its core has a job.
 WORKER_SLOTS = b"NCORES 0 ?DO I CORE-STATUS 0<> . LOOP"
+
+# What the emulator must print for a case, by core count, where the two
+# machines agreeing is not enough: every message the workers send at once
+# arrives whole, which the simulator's turns would show whatever the race.
+EXPECTED = {
+    ("messages-at-once", 1): b"0 0 0 0 0 0 0 ",
+    ("messages-at-once", 2): b"1 1 2 1 1 2 0 0 ",
+    ("messages-at-once", 4): b"3 3 14 3 3 14 0 0 0 0 ",
+}
 
 
 def case_word(name: str) -> bytes:
@@ -192,7 +218,7 @@ class _Emulator:
         return _report(self.type([word]))
 
     def run(self, name: str) -> bytes:
-        _cores, setup, body = CASES[name]
+        setup, body = CASES[name]
         return self.run_case(case_word(name), setup, body, WORKER_SLOTS)
 
 
@@ -249,7 +275,7 @@ class _Simulator:
         )
 
     def run(self, name: str) -> _Run:
-        _cores, setup, body = CASES[name]
+        setup, body = CASES[name]
         return self.run_case(case_word(name), setup, body, WORKER_SLOTS)
 
 
@@ -306,10 +332,8 @@ def machines(sources):
 @pytest.mark.parametrize("cores", (1, 2, 4))
 @pytest.mark.parametrize("name", tuple(CASES))
 def test_kdos_multicore_words_agree_with_the_emulator(machines, cores, name):
-    minimum, _setup, _body = CASES[name]
-    if cores < minimum:
-        pytest.skip(f"KDOS's {name} words never end on one core")
     expected = machines("emulator", cores).run(name)
+    assert EXPECTED.get((name, cores), expected) == expected
     first = machines("native", cores).run(name)
     assert first.text == expected
     # The simulator is deterministic: the same case on the same history

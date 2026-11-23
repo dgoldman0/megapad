@@ -2774,13 +2774,11 @@ does not resolve or execute its XT.
 |------|-------------|-------------|
 | `CORE-RUN` | `( xt core -- )` | Rejects core 0 with `Cannot dispatch to self`; negative and `core >= NCORES` values abort as `Invalid core ID`. The one-core profile therefore has no valid source dispatch target and never reaches `WAKE-CORE`. It does not test worker busy state or XT validity on a topology that does have a target. |
 | `CORE-WAIT` | `( core -- )` | Polls `CORE-STATUS` with non-suspending `YIELD?`. Core 0 returns immediately in this profile; other IDs fail at the strict BIOS boundary. There is no timeout. |
-| `ALL-CORES-WAIT` | `( -- )` | Intended to visit secondary cores, but uses plain `NCORES 1 DO`; equal bounds enter at phantom core 1 rather than zero-trip, so the hosted profile fails promptly. |
-| `ALL-FULL-WAIT` | `( -- )` | Has the same equal-bound `DO` defect using `N-FULL-CORES`. |
-| `BARRIER` | `( -- )` | Calls defective `ALL-CORES-WAIT`. Even on a larger topology this would only poll worker XT slots; the source supplies no explicit memory fence. |
+| `ALL-CORES-WAIT` | `( -- )` | Waits for each secondary core with `CORE-WAIT`, counting them with `NCORES 1 ?DO`; on one core there is none, and it returns at once. |
+| `ALL-FULL-WAIT` | `( -- )` | Does the same for the secondary full cores with `N-FULL-CORES 1 ?DO`. |
+| `BARRIER` | `( -- )` | Calls `ALL-CORES-WAIT`. It only polls worker XT slots; the source supplies no explicit memory fence. |
 
-The strict one-core failure is intentional evidence of the unchanged source,
-not a hosted rewrite to `?DO`. These wait words also assume a core-0 caller
-without enforcing it. Because `YIELD?` does not switch contexts, any wait that
+These wait words assume a core-0 caller without enforcing it. Because `YIELD?` does not switch contexts, any wait that
 does observe a busy slot is a pure busy-spin in the current scheduler model.
 
 ### Synchronization Words
@@ -2842,7 +2840,7 @@ unlocked; inter-core scratch is not automatically local.
 CORES                  \ one [self] RUNNING row
 my-pipe P.RUN-PAR      \ exactly the ordinary sequential P.RUN path
 ' work 0 CORE-RUN      \ aborts: Cannot dispatch to self
-BARRIER                \ exposes the equal-bound DO bug at phantom core 1
+BARRIER                \ no secondary core to wait for: returns at once
 ```
 
 This qualifies the source API and its actual one-core branch. It is not
@@ -2880,7 +2878,7 @@ The nine declared arrays are each seven bytes larger than their comments say.
 | `RQ-PUSH` / `RQ-POP` | Mutate a circular table synchronously. With depth eight and head-equals-tail empty encoding, usable capacity is seven. |
 | `RQ-CLEAR` | Reset head/tail only; old slot bytes remain. |
 | `SCHED-CORE 0` | Pop FIFO XTs and execute them inline on the caller's stacks and exception context. |
-| `SCHED-ALL` | Cannot complete on the one-core profile because both `NCORES 1 DO` loops enter at equal bounds. |
+| `SCHED-ALL` | Sends each secondary core its queue's first XT, drains core 0's queue inline, then waits for and drains each secondary queue. Both secondary passes count with `NCORES 1 ?DO`, so on the one-core profile it drains core 0's queue alone. |
 | `RQ-INFO` | Report only advertised core 0; this is queue metadata, not worker activity. |
 
 An XT is removed before `SCHED-CORE` executes it, so a throw or execution
@@ -2890,15 +2888,8 @@ as an XT, but pop returns the same zero used for empty and execution then
 fails. Queue operations do not validate core IDs, slot indices, or public
 head/tail cells; dormant tables 1–15 exist but are not execution targets.
 
-Plain `DO` does not zero-trip. In `SCHED-ALL`, start and limit are both one,
-so the first secondary pass enters phantom core 1. It walks dormant tables
-1–15 and then unchecked addresses beyond the initialized arrays, where
-arbitrary dictionary bytes may cause a fault or dispatch attempt. Only an
-uninterrupted full-cell index cycle would exit the loop. Bounded hosted
-execution stops before the core-0 drain and leaves queue 0 untouched. If queue
-1 was populated through the unchecked raw queue API, its XT is removed before
-strict `CORE-RUN` aborts for the invalid target. `SCHED-BALANCED` and
-`SCHED-AFFINE` inherit this tail and are not successful hosted schedulers.
+`SCHED-BALANCED` and `SCHED-AFFINE` end in `SCHED-ALL`, so on one core they
+too finish with core 0's queue drained.
 
 ### §8.3 Work Stealing
 
@@ -2922,9 +2913,10 @@ is allocated or registered.
 
 The XT registered by `SPAWN-ON` is already queued. `SCHED-AFFINE` nevertheless
 queues every READY descriptor again, maps affinity `-1` to core 0, and marks
-the descriptor RUNNING before entering broken `SCHED-ALL`. It never marks the
-descriptor DONE. Capacity errors and later dispatch failures therefore retain
-duplicate queue entries, partial status changes, and prior descriptor state.
+the descriptor RUNNING before entering `SCHED-ALL`, which runs both queued
+copies. It never marks the descriptor DONE. Capacity errors and later
+dispatch failures retain duplicate queue entries, partial status changes,
+and prior descriptor state.
 
 ### §8.5 Per-Core Preemption
 
@@ -2951,10 +2943,13 @@ acknowledgement. Self-send/receive is synchronous; `MSG-BROADCAST` excludes
 self and therefore returns zero. Each eight-index inbox has usable capacity
 seven and retains stale slot bytes. Target/core/index bounds are unchecked.
 
-The nominal message lock is insufficient for concurrency. `MS-*` staging is
-written before acquiring lock 7, and `MR-*` result scratch is reread after
-unlock. Those and the `MB-*` broadcast variables are global and non-reentrant.
-Any fault while a locked path is active can also strand the depthless lock.
+Lock 7 guards each message's fields. `MSG-SEND` stages its arguments in the
+global `MS-*` variables only while it holds the lock, and `MSG-RECV` copies a
+message through the global `MR-*` variables onto its stack before it
+releases the lock, so senders and receivers on several cores at once each
+keep their own message. `MSG-BROADCAST` keeps its arguments on its own
+stack. Any fault while a locked path is active can strand the depthless
+lock.
 
 Successful `MSG-RECV` has a source stack defect. Updating `MSG-IHEAD` leaves
 the first `COREID` cell behind, so the actual result is
