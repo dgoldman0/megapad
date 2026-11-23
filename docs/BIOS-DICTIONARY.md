@@ -411,14 +411,14 @@ Four more words of this section have no number in the catalogue:
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
 | 111 | `:` | `( "name" -- )` | | Begin colon definition: create header at HERE, set STATE=1 |
-| 112 | `;` | `( -- )` | ✓ | End definition: compile `sep r17` (EXIT handler), set STATE=0 |
-| 113 | `EXIT` | `( -- )` | ✓ | Compile early return (`sep r17`) within a definition |
+| 112 | `;` | `( -- )` | ✓ | End definition: compile the 1-byte return `ret.l`, set STATE=0 |
+| 113 | `EXIT` | `( -- )` | ✓ | Compile early return (`ret.l`) within a definition |
 | 114 | `VARIABLE` | `( "name" -- )` | | Create word that pushes address of an 8-byte data cell (initialized to 0) |
 | 115 | `CONSTANT` | `( n "name" -- )` | | Create word that pushes n |
 | 116 | `VALUE` | `( x "name" -- )` | | Create word that pushes *contents* of its data cell (19-byte trampoline with `ldn` indirection) |
 | 117 | `TO` | `( x "name" -- )` | ✓ | Store x into VALUE's data cell. State-smart: interpret → store directly; compile → emit inline store code. A word VALUE did not make is refused with `TO requires a VALUE target, got NAME`, as the simulator refuses it: x stays on the stack, compilation stops and the line ends |
 | 118 | `CREATE` | `( "name" -- )` | | Create word with 30-byte trampoline (runtime pushes data-field addr). Includes 13-byte DOES> slot of zeroes |
-| 119 | `DOES>` | `( -- )` | ✓ | Compile `call does_runtime` + `sep r17`. At runtime, patches latest CREATE'd word's trampoline offset 16–29 with jump to DOES> body |
+| 119 | `DOES>` | `( -- )` | ✓ | Compile `call does_runtime` + `ret.l`. At runtime, patches latest CREATE'd word's trampoline offset 16–29 with jump to DOES> body, which starts right after that `ret.l` |
 | 120 | `IMMEDIATE` | `( -- )` | | Set IMMEDIATE flag (bit 7 of flags byte) on most recent word |
 | 121 | `STATE` | `( -- addr )` | | Push address of STATE variable |
 | 122 | `[` | `( -- )` | ✓ | Switch to interpret mode (STATE=0) |
@@ -1492,5 +1492,5 @@ ram_size ↓             Return stack (R15 grows downward)
 | R14 | **DSP** — Data stack pointer (grows downward) |
 | R15 | **RSP** — Return/call stack pointer (grows downward) |
 | R16 | **NEXT** handler (`sep r16` = fetch inline XT, advance IP, branch) |
-| R17 | **EXIT** handler (`sep r17` = pop return address from RSP, branch) |
+| R17 | **EXIT** handler (`sep r17` = pop return address from RSP, branch); compiled words return with `ret.l`, and R17 serves code compiled before that, such as older images |
 | R20 | Task yield handler (cooperative multitasking; `SEP R20` yields) |

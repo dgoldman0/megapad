@@ -35,7 +35,7 @@ grant source `>BODY` access or execution authority. The current machine bridge
 does not convert an arbitrary body address into a semantic XT.
 
 The BIOS compiler's `compile_call` emits a ten-byte `SEP R16` plus inline XT;
-its return uses `SEP R17`. Its handlers manipulate the architectural return
+its return is `RET.L` (`SEP R17` before 2026-11-23). Its handlers manipulate the architectural return
 stack, and inlined primitives use the native Forth data stack. The bounded
 integer runner fixes selectors and excludes program-counter selection. Loading
 those BIOS bytes into today's runner is therefore not a native dictionary

@@ -6051,6 +6051,30 @@ class TestBIOS(unittest.TestCase):
         self.assertIn("<-1 >", text)
         self.assertIn("<7 10 4 3 42 >", text)
 
+    def test_compiled_words_return_with_ret_l(self):
+        """A compiled word returns with the one-byte RET.L: an empty
+        definition's code is that byte, and EXIT, UNLOOP EXIT, a
+        quotation, an interpreted IF and a DOES> child all return through
+        it, with the JIT on and off."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": EMPTY ;",
+            "60 EMIT ' EMPTY C@ . 62 EMIT",
+            ": EARLY ( n -- n' ) DUP 0= IF EXIT THEN 1+ ;",
+            ": FIND3 ( -- i ) 10 0 DO I 3 = IF I UNLOOP EXIT THEN LOOP -1 ;",
+            ": QUOT ( -- n ) [: 5 ;] EXECUTE 1+ ;",
+            ": MK CREATE , DOES> @ 1+ ;  9 MK MD",
+            "JIT-ON",
+            ": EARLY2 ( n -- n' ) DUP 0= IF EXIT THEN 1+ ;",
+            ": MK2 CREATE , DOES> @ 2 + ;  40 MK2 ME",
+            "JIT-OFF",
+            "60 EMIT 0 EARLY . 4 EARLY . FIND3 . QUOT . MD . 0 EARLY2 . 4 EARLY2 . ME . 62 EMIT",
+            "1 IF 60 EMIT 77 . 62 EMIT THEN",
+        ])
+        self.assertIn("<14 >", text)
+        self.assertIn("<0 5 3 6 10 0 5 42 >", text)
+        self.assertIn("<77 >", text)
+
     def test_jit_keeps_calls_while_relocation_is_tracked(self):
         """While relocation tracking is on, an image is being built: uses of
         constants and created words stay calls, which it records."""

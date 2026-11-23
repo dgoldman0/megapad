@@ -221,10 +221,17 @@ gain.
 
 ### Phase 3 — Hybrid STC with SEP NEXT/EXIT (Option B) ✅ DONE
 
-> **Status:** Implemented.  compile_call emits 10 bytes (sep r16 + XT),
-> compile_ret emits 2 bytes (sep r17).  R16 = NEXT handler, R17 = EXIT
-> handler.  Both initialised at boot for core 0 and secondary cores.
-> JIT inline table, peephole, and bigram fusion untouched.
+> **Status:** Calls implemented as designed: compile_call emits 10 bytes
+> (sep r16 + XT) and R16 is the NEXT handler.  Returns no longer use
+> R17: since 2026-11-23 compile_ret emits the 1-byte `ret.l`, which pops
+> the return address NEXT pushed in one 2-cycle instruction, where
+> `sep r17`, its trampoline and EXIT took 2 bytes and 7 cycles.  The
+> return hooks of 3d below were never built, so the indirection bought
+> nothing, and on the canonical Desktop journey colon returns were 3.8%
+> of the emulator's cycles.  R16 and R17 are still initialised at boot
+> for core 0 and secondary cores, so code compiled before the change,
+> such as an application image built earlier, still returns through
+> R17.  JIT inline table, peephole, and bigram fusion untouched.
 > bytes_saved baseline recalibrated from 13 → 10.
 >
 > **History:** Originally deferred because the only free register (R7)
@@ -385,6 +392,10 @@ Entries saving exactly 1–3 bytes (if any) might go negative and should
 be re-evaluated.
 
 #### 3d — Dispatch hooks (bonus)
+
+> **Status:** Not built.  Compiled returns now use `ret.l` rather than
+> R17 (see the Phase 3 status above), so a return hook would need its
+> own code at each return; a call hook through R16 is still possible.
 
 Because all non-inlined calls and returns flow through R16/R17, these
 become natural instrumentation points:

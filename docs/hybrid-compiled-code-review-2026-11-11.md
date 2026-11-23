@@ -158,7 +158,7 @@ where today's hybrid mode stops.
 
 | | What the BIOS compiler puts in a dictionary (`bios.asm`) | Where hybrid mode stops |
 | --- | --- | --- |
-| Call and return | `compile_call` emits `sep r16` and an inline 8-byte XT, `compile_ret` emits `sep r17`, and `forth_next` and `forth_exit` dispatch them | `admitted` refuses a change of selector. Inline XTs, strings and data fields are not instructions, so `make_hybrid_image` refuses the image before anything runs |
+| Call and return | `compile_call` emits `sep r16` and an inline 8-byte XT, `compile_ret` emits `sep r17`, and `forth_next` and `forth_exit` dispatch them (since 2026-11-23 `compile_ret` emits `ret.l`) | `admitted` refuses a change of selector. Inline XTs, strings and data fields are not instructions, so `make_hybrid_image` refuses the image before anything runs |
 | Data stack | `compile_literal` and the control-flow words, `w_if` among them, emit inline instructions that push and pop through r14 | A routine takes and gives cells in r4 to r11 and reaches memory only through declared buffers. Both semantic stacks do live in guest memory (`DataStack` and `ReturnStack` in `simulator/stacks.py`), so they could be shared |
 | Return stack | `forth_next` pushes return addresses on r15, and `w_do` emits inline code that keeps the loop frame there | `admitted` refuses a write to r15 outside CALL.L and RET.L. Semantic return cells also carry continuation records (plan, "Compiler and retained-stack boundary") |
 | `CREATE` and `DOES>` | `w_create` emits a 30-byte trampoline, `w_to_body` answers XT+30, and `does_runtime` patches the trampoline | A semantic body is XT+8, and `>BODY` requires a semantic `CREATE` word |

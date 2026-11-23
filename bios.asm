@@ -5043,17 +5043,20 @@ w_to_body:
 ;  Phase 3 — SEP NEXT/EXIT Dispatch Handlers (R16, R17)
 ; =====================================================================
 ;  R16 = NEXT: dispatch a JIT-compiled call via inline XT
-;  R17 = EXIT: return from a JIT-compiled word via RSP pop
+;  R17 = EXIT: return from a word via RSP pop, for code compiled before
+;        returns became RET.L (images built earlier still use it)
 ;
 ;  Compiled call site (10 bytes):   sep r16 (F4 A0) + 8-byte LE XT
-;  Compiled return (2 bytes):       sep r17 (F4 A1)
+;  Compiled return (1 byte):        ret.l (0E)
 ;
 ;  When sep r16 executes, R3 freezes at the byte after the 2-byte
 ;  instruction — i.e. the first byte of the inline 8-byte XT.
 ;  NEXT reads the XT, advances R3 past it (return address), pushes
 ;  R3 onto RSP, then dispatches to the target via sep r3.
 ;
-;  EXIT pops RSP into R3 and does sep r3 to resume the caller.
+;  A compiled word returns with RET.L, which pops RSP into the program
+;  counter in one 2-cycle instruction.  sep r17 did the same through EXIT
+;  (pop RSP into R3, sep r3) and its trampoline in 7 cycles.
 ;
 ;  Both handlers end with a `br` trampoline so subsequent sep r16/r17
 ;  invocations re-enter correctly (R16/R17 freeze at the br).
@@ -5252,22 +5255,17 @@ compile_byte:
     str r11, r0
     ret.l
 
-; compile_ret: emit sep r17 (F4 A1) at HERE  (Phase 3 EXIT dispatch).
-;   Advances HERE by 2 bytes.
+; compile_ret: emit ret.l (0E) at HERE, a compiled word's return.
+;   Advances HERE by 1 byte.  does_runtime and w_constant count on it.
 compile_ret:
     ldi64 r11, var_here
     ldn r0, r11
-    ldi r7, 2
+    ldi r7, 1
     ldi64 r11, dict_preflight
     call.l r11
-    sex r0                    ; R(X) = HERE for STXI chain
-    ldi r7, 0xF4
-    glo r7
-    stxi                      ; REX prefix
-    ldi r7, 0xA1
-    glo r7
-    stxi                      ; SEP R17
-    sex r2                    ; restore XSEL
+    ldi r7, 0x0E
+    st.b r0, r7               ; RET.L
+    inc r0
     ldi64 r11, var_here
     str r11, r0
     ret.l
@@ -5283,6 +5281,7 @@ compile_ret:
 ;    3. Compiles a use of a CONSTANT, a VARIABLE or a CREATE'd word
 ;       without DOES> as the value it pushes (jit_push_value), except
 ;       while relocation tracking builds an image.
+;    A compiled word returns with RET.L (compile_ret).
 ;
 ;  JIT-ON / JIT-OFF toggle at runtime.  JIT-STATS reports counters.
 ;  The inline table maps dictionary entry addresses to pre-assembled
@@ -5586,15 +5585,16 @@ jit_cw_fallback:
 ; ---------------------------------------------------------------------
 ;  jit_push_value — the value a word pushes, when its use can be compiled
 ;  as that value.
-;  A CONSTANT's code is ldi64 r1, v; subi r14, 8; str r14, r1; sep r17
-;  (F0 60 10 <v> 67 E0 08 54 E1 F4 A1).  A VARIABLE's code, and a
-;  CREATE'd word's until DOES> patches it, is the same push ending in
-;  ret.l (0E at offset 16).  Such a word only pushes v, and v cannot
-;  change: CONSTANT has no data field, a created word's data address is
-;  fixed when it is made, and DOES> patches only the word its defining
-;  word has just created, before any use of it is compiled.  DOES>
-;  rewrites offset 16, VALUE's code has ldn r1, r1 at offset 11, and a
-;  colon word whose body is one 64-bit literal pushes that literal too.
+;  A CONSTANT's code is ldi64 r1, v; subi r14, 8; str r14, r1; ret.l
+;  (F0 60 10 <v> 67 E0 08 54 E1 0E).  A VARIABLE's code, and a CREATE'd
+;  word's until DOES> patches it, is the same: its v is its data address.
+;  Such a word only pushes v, and v cannot change: CONSTANT has no data
+;  field, a created word's data address is fixed when it is made, and
+;  DOES> patches only the word its defining word has just created, before
+;  any use of it is compiled.  DOES> rewrites offset 16, VALUE's code has
+;  ldn r1, r1 at offset 11, and a colon word whose body is one 64-bit
+;  literal pushes that literal too.  A constant compiled before returns
+;  became RET.L ends in sep r17 instead; it stays a call.
 ;  While relocation tracking is on an image is being built: its uses stay
 ;  calls, which the image records and moves, and binimg checks the
 ;  constants they reach.
@@ -5614,13 +5614,13 @@ jit_push_value:
     andi r11, 0x7F
     inc r12
     add r12, r11
-    ; The bytes both shapes have, as (offset, byte) pairs ending at 0xFF
+    ; The shape's bytes, as (offset, byte) pairs ending at 0xFF
     ldi64 r13, jit_push_shape
 jpv_cmp:
     ld.b r11, r13
     ldi r7, 0xFF
     cmp r11, r7
-    lbreq jpv_end
+    lbreq jpv_value
     mov r7, r12
     add r7, r11
     ld.b r7, r7               ; the code's byte
@@ -5630,22 +5630,6 @@ jpv_cmp:
     cmp r11, r7
     lbrne jpv_done
     lbr jpv_cmp
-jpv_end:
-    ; Offset 16: ret.l for a created word, sep r17 for a CONSTANT
-    mov r13, r12
-    addi r13, 16
-    ld.b r11, r13
-    ldi r7, 0x0E
-    cmp r11, r7
-    lbreq jpv_value
-    ldi r7, 0xF4
-    cmp r11, r7
-    lbrne jpv_done
-    inc r13
-    ld.b r11, r13
-    ldi r7, 0xA1
-    cmp r11, r7
-    lbrne jpv_done
 jpv_value:
     ; R1 = the little-endian immediate at code+3, read a byte at a time
     ldi r1, 0
@@ -5666,7 +5650,7 @@ jpv_done:
 
 jit_push_shape:
     .db 0, 0xF0, 1, 0x60, 2, 0x10
-    .db 11, 0x67, 12, 0xE0, 13, 0x08, 14, 0x54, 15, 0xE1
+    .db 11, 0x67, 12, 0xE0, 13, 0x08, 14, 0x54, 15, 0xE1, 16, 0x0E
     .db 0xFF
 
 ; ---------------------------------------------------------------------
@@ -8539,7 +8523,7 @@ w_constant:
     ldi64 r11, var_here
     ldn r0, r11
     mov r7, r12
-    addi r7, 27                ; header (9+name) + literal (16) + return (2)
+    addi r7, 26                ; header (9+name) + literal (16) + return (1)
     ldi64 r11, dict_preflight
     call.l r11
     mov r1, r0                ; save entry start
@@ -14498,8 +14482,8 @@ w_does:
 ; does_runtime: runtime helper for DOES>
 ;   Called when the defining word executes. The return address on RSP points
 ;   to the byte after the compile_call to does_runtime, which is the
-;   compile_ret bytes (sep r17 = F4 A1, 2 bytes).  So:
-;     does_body = return_addr + 2
+;   compile_ret byte (ret.l = 0E, 1 byte).  So:
+;     does_body = return_addr + 1
 ;   Patches LATEST (the most recently CREATEd word) trampoline at offset 16.
 ; --- dictionary header so binimg can resolve compile_call references ---
 d_does_runtime:
@@ -14509,9 +14493,9 @@ d_does_runtime:
 does_runtime:
     ; Get return address from RSP (the call.l pushed it)
     ldn r10, r15              ; R10 = return address (points to ret.l)
-    ; does_body = R10 + 2 (skip the sep r17 = F4 A1, Phase 3)
+    ; does_body = R10 + 1 (skip compile_ret's ret.l)
     mov r13, r10
-    addi r13, 2               ; R13 = does_body address
+    addi r13, 1               ; R13 = does_body address
 
     ; Get LATEST entry → code addr
     ldi64 r11, var_latest
