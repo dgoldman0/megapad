@@ -1895,11 +1895,11 @@ seqlock concurrency, or cycle counts.
 
 `DICT-INDEX-NOTIFY! ( count xt -- )`, which follows `IDLE-MS` at the frontier,
 arms one notification, and an xt of zero disarms it. The BIOS makes the check as the final step of each named
-definition (`:`, `CREATE`, `VARIABLE`, `CONSTANT`, `VALUE`) and of `LATEST!`:
-when the index count has reached the armed count it disarms, then calls the
-xt. The hosted primitives return that xt as a follow-on call. The BIOS
-publishes a colon name at `:` and checks there, while this runtime publishes a
-colon definition at `;`, so its check follows `;`. A count crossed by a
+definition (`;` for a colon definition, `CREATE`, `VARIABLE`, `CONSTANT`,
+`VALUE`) and of `LATEST!`: when the index count has reached the armed count
+it disarms, then calls the xt. The hosted primitives return that xt as a
+follow-on call. The BIOS and this runtime both publish a colon definition at
+`;`, so the check follows `;` in both. A count crossed by a
 host-side definition, such as a hybrid routine, is seen at the next guest
 definition, as the BIOS would see it.
 

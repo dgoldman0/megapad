@@ -74,9 +74,10 @@ The complete table span must be 16-byte aligned, power-of-two sized,
 non-wrapping, and contained in advertised external memory.
 
 `DICT-INDEX-NOTIFY! ( count xt -- )` arms one notification for the table's
-owner; an xt of zero disarms it. The final step of `:`, `CREATE`, `VARIABLE`,
-`CONSTANT`, `VALUE`, and `LATEST!` compares the index count with the armed
-count and, once it is reached, disarms and calls the xt. Boot clears it.
+owner; an xt of zero disarms it. The final step of `;` for a named colon
+definition, and of `CREATE`, `VARIABLE`, `CONSTANT`, `VALUE`, and `LATEST!`,
+compares the index count with the armed count and, once it is reached,
+disarms and calls the xt. Boot clears it.
 
 Definition publication upserts the side index. `MARKER`, `FORGET`, and
 transactional compiler rollback use `DICT-ROLLBACK` to publish `HERE` and
@@ -410,8 +411,8 @@ Four more words of this section have no number in the catalogue:
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 111 | `:` | `( "name" -- )` | | Begin colon definition: create header at HERE, set STATE=1 |
-| 112 | `;` | `( -- )` | ✓ | End definition: compile the 1-byte return `ret.l`, set STATE=0 |
+| 111 | `:` | `( "name" -- )` | | Begin colon definition: create header at HERE, set STATE=1. The name stays hidden until `;`, as in standard Forth and the simulator: inside the body it finds an earlier word of that name, so a redefinition can extend the word it replaces, and a definition calls itself with `RECURSE`. A definition that a compile error stops is never published |
+| 112 | `;` | `( -- )` | ✓ | End definition: compile the 1-byte return `ret.l`, set STATE=0, and publish the name `:` began as LATEST |
 | 113 | `EXIT` | `( -- )` | ✓ | Compile early return (`ret.l`) within a definition |
 | 114 | `VARIABLE` | `( "name" -- )` | | Create word that pushes address of an 8-byte data cell (initialized to 0) |
 | 115 | `CONSTANT` | `( n "name" -- )` | | Create word that pushes n |
@@ -425,7 +426,7 @@ Four more words of this section have no number in the catalogue:
 | 123 | `]` | `( -- )` | | Switch to compile mode (STATE=1) |
 | 124 | `LITERAL` | `( x -- )` | ✓ | Compile code to push x at runtime (16 bytes: ldi64+subi+str) |
 | 125 | `POSTPONE` | `( "name" -- )` | ✓ | If IMMEDIATE: compile call. If not: compile literal(xt) + call(postpone_helper) for deferred compilation |
-| 126 | `RECURSE` | `( -- )` | ✓ | Compile call to current definition (uses LATEST → entry_to_code) |
+| 126 | `RECURSE` | `( -- )` | ✓ | Compile call to current definition: the `:NONAME` body, or the entry `:` began, which `;` has not yet published |
 | 127 | `EXECUTE` | `( xt -- )` | | Call execution token (code field address) |
 | 128 | `'` | `( "name" -- xt )` | | Parse next word, find in dictionary, push its code field address (0 if not found) |
 | 129 | `[']` | `( "name" -- )` | ✓ | Compile-time: parse next word, compile its XT as a literal. Equivalent to `' name LITERAL` |

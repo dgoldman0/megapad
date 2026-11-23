@@ -652,11 +652,14 @@ interp_undefined:
     ldi64 r11, var_here
     str r11, r0
 interp_undef_no_restore:
-    ; Reset STATE to interpret mode (recover from compile-mode errors)
+    ; Reset STATE to interpret mode (recover from compile-mode errors);
+    ; the unfinished definition is never published
     ldi r1, 0
     ldi64 r11, var_state
     str r11, r1
     ldi64 r11, var_compile_active
+    str r11, r1
+    ldi64 r11, var_def_entry
     str r11, r1
     ; Reset interpret-mode IF depth (recover from unfinished temp blocks)
     ldi64 r11, var_interp_if_depth
@@ -6409,6 +6412,9 @@ jit_bigram_table:
 ; =====================================================================
 ;  Creates dict entry: [link:8][flags+len:1][name:N]
 ;  Then sets STATE=1 (compiling).  Code starts at HERE after the header.
+;  The name stays hidden until ; publishes it, as standard Forth and the
+;  simulator have it: inside the body the search finds an earlier word of
+;  that name, and RECURSE reaches this one through var_def_entry.
 
 w_colon:
     ; Guard: reject if already compiling
@@ -6497,17 +6503,10 @@ w_colon_name_done:
     ldi64 r11, var_here
     str r11, r0
 
-    ; Set LATEST to entry start
-    ldi64 r11, dict_publication_begin
-    call.l r11
+    ; Keep the entry for ; to publish, and for RECURSE
     ldn r0, r14               ; entry addr
-    ldi64 r11, var_latest
+    ldi64 r11, var_def_entry
     str r11, r0
-
-    ; ---- DFIND cache: seed new entry (R0 → R1) ----
-    mov r1, r0
-    ldi64 r11, dict_cache_seed
-    call.l r11
 
     ; Drop temps from data stack (entry addr, name len, name addr)
     addi r14, 24
@@ -6521,8 +6520,6 @@ w_colon_name_done:
     str r11, r1
     ldi64 r11, var_compile_active
     str r11, r1
-    ldi64 r11, dict_index_notify
-    call.l r11
     ret.l
 
 w_colon_err:
@@ -6578,6 +6575,27 @@ w_semi_quot_ok:
     ; NOTE: var_noname_flag is NOT cleared here.  It persists so that
     ; IMMEDIATE (which follows ;) can detect the :NONAME case and
     ; error out.  The flag is cleared at the start of : and :NONAME.
+    ; Publish the definition : began (none for :NONAME).  Its link is
+    ; set again to LATEST now, which holds any word made while it compiled.
+    ldi64 r11, var_def_entry
+    ldn r0, r11
+    cmpi r0, 0
+    lbreq w_semi_done
+    str r11, r1                ; R1 = 0: nothing pending any more
+    ldi64 r11, var_latest
+    ldn r1, r11
+    str r0, r1                 ; link
+    ldi64 r11, dict_publication_begin
+    call.l r11
+    ldi64 r11, var_latest
+    str r11, r0
+    ; ---- DFIND cache: seed new entry (R0 → R1) ----
+    mov r1, r0
+    ldi64 r11, dict_cache_seed
+    call.l r11
+    ldi64 r11, dict_index_notify
+    call.l r11
+w_semi_done:
     ret.l
 
 ; =====================================================================
@@ -6597,9 +6615,11 @@ w_colonnoname:
     ldi64 r11, quit_keep_stack
     call.l r11                ; ends the line; never returns
 w_colonnoname_ok:
-    ; Reset JIT peephole state for new definition
+    ; Reset JIT peephole state for new definition; no named entry pending
     ldi r1, 0
     ldi64 r11, var_jit_last_type
+    str r11, r1
+    ldi64 r11, var_def_entry
     str r11, r1
     ; Push HERE onto data stack — this is the resulting XT
     ldi64 r11, var_here
@@ -13454,6 +13474,8 @@ w_evaluator_reset:
     str r11, r1
     ldi64 r11, var_noname_xt
     str r11, r1
+    ldi64 r11, var_def_entry
+    str r11, r1
     ldi64 r11, var_quot_depth
     str r11, r1
     ldi64 r11, var_leave_count
@@ -13582,7 +13604,7 @@ w_bchar_empty:
 
 ; RECURSE (IMMEDIATE) -- compile call to current definition
 w_recurse:
-    ; If in :NONAME, use var_noname_xt instead of LATEST
+    ; If in :NONAME, use var_noname_xt instead of the named entry
     ldi64 r11, var_noname_flag
     ldn r11, r11
     cmpi r11, 0
@@ -13592,9 +13614,12 @@ w_recurse:
     ldn r9, r11
     br w_recurse_emit
 w_recurse_named:
-    ; Named path: compile call to LATEST entry code
-    ldi64 r11, var_latest
+    ; Named path: compile a call to the entry : began, which ; has not
+    ; published yet
+    ldi64 r11, var_def_entry
     ldn r9, r11
+    cmpi r9, 0
+    breq w_recurse_refuse
     ldi64 r11, entry_to_code
     call.l r11
 w_recurse_emit:
@@ -13602,6 +13627,20 @@ w_recurse_emit:
     ldi64 r11, compile_call
     call.l r11
     ret.l
+w_recurse_refuse:
+    ; No definition is open, as at the prompt or after ] alone, so there is
+    ; nothing to call.  The report is the simulator's; compilation stops
+    ; and the line ends, as after an undefined word.
+    ldi64 r10, str_recurse_no_def
+    ldi64 r11, print_str
+    call.l r11
+    ldi r1, 0
+    ldi64 r11, var_state
+    str r11, r1
+    ldi64 r11, var_compile_active
+    str r11, r1
+    ldi64 r11, quit_keep_stack
+    call.l r11                ; ends the line; never returns
 
 
 ; =====================================================================
@@ -14131,6 +14170,8 @@ w_to_refuse:
     ldi64 r11, var_state
     str r11, r1
     ldi64 r11, var_compile_active
+    str r11, r1
+    ldi64 r11, var_def_entry
     str r11, r1
     ldi64 r11, quit_keep_stack
     call.l r11                ; ends the line; never returns
@@ -15303,6 +15344,8 @@ fault_recover:
     str r11, r1                       ; interpret
     ldi64 r11, var_compile_active
     str r11, r1
+    ldi64 r11, var_def_entry
+    str r11, r1                       ; an unfinished definition stays unpublished
     ldi64 r11, w_abort                ; stacks, EVALUATE depth, QUIT
     call.l r11
     halt
@@ -26635,6 +26678,8 @@ var_noname_flag:
     .dq 0                     ; 1 while compiling (or just finished) :NONAME
 var_noname_xt:
     .dq 0                     ; XT of current :NONAME body (for RECURSE)
+var_def_entry:
+    .dq 0                     ; entry : built, published by ; (0 = none)
 var_quot_depth:
     .dq 0                     ; nesting depth of [: ... ;] quotations
 
@@ -26837,6 +26882,8 @@ str_imm_noname:
     .asciiz "IMMEDIATE after :NONAME\n"
 str_to_not_value:
     .asciiz "TO requires a VALUE target, got "
+str_recurse_no_def:
+    .asciiz "RECURSE requires a colon definition\n"
 str_no_task_slot:
     .asciiz "no such task slot\n"
 str_nested_def:

@@ -4855,7 +4855,7 @@ class TestBIOS(unittest.TestCase):
             ": NTF-HOOK  1 NTF-HITS +!  DICT-INDEX@ DROP NIP NIP NTF-SEEN ! ;",
             ": NTF-ARM  DICT-INDEX@ DROP NIP NIP + "
             "['] NTF-HOOK DICT-INDEX-NOTIFY! ;",
-            # Armed two names ahead; : runs the check as its own last step.
+            # Armed two names ahead; ; runs the check as its own last step.
             "2 NTF-ARM",
             ": NTF-ONE 1 ;",
             'CR ." [NTF-ONE " NTF-HITS @ . ." ]"',
@@ -5066,6 +5066,35 @@ class TestBIOS(unittest.TestCase):
         self.assertEqual(text.count("TO requires a VALUE target, got KT"), 2)
         self.assertIn("<1 0 >", text)
         self.assertIn("<0 0 0 >", text)
+        self.assertIn("<9 >", text)
+
+    def test_a_definitions_name_is_hidden_until_semicolon(self):
+        """: keeps the new name hidden until ; publishes it, as the
+        simulator does.  Inside the body the name finds the earlier word,
+        so a redefinition extends the word it replaces, and RECURSE is how a
+        definition calls itself.  IMMEDIATE, DOES>, :NONAME's RECURSE and
+        quotations keep working.  A definition stopped by an undefined word,
+        its own name included, is never published, and RECURSE with no
+        definition open is refused with the simulator's message."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": FOO 1 ;  : FOO FOO 1+ ;  : BAR FOO ;",
+            ": FACT DUP 1 > IF DUP 1- RECURSE * THEN ;",
+            ": MK CREATE , DOES> @ ;  7 MK SEVEN",
+            ":NONAME DUP 0> IF DUP 1- RECURSE + THEN ; CONSTANT SUMX",
+            ": QQ [: 3 ;] EXECUTE ;",
+            ": IMM 7 ; IMMEDIATE  : USE-IMM IMM LITERAL ;",
+            "60 EMIT FOO . BAR . 5 FACT . SEVEN . 4 SUMX EXECUTE . QQ . USE-IMM . 62 EMIT",
+            ": SELF 1 SELF ;",
+            ": BAD 1 NOSUCH ;",
+            "60 EMIT ' SELF . ' BAD . DEPTH . 62 EMIT",
+            "RECURSE",
+            ": AFTER 9 ;  60 EMIT AFTER . 62 EMIT",
+        ])
+        self.assertIn("<2 2 120 7 10 3 7 >", text)
+        self.assertIn("SELF ?", text)
+        self.assertIn("<0 0 0 >", text)
+        self.assertIn("RECURSE requires a colon definition", text)
         self.assertIn("<9 >", text)
 
     def test_postpone_immediate(self):
