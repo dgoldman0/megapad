@@ -3,8 +3,9 @@
 Status: Accepted, 2026-11-22, with the nine decisions of section 10.
 Stages 1 and 2 are built (MegaPad d8016c43; 4ea4bc91, 09a26e8d and
 f317327b), stage 3 (1c4563f4 to 49d94ecd, with Akashic 95e081c9), stage 4
-(d8453449 to 348a482a, with Akashic d82d6e80 to 5da2eea3) and stage 5
-(ee95d589, with Akashic a603041c).
+(d8453449 to 348a482a, with Akashic d82d6e80 to 5da2eea3), stage 5
+(ee95d589, with Akashic a603041c) and stage 9 (Akashic 7cb83d31 to
+7832caa6).
 It is the staged plan for Part 3 of the release plan
 (`dev/PLAN.md` in fantasy-engine), in which MegaPad's hosted simulator
 becomes the multicore machine MegaPad is. Section 1 describes the simulator
@@ -702,6 +703,51 @@ Tests: the canonical Desktop journey on one core, as the gate, and on four
 cores; the `desktop-sandbox-modules` journey on four cores on the simulator,
 with the probe's job shown on a worker, and once on the emulator for
 comparison; the worker profiles of stage 4.
+
+Built on 2026-11-23:
+
+- `physical_desktop_acceptance.py` takes `--cores`, which `accept` checks
+  against the machine shapes the backend runs, and a passing run's
+  `final-guest-diagnostics.json` records each core's state, semantic steps
+  and turns from the server's status (Akashic 8a066e66). `serve` and
+  `accept` already gave the simulator the profile's full cores (stage 4);
+  their help no longer calls `--cores` emulator only. `worker-job.md`
+  describes the simulator beside the emulator.
+- The physical driver has the sandbox check, `--applet sandbox`: Desk with
+  the Agent and Probe on the rich terminal, composed as the emulator's
+  `desktop-sandbox-modules` profile composes them (a8f21ede), and its whole
+  journey (7832caa6), with nothing added to Desk, Probe or the Agent: the
+  Agent's install behind its review, its invoke, its refused wrong input
+  and unknown entry, and its long run; Probe refused, asking, allowed in
+  Desk's access prompt and served; the inspector withdrawing Probe's grant
+  and revoking the module; Desk idle at the end. No product path installs a
+  module without the Agent's review, so the journey takes the review. The
+  journey reads each core's semantic steps from the server's status: on
+  four cores core 1 ran Probe's job and each short invoke in 86,346 steps
+  and the long invoke in 3,068,562, while core 0 painted, and the long
+  run's work beyond the short run's, 2,982,216 steps, showed on core 1.
+  The emulator's journey compares cycle counts on Desk's core as well;
+  core 0's semantic steps over a turn grow with what Desk paints, so the
+  physical journey records them. It passes on one core and on four in
+  about 90 seconds.
+- The journey found a repaint missing in Akashic's applet host (7cb83d31):
+  a shown applet touched between passes, as when the sandbox's poll in
+  Desk's service step completes Probe's request, stayed dirty with no paint
+  due, so on four cores Probe's answer never reached the screen. On one
+  core, and on the emulator's four, the job ends inside the pass whose
+  paint is already due. A shown slot whose instance changed since its last
+  paint now marks the shell dirty. The canonical Desktop journey on one
+  core, with `PYTHONHASHSEED=0` and `--screen-profile`, ran 2,021,077,685
+  guest steps and 81 PRESENTs, against 2,016,509,878 and 81 on the stage 5
+  baseline: +0.23%, within code placement's noise.
+- The canonical Desktop journey passes on four cores, in 132 seconds, with
+  the workers idle: no applet of the canonical Desktop uses the sandbox.
+- Desk's background work runs on full cores through `worker-job.f`, never
+  in a task slot, so stage 5's precondition holds.
+
+The emulator comparison did not run: the author's standing direction
+defers emulator smokes. The stage's closing run and its Desktop journey
+are one combined run with the BIOS and KDOS findings' slice.
 
 ## 6. Order
 
