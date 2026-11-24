@@ -871,6 +871,10 @@ class MegaForthRuntime:
             self.sha3.bind_native_permutation(None)
         self.entropy = platform_mmio.entropy
         self.rtc = platform_mmio.rtc
+        # The network card a server attached (attach_network), or None for
+        # a machine without a network.
+        self.network = None
+        self.network_mac_address = 0
         # The profile's chiplet ports, or None when it has none.
         self.chiplet_ports = platform_mmio.chiplet
         self.sha2 = HostedSHA2Service(core_count=num_full)
@@ -3087,6 +3091,17 @@ class MegaForthRuntime:
 
     def find(self, name: bytes | str) -> Word | None:
         return self.dictionary.find(name)
+
+    def attach_network(self, card) -> None:
+        """Give the machine CARD, a simulator.network.NetworkCard, before it
+        boots: the BIOS's network words act on it from then on, and NET-MAC@
+        reports its address."""
+
+        self._require_unowned_host_access("attach a network card")
+        if self.network is not None:
+            raise ExecutionError("the machine already has a network card")
+        self.memory.write_bytes(self.network_mac_address, card.mac)
+        self.network = card
 
     def define_primitive(
         self,

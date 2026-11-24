@@ -53,11 +53,12 @@ The implemented slices provide:
   barriers and cluster MPU state are unavailable, `SPAD` returns the native
   sentinel without inventing storage, and `MICRO?` retains the BIOS unsigned
   classification rather than validating hosted core membership;
-- a pseudo-BIOS-only unconfigured-network boundary: until a local host port
-  is selected, `NET-STATUS` returns zero, `NET-SEND` consumes and drops a
-  request, `NET-RECV` reports no frame, and `NET-MAC@` exposes stable all-zero
-  ordinary memory for unchanged startup copying; this default does not decide
-  or qualify the later configured-port transport;
+- a pseudo-BIOS network card, present only when the server attaches one with
+  `--nic` (`simulator/network.py`): without one, `NET-STATUS` returns zero,
+  `NET-SEND` consumes and drops a request, `NET-RECV` reports no frame, and
+  `NET-MAC@` exposes stable all-zero ordinary memory for unchanged startup
+  copying; with one, the words carry frames through the slirp or TAP backend
+  with the emulator card's status bits (`docs/simulator-contract.md`);
 - fail-closed construction for injected address spaces: their SysInfo
   capability qword must be readable and may advertise only admitted services;
 - BIOS-compatible unaligned `@`, `!`, and `+!` access, low-byte `C!`,
@@ -2555,7 +2556,7 @@ clear-on-read `RESIZED?`, atomic `TERMSIZE`, clear-on-read
 `RESIZE-DENIED?`, and asynchronous `RESIZE-REQUEST`. Their focused scalar,
 memory, clock, UART, and session-geometry units are qualification of those
 primitives only. Six append-only source-closure words then provide `BSWAP`,
-the current unconfigured-port `NET-SEND`/`NET-RECV`/`NET-MAC@` behavior, and
+the network words `NET-SEND`/`NET-RECV`/`NET-MAC@`, unconfigured unless a card is attached, and
 checked deterministic `ENTROPY-FILL`/`ENTROPY-READY?`. Twenty-two more source words
 provide bytewise `CHAR`/`[CHAR]`, signed `/MOD`, dictionary predicates,
 cross-line `[IF]`/`[ELSE]`/`[THEN]` skipping, and structured

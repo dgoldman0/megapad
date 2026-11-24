@@ -1,8 +1,14 @@
-"""Build the independent native MegaForth semantic executor.
+"""Build the independent native MegaForth semantic executor, and the
+machine's user-mode network beside it.
 
     python setup_simulator_accel.py build_ext --inplace
+
+The network, _mp64_slirp, links libslirp and GLib, which pkg-config finds.
+It is a module of its own, so only a machine with a network loads them.
 """
 import os
+import shlex
+import subprocess
 
 import pybind11
 from setuptools import Extension, setup
@@ -19,6 +25,26 @@ else:
     instrumentation = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all"]
     flags += ["-O1", "-g", "-fno-omit-frame-pointer", *instrumentation]
     links += instrumentation
+
+
+def _pkg_config(*arguments: str) -> list[str]:
+    try:
+        result = subprocess.run(["pkg-config", *arguments, "slirp"],
+                                capture_output=True, text=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        raise SystemExit(
+            "MegaPad's network module builds against libslirp, whose development "
+            "files pkg-config cannot find (on Ubuntu: apt install libslirp-dev)")
+    return shlex.split(result.stdout)
+
+
+slirp_cflags = _pkg_config("--cflags")
+slirp_libs = _pkg_config("--libs")
+network_flags = ["-std=c++17", "-Wall", "-Wextra", "-fvisibility=hidden",
+                 "-O2" if sanitizer == "none" else "-O1"]
+if sanitizer != "none":
+    network_flags += ["-g", "-fno-omit-frame-pointer", *instrumentation]
+
 
 class IsolatedBuildExt(build_ext):
     """Keep shared source objects specific to this extension's compile flags."""
@@ -62,5 +88,10 @@ setup(
         define_macros=[("MP64_TEST_CHIPLET_BUILTIN", "1")],
         include_dirs=[pybind11.get_include()], language="c++",
         extra_compile_args=flags, extra_link_args=links,
+    ), Extension(
+        "_mp64_slirp", ["shared/accel/slirp_network.cpp"],
+        include_dirs=[pybind11.get_include()], language="c++",
+        extra_compile_args=network_flags + slirp_cflags,
+        extra_link_args=links + slirp_libs,
     )],
 )

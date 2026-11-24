@@ -7,7 +7,12 @@ Backend hierarchy:
   NICBackend          — abstract base
   ├─ LoopbackBackend  — in-process queues (unit tests)
   ├─ UDPBackend       — UDP tunnel between emulator instances
-  └─ TAPBackend       — Linux TAP device (real L2 networking)
+  ├─ TAPBackend       — Linux TAP device (real L2 networking)
+  └─ SlirpBackend     — user-mode network through libslirp, no
+                        administrator rights needed
+
+backend_from_spec() makes one from a server's --nic option: "slirp" or
+"tap:IFNAME".
 
 Usage:
   from nic_backends import TAPBackend
@@ -415,6 +420,116 @@ class TAPBackend(NICBackend):
         if frame is None:
             return None
         return frame[:limit].hex(" ")
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Slirp — user-mode networking through libslirp
+# ══════════════════════════════════════════════════════════════════════
+
+# The slirp network matches the TAP layout above, so a guest configured for
+# either finds its gateway: the gateway is 10.64.0.1, DHCP hands the guest
+# 10.64.0.2, and libslirp's DNS forwarder, which asks the host's own
+# resolver, answers at 10.64.0.3.
+SLIRP_NETWORK = "10.64.0.0"
+SLIRP_PREFIX = 24
+SLIRP_GATEWAY = "10.64.0.1"
+SLIRP_GUEST = "10.64.0.2"
+SLIRP_NAMESERVER = "10.64.0.3"
+
+LOCAL_ACCESS_WARNING = (
+    "Local access is on: any program on this machine, an installed applet or "
+    "code that a feed or page leads it to run included, can reach services "
+    "on this computer and its local network that expect only local callers."
+)
+
+
+class SlirpBackend(NICBackend):
+    """The machine's user-mode network, through libslirp.
+
+    libslirp turns the guest's Ethernet frames into ordinary connections
+    from the user's own account, with DHCP and a DNS forwarder of its own,
+    so the machine reaches the internet without administrator rights.  It
+    runs inside MegaPad's _mp64_slirp module, on a thread of its own, and
+    this backend hands each frame for the guest to on_rx_frame from a
+    thread of its own as the TAP backend does.
+
+    Unless LOCAL_ACCESS is true, the guest's packets to this computer and to
+    local addresses are refused (shared/accel/slirp_network.cpp).  The
+    backend keeps counts and no frames, since frames show what the user
+    does.
+    """
+
+    def __init__(self, *, local_access: bool = False):
+        super().__init__()
+        self._local_access = bool(local_access)
+        self._network = None
+        self._thread: Optional[threading.Thread] = None
+        self._running = False
+
+    @property
+    def local_access(self) -> bool:
+        return self._local_access
+
+    def send(self, frame: bytes) -> bool:
+        network = self._network
+        if network is None:
+            return False
+        return network.send(bytes(frame))
+
+    def start(self):
+        import _mp64_slirp
+
+        self._network = _mp64_slirp.SlirpNetwork(
+            SLIRP_NETWORK, SLIRP_PREFIX, SLIRP_GATEWAY, SLIRP_GUEST,
+            SLIRP_NAMESERVER, self._local_access)
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._rx_loop, daemon=True, name="NIC-slirp")
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        if self._network is not None:
+            self._network.close()
+            self._network = None
+
+    def _rx_loop(self):
+        network = self._network
+        while self._running:
+            frame = network.receive(0.25)
+            if frame is not None and self.on_rx_frame is not None:
+                self.on_rx_frame(frame)
+
+    @property
+    def link_up(self) -> bool:
+        return self._network is not None
+
+    @property
+    def name(self) -> str:
+        return "slirp, local access" if self._local_access else "slirp"
+
+    def stats(self) -> dict:
+        if self._network is None:
+            return {"backend": "slirp", "link_up": False,
+                    "local_access": self._local_access}
+        return {"backend": "slirp", "link_up": True, **self._network.stats()}
+
+
+def backend_from_spec(spec: str, *, local_access: bool = False) -> NICBackend:
+    """The backend a server's --nic SPEC names: "slirp", or "tap:IFNAME" for
+    a TAP device set up beforehand.  LOCAL_ACCESS applies to slirp alone,
+    since a TAP device's reach is the host's own routing."""
+
+    if spec == "slirp":
+        return SlirpBackend(local_access=local_access)
+    if local_access:
+        raise ValueError("local access applies to the slirp network alone")
+    if spec.startswith("tap:") and len(spec) > 4:
+        return TAPBackend(tap_name=spec[4:])
+    raise ValueError(f"unknown network {spec!r}: use slirp or tap:IFNAME")
 
 
 # ══════════════════════════════════════════════════════════════════════

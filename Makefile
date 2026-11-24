@@ -78,16 +78,26 @@ serve:
 
 # --- Hosted source simulator ---
 # The simulator's own extension, whose native services (CRC, storage) the
-# simulator needs whichever executor runs Forth.  Test targets depend on its
-# library file, so make builds it only when a source is newer and a current
-# build costs neither a build run nor a copy of the library; `make
+# simulator needs whichever executor runs Forth, and beside it the machine's
+# user-mode network, _mp64_slirp, which only a machine with a network loads.
+# One build script makes both, and the simulator's library depends on the
+# network's, so asking for the simulator's library also builds a missing or
+# stale network.  Test targets depend on the simulator's library file, so
+# make builds them only when a source is newer or a library is missing, and
+# a current build costs neither a build run nor a copy; `make
 # simulator-accel` always runs the build.
-SIMULATOR_ACCEL_LIB := _megaforth_native$(shell $(VENV_PY) -c \
+EXTENSION_SUFFIX := $(shell $(VENV_PY) -c \
 	'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))')
+SIMULATOR_ACCEL_LIB := _megaforth_native$(EXTENSION_SUFFIX)
+NETWORK_ACCEL_LIB := _mp64_slirp$(EXTENSION_SUFFIX)
 SIMULATOR_ACCEL_SOURCES := setup_simulator_accel.py $(wildcard \
 	simulator/accel/*.cpp simulator/accel/*.h shared/accel/*.cpp shared/accel/*.h)
 
-$(SIMULATOR_ACCEL_LIB): $(SIMULATOR_ACCEL_SOURCES)
+$(NETWORK_ACCEL_LIB): $(SIMULATOR_ACCEL_SOURCES)
+	$(VENV_PY) setup_simulator_accel.py build_ext --inplace
+	@touch $@
+
+$(SIMULATOR_ACCEL_LIB): $(NETWORK_ACCEL_LIB)
 	$(VENV_PY) setup_simulator_accel.py build_ext --inplace
 	@touch $@
 

@@ -80,7 +80,7 @@ from simulator.sha3 import SHA3_CONTROL, SHA3_STATUS
 
 _EVAL_TOKEN_BYTES = 256
 _CLUSTER_SPAD_ADDRESS = 0xFFFF_FE00_0000_0000
-_UNCONFIGURED_NETWORK_MAC_BYTES = 6
+_NETWORK_MAC_BYTES = 6
 _ENTROPY_OK = 0
 _ENTROPY_UNAVAILABLE = 1
 
@@ -1427,18 +1427,27 @@ def _cluster_spad(context: ExecutionContext) -> None:
     context.data.push(_CLUSTER_SPAD_ADDRESS)
 
 
-def _net_send_unconfigured(context: ExecutionContext) -> None:
-    # No local host-network port is configured for this runtime. Preserve the
-    # BIOS stack effect without inspecting memory or fabricating delivery.
-    context.data.pop()
-    context.data.pop()
+# The BIOS's network words act on the card a server attached
+# (simulator/network.py).  Without one they keep the BIOS's stack effects and
+# behave as a machine without a network: NET-STATUS reports nothing present,
+# NET-SEND reads no memory and delivers nothing, and NET-RECV finds no frame.
+def _net_status(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    card = runtime.network
+    context.data.push(0 if card is None else card.status())
 
 
-def _net_receive_unconfigured(context: ExecutionContext) -> None:
-    # An unconfigured transport has no queued frame, but the destination is
-    # still consumed exactly as it is by the native BIOS word.
-    context.data.pop()
-    context.data.push(0)
+def _net_send(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    length = context.data.pop()
+    address = context.data.pop()
+    card = runtime.network
+    if card is not None:
+        card.send_from(runtime, context, address, length)
+
+
+def _net_receive(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    address = context.data.pop()
+    card = runtime.network
+    context.data.push(0 if card is None else card.receive_into(runtime, context, address))
 
 
 def _micro_question(
@@ -2396,7 +2405,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
             lambda context: _cluster_unavailable(context, "BARRIER-STATUS"),
         ),
         (b"SPAD", _cluster_spad),
-        (b"NET-STATUS", _push_zero),
+        (b"NET-STATUS", lambda context: _net_status(runtime, context)),
         (b"DISK@", lambda context: context.data.push(runtime.storage.status)),
         (
             b"DISK-SECTORS",
@@ -3067,30 +3076,27 @@ def install_core(runtime: MegaForthRuntime) -> None:
     for name, callback in rich_terminal_primitives:
         runtime.define_primitive(name, callback)
 
-    # Continue the same append-only integration frontier. Until a local
-    # host-network port is configured, do not fabricate a queue or status.
+    # Continue the same append-only integration frontier.
     source_closure_primitives = (
         (b"BSWAP", _byte_swap),
-        (b"NET-SEND", _net_send_unconfigured),
-        (b"NET-RECV", _net_receive_unconfigured),
+        (b"NET-SEND", lambda context: _net_send(runtime, context)),
+        (b"NET-RECV", lambda context: _net_receive(runtime, context)),
     )
     for name, callback in source_closure_primitives:
         runtime.define_primitive(name, callback)
 
-    unconfigured_mac_address: int | None = None
-
     def net_mac_fetch(context: ExecutionContext) -> None:
-        assert unconfigured_mac_address is not None
-        context.data.push(unconfigured_mac_address)
+        context.data.push(runtime.network_mac_address)
 
-    unconfigured_mac = runtime.define_primitive(
+    # The card's address lives in the word's body, ordinary memory that
+    # MAC-INIT's CMOVE reads.  It stays all zero, an address no card has,
+    # until a card is attached (MegaForthRuntime.attach_network).
+    network_mac = runtime.define_primitive(
         b"NET-MAC@",
         net_mac_fetch,
-        # All-zero bytes are stable ordinary memory for MAC-INIT's CMOVE, but
-        # do not invent an interface identity before a port is configured.
-        initial_body=bytes(_UNCONFIGURED_NETWORK_MAC_BYTES),
+        initial_body=bytes(_NETWORK_MAC_BYTES),
     )
-    unconfigured_mac_address = unconfigured_mac.body_address
+    runtime.network_mac_address = network_mac.body_address
 
     runtime.define_primitive(
         b"ENTROPY-FILL",

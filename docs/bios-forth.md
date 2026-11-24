@@ -985,13 +985,15 @@ Low-level access to the network interface controller.
 | `NET-RECV` | `( addr -- actual )` | Receive a frame into `addr`; wait for RTL RX DMA completion before publishing the length. Returns 0 if nothing is available. |
 | `NET-MAC@` | `( -- addr )` | Return the MMIO address of the six MAC bytes. |
 
-The current hosted one-core profile has no configured local network port.
-`NET-STATUS` returns zero, `NET-SEND` consumes and drops its request,
-`NET-RECV` reports zero available bytes, and `NET-MAC@` returns stable all-zero
-ordinary memory so unchanged initialization can copy six bytes. This is the
-unconfigured-port source-load behavior, not configured-network qualification.
-The physical NIC MMIO window, frame transport, DMA, link, interface identity,
-queues, and interrupts remain unadmitted; direct NIC MMIO still faults.
+The hosted simulator has a network card only when its server attaches one
+with `--nic`. Without one, `NET-STATUS` returns zero, `NET-SEND` consumes and
+drops its request, `NET-RECV` reports zero available bytes, and `NET-MAC@`
+returns stable all-zero ordinary memory so unchanged initialization can copy
+six bytes. With one, the words carry frames through the user-mode slirp
+network or a TAP device, with the status bits above, and `NET-MAC@` returns
+ordinary memory holding the card's address (`docs/simulator-contract.md`).
+The physical NIC MMIO window and interrupts remain unadmitted; direct NIC
+MMIO still faults.
 
 ---
 
