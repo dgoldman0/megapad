@@ -4703,7 +4703,7 @@ VARIABLE _DFT-TAG
 \ --- Scratch buffers for X.509 parse results ---
 CREATE _X509-PUBKEY     256 ALLOT    \ extracted public key bytes
 VARIABLE _X509-PUBKEY-LEN
-VARIABLE _X509-PUBKEY-ALGO          \ 0x0403=ECDSA-P256, 0x0807=Ed25519
+VARIABLE _X509-PUBKEY-ALGO          \ an X509-KEY-* type, or 0x0807 for Ed25519
 CREATE _X509-SIG        256 ALLOT   \ extracted signature bytes
 VARIABLE _X509-SIG-LEN
 VARIABLE _X509-SIG-ALGO             \ signature algorithm of the cert
@@ -5087,7 +5087,13 @@ VARIABLE _DB-TAG
 184 CONSTANT XC.SKI-U
 192 CONSTANT XC.AKI-A
 200 CONSTANT XC.AKI-U
-208 CONSTANT /X509-CERT
+208 CONSTANT XC.PUB-E-A    \ an RSA key's public exponent, big-endian
+216 CONSTANT XC.PUB-E-U
+224 CONSTANT XC.SPKI-A     \ the whole SubjectPublicKeyInfo
+232 CONSTANT XC.SPKI-U
+240 CONSTANT XC.NC-A       \ the NameConstraints value, or 0
+248 CONSTANT XC.NC-U
+256 CONSTANT /X509-CERT
 
 1   CONSTANT XCF-CA
 2   CONSTANT XCF-BC-SEEN
@@ -5095,6 +5101,7 @@ VARIABLE _DB-TAG
 8   CONSTANT XCF-EKU-SEEN
 16  CONSTANT XCF-SAN-SEEN
 32  CONSTANT XCF-UNKNOWN-CRITICAL
+64  CONSTANT XCF-NC-SEEN
 
 1 CONSTANT XEKU-SERVER-AUTH
 2 CONSTANT XEKU-ANY
@@ -5198,20 +5205,74 @@ CREATE OID-SERVER-AUTH 43 C, 6 C, 1 C, 5 C, 5 C, 7 C, 3 C, 1 C,
 8 CONSTANT /OID-SERVER-AUTH
 CREATE OID-ANY-EKU 85 C, 29 C, 37 C, 0 C,
 4 CONSTANT /OID-ANY-EKU
+CREATE OID-NAME-CONSTRAINTS 85 C, 29 C, 30 C,
+3 CONSTANT /OID-NAME-CONSTRAINTS
 CREATE OID-ECDSA-SHA384 42 C, 134 C, 72 C, 206 C, 61 C, 4 C, 3 C, 3 C,
 8 CONSTANT /OID-ECDSA-SHA384
+CREATE OID-RSA-SHA384    42 C, 134 C, 72 C, 134 C, 247 C, 13 C, 1 C, 1 C, 12 C,
+9 CONSTANT /OID-RSA-SHA384
+CREATE OID-RSA-SHA512    42 C, 134 C, 72 C, 134 C, 247 C, 13 C, 1 C, 1 C, 13 C,
+9 CONSTANT /OID-RSA-SHA512
+CREATE OID-P384 43 C, 129 C, 4 C, 0 C, 34 C,
+5 CONSTANT /OID-P384
 
-1027 CONSTANT X509-ALG-P256
-1283 CONSTANT X509-ALG-ECDSA-SHA384
-1025 CONSTANT X509-ALG-RSA2048
+\ Signature algorithms, by their TLS SignatureScheme values.  Any other
+\ well-formed AlgorithmIdentifier parses as X509-SIG-OTHER, which no
+\ check accepts: a trust anchor's own signature, which nothing checks, may
+\ use any algorithm.
+0    CONSTANT X509-SIG-OTHER
+1025 CONSTANT X509-SIG-RSA-SHA256
+1281 CONSTANT X509-SIG-RSA-SHA384
+1537 CONSTANT X509-SIG-RSA-SHA512
+1027 CONSTANT X509-SIG-ECDSA-SHA256
+1283 CONSTANT X509-SIG-ECDSA-SHA384
+
+\ Public key types.  An RSA key's modulus is a whole number of bytes from
+\ 2048 to 8192 bits and its exponent odd, from 3 to below 2^33, the
+\ largest BoringSSL accepts.  An EC key is an uncompressed P-256 or P-384
+\ point.
+1 CONSTANT X509-KEY-RSA
+2 CONSTANT X509-KEY-P256
+3 CONSTANT X509-KEY-P384
+256  CONSTANT X509-RSA-MIN-BYTES
+1024 CONSTANT X509-RSA-MAX-BYTES
 -2   CONSTANT X509-PARSE-UNSUPPORTED
+
+VARIABLE _XCB-A
+VARIABLE _XCB-B
+VARIABLE _XCB-U
+
+: _XC-BYTES= ( a b len -- flag )
+    _XCB-U ! _XCB-B ! _XCB-A !
+    _XCB-U @ 0 DO
+        _XCB-A @ I + C@ _XCB-B @ I + C@ <> IF FALSE UNLOOP EXIT THEN
+    LOOP TRUE ;
+
+: _XC-SLICE= ( a1 u1 a2 u2 -- flag )
+    ROT OVER <> IF 2DROP DROP FALSE EXIT THEN
+    _XC-BYTES= ;
 
 VARIABLE _XA-POS
 VARIABLE _XA-LIMIT
 VARIABLE _XA-END
 VARIABLE _XA-NEXT
 VARIABLE _XA-AFTER-OID
+VARIABLE _XA-OID-A
+VARIABLE _XA-OID-U
 
+: _XA-OID? ( oid oid-u -- flag )
+    _XA-OID-A @ _XA-OID-U @ X509-OID-MATCH ;
+
+\ The parameters after the OID are exactly one NULL.
+: _XA-NULL-PARAMS? ( -- flag )
+    _XA-AFTER-OID @ _XA-END @ DER-READ IF FALSE EXIT THEN
+    _DB-TAG @ 5 = _DB-LEN @ 0= AND _DB-NEXT @ _XA-END @ = AND ;
+
+\ X509-PARSE-ALG ( item limit -- algo ior )
+\   Parse one AlgorithmIdentifier, an OID and at most one parameter
+\   element.  The algorithms the verifier checks must carry exactly their
+\   standard parameters: a NULL for RSA PKCS#1 v1.5 (RFC 4055), none for
+\   ECDSA (RFC 5758).  _XA-NEXT holds the address after the identifier.
 : X509-PARSE-ALG ( item limit -- algo ior )
     _XA-LIMIT ! _XA-POS !
     _XA-POS @ _XA-LIMIT @ DER-READ IF 0 -1 EXIT THEN
@@ -5219,28 +5280,34 @@ VARIABLE _XA-AFTER-OID
     _DB-VAL @ _DB-LEN @ + _XA-END !
     _DB-NEXT @ _XA-NEXT !
     _DB-VAL @ _XA-END @ DER-READ IF 0 -1 EXIT THEN
-    _DB-TAG @ 6 <> IF 0 -1 EXIT THEN
+    _DB-TAG @ 6 <> _DB-LEN @ 0= OR IF 0 -1 EXIT THEN
+    _DB-VAL @ _XA-OID-A ! _DB-LEN @ _XA-OID-U !
     _DB-NEXT @ _XA-AFTER-OID !
-    _DB-VAL @ _DB-LEN @ OID-ECDSA-SHA256 /OID-ECDSA-SHA256
-    X509-OID-MATCH IF
-        _XA-AFTER-OID @ _XA-END @ <> IF 0 -1 EXIT THEN
-        X509-ALG-P256 0 EXIT
-    THEN
-    _DB-VAL @ _DB-LEN @ OID-ECDSA-SHA384 /OID-ECDSA-SHA384
-    X509-OID-MATCH IF
-        _XA-AFTER-OID @ _XA-END @ <> IF 0 -1 EXIT THEN
-        X509-ALG-ECDSA-SHA384 0 EXIT
-    THEN
-    _DB-VAL @ _DB-LEN @ OID-RSA-SHA256 /OID-RSA-SHA256
-    X509-OID-MATCH IF
-        \ RFC 4055's sha256WithRSAEncryption AlgorithmIdentifier carries
-        \ an explicit NULL.  Reject absent, non-NULL, or trailing parameters.
+    _XA-AFTER-OID @ _XA-END @ <> IF
         _XA-AFTER-OID @ _XA-END @ DER-READ IF 0 -1 EXIT THEN
-        _DB-TAG @ 5 <> _DB-LEN @ 0<> OR _DB-NEXT @ _XA-END @ <> OR
-        IF 0 -1 EXIT THEN
-        X509-ALG-RSA2048 0 EXIT
+        _DB-NEXT @ _XA-END @ <> IF 0 -1 EXIT THEN
     THEN
-    0 -1 ;
+    OID-ECDSA-SHA256 /OID-ECDSA-SHA256 _XA-OID? IF
+        _XA-AFTER-OID @ _XA-END @ <> IF 0 -1 EXIT THEN
+        X509-SIG-ECDSA-SHA256 0 EXIT
+    THEN
+    OID-ECDSA-SHA384 /OID-ECDSA-SHA384 _XA-OID? IF
+        _XA-AFTER-OID @ _XA-END @ <> IF 0 -1 EXIT THEN
+        X509-SIG-ECDSA-SHA384 0 EXIT
+    THEN
+    OID-RSA-SHA256 /OID-RSA-SHA256 _XA-OID? IF
+        _XA-NULL-PARAMS? 0= IF 0 -1 EXIT THEN
+        X509-SIG-RSA-SHA256 0 EXIT
+    THEN
+    OID-RSA-SHA384 /OID-RSA-SHA384 _XA-OID? IF
+        _XA-NULL-PARAMS? 0= IF 0 -1 EXIT THEN
+        X509-SIG-RSA-SHA384 0 EXIT
+    THEN
+    OID-RSA-SHA512 /OID-RSA-SHA512 _XA-OID? IF
+        _XA-NULL-PARAMS? 0= IF 0 -1 EXIT THEN
+        X509-SIG-RSA-SHA512 0 EXIT
+    THEN
+    X509-SIG-OTHER 0 ;
 
 VARIABLE _XS-POS
 VARIABLE _XS-LIMIT
@@ -5250,81 +5317,125 @@ VARIABLE _XS-ALG-END
 VARIABLE _XS-ALG-NEXT
 VARIABLE _XS-CERT
 VARIABLE _XS-RSA-END
-VARIABLE _XS-RSA-MOD-A
-VARIABLE _XS-RSA-MOD-U
-VARIABLE _XS-RSA-UNSUPPORTED
+VARIABLE _XS-BITS-A
+VARIABLE _XS-BITS-U
+VARIABLE _XS-INT-A
+VARIABLE _XS-INT-U
+VARIABLE _XS-KEY
 
+\ The subjectPublicKey BIT STRING, with no unused bits, ends the SPKI.
+: _XS-BITS ( -- ior )
+    _XS-ALG-NEXT @ _XS-END @ DER-READ IF -1 EXIT THEN
+    _DB-TAG @ 3 <> _DB-LEN @ 1 < OR IF -1 EXIT THEN
+    _DB-VAL @ C@ 0<> _DB-NEXT @ _XS-END @ <> OR IF -1 EXIT THEN
+    _DB-VAL @ 1+ _XS-BITS-A !  _DB-LEN @ 1- _XS-BITS-U !  0 ;
+
+\ The INTEGER just read is positive and minimally encoded; its magnitude,
+\ without a sign byte, goes to _XS-INT-A and _XS-INT-U.
+: _XS-POSITIVE ( -- ior )
+    _DB-TAG @ 2 <> _DB-LEN @ 0= OR IF -1 EXIT THEN
+    _DB-VAL @ C@ 128 AND IF -1 EXIT THEN
+    _DB-VAL @ C@ 0= IF
+        _DB-LEN @ 1 = IF -1 EXIT THEN
+        _DB-VAL @ 1+ C@ 128 AND 0= IF -1 EXIT THEN
+        _DB-VAL @ 1+ _XS-INT-A !  _DB-LEN @ 1- _XS-INT-U !  0 EXIT
+    THEN
+    _DB-VAL @ _XS-INT-A !  _DB-LEN @ _XS-INT-U !  0 ;
+
+\ The parsed RSA key is a key at all: an odd modulus and an odd exponent of
+\ at least 3.
+: _XS-RSA-VALID? ( -- flag )
+    _XS-CERT @ XC.PUB-A + @ _XS-CERT @ XC.PUB-U + @ + 1- C@ 1 AND 0= IF
+        FALSE EXIT
+    THEN
+    _XS-CERT @ XC.PUB-E-A + @ _XS-CERT @ XC.PUB-E-U + @ + 1- C@ 1 AND 0= IF
+        FALSE EXIT
+    THEN
+    _XS-CERT @ XC.PUB-E-U + @ 1 > IF TRUE EXIT THEN
+    _XS-CERT @ XC.PUB-E-A + @ C@ 3 >= ;
+
+\ ... and in the profile: a modulus of whole bytes from 2048 to 8192 bits,
+\ an exponent below 2^33.
+: _XS-RSA-PROFILE? ( -- flag )
+    _XS-CERT @ XC.PUB-U + @ DUP X509-RSA-MIN-BYTES < SWAP
+    X509-RSA-MAX-BYTES > OR IF FALSE EXIT THEN
+    _XS-CERT @ XC.PUB-A + @ C@ 128 AND 0= IF FALSE EXIT THEN
+    _XS-CERT @ XC.PUB-E-U + @ DUP 5 > IF DROP FALSE EXIT THEN
+    5 = IF _XS-CERT @ XC.PUB-E-A + @ C@ 1 > IF FALSE EXIT THEN THEN
+    TRUE ;
+
+\ rsaEncryption: exactly a NULL parameter, and a DER RSAPublicKey filling
+\ the BIT STRING.
+: _XS-RSA ( -- next ior )
+    _DB-NEXT @ _XS-ALG-END @ DER-READ IF _XS-POS @ -1 EXIT THEN
+    _DB-TAG @ 5 <> _DB-LEN @ 0<> OR _DB-NEXT @ _XS-ALG-END @ <> OR
+    IF _XS-POS @ -1 EXIT THEN
+    _XS-BITS IF _XS-POS @ -1 EXIT THEN
+    _XS-BITS-A @ _XS-BITS-U @ + _XS-RSA-END !
+    _XS-BITS-A @ _XS-RSA-END @ DER-READ IF _XS-POS @ -1 EXIT THEN
+    _DB-TAG @ 48 <> _DB-NEXT @ _XS-RSA-END @ <> OR
+    IF _XS-POS @ -1 EXIT THEN
+    _DB-VAL @ _DB-LEN @ + _XS-RSA-END !
+    _DB-VAL @ _XS-RSA-END @ DER-READ IF _XS-POS @ -1 EXIT THEN
+    _XS-POSITIVE IF _XS-POS @ -1 EXIT THEN
+    _XS-INT-A @ _XS-CERT @ XC.PUB-A + !
+    _XS-INT-U @ _XS-CERT @ XC.PUB-U + !
+    _DB-NEXT @ _XS-RSA-END @ DER-READ IF _XS-POS @ -1 EXIT THEN
+    _XS-POSITIVE IF _XS-POS @ -1 EXIT THEN
+    _DB-NEXT @ _XS-RSA-END @ <> IF _XS-POS @ -1 EXIT THEN
+    _XS-INT-A @ _XS-CERT @ XC.PUB-E-A + !
+    _XS-INT-U @ _XS-CERT @ XC.PUB-E-U + !
+    _XS-RSA-VALID? 0= IF _XS-POS @ -1 EXIT THEN
+    _XS-RSA-PROFILE? 0= IF _XS-NEXT @ X509-PARSE-UNSUPPORTED EXIT THEN
+    X509-KEY-RSA _XS-CERT @ XC.PUB-ALGO + !
+    _XS-NEXT @ 0 ;
+
+\ id-ecPublicKey with a named P-256 or P-384 curve and an uncompressed
+\ point of that curve's length.
+: _XS-EC ( -- next ior )
+    _DB-NEXT @ _XS-ALG-END @ DER-READ IF _XS-POS @ -1 EXIT THEN
+    _DB-NEXT @ _XS-ALG-END @ <> IF _XS-POS @ -1 EXIT THEN
+    0 _XS-KEY !
+    _DB-TAG @ 6 = IF
+        _DB-VAL @ _DB-LEN @ OID-P256 /OID-P256 X509-OID-MATCH IF
+            X509-KEY-P256 _XS-KEY !
+        THEN
+        _DB-VAL @ _DB-LEN @ OID-P384 /OID-P384 X509-OID-MATCH IF
+            X509-KEY-P384 _XS-KEY !
+        THEN
+    THEN
+    _XS-BITS IF _XS-POS @ -1 EXIT THEN
+    _XS-KEY @ 0= IF _XS-NEXT @ X509-PARSE-UNSUPPORTED EXIT THEN
+    _XS-BITS-U @ _XS-KEY @ X509-KEY-P256 = IF 65 ELSE 97 THEN <>
+    _XS-BITS-A @ C@ 4 <> OR IF _XS-NEXT @ X509-PARSE-UNSUPPORTED EXIT THEN
+    _XS-BITS-A @ _XS-CERT @ XC.PUB-A + !
+    _XS-BITS-U @ _XS-CERT @ XC.PUB-U + !
+    _XS-KEY @ _XS-CERT @ XC.PUB-ALGO + !
+    _XS-NEXT @ 0 ;
+
+\ X509-PARSE-SPKI-DESC ( item limit cert -- next ior )
+\   Parse a SubjectPublicKeyInfo into the descriptor.  A well-formed key of
+\   another algorithm, curve or size answers X509-PARSE-UNSUPPORTED.
 : X509-PARSE-SPKI-DESC ( item limit cert -- next ior )
     _XS-CERT ! _XS-LIMIT ! _XS-POS !
     _XS-POS @ _XS-LIMIT @ DER-READ IF _XS-POS @ -1 EXIT THEN
     _DB-TAG @ 48 <> IF _XS-POS @ -1 EXIT THEN
     _DB-VAL @ _DB-LEN @ + _XS-END !
     _DB-NEXT @ _XS-NEXT !
+    _XS-POS @ _XS-CERT @ XC.SPKI-A + !
+    _XS-NEXT @ _XS-POS @ - _XS-CERT @ XC.SPKI-U + !
     _DB-VAL @ _XS-END @ DER-READ IF _XS-POS @ -1 EXIT THEN
     _DB-TAG @ 48 <> IF _XS-POS @ -1 EXIT THEN
     _DB-VAL @ _DB-LEN @ + _XS-ALG-END !
     _DB-NEXT @ _XS-ALG-NEXT !
     _DB-VAL @ _XS-ALG-END @ DER-READ IF _XS-POS @ -1 EXIT THEN
     _DB-TAG @ 6 <> IF _XS-POS @ -1 EXIT THEN
-
-    \ rsaEncryption has an exact NULL parameter and a DER RSAPublicKey in
-    \ the subjectPublicKey BIT STRING.  This profile accepts only a
-    \ canonical, full-width RSA-2048 modulus and exponent 65537.  Larger
-    \ canonical RSA keys are distinguished as unsupported from malformed.
     _DB-VAL @ _DB-LEN @ OID-RSA-ENCRYPTION /OID-RSA-ENCRYPTION
-    X509-OID-MATCH IF
-        _DB-NEXT @ _XS-ALG-END @ DER-READ IF _XS-POS @ -1 EXIT THEN
-        _DB-TAG @ 5 <> _DB-LEN @ 0<> OR _DB-NEXT @ _XS-ALG-END @ <> OR
-        IF _XS-POS @ -1 EXIT THEN
-        _XS-ALG-NEXT @ _XS-END @ DER-READ IF _XS-POS @ -1 EXIT THEN
-        _DB-TAG @ 3 <> _DB-LEN @ 1 < OR IF _XS-POS @ -1 EXIT THEN
-        _DB-VAL @ C@ 0<> _DB-NEXT @ _XS-END @ <> OR
-        IF _XS-POS @ -1 EXIT THEN
-        _DB-VAL @ 1+ DUP _DB-LEN @ 1- + _XS-RSA-END !
-        _XS-RSA-END @ DER-READ IF _XS-POS @ -1 EXIT THEN
-        _DB-TAG @ 48 <> _DB-NEXT @ _XS-RSA-END @ <> OR
-        IF _XS-POS @ -1 EXIT THEN
-        _DB-VAL @ _DB-LEN @ + _XS-RSA-END !
-        _DB-VAL @ _XS-RSA-END @ DER-READ IF _XS-POS @ -1 EXIT THEN
-        _DB-TAG @ 2 <> _DB-LEN @ 2 < OR IF _XS-POS @ -1 EXIT THEN
-        \ Positive INTEGERs are canonical only when the leading zero is
-        \ required by the following high bit.
-        _DB-VAL @ C@ 0<> _DB-VAL @ 1+ C@ 128 AND 0= OR
-        IF _XS-POS @ -1 EXIT THEN
-        _DB-VAL @ _DB-LEN @ 1- + C@ 1 AND 0= IF _XS-POS @ -1 EXIT THEN
-        _DB-VAL @ 1+ _XS-RSA-MOD-A !
-        _DB-LEN @ 1- DUP _XS-RSA-MOD-U !
-        256 <> _XS-RSA-UNSUPPORTED !
-        _DB-NEXT @ _XS-RSA-END @ DER-READ IF _XS-POS @ -1 EXIT THEN
-        _DB-TAG @ 2 <> _DB-LEN @ 3 <> OR IF _XS-POS @ -1 EXIT THEN
-        _DB-VAL @ C@ 1 <> _DB-VAL @ 1+ C@ 0<> OR
-        _DB-VAL @ 2 + C@ 1 <> OR _DB-NEXT @ _XS-RSA-END @ <> OR
-        IF _XS-POS @ -1 EXIT THEN
-        _XS-RSA-UNSUPPORTED @ IF
-            _XS-NEXT @ X509-PARSE-UNSUPPORTED EXIT
-        THEN
-        _XS-RSA-MOD-A @ _XS-CERT @ XC.PUB-A + !
-        _XS-RSA-MOD-U @ _XS-CERT @ XC.PUB-U + !
-        X509-ALG-RSA2048 _XS-CERT @ XC.PUB-ALGO + !
-        _XS-NEXT @ 0 EXIT
-    THEN
-
+    X509-OID-MATCH IF _XS-RSA EXIT THEN
     _DB-VAL @ _DB-LEN @ OID-EC-PUBKEY /OID-EC-PUBKEY
-    X509-OID-MATCH 0= IF _XS-POS @ -1 EXIT THEN
-    _DB-NEXT @ _XS-ALG-END @ DER-READ IF _XS-POS @ -1 EXIT THEN
-    _DB-TAG @ 6 <> IF _XS-POS @ -1 EXIT THEN
-    _DB-VAL @ _DB-LEN @ OID-P256 /OID-P256
-    X509-OID-MATCH 0= IF _XS-POS @ -1 EXIT THEN
-    _DB-NEXT @ _XS-ALG-END @ <> IF _XS-POS @ -1 EXIT THEN
-    _XS-ALG-NEXT @ _XS-END @ DER-READ IF _XS-POS @ -1 EXIT THEN
-    _DB-TAG @ 3 <> _DB-LEN @ 66 <> OR IF _XS-POS @ -1 EXIT THEN
-    _DB-VAL @ C@ 0<> IF _XS-POS @ -1 EXIT THEN
-    _DB-VAL @ 1+ C@ 4 <> IF _XS-POS @ -1 EXIT THEN
-    _DB-NEXT @ _XS-END @ <> IF _XS-POS @ -1 EXIT THEN
-    _DB-VAL @ 1+ _XS-CERT @ XC.PUB-A + !
-    65 _XS-CERT @ XC.PUB-U + !
-    X509-ALG-P256 _XS-CERT @ XC.PUB-ALGO + !
-    _XS-NEXT @ 0 ;
+    X509-OID-MATCH IF _XS-EC EXIT THEN
+    _XS-BITS IF _XS-POS @ -1 EXIT THEN
+    _XS-NEXT @ X509-PARSE-UNSUPPORTED ;
 
 VARIABLE _XE-POS
 VARIABLE _XE-LIMIT
@@ -5427,6 +5538,84 @@ VARIABLE _XE-CERT
     REPEAT
     DROP 0 ;
 
+\ --- NameConstraints (RFC 5280 section 4.2.1.10) ---
+\ A NameConstraints value holds a permitted set [0], an excluded set [1] or
+\ both, in that order, each a nonempty list of GeneralSubtrees.  A subtree
+\ is one base GeneralName; DER leaves out minimum's default, and RFC 5280
+\ forbids maximum.  An IP address base is an address and mask of four or
+\ sixteen bytes each, and a directory name base one Name.
+VARIABLE _XNV-END
+VARIABLE _XNV-POS
+VARIABLE _XNV-SEEN
+VARIABLE _XNV-SET-END
+VARIABLE _XNV-SUB-END
+
+\ _DB-* holds a GeneralName of a known form, constructed where it must be.
+: _XNV-FORM? ( -- flag )
+    _DB-TAG @ 192 AND 128 <> IF FALSE EXIT THEN
+    _DB-TAG @ 31 AND DUP 8 > IF DROP FALSE EXIT THEN
+    DUP 0= OVER 3 = OR OVER 4 = OR SWAP 5 = OR
+    _DB-TAG @ 32 AND 0<> = ;
+
+\ One GeneralSubtree at pos: a base and nothing after it.
+: _XNV-SUBTREE? ( pos limit -- next flag )
+    DER-READ IF 0 FALSE EXIT THEN
+    _DB-TAG @ 48 <> IF 0 FALSE EXIT THEN
+    _DB-NEXT @ >R
+    _DB-VAL @ DUP _DB-LEN @ + DUP _XNV-SUB-END !
+    DER-READ IF R> FALSE EXIT THEN
+    _DB-NEXT @ _XNV-SUB-END @ <> IF R> FALSE EXIT THEN
+    _XNV-FORM? 0= IF R> FALSE EXIT THEN
+    _DB-TAG @ 31 AND 7 = IF
+        _DB-LEN @ DUP 8 <> SWAP 32 <> AND IF R> FALSE EXIT THEN
+    THEN
+    _DB-TAG @ 31 AND 4 = IF
+        _DB-VAL @ DUP _DB-LEN @ + DUP >R DER-READ
+        IF R> DROP R> FALSE EXIT THEN
+        _DB-TAG @ 48 <> _DB-NEXT @ R> <> OR IF R> FALSE EXIT THEN
+    THEN
+    R> TRUE ;
+
+\ The set _DB-* now holds: a nonempty list of subtrees.
+: _XNV-SET? ( -- flag )
+    _DB-LEN @ 0= IF FALSE EXIT THEN
+    _DB-VAL @ DUP _DB-LEN @ + _XNV-SET-END !
+    BEGIN DUP _XNV-SET-END @ < WHILE
+        _XNV-SET-END @ _XNV-SUBTREE? 0= IF DROP FALSE EXIT THEN
+    REPEAT
+    _XNV-SET-END @ = ;
+
+\ X509-NC-VALID? ( a u -- flag )
+\   a u is a whole NameConstraints value of the form above.
+: X509-NC-VALID? ( a u -- flag )
+    OVER + DUP _XNV-END !
+    DER-READ IF FALSE EXIT THEN
+    _DB-TAG @ 48 <> _DB-NEXT @ _XNV-END @ <> OR IF FALSE EXIT THEN
+    _DB-VAL @ _DB-LEN @ + _XNV-END !
+    0 _XNV-SEEN !
+    _DB-VAL @
+    BEGIN DUP _XNV-END @ < WHILE
+        _XNV-END @ DER-READ IF FALSE EXIT THEN
+        _DB-NEXT @ _XNV-POS !
+        _DB-TAG @ 160 = IF
+            _XNV-SEEN @ IF FALSE EXIT THEN
+            1 _XNV-SEEN !
+        ELSE
+            _DB-TAG @ 161 <> _XNV-SEEN @ 2 AND OR IF FALSE EXIT THEN
+            _XNV-SEEN @ 2 OR _XNV-SEEN !
+        THEN
+        _XNV-SET? 0= IF FALSE EXIT THEN
+        _XNV-POS @
+    REPEAT
+    _XNV-END @ = _XNV-SEEN @ 0<> AND ;
+
+: _XE-NC ( -- ior )
+    XCF-NC-SEEN _XE-SEEN? IF -1 EXIT THEN
+    XCF-NC-SEEN _XE-CERT @ _XC-FLAG+
+    _XE-V-A @ _XE-V-U @ X509-NC-VALID? 0= IF -1 EXIT THEN
+    _XE-V-A @ _XE-CERT @ XC.NC-A + !
+    _XE-V-U @ _XE-CERT @ XC.NC-U + ! 0 ;
+
 : X509-PARSE-EXT ( item limit cert -- next ior )
     _XE-CERT ! _XE-LIMIT ! _XE-POS ! 0 _XE-CRITICAL !
     _XE-POS @ _XE-LIMIT @ DER-READ IF _XE-POS @ -1 EXIT THEN
@@ -5461,10 +5650,12 @@ VARIABLE _XE-CERT
     X509-OID-MATCH IF _XE-SKI ELSE
     _XE-OID-A @ _XE-OID-U @ OID-AUTHORITY-KEY-ID /OID-AUTHORITY-KEY-ID
     X509-OID-MATCH IF _XE-AKI ELSE
+    _XE-OID-A @ _XE-OID-U @ OID-NAME-CONSTRAINTS /OID-NAME-CONSTRAINTS
+    X509-OID-MATCH IF _XE-NC ELSE
         _XE-CRITICAL @ IF
             XCF-UNKNOWN-CRITICAL _XE-CERT @ _XC-FLAG+ -1
         ELSE 0 THEN
-    THEN THEN THEN THEN THEN THEN
+    THEN THEN THEN THEN THEN THEN THEN
     DUP IF DROP _XE-POS @ -1 ELSE DROP _XE-NEXT @ 0 THEN ;
 
 VARIABLE _XDP-CERT-A
@@ -5475,6 +5666,8 @@ VARIABLE _XDP-OUTER-END
 VARIABLE _XDP-TBS-END
 VARIABLE _XDP-POS
 VARIABLE _XDP-ALG
+VARIABLE _XDP-ALG-A
+VARIABLE _XDP-ALG-U
 VARIABLE _XDP-EXT-SEEN
 VARIABLE _XDP-EXT-END
 VARIABLE _XDP-AFTER-EXT
@@ -5499,7 +5692,8 @@ VARIABLE _XDP-AFTER-EXT
     DROP _DB-NEXT @ DUP _XDP-OUTER-END @ X509-PARSE-ALG
     IF 2DROP -1 EXIT THEN
     DUP _XDP-ALG ! _XDP-OUT @ XC.SIG-ALGO + !
-    DROP _XA-NEXT @ _XDP-OUTER-END @ DER-READ IF -1 EXIT THEN
+    DUP _XDP-ALG-A ! _XA-NEXT @ SWAP - _XDP-ALG-U !
+    _XA-NEXT @ _XDP-OUTER-END @ DER-READ IF -1 EXIT THEN
     _DB-TAG @ 3 <> _DB-LEN @ 2 < OR IF -1 EXIT THEN
     _DB-VAL @ C@ 0<> _DB-NEXT @ _XDP-OUTER-END @ <> OR IF -1 EXIT THEN
     _DB-VAL @ 1+ _XDP-OUT @ XC.SIG-A + !
@@ -5518,9 +5712,10 @@ VARIABLE _XDP-AFTER-EXT
     _XDP-POS @ _XDP-TBS-END @ DER-READ IF -1 EXIT THEN
     _DB-TAG @ 2 <> _DB-LEN @ 0= OR _DB-VAL @ C@ 128 AND OR IF -1 EXIT THEN
     _DB-NEXT @ _XDP-POS !
-    \ TBS and outer signature AlgorithmIdentifiers must agree.
+    \ The TBS and outer signature AlgorithmIdentifiers are the same bytes.
     _XDP-POS @ _XDP-TBS-END @ X509-PARSE-ALG IF 2DROP -1 EXIT THEN
-    _XDP-ALG @ <> IF -1 EXIT THEN _XA-NEXT @ _XDP-POS !
+    DROP _XDP-POS @ _XA-NEXT @ OVER - _XDP-ALG-A @ _XDP-ALG-U @ _XC-SLICE=
+    0= IF -1 EXIT THEN _XA-NEXT @ _XDP-POS !
     \ Issuer Name.
     _XDP-POS @ _XDP-TBS-END @ DER-READ IF -1 EXIT THEN
     _DB-TAG @ 48 <> IF -1 EXIT THEN
@@ -5625,18 +5820,198 @@ VARIABLE _XH-END
     _X509-CERT0 X509-DESC-CHECK-HOST ;
 
 \ =====================================================================
-\  §16.7b.2  Versioned trust bundles and bounded path validation
+\  §16.7b.1a  Name constraints
 \ =====================================================================
+\
+\  A CA's NameConstraints limit the names of every certificate below it on
+\  a path.  DNS names and IP addresses are checked against both permitted
+\  and excluded subtrees, and directory names against permitted subtrees,
+\  by their leading RDNs.  A certificate fails a constraint it cannot be
+\  checked against: a name of another form under a subtree of that form,
+\  or a directory name under an excluded directory subtree.
+\
+\  X509-NC-CERT-OK? ( nc-a nc-u cert -- flag )
+\    TRUE when every name of cert lies within the constraints nc-a nc-u, a
+\    NameConstraints value X509-NC-VALID? accepts.  Its names are its
+\    subject, unless that is empty, and every subjectAltName.
 
-8 CONSTANT TLS-TRUST-MAX
-32768 CONSTANT TLS-TRUST-BUNDLE-MAX
+VARIABLE _XNC-A         \ the constraints' content
+VARIABLE _XNC-END
+VARIABLE _XNC-CERT
+VARIABLE _XNC-NAME-A    \ the name under test
+VARIABLE _XNC-NAME-U
+VARIABLE _XNC-KIND      \ its GeneralName form
+VARIABLE _XNC-HAVE      \ a subtree of that form was seen
+VARIABLE _XNC-HIT       \ a subtree of that form holds the name
+VARIABLE _XNC-EXCLUDED
+
+VARIABLE _XDW-N
+VARIABLE _XDW-NU
+VARIABLE _XDW-B
+VARIABLE _XDW-BU
+
+\ A DNS name lies within a subtree base: an empty base holds every name, a
+\ base with a leading dot holds only names below it, and any other base
+\ holds itself and the names below it.  ASCII case is ignored.
+: _XNC-DNS-WITHIN? ( name name-u base base-u -- flag )
+    _XDW-BU ! _XDW-B ! _XDW-NU ! _XDW-N !
+    _XDW-BU @ 0= IF TRUE EXIT THEN
+    _XDW-B @ C@ 46 = IF
+        _XDW-NU @ _XDW-BU @ <= IF FALSE EXIT THEN
+        _XDW-N @ _XDW-NU @ + _XDW-BU @ -
+        _XDW-B @ _XDW-BU @ _XCH-IEQUAL EXIT
+    THEN
+    _XDW-NU @ _XDW-BU @ = IF
+        _XDW-N @ _XDW-B @ _XDW-BU @ _XCH-IEQUAL EXIT
+    THEN
+    _XDW-NU @ _XDW-BU @ 1+ <= IF FALSE EXIT THEN
+    _XDW-N @ _XDW-NU @ + _XDW-BU @ - 1- C@ 46 <> IF FALSE EXIT THEN
+    _XDW-N @ _XDW-NU @ + _XDW-BU @ -
+    _XDW-B @ _XDW-BU @ _XCH-IEQUAL ;
+
+\ The current DNS name and a base.  Against an excluded base a wildcard
+\ *.B also counts when the base lies below B, since the wildcard may name
+\ the excluded host.
+: _XNC-DNS-HOLDS? ( base base-u -- flag )
+    2DUP _XNC-NAME-A @ _XNC-NAME-U @ 2SWAP _XNC-DNS-WITHIN? IF
+        2DROP TRUE EXIT
+    THEN
+    _XNC-EXCLUDED @ 0= IF 2DROP FALSE EXIT THEN
+    _XNC-NAME-U @ 3 < IF 2DROP FALSE EXIT THEN
+    _XNC-NAME-A @ C@ 42 <> _XNC-NAME-A @ 1+ C@ 46 <> OR IF
+        2DROP FALSE EXIT
+    THEN
+    \ the base without its leading dot, against B
+    DUP IF OVER C@ 46 = IF 1- SWAP 1+ SWAP THEN THEN
+    _XNC-NAME-A @ 2 + _XNC-NAME-U @ 2 -
+    _XNC-DNS-WITHIN? ;
+
+\ The current IP address and a base of address and mask.
+: _XNC-IP-HOLDS? ( base base-u -- flag )
+    _XNC-NAME-U @ 2* <> IF DROP FALSE EXIT THEN
+    _XNC-NAME-U @ 0 ?DO
+        _XNC-NAME-A @ I + C@ OVER _XNC-NAME-U @ + I + C@ AND
+        OVER I + C@ 2 PICK _XNC-NAME-U @ + I + C@ AND
+        <> IF DROP FALSE UNLOOP EXIT THEN
+    LOOP DROP TRUE ;
+
+VARIABLE _XND-B
+VARIABLE _XND-BU
+
+\ The current directory name, a Name, begins with the RDNs of the base.
+: _XNC-DN-HOLDS? ( base base-u -- flag )
+    OVER + DER-READ IF FALSE EXIT THEN
+    _DB-VAL @ _XND-B !  _DB-LEN @ _XND-BU !
+    _XNC-NAME-A @ DUP _XNC-NAME-U @ + DER-READ IF FALSE EXIT THEN
+    _DB-LEN @ _XND-BU @ < IF FALSE EXIT THEN
+    _DB-VAL @ _XND-B @ _XND-BU @ _XC-BYTES= ;
+
+: _XNC-HOLDS? ( base base-u -- flag )
+    _XNC-KIND @ 2 = IF _XNC-DNS-HOLDS? EXIT THEN
+    _XNC-KIND @ 7 = IF _XNC-IP-HOLDS? EXIT THEN
+    _XNC-KIND @ 4 = IF _XNC-DN-HOLDS? EXIT THEN
+    2DROP FALSE ;
+
+VARIABLE _XNS-TAG
+VARIABLE _XNS-POS
+VARIABLE _XNS-NEXT
+VARIABLE _XNS-END
+VARIABLE _XNS-SUB
+
+\ Over the subtrees of the set tagged set-tag, 160 permitted or 161
+\ excluded, note whether one has the current name's form and whether one
+\ of those holds it.
+: _XNC-SCAN ( set-tag -- )
+    DUP _XNS-TAG ! 161 = _XNC-EXCLUDED !
+    FALSE _XNC-HAVE ! FALSE _XNC-HIT !
+    _XNC-A @ _XNS-POS !
+    BEGIN _XNS-POS @ _XNC-END @ < WHILE
+        _XNS-POS @ _XNC-END @ DER-READ IF EXIT THEN
+        _DB-NEXT @ _XNS-NEXT !
+        _DB-TAG @ _XNS-TAG @ = IF
+            _DB-VAL @ _DB-LEN @ + _XNS-END !
+            _DB-VAL @ _XNS-POS !
+            BEGIN _XNS-POS @ _XNS-END @ < WHILE
+                _XNS-POS @ _XNS-END @ DER-READ IF EXIT THEN
+                _DB-NEXT @ _XNS-SUB !
+                _DB-VAL @ DUP _DB-LEN @ + DER-READ IF EXIT THEN
+                _DB-TAG @ 31 AND _XNC-KIND @ = IF
+                    TRUE _XNC-HAVE !
+                    _DB-VAL @ _DB-LEN @ _XNC-HOLDS? IF TRUE _XNC-HIT ! THEN
+                THEN
+                _XNS-SUB @ _XNS-POS !
+            REPEAT
+        THEN
+        _XNS-NEXT @ _XNS-POS !
+    REPEAT ;
+
+\ One name of the certificate, of GeneralName form kind.
+: _XNC-NAME-OK? ( name name-u kind -- flag )
+    _XNC-KIND ! _XNC-NAME-U ! _XNC-NAME-A !
+    160 _XNC-SCAN
+    _XNC-KIND @ DUP 2 = OVER 4 = OR SWAP 7 = OR IF
+        _XNC-HAVE @ _XNC-HIT @ 0= AND IF FALSE EXIT THEN
+    ELSE
+        _XNC-HAVE @ IF FALSE EXIT THEN
+    THEN
+    161 _XNC-SCAN
+    _XNC-KIND @ DUP 2 = SWAP 7 = OR IF _XNC-HIT @ 0= EXIT THEN
+    _XNC-HAVE @ 0= ;
+
+VARIABLE _XNW-POS
+VARIABLE _XNW-END
+
+: X509-NC-CERT-OK? ( nc-a nc-u cert -- flag )
+    _XNC-CERT !
+    OVER + DER-READ IF FALSE EXIT THEN
+    _DB-VAL @ _XNC-A !  _DB-VAL @ _DB-LEN @ + _XNC-END !
+    _XNC-CERT @ XC.SUBJECT-U + @ 2 > IF
+        _XNC-CERT @ XC.SUBJECT-A + @ _XNC-CERT @ XC.SUBJECT-U + @ 4
+        _XNC-NAME-OK? 0= IF FALSE EXIT THEN
+    THEN
+    _XNC-CERT @ XC.SAN-A + @ DUP _XNW-POS !
+    _XNC-CERT @ XC.SAN-U + @ + _XNW-END !
+    BEGIN _XNW-POS @ _XNW-END @ < WHILE
+        _XNW-POS @ _XNW-END @ DER-READ IF FALSE EXIT THEN
+        _DB-NEXT @ _XNW-POS !
+        _DB-VAL @ _DB-LEN @ _DB-TAG @ 31 AND
+        _XNC-NAME-OK? 0= IF FALSE EXIT THEN
+    REPEAT
+    TRUE ;
+
+\ =====================================================================
+\  §16.7b.2  Trust anchors
+\ =====================================================================
+\
+\  TLS-TRUST-LOAD ( bundle-a bundle-u -- ior ) replaces the machine's trust
+\  anchors with an MPTA version 2 bundle, copied into storage sized to it.
+\  The header is "MPTA", a 16-bit version, a 16-bit record count and a
+\  64-bit generation, all big-endian.  Each record is a 16-bit flags field,
+\  the 16-bit lengths of its scope and of its imposed name constraints, the
+\  32-bit length of its certificate and a 64-bit distrust-after time, then
+\  those three byte strings in that order.
+\
+\  A record without a scope is a global anchor, which may end the path of
+\  any host that no scoped anchor binds.  A scoped anchor, a private root,
+\  binds the host its scope names, and with TTAF-SUBDOMAINS every host below
+\  it: such a host's path may end only at a scoped anchor that names it.  A
+\  nonzero distrust-after time refuses paths whose leaf was issued after
+\  it, as Mozilla's root program sets for some roots.  Imposed name
+\  constraints, a NameConstraints value, hold every certificate with the
+\  anchor's subject, as NSS holds some roots, beside the anchor's own.
+
 0 CONSTANT TTA-DESC
-208 CONSTANT TTA-SCOPE-A
-216 CONSTANT TTA-SCOPE-U
-224 CONSTANT TTA-FLAGS
-232 CONSTANT /TLS-TRUST-ANCHOR
+/X509-CERT      CONSTANT TTA-SCOPE-A
+/X509-CERT 8 +  CONSTANT TTA-SCOPE-U
+/X509-CERT 16 + CONSTANT TTA-FLAGS
+/X509-CERT 24 + CONSTANT TTA-DISTRUST
+/X509-CERT 32 + CONSTANT TTA-NC-A
+/X509-CERT 40 + CONSTANT TTA-NC-U
+/X509-CERT 48 + CONSTANT /TLS-TRUST-ANCHOR
 
 1 CONSTANT TTAF-SUBDOMAINS
+2 CONSTANT TLS-TRUST-FORMAT          \ the MPTA version TLS-TRUST-LOAD reads
+18 CONSTANT /TLS-TRUST-RECORD-HEADER
 
 0 CONSTANT TLS-CERT-OK
 -4101 CONSTANT TLS-CERT-MALFORMED
@@ -5648,20 +6023,26 @@ VARIABLE _XH-END
 -4107 CONSTANT TLS-CERT-CONSTRAINT
 -4108 CONSTANT TLS-CERT-UNSUPPORTED
 -4109 CONSTANT TLS-CERT-CLOCK
+-4110 CONSTANT TLS-CERT-ALLOC
+-4111 CONSTANT TLS-CERT-DISTRUSTED
 
-TLS-TRUST-BUNDLE-MAX XBUF TLS-TRUST-BLOB
-/TLS-TRUST-ANCHOR TLS-TRUST-MAX * XBUF TLS-TRUST-TABLE
+VARIABLE TLS-TRUST-BLOB              \ the loaded bundle's copy
+VARIABLE _TTB-CAP
+VARIABLE TLS-TRUST-TABLE             \ the anchors
+VARIABLE _TTT-CAP
 VARIABLE TLS-TRUST-COUNT
 VARIABLE TLS-TRUST-VERSION
 VARIABLE TLS-TRUST-GENERATION
 VARIABLE TLS-CERT-LAST-ERROR
+0 TLS-TRUST-BLOB !  0 _TTB-CAP !  0 TLS-TRUST-TABLE !  0 _TTT-CAP !
+0 TLS-TRUST-COUNT !
 
 : TLS-TRUST@ ( index -- anchor )
-    /TLS-TRUST-ANCHOR * TLS-TRUST-TABLE + ;
+    /TLS-TRUST-ANCHOR * TLS-TRUST-TABLE @ + ;
 
 : TLS-TRUST-RESET ( -- )
-    0 TLS-TRUST-COUNT ! 0 TLS-TRUST-VERSION ! 0 TLS-TRUST-GENERATION !
-    TLS-TRUST-TABLE /TLS-TRUST-ANCHOR TLS-TRUST-MAX * 0 FILL ;
+    TLS-TRUST-TABLE @ ?DUP IF TLS-TRUST-COUNT @ /TLS-TRUST-ANCHOR * 0 FILL THEN
+    0 TLS-TRUST-COUNT ! 0 TLS-TRUST-VERSION ! 0 TLS-TRUST-GENERATION ! ;
 
 : _BE16@ ( addr -- u )
     DUP C@ 8 LSHIFT SWAP 1+ C@ OR ;
@@ -5678,27 +6059,18 @@ VARIABLE _BE64-A
     _BE64-A ! 0
     8 0 DO 8 LSHIFT _BE64-A @ I + C@ OR LOOP ;
 
-VARIABLE _XCB-A
-VARIABLE _XCB-B
-VARIABLE _XCB-U
+VARIABLE _TTR-U
+VARIABLE _TTR-BUF
+VARIABLE _TTR-CAP
 
-: _XC-BYTES= ( a b len -- flag )
-    _XCB-U ! _XCB-B ! _XCB-A !
-    _XCB-U @ 0 DO
-        _XCB-A @ I + C@ _XCB-B @ I + C@ <> IF FALSE UNLOOP EXIT THEN
-    LOOP TRUE ;
-
-: _XC-SLICE= ( a1 u1 a2 u2 -- flag )
-    ROT OVER <> IF 2DROP DROP FALSE EXIT THEN
-    _XC-BYTES= ;
-
-VARIABLE _TTS-A
-VARIABLE _TTS-U
-
-: _TLS-SCOPE-VALID? ( addr len -- flag )
-    _TTS-U ! _TTS-A !
-    _TTS-U @ 0= IF TRUE EXIT THEN
-    _TTS-A @ _TTS-U @ FALSE DNS-NAME-VALID? ;
+\ Room for u bytes in the buffer whose address and capacity live in
+\ buf-var and cap-var.  Storage only grows; it is kept for the next load.
+: _TT-ROOM ( u buf-var cap-var -- ior )
+    _TTR-CAP ! _TTR-BUF ! _TTR-U !
+    _TTR-U @ _TTR-CAP @ @ <= IF 0 EXIT THEN
+    _TTR-BUF @ @ ?DUP IF FREE 0 _TTR-BUF @ ! 0 _TTR-CAP @ ! THEN
+    _TTR-U @ ALLOCATE IF DROP TLS-CERT-ALLOC EXIT THEN
+    _TTR-BUF @ !  _TTR-U @ _TTR-CAP @ !  0 ;
 
 VARIABLE _TTL-A
 VARIABLE _TTL-U
@@ -5706,17 +6078,29 @@ VARIABLE _TTL-POS
 VARIABLE _TTL-END
 VARIABLE _TTL-N
 VARIABLE _TTL-FLAGS
+VARIABLE _TTL-SCOPE-A
 VARIABLE _TTL-SCOPE-U
+VARIABLE _TTL-NC-A
+VARIABLE _TTL-NC-U
+VARIABLE _TTL-CERT-A
 VARIABLE _TTL-CERT-U
+VARIABLE _TTL-DISTRUST
 VARIABLE _TTL-ANCHOR
 
-: _TLS-TRUST-ADD ( cert-a cert-u scope-a scope-u flags -- ior )
-    _TTL-FLAGS ! _TTL-SCOPE-U ! _TTS-A ! _TTL-CERT-U ! _TTL-A !
-    TLS-TRUST-COUNT @ TLS-TRUST-MAX >= IF TLS-CERT-MALFORMED EXIT THEN
+\ The record the _TTL-* fields describe becomes the next anchor.
+: _TLS-TRUST-ADD ( -- ior )
     _TTL-FLAGS @ TTAF-SUBDOMAINS INVERT AND IF TLS-CERT-MALFORMED EXIT THEN
-    _TTS-A @ _TTL-SCOPE-U @ _TLS-SCOPE-VALID? 0= IF TLS-CERT-MALFORMED EXIT THEN
+    _TTL-SCOPE-U @ IF
+        _TTL-SCOPE-A @ _TTL-SCOPE-U @ FALSE DNS-NAME-VALID? 0=
+        IF TLS-CERT-MALFORMED EXIT THEN
+    ELSE
+        _TTL-FLAGS @ IF TLS-CERT-MALFORMED EXIT THEN
+    THEN
+    _TTL-NC-U @ IF
+        _TTL-NC-A @ _TTL-NC-U @ X509-NC-VALID? 0= IF TLS-CERT-MALFORMED EXIT THEN
+    THEN
     TLS-TRUST-COUNT @ TLS-TRUST@ _TTL-ANCHOR !
-    _TTL-A @ _TTL-CERT-U @ _TTL-ANCHOR @ TTA-DESC + X509-DESC-PARSE
+    _TTL-CERT-A @ _TTL-CERT-U @ _TTL-ANCHOR @ TTA-DESC + X509-DESC-PARSE
     DUP X509-PARSE-UNSUPPORTED = IF DROP TLS-CERT-UNSUPPORTED EXIT THEN
     IF TLS-CERT-MALFORMED EXIT THEN
     _TTL-ANCHOR @ TTA-DESC + DUP XC.FLAGS + @
@@ -5727,46 +6111,57 @@ VARIABLE _TTL-ANCHOR
         DUP XC.KEY-USAGE + @ 4 AND 0= IF DROP TLS-CERT-CONSTRAINT EXIT THEN
     THEN
     DROP
-    _TTS-A @ _TTL-ANCHOR @ TTA-SCOPE-A + !
+    _TTL-SCOPE-A @ _TTL-ANCHOR @ TTA-SCOPE-A + !
     _TTL-SCOPE-U @ _TTL-ANCHOR @ TTA-SCOPE-U + !
     _TTL-FLAGS @ _TTL-ANCHOR @ TTA-FLAGS + !
+    _TTL-DISTRUST @ _TTL-ANCHOR @ TTA-DISTRUST + !
+    _TTL-NC-A @ _TTL-ANCHOR @ TTA-NC-A + !
+    _TTL-NC-U @ _TTL-ANCHOR @ TTA-NC-U + !
     1 TLS-TRUST-COUNT +! TLS-CERT-OK ;
 
+\ The record at _TTL-POS, read into the _TTL-* fields.
+: _TLS-TRUST-RECORD ( -- ior )
+    _TTL-END @ _TTL-POS @ - /TLS-TRUST-RECORD-HEADER < IF
+        TLS-CERT-MALFORMED EXIT
+    THEN
+    _TTL-POS @ _BE16@ _TTL-FLAGS !
+    _TTL-POS @ 2 + _BE16@ _TTL-SCOPE-U !
+    _TTL-POS @ 4 + _BE16@ _TTL-NC-U !
+    _TTL-POS @ 6 + _BE32@ _TTL-CERT-U !
+    _TTL-POS @ 10 + _BE64@ _TTL-DISTRUST !
+    _TTL-SCOPE-U @ DNS-NAME-MAX > _TTL-CERT-U @ 8192 > OR IF
+        TLS-CERT-MALFORMED EXIT
+    THEN
+    _TTL-POS @ /TLS-TRUST-RECORD-HEADER + DUP _TTL-SCOPE-A !
+    _TTL-SCOPE-U @ + DUP _TTL-NC-A !
+    _TTL-NC-U @ + DUP _TTL-CERT-A !
+    _TTL-CERT-U @ + DUP _TTL-END @ > IF DROP TLS-CERT-MALFORMED EXIT THEN
+    _TTL-POS !
+    _TTL-NC-U @ 0= IF 0 _TTL-NC-A ! THEN
+    _TLS-TRUST-ADD ;
+
 : TLS-TRUST-LOAD ( bundle-a bundle-u -- ior )
-    DUP 16 < OVER TLS-TRUST-BUNDLE-MAX > OR IF 2DROP TLS-CERT-MALFORMED EXIT THEN
-    DUP _TTL-U ! OVER _TTL-A !
-    _TTL-A @ TLS-TRUST-BLOB _TTL-U @ CMOVE 2DROP
     TLS-TRUST-RESET
-    TLS-TRUST-BLOB C@ 77 <> TLS-TRUST-BLOB 1+ C@ 80 <> OR
-    TLS-TRUST-BLOB 2 + C@ 84 <> OR TLS-TRUST-BLOB 3 + C@ 65 <> OR
+    DUP 16 < IF 2DROP TLS-CERT-MALFORMED EXIT THEN
+    _TTL-U ! _TTL-A !
+    _TTL-U @ TLS-TRUST-BLOB _TTB-CAP _TT-ROOM ?DUP IF EXIT THEN
+    _TTL-A @ TLS-TRUST-BLOB @ _TTL-U @ CMOVE
+    TLS-TRUST-BLOB @ _TTL-A !
+    _TTL-A @ C@ 77 <> _TTL-A @ 1+ C@ 80 <> OR
+    _TTL-A @ 2 + C@ 84 <> OR _TTL-A @ 3 + C@ 65 <> OR
     IF TLS-CERT-MALFORMED EXIT THEN
-    TLS-TRUST-BLOB 4 + _BE16@ DUP 1 <> IF DROP TLS-CERT-UNSUPPORTED EXIT THEN
-    TLS-TRUST-VERSION !
-    TLS-TRUST-BLOB 6 + _BE16@ DUP TLS-TRUST-MAX > IF DROP TLS-CERT-MALFORMED EXIT THEN
-    _TTL-N !
-    TLS-TRUST-BLOB 8 + _BE64@ TLS-TRUST-GENERATION !
-    TLS-TRUST-BLOB 16 + _TTL-POS !
-    TLS-TRUST-BLOB _TTL-U @ + _TTL-END !
+    _TTL-A @ 4 + _BE16@ TLS-TRUST-FORMAT <> IF TLS-CERT-UNSUPPORTED EXIT THEN
+    _TTL-A @ 6 + _BE16@ _TTL-N !
+    _TTL-N @ /TLS-TRUST-ANCHOR * TLS-TRUST-TABLE _TTT-CAP _TT-ROOM
+    ?DUP IF EXIT THEN
+    _TTL-A @ 16 + _TTL-POS !
+    _TTL-A @ _TTL-U @ + _TTL-END !
     _TTL-N @ 0 ?DO
-        _TTL-POS @ 8 + _TTL-END @ > IF TLS-TRUST-RESET TLS-CERT-MALFORMED UNLOOP EXIT THEN
-        _TTL-POS @ _BE16@ _TTL-FLAGS !
-        _TTL-POS @ 2 + _BE16@ _TTL-SCOPE-U !
-        _TTL-POS @ 4 + _BE32@ _TTL-CERT-U !
-        _TTL-SCOPE-U @ DNS-NAME-MAX > _TTL-CERT-U @ 8192 > OR IF
-            TLS-TRUST-RESET TLS-CERT-MALFORMED UNLOOP EXIT
-        THEN
-        _TTL-POS @ 8 + DUP _TTS-A !
-        _TTL-SCOPE-U @ + DUP _TTL-A !
-        _TTL-CERT-U @ + DUP _TTL-END @ > IF
-            DROP TLS-TRUST-RESET TLS-CERT-MALFORMED UNLOOP EXIT
-        THEN
-        _TTL-A @ _TTL-CERT-U @ _TTS-A @ _TTL-SCOPE-U @ _TTL-FLAGS @
-        _TLS-TRUST-ADD DUP IF
-            TLS-TRUST-RESET UNLOOP EXIT
-        THEN DROP
-        _TTL-POS !
+        _TLS-TRUST-RECORD ?DUP IF TLS-TRUST-RESET UNLOOP EXIT THEN
     LOOP
     _TTL-POS @ _TTL-END @ <> IF TLS-TRUST-RESET TLS-CERT-MALFORMED EXIT THEN
+    TLS-TRUST-FORMAT TLS-TRUST-VERSION !
+    _TTL-A @ 8 + _BE64@ TLS-TRUST-GENERATION !
     TLS-CERT-OK ;
 
 VARIABLE _XCV-CERT
@@ -5785,7 +6180,7 @@ VARIABLE _XCV-NOW
 
 VARIABLE _XVS-CHILD
 VARIABLE _XVS-ISSUER
-CREATE _XVS-HASH 32 ALLOT
+CREATE _XVS-HASH 64 ALLOT
 
 : _X509-NAME-LINK? ( child issuer -- flag )
     _XVS-ISSUER ! _XVS-CHILD !
@@ -5818,23 +6213,6 @@ VARIABLE _XSC-SCOPE-U
     _XSC-HOST @ _XSC-HOST-U @ _XSC-SCOPE-U @ - 1- + C@ 46 <> IF FALSE EXIT THEN
     _XSC-HOST @ _XSC-HOST-U @ _XSC-SCOPE-U @ - +
     _XSC-SCOPE @ _XSC-SCOPE-U @ _XCH-IEQUAL ;
-
-VARIABLE _XAM-CERT
-VARIABLE _XAM-HOST
-VARIABLE _XAM-HOST-U
-
-: _X509-ANCHOR-MATCH? ( cert host host-u anchor -- flag )
-    >R _XAM-HOST-U ! _XAM-HOST ! _XAM-CERT !
-    _XAM-CERT @ XC.SUBJECT-A + @ _XAM-CERT @ XC.SUBJECT-U + @
-    R@ TTA-DESC + XC.SUBJECT-A + @ R@ TTA-DESC + XC.SUBJECT-U + @
-    _XC-SLICE= 0= IF R> DROP FALSE EXIT THEN
-    _XAM-CERT @ XC.PUB-ALGO + @ R@ TTA-DESC + XC.PUB-ALGO + @ <> IF
-        R> DROP FALSE EXIT
-    THEN
-    _XAM-CERT @ XC.PUB-A + @ _XAM-CERT @ XC.PUB-U + @
-    R@ TTA-DESC + XC.PUB-A + @ R@ TTA-DESC + XC.PUB-U + @
-    _XC-SLICE= 0= IF R> DROP FALSE EXIT THEN
-    _XAM-HOST @ _XAM-HOST-U @ R> _TLS-SCOPE-MATCH? ;
 
 VARIABLE _XPC-CERT
 VARIABLE _XPC-CA-BELOW
@@ -6429,34 +6807,42 @@ VARIABLE _B2L-SRC
 VARIABLE _B2L-LEN
 VARIABLE _B2L-DST
 
-: _BE>LE32 ( src len dst -- )
+\ Copy len big-endian bytes into w little-endian bytes, zero-padded.
+: _BE>LE-W ( src len dst w -- )
+    OVER SWAP 0 FILL
     _B2L-DST ! _B2L-LEN ! _B2L-SRC !
-    _B2L-DST @ 32 0 FILL
-    _B2L-LEN @ 0 DO
+    _B2L-LEN @ 0 ?DO
         _B2L-SRC @ I + C@
         _B2L-DST @ _B2L-LEN @ 1- I - + C!
     LOOP ;
+
+: _BE>LE32 ( src len dst -- )  32 _BE>LE-W ;
 
 VARIABLE _EDS-POS
 VARIABLE _EDS-END
 VARIABLE _EDS-LEN
 VARIABLE _EDS-DST
+VARIABLE _EDS-W
+VARIABLE _EDS-R
+VARIABLE _EDS-S
 
+\ Read one positive, minimally encoded DER INTEGER of at most _EDS-W
+\ bytes into dst, little-endian and zero-padded to that width.
 : _ECDSA-DECODE-INT ( pos end dst -- next flag )
     _EDS-DST ! _EDS-END ! _EDS-POS !
     _EDS-POS @ 2 + _EDS-END @ > IF _EDS-POS @ -1 EXIT THEN
     _EDS-POS @ C@ 2 <> IF _EDS-POS @ -1 EXIT THEN
     _EDS-POS @ 1+ C@ DUP _EDS-LEN !
-    DUP 0= OVER 33 > OR IF DROP _EDS-POS @ -1 EXIT THEN
+    DUP 0= OVER _EDS-W @ 1+ > OR IF DROP _EDS-POS @ -1 EXIT THEN
     _EDS-POS @ 2 + OVER + DUP _EDS-END @ > IF
         DROP DROP _EDS-POS @ -1 EXIT
     THEN
     SWAP DROP                         \ next
     _EDS-POS @ 2 +                   \ next value
-    _EDS-LEN @ 33 = IF
+    _EDS-LEN @ _EDS-W @ 1+ = IF
         DUP C@ 0<> IF 2DROP _EDS-POS @ -1 EXIT THEN
         DUP 1+ C@ 128 AND 0= IF 2DROP _EDS-POS @ -1 EXIT THEN
-        1+ 32
+        1+ _EDS-W @
     ELSE
         DUP C@ 128 AND IF 2DROP _EDS-POS @ -1 EXIT THEN
         _EDS-LEN @ 1 > IF
@@ -6468,23 +6854,30 @@ VARIABLE _EDS-DST
         THEN
         _EDS-LEN @
     THEN
-    _EDS-DST @ _BE>LE32 0 ;
+    _EDS-DST @ _EDS-W @ _BE>LE-W 0 ;
 
-\ ECDSA-DECODE-SIG ( sig slen -- flag )
-\   Decode DER-encoded ECDSA signature into _ECDSA-R and _ECDSA-S.
-\   Returns 0 on success, -1 on error.
-: ECDSA-DECODE-SIG ( sig slen -- flag )
+\ _ECDSA-DECODE ( sig slen r s w -- flag )
+\   Decode a DER ECDSA-Sig-Value, a SEQUENCE of two INTEGERs of at most w
+\   bytes, into little-endian r and s of w bytes.  0 on success, -1 on
+\   error.  The short-form SEQUENCE length covers curves up to P-384.
+: _ECDSA-DECODE ( sig slen r s w -- flag )
+    _EDS-W ! _EDS-S ! _EDS-R !
     2DUP + _EDS-END !
-    DUP 8 < OVER 72 > OR IF 2DROP -1 EXIT THEN
+    DUP 8 < OVER _EDS-W @ 2* 8 + > OR IF 2DROP -1 EXIT THEN
     OVER C@ 48 <> IF 2DROP -1 EXIT THEN
     OVER 1+ C@ OVER 2 - <> IF 2DROP -1 EXIT THEN
-    DROP 2 + _EDS-END @ _ECDSA-R _ECDSA-DECODE-INT
+    DROP 2 + _EDS-END @ _EDS-R @ _ECDSA-DECODE-INT
     IF DROP -1 EXIT THEN
-    _EDS-END @ _ECDSA-S _ECDSA-DECODE-INT
+    _EDS-END @ _EDS-S @ _ECDSA-DECODE-INT
     IF DROP -1 EXIT THEN
     _EDS-END @ <> IF -1 EXIT THEN
-    0
-;
+    0 ;
+
+\ ECDSA-DECODE-SIG ( sig slen -- flag )
+\   Decode a DER-encoded P-256 signature into _ECDSA-R and _ECDSA-S.
+\   Returns 0 on success, -1 on error.
+: ECDSA-DECODE-SIG ( sig slen -- flag )
+    _ECDSA-R _ECDSA-S 32 _ECDSA-DECODE ;
 
 \ --- Modular arithmetic over the curve order n ---
 \ We need s⁻¹ mod n and multiplications mod n for ECDSA verify.
@@ -6580,491 +6973,1098 @@ CREATE _EPV-V 32 ALLOT
 ;
 
 \ =====================================================================
-\  §16.7c.1  Bounded RSA-2048 verification
+\  §16.7c.1  Multi-precision Montgomery arithmetic and RSA verification
 \ =====================================================================
 \
-\  RSA values use 32 little-endian 64-bit limbs internally.  Montgomery
-\  products are computed with CIOS reduction and BIOS UM*, which maps to the
-\  existing UMUL/UMULH instructions.  The fixed public exponent is 65537;
-\  there is no private-key operation and no variable-width RSA profile.
+\  Numbers are little-endian strings of 256-bit digits, the Field ALU's
+\  operand width; a number of D digits occupies 32*D bytes.  A Montgomery
+\  context holds one odd modulus n of D digits with R = 2^(256*D): the
+\  digit inverse n' = -n^-1 mod 2^256, R^2 mod n, the number one, and the
+\  product scratch.
+\
+\  MPM-MUL is coarsely integrated operand scanning (CIOS) with 256-bit
+\  words.  Each step T[j] + a[j]*b[i] + C runs as one FMUL-RAW and two
+\  FMUL-ADD-RAW on the Field ALU.  The 512-bit sum cannot wrap, because
+\  (2^256-1) + (2^256-1)^2 + (2^256-1) = 2^512-1, so the carry digit C
+\  comes back exact in the high half.  RSA of every width and the P-384
+\  field and scalar arithmetic share this one definition; a hardware
+\  Montgomery unit would replace MPM-MUL behind the same words.
+\
+\  The scratch below is shared, so these words run on core 0 under their
+\  caller's serialization, as the other certificate primitives do.
 
-32  CONSTANT RSA2048-LIMBS
-256 CONSTANT /RSA2048
--2  CONSTANT RSA-E-BUSY
-CREATE _RSA-N       /RSA2048 ALLOT
-CREATE _RSA-BASE    /RSA2048 ALLOT
-CREATE _RSA-ACC     /RSA2048 ALLOT
-CREATE _RSA-TMP     /RSA2048 ALLOT
-CREATE _RSA-DEC     /RSA2048 ALLOT
-CREATE _RSA-ONE     /RSA2048 ALLOT
-CREATE _RSA-CIOS-T  272 ALLOT             \ 34 limbs
-CREATE _RSA-EM      /RSA2048 ALLOT
+CREATE _MPM-ONE 32 ALLOT
+_MPM-ONE 32 0 FILL  1 _MPM-ONE C!
+CREATE _MPM-ZERO 32 ALLOT
+_MPM-ZERO 32 0 FILL
+CREATE _MPM-TWO 32 ALLOT
+_MPM-TWO 32 0 FILL  2 _MPM-TWO C!
+CREATE _MPM-LO 32 ALLOT
+CREATE _MPM-HI 32 ALLOT
+CREATE _MPM-C 32 ALLOT
+CREATE _MPM-M 32 ALLOT
+CREATE _MPM-X0 32 ALLOT
+CREATE _MPM-X1 32 ALLOT
 
-: _RSA-CELL@ ( addr index -- x )  8 * + @ ;
-: _RSA-CELL! ( x addr index -- )  8 * + ! ;
+\ (C, dst) <- t + a*b + C, with the carry digit C in _MPM-C.
+: _MPM-STEP ( t a b dst -- )
+    >R _MPM-LO _MPM-HI FMUL-RAW
+    _MPM-ONE _MPM-LO _MPM-HI FMUL-ADD-RAW
+    _MPM-C _MPM-ONE R> _MPM-C FMUL-ADD-RAW ;
 
-VARIABLE _RM-X
-VARIABLE _RM-Y
-VARIABLE _RM-ADD
-VARIABLE _RM-CARRY
-VARIABLE _RM-LO
-VARIABLE _RM-HI
-VARIABLE _RM-SUM
-VARIABLE _RM-OUT
-VARIABLE _RM-C1
-VARIABLE _RM-C2
+\ (hi, lo) <- t + C.
+: _MPM-ADD-C ( t lo hi -- )
+    >R >R _MPM-ONE _MPM-LO _MPM-HI FMUL-RAW
+    _MPM-C _MPM-ONE R> R> FMUL-ADD-RAW ;
 
-\ Add a 64x64 product, one limb, and an incoming carry without losing either
-\ carry bit.  Bounds on the inputs guarantee the returned carry fits a cell.
-: _RSA-MAC ( x y add carry -- lo carry' )
-    _RM-CARRY ! _RM-ADD ! _RM-Y ! _RM-X !
-    _RM-X @ _RM-Y @ UM* _RM-HI ! _RM-LO !
-    _RM-LO @ _RM-ADD @ + DUP _RM-SUM !
-    _RM-LO @ U< IF 1 ELSE 0 THEN _RM-C1 !
-    _RM-SUM @ _RM-CARRY @ + DUP _RM-OUT !
-    _RM-SUM @ U< IF 1 ELSE 0 THEN _RM-C2 !
-    _RM-OUT @ _RM-HI @ _RM-C1 @ + _RM-C2 @ + ;
+\ --- Limb arithmetic on 64-bit cells ---
 
-VARIABLE _RU-A
-VARIABLE _RU-B
+VARIABLE _MPA-A
+VARIABLE _MPA-B
+VARIABLE _MPA-D
+VARIABLE _MPC-N
 
-: _RSA-U< ( a b -- flag )
-    _RU-B ! _RU-A !
-    RSA2048-LIMBS 0 DO
-        _RU-A @ 31 I - _RSA-CELL@
-        _RU-B @ 31 I - _RSA-CELL@
-        2DUP <> IF U< UNLOOP EXIT THEN 2DROP
-    LOOP
-    FALSE ;
-
-VARIABLE _RS-A
-VARIABLE _RS-B
-VARIABLE _RS-OUT
-VARIABLE _RS-X
-VARIABLE _RS-Y
-VARIABLE _RS-D1
-VARIABLE _RS-BORROW
-VARIABLE _RS-B1
-
-: _RSA-SUB ( a b out -- )
-    _RS-OUT ! _RS-B ! _RS-A ! 0 _RS-BORROW !
-    RSA2048-LIMBS 0 DO
-        _RS-A @ I _RSA-CELL@ DUP _RS-X !
-        _RS-B @ I _RSA-CELL@ DUP _RS-Y !
-        - DUP _RS-D1 ! DROP
-        _RS-X @ _RS-Y @ U< IF 1 ELSE 0 THEN _RS-B1 !
-        _RS-D1 @ _RS-BORROW @ - _RS-OUT @ I _RSA-CELL!
-        _RS-D1 @ _RS-BORROW @ U< IF 1 ELSE 0 THEN
-        _RS-B1 @ OR _RS-BORROW !
+\ dst <- a + b over limbs cells, answering the carry, 0 or 1.  dst may be
+\ a or b.
+: _MP-ADD ( a b dst limbs -- carry )
+    >R _MPA-D ! _MPA-B ! _MPA-A !
+    0 R> 0 ?DO
+        _MPA-A @ I CELLS + @
+        _MPA-B @ I CELLS + @ OVER +
+        TUCK U> 1 AND
+        -ROT OVER +
+        DUP _MPA-D @ I CELLS + !
+        0= AND OR
     LOOP ;
 
-VARIABLE _RD-IN
-VARIABLE _RD-N
-VARIABLE _RD-OUT
-VARIABLE _RD-CARRY
-VARIABLE _RD-X
+\ dst <- a - b over limbs cells, answering the borrow, 0 or 1.  dst may
+\ be a or b.
+: _MP-SUB ( a b dst limbs -- borrow )
+    >R _MPA-D ! _MPA-B ! _MPA-A !
+    0 R> 0 ?DO
+        _MPA-A @ I CELLS + @
+        _MPA-B @ I CELLS + @
+        2DUP U< 1 AND -ROT -
+        ROT OVER 0= OVER AND -ROT -
+        _MPA-D @ I CELLS + !
+        OR
+    LOOP ;
 
-: _RSA-DOUBLE-MOD ( in n out -- )
-    _RD-OUT ! _RD-N ! _RD-IN ! 0 _RD-CARRY !
-    RSA2048-LIMBS 0 DO
-        _RD-IN @ I _RSA-CELL@ DUP _RD-X !
-        1 LSHIFT _RD-CARRY @ OR _RD-OUT @ I _RSA-CELL!
-        _RD-X @ 63 RSHIFT _RD-CARRY !
+: _MP-U< ( a b limbs -- flag )
+    DUP _MPC-N ! 0 ?DO
+        OVER _MPC-N @ 1- I - CELLS + @
+        OVER _MPC-N @ 1- I - CELLS + @
+        2DUP <> IF U< NIP NIP UNLOOP EXIT THEN
+        2DROP
     LOOP
-    _RD-CARRY @ IF TRUE ELSE
-        _RD-OUT @ _RD-N @ _RSA-U< 0=
-    THEN IF
-        _RD-OUT @ _RD-N @ _RD-OUT @ _RSA-SUB
-    THEN ;
+    2DROP FALSE ;
 
-VARIABLE _RN0-N
-VARIABLE _RN0-X
-
-: _RSA-N0' ( n0 -- n0-prime )
-    _RN0-N ! 1 _RN0-X !
-    6 0 DO
-        _RN0-X @ 2 _RN0-N @ _RN0-X @ * - * _RN0-X !
+: _MP-ZERO? ( a limbs -- flag )
+    0 ?DO
+        DUP I CELLS + @ IF DROP FALSE UNLOOP EXIT THEN
     LOOP
-    0 _RN0-X @ - ;
+    DROP TRUE ;
 
-VARIABLE _RC-A
-VARIABLE _RC-B
-VARIABLE _RC-N
-VARIABLE _RC-N0
-VARIABLE _RC-OUT
-VARIABLE _RC-I
-VARIABLE _RC-CARRY
-VARIABLE _RC-M
-VARIABLE _RC-OLD
-VARIABLE _RC-SUM
+\ The bit length of one cell, and of a number, zero for zero.
+: _MP-CELL-BITS ( x -- n )
+    0 SWAP BEGIN ?DUP WHILE 1 RSHIFT SWAP 1+ SWAP REPEAT ;
 
-\ _RSA2048-MONT-MUL ( a b n n0-prime out -- )
-\   CIOS Montgomery multiplication.  Inputs must be reduced modulo n.
-: _RSA2048-MONT-MUL ( a b n n0-prime out -- )
-    _RC-OUT ! _RC-N0 ! _RC-N ! _RC-B ! _RC-A !
-    _RSA-CIOS-T 272 0 FILL
-    RSA2048-LIMBS 0 DO
-        I _RC-I ! 0 _RC-CARRY !
-        RSA2048-LIMBS 0 DO
-            _RC-A @ I _RSA-CELL@
-            _RC-B @ _RC-I @ _RSA-CELL@
-            _RSA-CIOS-T I _RSA-CELL@
-            _RC-CARRY @ _RSA-MAC
-            _RC-CARRY ! _RSA-CIOS-T I _RSA-CELL!
+: _MP-BITS ( a limbs -- bits )
+    DUP 0 ?DO
+        2DUP 1- I - CELLS + @ ?DUP IF
+            _MP-CELL-BITS SWAP 1- I - 6 LSHIFT + NIP UNLOOP EXIT
+        THEN
+    LOOP
+    2DROP 0 ;
+
+\ Copy u big-endian bytes into a number of digits digits, zero-padded.
+: _MP-BE> ( src u dst digits -- )  5 LSHIFT _BE>LE-W ;
+
+\ Copy a number's low u bytes out big-endian.
+: _MP>BE ( src dst u -- )
+    DUP 0 ?DO
+        2 PICK OVER 1- I - + C@
+        2 PICK I + C!
+    LOOP
+    DROP 2DROP ;
+
+\ --- Contexts ---
+
+\ A context is a header, then the modulus, n', R^2 and one, then the
+\ product scratch of D+2 digits.
+ 0 CONSTANT MPM.DIGITS
+ 8 CONSTANT MPM.BITS
+16 CONSTANT MPM.N
+24 CONSTANT MPM.NINV
+32 CONSTANT MPM.R2
+40 CONSTANT MPM.UNIT
+48 CONSTANT MPM.T
+
+: MPM-CONTEXT-SIZE ( digits -- u )  7 LSHIFT 160 + ;
+
+: _MPM-LIMBS ( ctx -- limbs )  MPM.DIGITS + @ 2 LSHIFT ;
+
+VARIABLE _MPM-X
+
+\ out <- a + b mod n, for a, b < n.
+: MPM-ADD ( a b out ctx -- )
+    _MPM-X ! DUP >R _MPM-X @ _MPM-LIMBS _MP-ADD
+    R@ _MPM-X @ MPM.N + @ _MPM-X @ _MPM-LIMBS _MP-U< 0= OR IF
+        R@ _MPM-X @ MPM.N + @ R@ _MPM-X @ _MPM-LIMBS _MP-SUB DROP
+    THEN
+    R> DROP ;
+
+\ out <- a - b mod n, for a, b < n.
+: MPM-SUB ( a b out ctx -- )
+    _MPM-X ! DUP >R _MPM-X @ _MPM-LIMBS _MP-SUB IF
+        R@ _MPM-X @ MPM.N + @ R@ _MPM-X @ _MPM-LIMBS _MP-ADD DROP
+    THEN
+    R> DROP ;
+
+VARIABLE _MPM-CTX
+VARIABLE _MPM-DG
+VARIABLE _MPM-TA
+VARIABLE _MPM-NA
+VARIABLE _MPM-A
+VARIABLE _MPM-B
+VARIABLE _MPM-BI
+
+: _MPM-T@ ( j -- addr )  5 LSHIFT _MPM-TA @ + ;
+
+\ out <- a*b*R^-1 mod n, for a, b < n.  out may be a or b.
+: MPM-MUL ( a b out ctx -- )
+    DUP _MPM-CTX !
+    DUP MPM.DIGITS + @ _MPM-DG !
+    DUP MPM.N + @ _MPM-NA !
+    MPM.T + @ _MPM-TA !
+    >R _MPM-B ! _MPM-A !
+    _MPM-TA @ _MPM-DG @ 2 + 5 LSHIFT 0 FILL
+    _MPM-DG @ 0 DO
+        I 5 LSHIFT _MPM-B @ + _MPM-BI !
+        \ T <- T + a*b[i]
+        _MPM-C 32 0 FILL
+        _MPM-DG @ 0 DO
+            I _MPM-T@  I 5 LSHIFT _MPM-A @ +  _MPM-BI @  I _MPM-T@
+            _MPM-STEP
         LOOP
-        \ Preserve the prior high limb while appending the multiplication
-        \ carry; the 34th cell catches the single overflow bit.
-        _RSA-CIOS-T 32 _RSA-CELL@ DUP _RC-OLD !
-        _RC-CARRY @ + DUP _RSA-CIOS-T 32 _RSA-CELL!
-        _RC-OLD @ U< IF 1 ELSE 0 THEN _RSA-CIOS-T 33 _RSA-CELL!
-
-        _RSA-CIOS-T 0 _RSA-CELL@ _RC-N0 @ * _RC-M !
-        0 _RC-CARRY !
-        RSA2048-LIMBS 0 DO
-            _RC-M @ _RC-N @ I _RSA-CELL@
-            _RSA-CIOS-T I _RSA-CELL@
-            _RC-CARRY @ _RSA-MAC
-            _RC-CARRY !
-            I IF _RSA-CIOS-T I 1- _RSA-CELL! ELSE DROP THEN
+        _MPM-DG @ _MPM-T@ DUP _MPM-DG @ 1+ _MPM-T@ _MPM-ADD-C
+        \ m <- T[0]*n' mod 2^256, then T <- (T + m*n) / 2^256
+        0 _MPM-T@ _MPM-CTX @ MPM.NINV + @ _MPM-M _MPM-HI FMUL-RAW
+        _MPM-C 32 0 FILL
+        0 _MPM-T@ _MPM-M _MPM-NA @ _MPM-LO _MPM-STEP
+        _MPM-DG @ 1 ?DO
+            I _MPM-T@  _MPM-M  I 5 LSHIFT _MPM-NA @ +  I 1- _MPM-T@
+            _MPM-STEP
         LOOP
-        _RSA-CIOS-T 32 _RSA-CELL@ DUP _RC-OLD !
-        _RC-CARRY @ + DUP _RC-SUM ! _RSA-CIOS-T 31 _RSA-CELL!
-        _RC-SUM @ _RC-OLD @ U< IF 1 ELSE 0 THEN
-        _RSA-CIOS-T 33 _RSA-CELL@ + _RSA-CIOS-T 32 _RSA-CELL!
-        0 _RSA-CIOS-T 33 _RSA-CELL!
+        _MPM-DG @ _MPM-T@  _MPM-DG @ 1- _MPM-T@  _MPM-C _MPM-ADD-C
+        _MPM-DG @ 1+ _MPM-T@  _MPM-DG @ _MPM-T@  _MPM-HI _MPM-ADD-C
     LOOP
-    _RSA-CIOS-T 32 _RSA-CELL@ 0<> IF TRUE ELSE
-        _RSA-CIOS-T _RC-N @ _RSA-U< 0=
-    THEN IF
-        _RSA-CIOS-T _RC-N @ _RC-OUT @ _RSA-SUB
-    ELSE
-        _RSA-CIOS-T _RC-OUT @ /RSA2048 CMOVE
-    THEN ;
+    \ T < 2n, so one subtraction reduces it.
+    _MPM-DG @ _MPM-T@ 4 _MP-ZERO? 0=
+    0 _MPM-T@ _MPM-NA @ _MPM-DG @ 2 LSHIFT _MP-U< 0= OR IF
+        0 _MPM-T@ _MPM-NA @ 0 _MPM-T@ _MPM-DG @ 2 LSHIFT _MP-SUB DROP
+    THEN
+    0 _MPM-T@ R> _MPM-DG @ 5 LSHIFT MOVE ;
 
-VARIABLE _RB2L-SRC
-VARIABLE _RB2L-DST
+\ x <- 2x mod n, for x < n.
+: _MPM-DOUBLE ( x ctx -- )
+    >R DUP DUP DUP R@ _MPM-LIMBS _MP-ADD
+    OVER R@ MPM.N + @ R@ _MPM-LIMBS _MP-U< 0= OR IF
+        DUP R@ MPM.N + @ OVER R@ _MPM-LIMBS _MP-SUB DROP
+    THEN
+    DROP R> DROP ;
 
-: _RSA-BE>LE ( src dst -- )
-    _RB2L-DST ! _RB2L-SRC !
-    RSA2048-LIMBS 0 DO
-        _RB2L-SRC @ 31 I - 8 * + _BE64@
-        _RB2L-DST @ I _RSA-CELL!
+\ n' = -n^-1 mod 2^256 by Newton's iteration x <- x*(2 - n*x), which
+\ doubles the correct low bits each round: odd n is its own inverse mod 8,
+\ and seven rounds reach 384 bits.
+: _MPM-NINV ( ctx -- )
+    DUP MPM.N + @ _MPM-X0 32 MOVE
+    7 0 DO
+        DUP MPM.N + @ _MPM-X0 _MPM-X1 _MPM-HI FMUL-RAW
+        _MPM-TWO _MPM-X1 _MPM-X1 4 _MP-SUB DROP
+        _MPM-X0 _MPM-X1 _MPM-X0 _MPM-HI FMUL-RAW
+    LOOP
+    _MPM-ZERO _MPM-X0 ROT MPM.NINV + @ 4 _MP-SUB DROP ;
+
+VARIABLE _MPM-I
+
+\ R^2 mod n: from 2^(bits-1), which is below n, double to R mod n and on to
+\ 2^D * R, the Montgomery form of 2^D; eight Montgomery squarings then give
+\ the form of (2^D)^256 = R, which is R^2.
+: _MPM-R2 ( ctx -- )
+    _MPM-I !
+    _MPM-I @ MPM.R2 + @ _MPM-I @ MPM.DIGITS + @ 5 LSHIFT 0 FILL
+    _MPM-I @ MPM.BITS + @ 1-
+    DUP 3 RSHIFT _MPM-I @ MPM.R2 + @ +
+    1 ROT 7 AND LSHIFT SWAP C!
+    _MPM-I @ MPM.DIGITS + @ 8 LSHIFT _MPM-I @ MPM.BITS + @ - 1+
+    _MPM-I @ MPM.DIGITS + @ +
+    0 ?DO _MPM-I @ MPM.R2 + @ _MPM-I @ _MPM-DOUBLE LOOP
+    8 0 DO
+        _MPM-I @ MPM.R2 + @ DUP DUP _MPM-I @ MPM-MUL
     LOOP ;
 
-VARIABLE _RL2B-SRC
-VARIABLE _RL2B-DST
-
-: _RSA-LE>BE ( src dst -- )
-    _RL2B-DST ! _RL2B-SRC !
-    RSA2048-LIMBS 0 DO
-        _RL2B-SRC @ I _RSA-CELL@ BSWAP
-        _RL2B-DST @ 31 I - 8 * + !
-    LOOP ;
-
-VARIABLE _RP-SIG
-VARIABLE _RP-MOD
-VARIABLE _RP-OUT
-VARIABLE _RP-N0
-VARIABLE _RP-AP
-VARIABLE _RP-TP
-
-\ RSA2048-PUBLIC ( signature-be modulus-be encoded-message -- flag )
-\   Perform the fixed e=65537 public operation.  Returns 0 on success and -1
-\   for a non-full-width/even modulus or an out-of-range representative.
-: _RSA2048-PUBLIC-BODY ( sig modulus em -- flag )
-    _RP-OUT ! _RP-MOD ! _RP-SIG !
-    _RP-MOD @ C@ 128 AND 0= _RP-MOD @ 255 + C@ 1 AND 0= OR IF -1 EXIT THEN
-    _RP-MOD @ _RSA-N _RSA-BE>LE
-    _RP-SIG @ _RSA-BASE _RSA-BE>LE
-    _RSA-BASE _RSA-N _RSA-U< 0= IF -1 EXIT THEN
-    _RSA-N @ _RSA-N0' _RP-N0 !
-
-    \ Convert the representative to Montgomery form by 2048 reduced
-    \ doublings.  This avoids storing modulus-specific R^2 tables.
-    2048 0 DO _RSA-BASE _RSA-N _RSA-BASE _RSA-DOUBLE-MOD LOOP
-    _RSA-BASE _RSA-ACC /RSA2048 CMOVE
-    _RSA-ACC _RP-AP ! _RSA-TMP _RP-TP !
-    16 0 DO
-        _RP-AP @ _RP-AP @ _RSA-N _RP-N0 @ _RP-TP @ _RSA2048-MONT-MUL
-        _RP-AP @ _RP-TP @ _RP-AP ! _RP-TP !
-    LOOP
-    _RP-AP @ _RSA-BASE _RSA-N _RP-N0 @ _RP-TP @ _RSA2048-MONT-MUL
-    _RP-TP @ _RP-AP !
-    _RSA-ONE /RSA2048 0 FILL 1 _RSA-ONE !
-    _RP-AP @ _RSA-ONE _RSA-N _RP-N0 @ _RSA-DEC _RSA2048-MONT-MUL
-    _RSA-DEC _RP-OUT @ _RSA-LE>BE
+\ Set up a context for an odd modulus of digits little-endian digits whose
+\ top digit is not zero.  The modulus is copied in.  ior is 0 or -1.
+: MPM-INIT ( modulus digits ctx -- ior )
+    OVER 1 < IF DROP 2DROP -1 EXIT THEN
+    _MPM-I !
+    DUP _MPM-I @ MPM.DIGITS + !
+    5 LSHIFT
+    _MPM-I @ 64 + _MPM-I @ MPM.N + !
+    DUP _MPM-I @ 64 + + _MPM-I @ MPM.NINV + !
+    DUP _MPM-I @ 96 + + _MPM-I @ MPM.R2 + !
+    DUP 2* _MPM-I @ 96 + + _MPM-I @ MPM.UNIT + !
+    DUP 3 * _MPM-I @ 96 + + _MPM-I @ MPM.T + !
+    _MPM-I @ MPM.N + @ SWAP MOVE
+    _MPM-I @ MPM.N + @ C@ 1 AND 0= IF -1 EXIT THEN
+    _MPM-I @ MPM.N + @ _MPM-I @ MPM.DIGITS + @ 1- 5 LSHIFT +
+        4 _MP-ZERO? IF -1 EXIT THEN
+    _MPM-I @ MPM.N + @ _MPM-I @ _MPM-LIMBS _MP-BITS
+    DUP 2 < IF DROP -1 EXIT THEN
+    _MPM-I @ MPM.BITS + !
+    _MPM-I @ MPM.UNIT + @ _MPM-I @ MPM.DIGITS + @ 5 LSHIFT 0 FILL
+    1 _MPM-I @ MPM.UNIT + @ C!
+    _MPM-I @ DUP _MPM-NINV _MPM-R2
     0 ;
 
-VARIABLE _RSA2048-PUBLIC-PHASE
-VARIABLE _RSAI-OWNER-CORE
-VARIABLE _RSAI-OWNER-TASK
+\ a -> a*R mod n, and back.
+: MPM-TO ( a out ctx -- )  >R SWAP R@ MPM.R2 + @ ROT R> MPM-MUL ;
+: MPM-FROM ( a out ctx -- )  >R SWAP R@ MPM.UNIT + @ ROT R> MPM-MUL ;
 
-: RSA2048-PUBLIC-STATUS ( -- phase )
-    _RSA2048-PUBLIC-PHASE @ ;
+VARIABLE _MPE-BASE
+VARIABLE _MPE-EXP
+VARIABLE _MPE-EXP-U
+VARIABLE _MPE-OUT
+VARIABLE _MPE-CTX
+VARIABLE _MPE-STARTED
 
-: _RSAI-OWNER! ( -- )
-    COREID _RSAI-OWNER-CORE !
-    TASK-ID _RSAI-OWNER-TASK ! ;
+\ out <- base^exp, both in Montgomery form; exp is exp-u big-endian bytes.
+\ out must not be base.
+: MPM-EXP ( base exp exp-u out ctx -- )
+    _MPE-CTX ! _MPE-OUT ! _MPE-EXP-U ! _MPE-EXP ! _MPE-BASE !
+    0 _MPE-STARTED !
+    _MPE-EXP-U @ 0 ?DO
+        _MPE-EXP @ I + C@
+        8 0 DO
+            _MPE-STARTED @ IF
+                _MPE-OUT @ DUP DUP _MPE-CTX @ MPM-MUL
+            THEN
+            DUP 128 AND IF
+                _MPE-STARTED @ IF
+                    _MPE-OUT @ _MPE-BASE @ _MPE-OUT @ _MPE-CTX @ MPM-MUL
+                ELSE
+                    _MPE-BASE @ _MPE-OUT @
+                    _MPE-CTX @ MPM.DIGITS + @ 5 LSHIFT MOVE
+                    -1 _MPE-STARTED !
+                THEN
+            THEN
+            2*
+        LOOP
+        DROP
+    LOOP
+    _MPE-STARTED @ 0= IF
+        _MPE-CTX @ MPM.UNIT + @ _MPE-OUT @ _MPE-CTX @ MPM-TO
+    THEN ;
 
-: _RSAI-OWNER? ( -- flag )
-    COREID _RSAI-OWNER-CORE @ =
-    TASK-ID _RSAI-OWNER-TASK @ = AND ;
+\ --- RSA public keys and signature verification ---
+\
+\ An RSA public key is four cells: the big-endian modulus and its length
+\ in bytes, then the big-endian public exponent and its length.  The
+\ verification words take a digest of 32, 48 or 64 bytes, which selects
+\ SHA-256, SHA-384 or SHA-512, and answer 0 for a valid signature, -1 for
+\ an invalid one, RSA-E-BUSY when RSA runs elsewhere or off core 0, and
+\ RSA-E-ALLOC when its workspace cannot grow.
 
-: _RSAI-OWNER-CLEAR ( -- )
-    -1 _RSAI-OWNER-CORE !
-    -1 _RSAI-OWNER-TASK ! ;
+ 0 CONSTANT RSAK.N
+ 8 CONSTANT RSAK.N-U
+16 CONSTANT RSAK.E
+24 CONSTANT RSAK.E-U
+32 CONSTANT /RSA-KEY
 
-_RSAI-OWNER-CLEAR
+-2 CONSTANT RSA-E-BUSY
+-3 CONSTANT RSA-E-ALLOC
 
-: RSA2048-PUBLIC ( sig modulus em -- flag )
-    COREID IF 2DROP DROP RSA-E-BUSY EXIT THEN
-    _RSA2048-PUBLIC-PHASE @ IF 2DROP DROP RSA-E-BUSY EXIT THEN
-    -1 _RSA2048-PUBLIC-PHASE !
-    _RSA2048-PUBLIC-BODY
-    0 _RSA2048-PUBLIC-PHASE ! ;
+\ One workspace, grown to the widest modulus seen: a context and three
+\ numbers, the signature, the accumulator and the encoded message.
+VARIABLE _RSA-WS
+VARIABLE _RSA-WS-U
+VARIABLE _RSA-DG
+VARIABLE _RSA-KEY
+VARIABLE _RSA-BUSY
+0 _RSA-WS !  0 _RSA-WS-U !  0 _RSA-BUSY !
 
-0 CONSTANT RSAI-IDLE
-1 CONSTANT RSAI-CONVERT
-2 CONSTANT RSAI-SQUARE
-3 CONSTANT RSAI-MULTIPLY
-4 CONSTANT RSAI-DECODE
-5 CONSTANT RSAI-READY
+: _RSA-CTX ( -- ctx )  _RSA-WS @ ;
+: _RSA-S ( -- a )  _RSA-WS @ _RSA-DG @ MPM-CONTEXT-SIZE + ;
+: _RSA-ACC ( -- a )  _RSA-S _RSA-DG @ 5 LSHIFT + ;
+: _RSA-EM ( -- a )  _RSA-ACC _RSA-DG @ 5 LSHIFT + ;
 
-VARIABLE _RPI-COUNT
+: _RSA-WORKSPACE ( digits -- ior )
+    DUP MPM-CONTEXT-SIZE SWAP 96 * +
+    DUP _RSA-WS-U @ <= IF DROP 0 EXIT THEN
+    _RSA-WS @ ?DUP IF FREE 0 _RSA-WS ! 0 _RSA-WS-U ! THEN
+    DUP ALLOCATE IF 2DROP RSA-E-ALLOC EXIT THEN
+    _RSA-WS ! _RSA-WS-U ! 0 ;
 
-\ Incremental fixed-exponent public operation for cooperative owner loops.
-\ BEGIN copies the signature and modulus into owner-gated scratch.  Each STEP does
-\ one modular doubling or one Montgomery multiplication; FINAL releases the
-\ owner only after the encoded message has been committed to the caller buffer.
-: RSA2048-PUBLIC-BEGIN ( sig modulus em -- ior )
-    COREID IF 2DROP DROP RSA-E-BUSY EXIT THEN
-    _RSA2048-PUBLIC-PHASE @ IF 2DROP DROP RSA-E-BUSY EXIT THEN
-    _RP-OUT ! _RP-MOD ! _RP-SIG !
-    _RP-MOD @ C@ 128 AND 0= _RP-MOD @ 255 + C@ 1 AND 0= OR IF
-        -1 EXIT
+\ Admit the key and set up its context: a canonical modulus (nonzero top
+\ byte, odd) and an exponent of at most the modulus' length.
+: _RSA-PREPARE ( key -- ior )
+    DUP _RSA-KEY !
+    DUP RSAK.N-U + @ 1 < IF DROP -1 EXIT THEN
+    DUP RSAK.E-U + @ 1 < IF DROP -1 EXIT THEN
+    DUP RSAK.E-U + @ OVER RSAK.N-U + @ > IF DROP -1 EXIT THEN
+    DUP RSAK.N + @ C@ 0= IF DROP -1 EXIT THEN
+    DUP RSAK.N + @ OVER RSAK.N-U + @ + 1- C@ 1 AND 0= IF DROP -1 EXIT THEN
+    RSAK.N-U + @ 31 + 5 RSHIFT _RSA-DG !
+    _RSA-DG @ _RSA-WORKSPACE ?DUP IF EXIT THEN
+    _RSA-KEY @ RSAK.N + @ _RSA-KEY @ RSAK.N-U + @ _RSA-S _RSA-DG @ _MP-BE>
+    _RSA-S _RSA-DG @ _RSA-CTX MPM-INIT ;
+
+\ em <- sig^e mod n, big-endian at the modulus' length, for the prepared key.
+: _RSA-APPLY ( sig sig-u em -- ior )
+    >R
+    DUP _RSA-KEY @ RSAK.N-U + @ <> IF 2DROP R> DROP -1 EXIT THEN
+    _RSA-S _RSA-DG @ _MP-BE>
+    _RSA-S _RSA-CTX MPM.N + @ _RSA-DG @ 2 LSHIFT _MP-U< 0= IF
+        R> DROP -1 EXIT
     THEN
-    _RP-MOD @ _RSA-N _RSA-BE>LE
-    _RP-SIG @ _RSA-BASE _RSA-BE>LE
-    _RSA-BASE _RSA-N _RSA-U< 0= IF -1 EXIT THEN
-    _RSA-N @ _RSA-N0' _RP-N0 !
-    _RSAI-OWNER!
-    0 _RPI-COUNT ! RSAI-CONVERT _RSA2048-PUBLIC-PHASE ! 0 ;
+    _RSA-S _RSA-S _RSA-CTX MPM-TO
+    _RSA-S _RSA-KEY @ RSAK.E + @ _RSA-KEY @ RSAK.E-U + @
+        _RSA-ACC _RSA-CTX MPM-EXP
+    _RSA-ACC _RSA-ACC _RSA-CTX MPM-FROM
+    _RSA-ACC R> _RSA-KEY @ RSAK.N-U + @ _MP>BE
+    0 ;
 
-: RSA2048-PUBLIC-STEP ( -- status )
-    COREID IF -1 EXIT THEN
-    _RSA2048-PUBLIC-PHASE @ RSAI-IDLE =
-    _RSA2048-PUBLIC-PHASE @ -1 = OR IF -1 EXIT THEN
-    _RSAI-OWNER? 0= IF -1 EXIT THEN
-    _RSA2048-PUBLIC-PHASE @ RSAI-CONVERT = IF
-        _RSA-BASE _RSA-N _RSA-BASE _RSA-DOUBLE-MOD
-        1 _RPI-COUNT +!
-        _RPI-COUNT @ 2048 = IF
-            _RSA-BASE _RSA-ACC /RSA2048 CMOVE
-            _RSA-ACC _RP-AP ! _RSA-TMP _RP-TP !
-            0 _RPI-COUNT ! RSAI-SQUARE _RSA2048-PUBLIC-PHASE !
-        THEN 0 EXIT
-    THEN
-    _RSA2048-PUBLIC-PHASE @ RSAI-SQUARE = IF
-        _RP-AP @ _RP-AP @ _RSA-N _RP-N0 @ _RP-TP @ _RSA2048-MONT-MUL
-        _RP-AP @ _RP-TP @ _RP-AP ! _RP-TP !
-        1 _RPI-COUNT +!
-        _RPI-COUNT @ 16 = IF RSAI-MULTIPLY _RSA2048-PUBLIC-PHASE ! THEN
-        0 EXIT
-    THEN
-    _RSA2048-PUBLIC-PHASE @ RSAI-MULTIPLY = IF
-        _RP-AP @ _RSA-BASE _RSA-N _RP-N0 @ _RP-TP @ _RSA2048-MONT-MUL
-        _RP-TP @ _RP-AP ! RSAI-DECODE _RSA2048-PUBLIC-PHASE ! 0 EXIT
-    THEN
-    _RSA2048-PUBLIC-PHASE @ RSAI-DECODE = IF
-        _RSA-ONE /RSA2048 0 FILL 1 _RSA-ONE !
-        _RP-AP @ _RSA-ONE _RSA-N _RP-N0 @ _RSA-DEC _RSA2048-MONT-MUL
-        _RSA-DEC _RP-OUT @ _RSA-LE>BE
-        RSAI-READY _RSA2048-PUBLIC-PHASE ! 1 EXIT
-    THEN
-    _RSA2048-PUBLIC-PHASE @ RSAI-READY = IF 1 ELSE -1 THEN ;
+: _RSA-ENTER ( -- flag )
+    COREID IF FALSE EXIT THEN
+    _RSA-BUSY @ IF FALSE EXIT THEN
+    -1 _RSA-BUSY ! TRUE ;
 
-: RSA2048-PUBLIC-FINAL ( -- ior )
-    COREID IF -1 EXIT THEN
-    _RSA2048-PUBLIC-PHASE @ RSAI-READY <> IF -1 EXIT THEN
-    _RSAI-OWNER? 0= IF -1 EXIT THEN
-    RSAI-IDLE _RSA2048-PUBLIC-PHASE !
-    _RSAI-OWNER-CLEAR 0 ;
+: _RSA-PUBLIC-BODY ( sig sig-u key em -- ior )
+    >R _RSA-PREPARE ?DUP IF NIP NIP R> DROP EXIT THEN
+    R> _RSA-APPLY ;
 
-: RSA2048-PUBLIC-CANCEL ( -- ior )
-    COREID IF -1 EXIT THEN
-    _RSA2048-PUBLIC-PHASE @ RSAI-IDLE =
-    _RSA2048-PUBLIC-PHASE @ -1 = OR IF -1 EXIT THEN
-    _RSAI-OWNER? 0= IF -1 EXIT THEN
-    _RSA-N /RSA2048 0 FILL
-    _RSA-BASE /RSA2048 0 FILL
-    _RSA-ACC /RSA2048 0 FILL
-    _RSA-TMP /RSA2048 0 FILL
-    _RSA-DEC /RSA2048 0 FILL
-    _RSA-CIOS-T 272 0 FILL
-    RSAI-IDLE _RSA2048-PUBLIC-PHASE !
-    _RSAI-OWNER-CLEAR 0 ;
+\ em <- sig^e mod n at the modulus' length.  ior is 0, -1 for an invalid
+\ key or a signature that is not below the modulus, RSA-E-BUSY or
+\ RSA-E-ALLOC.
+: RSA-PUBLIC ( sig sig-u key em -- ior )
+    _RSA-ENTER 0= IF 2DROP 2DROP RSA-E-BUSY EXIT THEN
+    ['] _RSA-PUBLIC-BODY CATCH
+    0 _RSA-BUSY !
+    ?DUP IF >R 2DROP 2DROP R> THROW THEN ;
 
-CREATE RSA-SHA256-DIGESTINFO
+\ DigestInfo prefixes, RFC 8017 section 9.2, note 1.
+CREATE _RSA-DI-SHA256
     48 C, 49 C, 48 C, 13 C, 6 C, 9 C, 96 C, 134 C, 72 C, 1 C,
     101 C, 3 C, 4 C, 2 C, 1 C, 5 C, 0 C, 4 C, 32 C,
-19 CONSTANT /RSA-SHA256-DIGESTINFO
+CREATE _RSA-DI-SHA384
+    48 C, 65 C, 48 C, 13 C, 6 C, 9 C, 96 C, 134 C, 72 C, 1 C,
+    101 C, 3 C, 4 C, 2 C, 2 C, 5 C, 0 C, 4 C, 48 C,
+CREATE _RSA-DI-SHA512
+    48 C, 81 C, 48 C, 13 C, 6 C, 9 C, 96 C, 134 C, 72 C, 1 C,
+    101 C, 3 C, 4 C, 2 C, 3 C, 5 C, 0 C, 4 C, 64 C,
+19 CONSTANT /RSA-DIGESTINFO
 
-VARIABLE _RPK-HASH
-VARIABLE _RPK-MOD
-VARIABLE _RPK-SIG
-VARIABLE _RPK-SIG-U
+: _RSA-DIGESTINFO ( hash-u -- prefix | 0 )
+    DUP 32 = IF DROP _RSA-DI-SHA256 EXIT THEN
+    DUP 48 = IF DROP _RSA-DI-SHA384 EXIT THEN
+    64 = IF _RSA-DI-SHA512 ELSE 0 THEN ;
+
+VARIABLE _RPK-H
+VARIABLE _RPK-HU
 VARIABLE _RPK-EM
+VARIABLE _RPK-K
+VARIABLE _RPK-DI
 
-: _RSA-PKCS1-SHA256-EM-CHECK ( hash em -- flag )
-    _RPK-EM ! _RPK-HASH !
-    _RPK-EM @ C@ 0<> _RPK-EM @ 1+ C@ 1 <> OR IF -1 EXIT THEN
-    202 0 DO _RPK-EM @ 2 + I + C@ 255 <> IF -1 UNLOOP EXIT THEN LOOP
-    _RPK-EM @ 204 + C@ 0<> IF -1 EXIT THEN
-    _RPK-EM @ 205 + RSA-SHA256-DIGESTINFO /RSA-SHA256-DIGESTINFO
-    _XC-BYTES= 0= IF -1 EXIT THEN
-    _RPK-EM @ 224 + _RPK-HASH @ 32 _XC-BYTES= IF 0 ELSE -1 THEN ;
-
-\ Exact EMSA-PKCS1-v1_5 SHA-256 verification for certificate signatures.
-: _RSA2048-PKCS1-SHA256-BODY ( hash modulus sig sig-u -- flag )
-    _RPK-SIG-U ! _RPK-SIG ! _RPK-MOD ! _RPK-HASH !
-    _RPK-SIG-U @ /RSA2048 <> IF -1 EXIT THEN
-    _RPK-SIG @ _RPK-MOD @ _RSA-EM _RSA2048-PUBLIC-BODY IF -1 EXIT THEN
-    _RPK-HASH @ _RSA-EM _RSA-PKCS1-SHA256-EM-CHECK ;
-
-: RSA2048-PKCS1-SHA256-VERIFY ( hash modulus sig sig-u -- flag )
-    COREID IF 2DROP 2DROP RSA-E-BUSY EXIT THEN
-    _RSA2048-PUBLIC-PHASE @ IF 2DROP 2DROP RSA-E-BUSY EXIT THEN
-    -1 _RSA2048-PUBLIC-PHASE !
-    _RSA2048-PKCS1-SHA256-BODY
-    0 _RSA2048-PUBLIC-PHASE ! ;
-
-CREATE _RSA-PSS-MASK 223 ALLOT
-CREATE _RSA-PSS-DB   223 ALLOT
-CREATE _RSA-PSS-H     32 ALLOT
-CREATE _RSA-PSS-H2    32 ALLOT
-CREATE _RSA-PSS-MGF   32 ALLOT
-CREATE _RSA-PSS-CTR    4 ALLOT
-CREATE _RSA-PSS-MPRIME 72 ALLOT
-VARIABLE _RMG-H
-VARIABLE _RMG-OFF
-VARIABLE _RMG-N
-
-: _RSA-MGF1-SHA256-223 ( h -- status )
-    _RMG-H ! 0 _RMG-OFF !
-    7 0 DO
-        _RSA-PSS-CTR 4 0 FILL I _RSA-PSS-CTR 3 + C!
-        SHA256-INIT DUP IF UNLOOP EXIT THEN DROP
-        _RMG-H @ 32 SHA256-UPDATE DUP IF UNLOOP EXIT THEN DROP
-        _RSA-PSS-CTR 4 SHA256-UPDATE DUP IF UNLOOP EXIT THEN DROP
-        _RSA-PSS-MGF SHA256-FINAL DUP IF UNLOOP EXIT THEN DROP
-        223 _RMG-OFF @ - 32 MIN _RMG-N !
-        _RSA-PSS-MGF _RSA-PSS-MASK _RMG-OFF @ + _RMG-N @ CMOVE
-        _RMG-N @ _RMG-OFF +!
-    LOOP 0 ;
-
-VARIABLE _RPS-HASH
-VARIABLE _RPS-MOD
-VARIABLE _RPS-SIG
-VARIABLE _RPS-SIG-U
-VARIABLE _RPS-EM
-
-: _RSA-PSS-SHA256-EM-CHECK ( message-hash em -- flag )
-    _RPS-EM ! _RPS-HASH !
-    _RPS-EM @ 255 + C@ 188 <> IF -1 EXIT THEN
-    _RPS-EM @ C@ 128 AND IF -1 EXIT THEN
-    _RPS-EM @ 223 + _RSA-PSS-H 32 CMOVE
-    _RSA-PSS-H _RSA-MGF1-SHA256-223 IF -1 EXIT THEN
-    223 0 DO
-        _RPS-EM @ I + C@ _RSA-PSS-MASK I + C@ XOR _RSA-PSS-DB I + C!
+\ EMSA-PKCS1-v1_5: em is 00 01 FF..FF 00 DigestInfo H, k bytes long, with
+\ at least eight FF bytes.
+: _RSA-PKCS1-EM? ( hash hash-u em k -- flag )
+    _RPK-K ! _RPK-EM ! _RPK-HU ! _RPK-H !
+    _RPK-HU @ _RSA-DIGESTINFO DUP _RPK-DI ! 0= IF -1 EXIT THEN
+    _RPK-K @ 3 - /RSA-DIGESTINFO - _RPK-HU @ -
+    DUP 8 < IF DROP -1 EXIT THEN
+    _RPK-EM @ C@ 0<> _RPK-EM @ 1+ C@ 1 <> OR IF DROP -1 EXIT THEN
+    DUP 0 ?DO
+        _RPK-EM @ 2 + I + C@ 255 <> IF DROP -1 UNLOOP EXIT THEN
     LOOP
-    _RSA-PSS-DB C@ 127 AND _RSA-PSS-DB C!
-    190 0 DO _RSA-PSS-DB I + C@ IF -1 UNLOOP EXIT THEN LOOP
-    _RSA-PSS-DB 190 + C@ 1 <> IF -1 EXIT THEN
-    _RSA-PSS-MPRIME 72 0 FILL
-    _RPS-HASH @ _RSA-PSS-MPRIME 8 + 32 CMOVE
-    _RSA-PSS-DB 191 + _RSA-PSS-MPRIME 40 + 32 CMOVE
-    _RSA-PSS-MPRIME 72 _RSA-PSS-H2 SHA256 IF -1 EXIT THEN
-    _RSA-PSS-H _RSA-PSS-H2 32 _XC-BYTES= IF 0 ELSE -1 THEN ;
+    _RPK-EM @ 2 + +
+    DUP C@ IF DROP -1 EXIT THEN
+    1+ DUP _RPK-DI @ /RSA-DIGESTINFO _XC-BYTES= 0= IF DROP -1 EXIT THEN
+    /RSA-DIGESTINFO + _RPK-H @ _RPK-HU @ _XC-BYTES= IF 0 ELSE -1 THEN ;
 
-\ RFC 8017 EMSA-PSS verification with emBits=2047, SHA-256, MGF1-SHA256,
-\ and an exact 32-byte salt, as required by rsa_pss_rsae_sha256.
-: _RSA2048-PSS-SHA256-BODY ( message-hash modulus sig sig-u -- flag )
-    _RPS-SIG-U ! _RPS-SIG ! _RPS-MOD ! _RPS-HASH !
-    _RPS-SIG-U @ /RSA2048 <> IF -1 EXIT THEN
-    _RPS-SIG @ _RPS-MOD @ _RSA-EM _RSA2048-PUBLIC-BODY IF -1 EXIT THEN
-    _RPS-HASH @ _RSA-EM _RSA-PSS-SHA256-EM-CHECK ;
+VARIABLE _RH-A1
+VARIABLE _RH-U1
+VARIABLE _RH-A2
+VARIABLE _RH-U2
+VARIABLE _RH-DST
+VARIABLE _RH-U
 
-: RSA2048-PSS-SHA256-VERIFY ( message-hash modulus sig sig-u -- flag )
-    COREID IF 2DROP 2DROP RSA-E-BUSY EXIT THEN
-    _RSA2048-PUBLIC-PHASE @ IF 2DROP 2DROP RSA-E-BUSY EXIT THEN
-    -1 _RSA2048-PUBLIC-PHASE !
-    _RSA2048-PSS-SHA256-BODY
-    0 _RSA2048-PUBLIC-PHASE ! ;
+\ dst <- Hash(a1 || a2) for the hash whose digest is hash-u bytes: 32, 48
+\ or 64.  Answers the BIOS status.
+: _RSA-HASH2 ( a1 u1 a2 u2 dst hash-u -- status )
+    _RH-U ! _RH-DST ! _RH-U2 ! _RH-A2 ! _RH-U1 ! _RH-A1 !
+    _RH-U @ 32 = IF
+        SHA256-INIT ?DUP IF EXIT THEN
+        _RH-A1 @ _RH-U1 @ SHA256-UPDATE ?DUP IF SHA256-CLEAR DROP EXIT THEN
+        _RH-A2 @ _RH-U2 @ SHA256-UPDATE ?DUP IF SHA256-CLEAR DROP EXIT THEN
+        _RH-DST @ SHA256-FINAL EXIT
+    THEN
+    _RH-U @ 48 = IF SHA384-INIT ELSE SHA512-INIT THEN
+    ?DUP IF EXIT THEN
+    _RH-A1 @ _RH-U1 @ SHA512-UPDATE ?DUP IF SHA512-CLEAR DROP EXIT THEN
+    _RH-A2 @ _RH-U2 @ SHA512-UPDATE ?DUP IF SHA512-CLEAR DROP EXIT THEN
+    _RH-DST @ _RH-U @ 48 = IF SHA384-FINAL ELSE SHA512-FINAL THEN ;
+
+: _RSA-BE32! ( u addr -- )
+    OVER 24 RSHIFT 255 AND OVER C!
+    OVER 16 RSHIFT 255 AND OVER 1+ C!
+    OVER 8 RSHIFT 255 AND OVER 2 + C!
+    SWAP 255 AND SWAP 3 + C! ;
+
+CREATE _RSA-MGF-OUT 64 ALLOT
+CREATE _RSA-MGF-CTR 4 ALLOT
+VARIABLE _RMG-SEED
+VARIABLE _RMG-HU
+VARIABLE _RMG-DST
+VARIABLE _RMG-LEN
+VARIABLE _RMG-OFF
+VARIABLE _RMG-I
+
+\ dst[0..len) ^= MGF1(seed, len), seed and hash both hash-u bytes.
+: _RSA-MGF1-XOR ( seed hash-u dst len -- status )
+    _RMG-LEN ! _RMG-DST ! _RMG-HU ! _RMG-SEED !
+    0 _RMG-OFF ! 0 _RMG-I !
+    BEGIN _RMG-OFF @ _RMG-LEN @ < WHILE
+        _RMG-I @ _RSA-MGF-CTR _RSA-BE32!
+        _RMG-SEED @ _RMG-HU @ _RSA-MGF-CTR 4 _RSA-MGF-OUT _RMG-HU @
+        _RSA-HASH2 ?DUP IF EXIT THEN
+        _RMG-LEN @ _RMG-OFF @ - _RMG-HU @ MIN 0 ?DO
+            _RSA-MGF-OUT I + C@
+            _RMG-DST @ _RMG-OFF @ + I + DUP C@ ROT XOR SWAP C!
+        LOOP
+        _RMG-HU @ _RMG-OFF +!
+        1 _RMG-I +!
+    REPEAT
+    0 ;
+
+CREATE _RSA-PSS-MP 72 ALLOT       \ 8 zero bytes || mHash
+CREATE _RSA-PSS-H2 64 ALLOT
+VARIABLE _RPS-H
+VARIABLE _RPS-HU
+VARIABLE _RPS-EM
+VARIABLE _RPS-EMLEN
+VARIABLE _RPS-ZB
+VARIABLE _RPS-DBLEN
+
+\ EMSA-PSS verification, RFC 8017 section 9.1.2, with MGF1 over the same
+\ hash and a salt as long as the hash, as TLS 1.3 requires.  em is the
+\ k-byte RSA output and bits the modulus' bit length, so emBits = bits-1.
+\ The check unmasks em in place.
+: _RSA-PSS-EM? ( hash hash-u em k bits -- flag )
+    1- DUP 7 + 3 RSHIFT DUP _RPS-EMLEN !
+    3 LSHIFT SWAP - _RPS-ZB !
+    \ Output bytes above emLen are zero.
+    _RPS-EMLEN @ - DUP 0 ?DO
+        OVER I + C@ IF 2DROP 2DROP -1 UNLOOP EXIT THEN
+    LOOP
+    + _RPS-EM !
+    _RPS-HU ! _RPS-H !
+    _RPS-HU @ _RSA-DIGESTINFO 0= IF -1 EXIT THEN
+    _RPS-EMLEN @ _RPS-HU @ 2* 2 + < IF -1 EXIT THEN
+    _RPS-EM @ _RPS-EMLEN @ + 1- C@ 188 <> IF -1 EXIT THEN
+    _RPS-EMLEN @ _RPS-HU @ - 1- _RPS-DBLEN !
+    \ The leftmost 8*emLen-emBits bits are zero before and after unmasking.
+    _RPS-EM @ C@ 255 _RPS-ZB @ RSHIFT INVERT AND 255 AND IF -1 EXIT THEN
+    _RPS-EM @ _RPS-DBLEN @ + _RPS-HU @ _RPS-EM @ _RPS-DBLEN @
+        _RSA-MGF1-XOR IF -1 EXIT THEN
+    _RPS-EM @ C@ 255 _RPS-ZB @ RSHIFT AND _RPS-EM @ C!
+    \ DB = zeros || 01 || salt
+    _RPS-DBLEN @ _RPS-HU @ - 1- 0 ?DO
+        _RPS-EM @ I + C@ IF -1 UNLOOP EXIT THEN
+    LOOP
+    _RPS-EM @ _RPS-DBLEN @ _RPS-HU @ - 1- + C@ 1 <> IF -1 EXIT THEN
+    \ H = Hash(8 zero bytes || mHash || salt)
+    _RSA-PSS-MP 8 0 FILL
+    _RPS-H @ _RSA-PSS-MP 8 + _RPS-HU @ MOVE
+    _RSA-PSS-MP 8 _RPS-HU @ +
+    _RPS-EM @ _RPS-DBLEN @ + _RPS-HU @ - _RPS-HU @
+    _RSA-PSS-H2 _RPS-HU @ _RSA-HASH2 IF -1 EXIT THEN
+    _RSA-PSS-H2 _RPS-EM @ _RPS-DBLEN @ + _RPS-HU @ _XC-BYTES=
+    IF 0 ELSE -1 THEN ;
+
+VARIABLE _RV-H
+VARIABLE _RV-HU
+
+: _RSA-VERIFY-PREFIX ( hash hash-u sig sig-u key -- ior )
+    >R 2SWAP _RV-HU ! _RV-H ! R>
+    _RSA-PREPARE ?DUP IF NIP NIP EXIT THEN
+    _RSA-EM _RSA-APPLY ;
+
+: _RSA-PKCS1-BODY ( hash hash-u sig sig-u key -- flag )
+    _RSA-VERIFY-PREFIX ?DUP IF EXIT THEN
+    _RV-H @ _RV-HU @ _RSA-EM _RSA-KEY @ RSAK.N-U + @ _RSA-PKCS1-EM? ;
+
+: _RSA-PSS-BODY ( hash hash-u sig sig-u key -- flag )
+    _RSA-VERIFY-PREFIX ?DUP IF EXIT THEN
+    _RV-H @ _RV-HU @ _RSA-EM _RSA-KEY @ RSAK.N-U + @
+    _RSA-CTX MPM.BITS + @ _RSA-PSS-EM? ;
+
+: _RSA-GATED ( hash hash-u sig sig-u key xt -- flag )
+    _RSA-ENTER 0= IF DROP 2DROP 2DROP DROP RSA-E-BUSY EXIT THEN
+    CATCH
+    0 _RSA-BUSY !
+    ?DUP IF >R 2DROP 2DROP DROP R> THROW THEN ;
+
+: RSA-PKCS1-VERIFY ( hash hash-u sig sig-u key -- flag )
+    ['] _RSA-PKCS1-BODY _RSA-GATED ;
+
+: RSA-PSS-VERIFY ( hash hash-u sig sig-u key -- flag )
+    ['] _RSA-PSS-BODY _RSA-GATED ;
+
+\ The public exponent every certificate key in the current profile uses.
+CREATE RSA-E-65537  1 C, 0 C, 1 C,
 
 \ =====================================================================
-\  §16.7c.2  Bounded X.509 path validation
+\  §16.7c.3  P-384 ECDSA verification
 \ =====================================================================
 \
-\  This layer follows the ECDSA primitive so every compiled call has a
-\  concrete native target.  Presented certificates may be unordered, but
-\  the authenticated leaf is always descriptor zero.
+\  NIST P-384 over the Montgomery module: two-digit contexts for the field
+\  prime p and the group order n, Jacobian points with a = -3, and
+\  Shamir's joint double-and-add for u1*G + u2*Q.  Field values stay in
+\  Montgomery form; every number is 64 bytes, two little-endian digits
+\  whose top 128 bits are zero.  The P-256 path above runs on the Field
+\  ALU's built-in prime; P-384 has no such prime, so this software path
+\  is the one definition until a wider field unit replaces MPM-MUL.
+
+CREATE P384-P
+    255 C, 255 C, 255 C, 255 C, 0 C, 0 C, 0 C, 0 C,
+    0 C, 0 C, 0 C, 0 C, 255 C, 255 C, 255 C, 255 C,
+    254 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C,
+    255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C,
+    255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C,
+    255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+\ = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE
+\     FFFFFFFF0000000000000000FFFFFFFF
+
+CREATE P384-N
+    115 C, 41 C, 197 C, 204 C, 106 C, 25 C, 236 C, 236 C,
+    122 C, 167 C, 176 C, 72 C, 178 C, 13 C, 26 C, 88 C,
+    223 C, 45 C, 55 C, 244 C, 129 C, 77 C, 99 C, 199 C,
+    255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C,
+    255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C,
+    255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+\ = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFC7634D81F4372DDF
+\     581A0DB248B0A77AECEC196ACCC52973
+
+CREATE P384-B
+    239 C, 42 C, 236 C, 211 C, 237 C, 200 C, 133 C, 42 C,
+    157 C, 209 C, 46 C, 138 C, 141 C, 57 C, 86 C, 198 C,
+    90 C, 135 C, 19 C, 80 C, 143 C, 8 C, 20 C, 3 C,
+    18 C, 65 C, 129 C, 254 C, 110 C, 156 C, 29 C, 24 C,
+    25 C, 45 C, 248 C, 227 C, 107 C, 5 C, 142 C, 152 C,
+    228 C, 231 C, 62 C, 226 C, 167 C, 47 C, 49 C, 179 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+\ = 0xB3312FA7E23EE7E4988E056BE3F82D19181D9C6EFE8141120314088F5013875A
+\     C656398D8A2ED19D2A85C8EDD3EC2AEF
+
+CREATE P384-GX
+    183 C, 10 C, 118 C, 114 C, 56 C, 94 C, 84 C, 58 C,
+    108 C, 41 C, 85 C, 191 C, 93 C, 242 C, 2 C, 85 C,
+    56 C, 42 C, 84 C, 130 C, 224 C, 65 C, 247 C, 89 C,
+    152 C, 155 C, 167 C, 139 C, 98 C, 59 C, 29 C, 110 C,
+    116 C, 173 C, 32 C, 243 C, 30 C, 199 C, 177 C, 142 C,
+    55 C, 5 C, 139 C, 190 C, 34 C, 202 C, 135 C, 170 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+
+CREATE P384-GY
+    95 C, 14 C, 234 C, 144 C, 124 C, 29 C, 67 C, 122 C,
+    157 C, 129 C, 126 C, 29 C, 206 C, 177 C, 96 C, 10 C,
+    192 C, 184 C, 240 C, 181 C, 19 C, 49 C, 218 C, 233 C,
+    124 C, 20 C, 154 C, 40 C, 189 C, 29 C, 244 C, 248 C,
+    41 C, 220 C, 146 C, 146 C, 191 C, 152 C, 158 C, 93 C,
+    111 C, 44 C, 38 C, 150 C, 74 C, 222 C, 23 C, 54 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+
+2 MPM-CONTEXT-SIZE CONSTANT /P384-CTX
+CREATE _P384-FP /P384-CTX ALLOT      \ arithmetic modulo p
+CREATE _P384-FN /P384-CTX ALLOT      \ arithmetic modulo n
+CREATE _P384-N-2 48 ALLOT            \ n-2, big-endian: the inverse's exponent
+
+\ Montgomery forms of b, the generator and one, modulo p.
+CREATE _P384-MB 64 ALLOT
+CREATE _P384-MGX 64 ALLOT
+CREATE _P384-MGY 64 ALLOT
+CREATE _P384-MONE 64 ALLOT
+
+P384-P 2 _P384-FP MPM-INIT DROP
+P384-N 2 _P384-FN MPM-INIT DROP
+P384-N _P384-N-2 48 _MP>BE
+_P384-N-2 47 + DUP C@ 2 - SWAP C!
+P384-B _P384-MB _P384-FP MPM-TO
+P384-GX _P384-MGX _P384-FP MPM-TO
+P384-GY _P384-MGY _P384-FP MPM-TO
+_P384-FP MPM.UNIT + @ _P384-MONE _P384-FP MPM-TO
+
+: _F* ( a b out -- )  _P384-FP MPM-MUL ;
+: _F+ ( a b out -- )  _P384-FP MPM-ADD ;
+: _F- ( a b out -- )  _P384-FP MPM-SUB ;
+: _F0? ( a -- flag )  8 _MP-ZERO? ;
+: _F= ( a b -- flag )  64 _XC-BYTES= ;
+
+\ Field temporaries.
+CREATE _PT1 64 ALLOT
+CREATE _PT2 64 ALLOT
+CREATE _PT3 64 ALLOT
+CREATE _PT4 64 ALLOT
+CREATE _PT5 64 ALLOT
+CREATE _PT6 64 ALLOT
+CREATE _PT7 64 ALLOT
+CREATE _PT8 64 ALLOT
+CREATE _PT9 64 ALLOT
+CREATE _PT10 64 ALLOT
+
+\ The accumulator point, Jacobian; Z = 0 is the point at infinity.
+CREATE _PAX 64 ALLOT
+CREATE _PAY 64 ALLOT
+CREATE _PAZ 64 ALLOT
+
+\ The table: G and Q affine, G+Q Jacobian.
+CREATE _PQX 64 ALLOT
+CREATE _PQY 64 ALLOT
+CREATE _PSX 64 ALLOT
+CREATE _PSY 64 ALLOT
+CREATE _PSZ 64 ALLOT
+
+\ Doubling with a = -3 (dbl-2001-b), in place on the accumulator.
+: _P384-DOUBLE ( -- )
+    _PAZ _PAZ _PT1 _F*                 \ delta = Z^2
+    _PAY _PAY _PT2 _F*                 \ gamma = Y^2
+    _PAX _PT2 _PT3 _F*                 \ beta = X*gamma
+    _PAX _PT1 _PT4 _F-
+    _PAX _PT1 _PT5 _F+
+    _PT4 _PT5 _PT4 _F*
+    _PT4 _PT4 _PT5 _F+
+    _PT5 _PT4 _PT4 _F+                 \ alpha = 3*(X-delta)*(X+delta)
+    _PAY _PAZ _PT5 _F+
+    _PT5 _PT5 _PT5 _F*
+    _PT5 _PT2 _PT5 _F-
+    _PT5 _PT1 _PAZ _F-                 \ Z3 = (Y+Z)^2-gamma-delta
+    _PT4 _PT4 _PT5 _F*
+    _PT3 _PT3 _PT6 _F+
+    _PT6 _PT6 _PT6 _F+                 \ 4*beta
+    _PT6 _PT6 _PT7 _F+                 \ 8*beta
+    _PT5 _PT7 _PAX _F-                 \ X3 = alpha^2-8*beta
+    _PT6 _PAX _PT6 _F-
+    _PT4 _PT6 _PT6 _F*
+    _PT2 _PT2 _PT2 _F*
+    _PT2 _PT2 _PT2 _F+
+    _PT2 _PT2 _PT2 _F+
+    _PT2 _PT2 _PT2 _F+                 \ 8*gamma^2
+    _PT6 _PT2 _PAY _F- ;               \ Y3 = alpha*(4*beta-X3)-8*gamma^2
+
+: _P384-INFINITY ( -- )  _PAZ 64 0 FILL ;
+
+\ Add the affine point (x, y) to the accumulator (madd-2007-bl).
+: _P384-ADD-AFFINE ( x y -- )
+    _PAZ _F0? IF
+        _PAY 64 MOVE _PAX 64 MOVE _P384-MONE _PAZ 64 MOVE EXIT
+    THEN
+    _PAZ _PAZ _PT1 _F*                 \ Z1Z1
+    OVER _PT1 _PT2 _F*                 \ U2 = x*Z1Z1
+    DUP _PAZ _PT3 _F*
+    _PT3 _PT1 _PT3 _F*                 \ S2 = y*Z1*Z1Z1
+    _PT2 _PAX _PT2 _F-                 \ H = U2-X1
+    _PT3 _PAY _PT3 _F-                 \ S2-Y1
+    _PT2 _F0? IF
+        2DROP
+        _PT3 _F0? IF _P384-DOUBLE ELSE _P384-INFINITY THEN EXIT
+    THEN
+    2DROP
+    _PT3 _PT3 _PT3 _F+                 \ r = 2*(S2-Y1)
+    _PT2 _PT2 _PT4 _F*                 \ HH
+    _PT4 _PT4 _PT5 _F+
+    _PT5 _PT5 _PT5 _F+                 \ I = 4*HH
+    _PT2 _PT5 _PT6 _F*                 \ J = H*I
+    _PAX _PT5 _PT7 _F*                 \ V = X1*I
+    _PAY _PT6 _PT9 _F*
+    _PT9 _PT9 _PT9 _F+                 \ 2*Y1*J
+    _PAZ _PT2 _PT8 _F+
+    _PT8 _PT8 _PT8 _F*
+    _PT8 _PT1 _PT8 _F-
+    _PT8 _PT4 _PAZ _F-                 \ Z3 = (Z1+H)^2-Z1Z1-HH
+    _PT3 _PT3 _PT8 _F*
+    _PT8 _PT6 _PT8 _F-
+    _PT7 _PT7 _PT10 _F+
+    _PT8 _PT10 _PAX _F-                \ X3 = r^2-J-2*V
+    _PT7 _PAX _PT7 _F-
+    _PT3 _PT7 _PT7 _F*
+    _PT7 _PT9 _PAY _F- ;               \ Y3 = r*(V-X3)-2*Y1*J
+
+\ Add the Jacobian table point G+Q to the accumulator (add-2007-bl).
+: _P384-ADD-SUM ( -- )
+    _PSZ _F0? IF EXIT THEN
+    _PAZ _F0? IF
+        _PSX _PAX 64 MOVE _PSY _PAY 64 MOVE _PSZ _PAZ 64 MOVE EXIT
+    THEN
+    _PAZ _PAZ _PT1 _F*                 \ Z1Z1
+    _PSZ _PSZ _PT2 _F*                 \ Z2Z2
+    _PAX _PT2 _PT3 _F*                 \ U1
+    _PSX _PT1 _PT4 _F*                 \ U2
+    _PAY _PSZ _PT5 _F*
+    _PT5 _PT2 _PT5 _F*                 \ S1
+    _PSY _PAZ _PT6 _F*
+    _PT6 _PT1 _PT6 _F*                 \ S2
+    _PT4 _PT3 _PT4 _F-                 \ H = U2-U1
+    _PT6 _PT5 _PT6 _F-                 \ S2-S1
+    _PT4 _F0? IF
+        _PT6 _F0? IF _P384-DOUBLE ELSE _P384-INFINITY THEN EXIT
+    THEN
+    _PT6 _PT6 _PT6 _F+                 \ r = 2*(S2-S1)
+    _PT4 _PT4 _PT7 _F+
+    _PT7 _PT7 _PT7 _F*                 \ I = (2*H)^2
+    _PT4 _PT7 _PT8 _F*                 \ J = H*I
+    _PT3 _PT7 _PT3 _F*                 \ V = U1*I
+    _PAZ _PSZ _PT9 _F+
+    _PT9 _PT9 _PT9 _F*
+    _PT9 _PT1 _PT9 _F-
+    _PT9 _PT2 _PT9 _F-
+    _PT9 _PT4 _PAZ _F*                 \ Z3 = ((Z1+Z2)^2-Z1Z1-Z2Z2)*H
+    _PT6 _PT6 _PT9 _F*
+    _PT9 _PT8 _PT9 _F-
+    _PT3 _PT3 _PT10 _F+
+    _PT9 _PT10 _PAX _F-                \ X3 = r^2-J-2*V
+    _PT3 _PAX _PT3 _F-
+    _PT6 _PT3 _PT3 _F*
+    _PT5 _PT8 _PT5 _F*
+    _PT5 _PT5 _PT5 _F+
+    _PT3 _PT5 _PAY _F- ;               \ Y3 = r*(V-X3)-2*S1*J
+
+\ Scalars, regular (not Montgomery) numbers modulo n.
+CREATE _P384-R 64 ALLOT
+CREATE _P384-S 64 ALLOT
+CREATE _P384-E 64 ALLOT
+CREATE _P384-W 64 ALLOT
+CREATE _P384-U1 64 ALLOT
+CREATE _P384-U2 64 ALLOT
+CREATE _P384-T 64 ALLOT
+
+: _P384-BIT ( scalar bit -- 0|1 )
+    DUP 6 RSHIFT CELLS ROT + @ SWAP 63 AND RSHIFT 1 AND ;
+
+\ The accumulator <- u1*G + u2*Q.
+: _P384-JOINT ( -- )
+    _P384-INFINITY
+    \ G+Q, starting from G with Z = one.
+    _P384-MGX _PAX 64 MOVE _P384-MGY _PAY 64 MOVE _P384-MONE _PAZ 64 MOVE
+    _PQX _PQY _P384-ADD-AFFINE
+    _PAX _PSX 64 MOVE _PAY _PSY 64 MOVE _PAZ _PSZ 64 MOVE
+    _P384-INFINITY
+    384 0 DO
+        _PAZ _F0? 0= IF _P384-DOUBLE THEN
+        _P384-U1 383 I - _P384-BIT
+        _P384-U2 383 I - _P384-BIT
+        2DUP AND IF
+            2DROP _P384-ADD-SUM
+        ELSE
+            IF DROP _PQX _PQY _P384-ADD-AFFINE
+            ELSE IF _P384-MGX _P384-MGY _P384-ADD-AFFINE THEN
+            THEN
+        THEN
+    LOOP ;
+
+\ a*b mod n for regular a and b: the Montgomery product of a with b's
+\ Montgomery form is the regular product.
+: _P384-NMUL ( a b out -- )
+    >R _P384-T _P384-FN MPM-TO
+    _P384-T R> _P384-FN MPM-MUL ;
+
+\ The public point: 04 || X || Y, coordinates below p, on the curve.  Its
+\ Montgomery coordinates land in _PQX and _PQY.
+: _P384-PUBKEY ( pubkey -- flag )
+    DUP C@ 4 <> IF DROP FALSE EXIT THEN
+    DUP 1+ 48 _PQX 2 _MP-BE>
+    49 + 48 _PQY 2 _MP-BE>
+    _PQX P384-P 8 _MP-U< 0= IF FALSE EXIT THEN
+    _PQY P384-P 8 _MP-U< 0= IF FALSE EXIT THEN
+    _PQX _PQX _P384-FP MPM-TO
+    _PQY _PQY _P384-FP MPM-TO
+    \ y^2 = x^3 - 3x + b
+    _PQY _PQY _PT1 _F*
+    _PQX _PQX _PT2 _F*
+    _PT2 _PQX _PT2 _F*
+    _PQX _PQX _PT3 _F+
+    _PT3 _PQX _PT3 _F+
+    _PT2 _PT3 _PT2 _F-
+    _PT2 _P384-MB _PT2 _F+
+    _PT1 _PT2 _F= ;
+
+\ ECDSA-P384-VERIFY ( hash hash-u pubkey sig slen -- flag )
+\   Verify an ECDSA P-384 signature over a digest.  The leftmost 384 bits
+\   of the digest are used, as FIPS 186-5 specifies, so SHA-384 is the
+\   natural hash.  pubkey is 97 bytes, 04 || X || Y; sig is the DER
+\   ECDSA-Sig-Value.  Answers 0 for valid and -1 for invalid.
+VARIABLE _E3-HASH
+VARIABLE _E3-HU
+
+: ECDSA-P384-VERIFY ( hash hash-u pubkey sig slen -- flag )
+    _P384-R 64 0 FILL _P384-S 64 0 FILL
+    _P384-R _P384-S 48 _ECDSA-DECODE IF 2DROP DROP -1 EXIT THEN
+    _P384-PUBKEY 0= IF 2DROP -1 EXIT THEN
+    _E3-HU ! _E3-HASH !
+    \ 1 <= r, s < n
+    _P384-R 8 _MP-ZERO? IF -1 EXIT THEN
+    _P384-S 8 _MP-ZERO? IF -1 EXIT THEN
+    _P384-R P384-N 8 _MP-U< 0= IF -1 EXIT THEN
+    _P384-S P384-N 8 _MP-U< 0= IF -1 EXIT THEN
+    \ e: the digest's leftmost 384 bits, reduced once modulo n
+    _E3-HASH @ _E3-HU @ 48 MIN _P384-E 2 _MP-BE>
+    _P384-E P384-N 8 _MP-U< 0= IF
+        _P384-E P384-N _P384-E 8 _MP-SUB DROP
+    THEN
+    \ w = s^(n-2) mod n; u1 = e*w, u2 = r*w
+    _P384-S _P384-T _P384-FN MPM-TO
+    _P384-T _P384-N-2 48 _P384-W _P384-FN MPM-EXP
+    _P384-W _P384-W _P384-FN MPM-FROM
+    _P384-E _P384-W _P384-U1 _P384-NMUL
+    _P384-R _P384-W _P384-U2 _P384-NMUL
+    _P384-JOINT
+    _PAZ _F0? IF -1 EXIT THEN
+    \ r = X/Z^2 mod n, checked as X == r*Z^2 for r and, below p, r+n.
+    _PAZ _PAZ _PT1 _F*
+    _P384-R _PT2 _P384-FP MPM-TO
+    _PT2 _PT1 _PT2 _F*
+    _PT2 _PAX _F= IF 0 EXIT THEN
+    _P384-R P384-N _PT3 8 _MP-ADD DROP
+    _PT3 P384-P 8 _MP-U< 0= IF -1 EXIT THEN
+    _PT3 _PT2 _P384-FP MPM-TO
+    _PT2 _PT1 _PT2 _F*
+    _PT2 _PAX _F= IF 0 ELSE -1 THEN ;
+
+\ =====================================================================
+\  §16.7c.2  X.509 path building
+\ =====================================================================
+\
+\  This layer follows the signature primitives so every compiled call has
+\  a concrete native target.  Presented certificates may come in any order
+\  and include extras; the authenticated leaf is always descriptor zero.
+\
+\  X509-VERIFY-SIGNED-BY ( child issuer -- ior )
+\    Check child's signature with issuer's key: ECDSA P-256 with SHA-256,
+\    ECDSA P-384 with SHA-384 (the pairs Mozilla's root policy allows),
+\    or RSA PKCS#1 v1.5 with SHA-256, -384 or -512.
+\
+\  X509-PATH-BEGIN ( certs count hostname hlen now -- ior )
+\  X509-PATH-STEP  ( -- ior )
+\    Search for a path from the leaf, through presented CA certificates,
+\    to a trust anchor that may vouch for the host.  The search backtracks
+\    over every candidate issuer, anchors first, and each STEP checks at
+\    most one signature, so a caller polling it stays responsive.  BEGIN
+\    answers X509-PATH-PENDING once the search has started, or the leaf's
+\    failure; STEP answers X509-PATH-PENDING while work remains, 0 for a
+\    complete path, or the most recent specific failure of a candidate,
+\    TLS-CERT-NO-TRUST when no candidate came close.  Descriptors must
+\    stay valid until the search ends.
+\
+\  X509-VERIFY-CHAIN ( certs count hostname hlen now -- ior )
+\    The whole search at once.
+\
+\  On every candidate issuer the search checks the name chain, basic
+\  constraints, key usage, extended key usage, path length, validity at
+\  now and the name constraints of every CA above each certificate.  An
+\  anchor must also allow the host and must not distrust the leaf's
+\  issuance date.  Signatures already checked this boot between the same
+\  intermediate's bytes and the same issuer key are not checked again: a
+\  successful path adds its intermediates' edges to that cache, keyed by
+\  SHA-256 over the child certificate and the issuer's public key info.
+
+1 CONSTANT X509-PATH-PENDING
+8 CONSTANT X509-CHAIN-MAX
+
+\ The issuer's RSA key as an RSA-KEY record.
+CREATE _XVS-RSA-KEY /RSA-KEY ALLOT
+
+: _XVS-RSA-KEY! ( issuer -- )
+    DUP XC.PUB-A + @ _XVS-RSA-KEY RSAK.N + !
+    DUP XC.PUB-U + @ _XVS-RSA-KEY RSAK.N-U + !
+    DUP XC.PUB-E-A + @ _XVS-RSA-KEY RSAK.E + !
+    XC.PUB-E-U + @ _XVS-RSA-KEY RSAK.E-U + ! ;
+
+\ The digest length of a signature algorithm, or 0.
+: _X509-SIG-HASH-U ( sig-algo -- u )
+    DUP X509-SIG-ECDSA-SHA256 = OVER X509-SIG-RSA-SHA256 = OR IF DROP 32 EXIT THEN
+    DUP X509-SIG-ECDSA-SHA384 = OVER X509-SIG-RSA-SHA384 = OR IF DROP 48 EXIT THEN
+    X509-SIG-RSA-SHA512 = IF 64 ELSE 0 THEN ;
+
+\ The key type a signature algorithm needs.
+: _X509-SIG-KEY ( sig-algo -- key-type )
+    DUP X509-SIG-ECDSA-SHA256 = IF DROP X509-KEY-P256 EXIT THEN
+    X509-SIG-ECDSA-SHA384 = IF X509-KEY-P384 ELSE X509-KEY-RSA THEN ;
+
+VARIABLE _XVS-HU
 
 : X509-VERIFY-SIGNED-BY ( child issuer -- ior )
     2DUP _X509-NAME-LINK? 0= IF 2DROP TLS-CERT-CONSTRAINT EXIT THEN
     _XVS-ISSUER ! _XVS-CHILD !
-    _XVS-CHILD @ XC.TBS-A + @ _XVS-CHILD @ XC.TBS-U + @ _XVS-HASH SHA256
+    _XVS-CHILD @ XC.SIG-ALGO + @ DUP _X509-SIG-HASH-U DUP _XVS-HU !
+    0= IF DROP TLS-CERT-UNSUPPORTED EXIT THEN
+    _X509-SIG-KEY _XVS-ISSUER @ XC.PUB-ALGO + @ <> IF
+        TLS-CERT-UNSUPPORTED EXIT
+    THEN
+    _XVS-CHILD @ XC.TBS-A + @ _XVS-CHILD @ XC.TBS-U + @ 0 0
+        _XVS-HASH _XVS-HU @ _RSA-HASH2
     IF TLS-CERT-BAD-SIGNATURE EXIT THEN
-    _XVS-CHILD @ XC.SIG-ALGO + @ X509-ALG-P256 = IF
-        _XVS-ISSUER @ XC.PUB-ALGO + @ X509-ALG-P256 <>
-        _XVS-ISSUER @ XC.PUB-U + @ 65 <> OR IF TLS-CERT-UNSUPPORTED EXIT THEN
+    _XVS-ISSUER @ XC.PUB-ALGO + @ X509-KEY-P256 = IF
         _XVS-HASH _XVS-ISSUER @ XC.PUB-A + @
         _XVS-CHILD @ XC.SIG-A + @ _XVS-CHILD @ XC.SIG-U + @
-        ECDSA-P256-VERIFY IF TLS-CERT-BAD-SIGNATURE ELSE TLS-CERT-OK THEN
-        EXIT
-    THEN
-    _XVS-CHILD @ XC.SIG-ALGO + @ X509-ALG-RSA2048 = IF
-        _XVS-ISSUER @ XC.PUB-ALGO + @ X509-ALG-RSA2048 <>
-        _XVS-ISSUER @ XC.PUB-U + @ /RSA2048 <> OR
-        _XVS-CHILD @ XC.SIG-U + @ /RSA2048 <> OR
-        IF TLS-CERT-UNSUPPORTED EXIT THEN
-        _XVS-HASH _XVS-ISSUER @ XC.PUB-A + @
+        ECDSA-P256-VERIFY
+    ELSE _XVS-ISSUER @ XC.PUB-ALGO + @ X509-KEY-P384 = IF
+        _XVS-HASH 48 _XVS-ISSUER @ XC.PUB-A + @
         _XVS-CHILD @ XC.SIG-A + @ _XVS-CHILD @ XC.SIG-U + @
-        RSA2048-PKCS1-SHA256-VERIFY
-        IF TLS-CERT-BAD-SIGNATURE ELSE TLS-CERT-OK THEN EXIT
-    THEN
-    TLS-CERT-UNSUPPORTED ;
+        ECDSA-P384-VERIFY
+    ELSE
+        _XVS-ISSUER @ _XVS-RSA-KEY!
+        _XVS-HASH _XVS-HU @
+        _XVS-CHILD @ XC.SIG-A + @ _XVS-CHILD @ XC.SIG-U + @
+        _XVS-RSA-KEY RSA-PKCS1-VERIFY
+    THEN THEN
+    IF TLS-CERT-BAD-SIGNATURE ELSE TLS-CERT-OK THEN ;
 
+\ --- The per-boot cache of verified intermediate edges ---
+32 CONSTANT /XEC-KEY
+VARIABLE _XEC-TABLE
+VARIABLE _XEC-CAP
+VARIABLE _XEC-N
+0 _XEC-TABLE !  0 _XEC-CAP !  0 _XEC-N !
+CREATE _XEC-KEY /XEC-KEY ALLOT
+
+\ _XEC-KEY <- SHA-256(child certificate || issuer SubjectPublicKeyInfo)
+: _XEC-KEY! ( child issuer -- ior )
+    >R DUP XC.CERT-A + @ SWAP XC.CERT-U + @
+    R@ XC.SPKI-A + @ R> XC.SPKI-U + @
+    _XEC-KEY /XEC-KEY _RSA-HASH2 ;
+
+: _XEC-FIND ( key -- flag )
+    _XEC-N @ 0 ?DO
+        DUP _XEC-TABLE @ I /XEC-KEY * + /XEC-KEY _XC-BYTES= IF
+            DROP TRUE UNLOOP EXIT
+        THEN
+    LOOP DROP FALSE ;
+
+VARIABLE _XEC-NEW
+: _XEC-ADD ( key -- )
+    DUP _XEC-FIND IF DROP EXIT THEN
+    _XEC-N @ _XEC-CAP @ >= IF
+        _XEC-CAP @ 2* 16 MAX DUP /XEC-KEY * ALLOCATE IF 2DROP DROP EXIT THEN
+        _XEC-NEW !
+        _XEC-TABLE @ ?DUP IF
+            DUP _XEC-NEW @ _XEC-N @ /XEC-KEY * CMOVE FREE
+        THEN
+        _XEC-NEW @ _XEC-TABLE !  _XEC-CAP !
+    THEN
+    _XEC-TABLE @ _XEC-N @ /XEC-KEY * + /XEC-KEY CMOVE
+    1 _XEC-N +! ;
+
+\ Forget every cached edge.
+: X509-EDGE-CACHE-CLEAR ( -- )  0 _XEC-N ! ;
+
+\ --- The search ---
 VARIABLE _XPV-CERTS
 VARIABLE _XPV-N
 VARIABLE _XPV-HOST
 VARIABLE _XPV-HOST-U
 VARIABLE _XPV-NOW
-VARIABLE _XPV-USED
-VARIABLE _XPV-CURR
-VARIABLE _XPV-CA-BELOW
-VARIABLE _XPV-NEXT
-VARIABLE _XPV-STATUS
-VARIABLE _XPV-CHILD
-VARIABLE _XPV-CANDIDATE
-VARIABLE _XPV-ANCHOR
+VARIABLE _XPV-USED        \ bit i: presented certificate i is on the path
+VARIABLE _XPV-DEPTH       \ the path's top; -1 once every candidate failed
+VARIABLE _XPV-BOUND       \ a scoped anchor names the host
+VARIABLE _XPV-ERR         \ the most recent specific failure
+VARIABLE _XPV-STATE       \ X509-PATH-PENDING while searching, else the result
+VARIABLE _XPV-SPENT       \ this step has checked its signature
+VARIABLE _XPV-C           \ the candidate issuer
+VARIABLE _XPV-I           \ its presented index
+VARIABLE _XPV-A           \ the candidate anchor
+VARIABLE _XPV-NC-A
+VARIABLE _XPV-NC-U
+TLS-CERT-NO-TRUST _XPV-STATE !
+CREATE _XPV-NODE  X509-CHAIN-MAX CELLS ALLOT     \ presented index by depth
+CREATE _XPV-CAND  X509-CHAIN-MAX CELLS ALLOT     \ next candidate by depth
+CREATE _XPV-KEYED X509-CHAIN-MAX CELLS ALLOT     \ an edge key was made
+CREATE _XPV-EKEYS X509-CHAIN-MAX /XEC-KEY * ALLOT
 
 : _XPV-CERT@ ( index -- cert )
     /X509-CERT * _XPV-CERTS @ + ;
 
-: _XPV-ANCHOR-FIND ( cert -- anchor | 0 )
-    TLS-TRUST-COUNT @ 0 ?DO
-        DUP _XPV-HOST @ _XPV-HOST-U @ I TLS-TRUST@
-        _X509-ANCHOR-MATCH? IF DROP I TLS-TRUST@ UNLOOP EXIT THEN
-    LOOP DROP 0 ;
+: _XPV-NODE@ ( depth -- cert )
+    CELLS _XPV-NODE + @ _XPV-CERT@ ;
 
-: _XPV-ISSUER-ANCHOR ( child -- anchor | 0 )
+: _XPV-CHILD ( -- cert )
+    _XPV-DEPTH @ _XPV-NODE@ ;
+
+: _X509-SELF-ISSUED? ( cert -- flag )
+    DUP XC.ISSUER-A + @ OVER XC.ISSUER-U + @
+    ROT DUP XC.SUBJECT-A + @ SWAP XC.SUBJECT-U + @ _XC-SLICE= ;
+
+\ The CA certificates below the current candidate that count toward its
+\ path length: those on the path above the leaf, less self-issued ones.
+: _XPV-CA-BELOW ( -- n )
+    0 _XPV-DEPTH @ 1+ 1 ?DO
+        I _XPV-NODE@ _X509-SELF-ISSUED? 0= IF 1+ THEN
+    LOOP ;
+
+\ The constraints nc-a nc-u allow every certificate on the path, except
+\ self-issued ones above the leaf.
+: _XPV-NC-OK? ( nc-a nc-u -- flag )
+    _XPV-NC-U ! _XPV-NC-A !
+    _XPV-NC-U @ 0= IF TRUE EXIT THEN
+    _XPV-DEPTH @ 1+ 0 ?DO
+        I _XPV-NODE@
+        I IF DUP _X509-SELF-ISSUED? IF DROP ELSE
+            _XPV-NC-A @ _XPV-NC-U @ ROT X509-NC-CERT-OK?
+            0= IF FALSE UNLOOP EXIT THEN
+        THEN ELSE
+            _XPV-NC-A @ _XPV-NC-U @ ROT X509-NC-CERT-OK?
+            0= IF FALSE UNLOOP EXIT THEN
+        THEN
+    LOOP TRUE ;
+
+\ The candidate issuer cert's own name constraints, and those an anchor
+\ with its subject imposes, allow the path.
+: _XPV-ISSUER-NC-OK? ( cert -- flag )
+    DUP XC.NC-A + @ OVER XC.NC-U + @ _XPV-NC-OK? 0= IF DROP FALSE EXIT THEN
     TLS-TRUST-COUNT @ 0 ?DO
-        DUP I TLS-TRUST@ TTA-DESC + _X509-NAME-LINK? IF
-            _XPV-HOST @ _XPV-HOST-U @ I TLS-TRUST@ _TLS-SCOPE-MATCH? IF
-                DROP I TLS-TRUST@ UNLOOP EXIT
+        I TLS-TRUST@ TTA-NC-U + @ IF
+            DUP XC.SUBJECT-A + @ OVER XC.SUBJECT-U + @
+            I TLS-TRUST@ TTA-DESC + DUP XC.SUBJECT-A + @ SWAP XC.SUBJECT-U + @
+            _XC-SLICE= IF
+                I TLS-TRUST@ DUP TTA-NC-A + @ SWAP TTA-NC-U + @
+                _XPV-NC-OK? 0= IF DROP FALSE UNLOOP EXIT THEN
             THEN
         THEN
-    LOOP DROP 0 ;
+    LOOP DROP TRUE ;
+
+\ A scoped anchor names the host.
+: _XPV-BIND ( -- )
+    FALSE _XPV-BOUND !
+    TLS-TRUST-COUNT @ 0 ?DO
+        I TLS-TRUST@ TTA-SCOPE-U + @ IF
+            _XPV-HOST @ _XPV-HOST-U @ I TLS-TRUST@ _TLS-SCOPE-MATCH? IF
+                TRUE _XPV-BOUND ! LEAVE
+            THEN
+        THEN
+    LOOP ;
+
+\ The anchor may vouch for the host: a global anchor when no scoped anchor
+\ binds it, otherwise a scoped anchor that names it.
+: _XPV-ANCHOR-FOR-HOST? ( anchor -- flag )
+    DUP TTA-SCOPE-U + @ 0= IF DROP _XPV-BOUND @ 0= EXIT THEN
+    _XPV-BOUND @ 0= IF DROP FALSE EXIT THEN
+    _XPV-HOST @ _XPV-HOST-U @ ROT _TLS-SCOPE-MATCH? ;
 
 : _XPV-LEAF-CHECK ( cert -- ior )
     DUP XC.FLAGS + @ XCF-CA AND IF DROP TLS-CERT-CONSTRAINT EXIT THEN
@@ -7080,62 +8080,125 @@ VARIABLE _XPV-ANCHOR
     _XPV-HOST @ _XPV-HOST-U @ ROT X509-DESC-CHECK-HOST
     IF TLS-CERT-HOSTNAME ELSE TLS-CERT-OK THEN ;
 
-: X509-VERIFY-CHAIN ( certs count hostname hlen now -- ior )
-    _XPV-NOW ! _XPV-HOST-U ! _XPV-HOST ! _XPV-N ! _XPV-CERTS !
-    _XPV-N @ 0= _XPV-N @ 8 > OR IF TLS-CERT-MALFORMED EXIT THEN
-    TLS-TRUST-COUNT @ 0= IF TLS-CERT-NO-TRUST EXIT THEN
-    0 _XPV-CERT@ _XPV-LEAF-CHECK DUP IF EXIT THEN DROP
-    1 _XPV-USED ! 0 _XPV-CURR ! 0 _XPV-CA-BELOW !
-    8 0 DO
-        _XPV-CURR @ _XPV-CERT@ _XPV-CHILD !
+: _XPV-FAIL ( ior -- )  _XPV-ERR ! ;
 
-        \ A presented CA may itself be the explicitly provisioned anchor.
-        _XPV-CHILD @ _XPV-ANCHOR-FIND DUP IF
-            TTA-DESC + _XPV-NOW @ X509-CHECK-VALIDITY UNLOOP EXIT
-        THEN DROP
+\ The signature on the edge from the current child to issuer.  An
+\ intermediate's edge is looked up in the cache first, keyed for adding
+\ once the path is complete; anything else spends this step's signature.
+: _XPV-EDGE? ( issuer -- flag )
+    _XPV-CHILD SWAP
+    _XPV-DEPTH @ IF
+        FALSE _XPV-DEPTH @ CELLS _XPV-KEYED + !
+        2DUP _XEC-KEY! 0= IF
+            _XEC-KEY _XPV-DEPTH @ /XEC-KEY * _XPV-EKEYS + /XEC-KEY CMOVE
+            TRUE _XPV-DEPTH @ CELLS _XPV-KEYED + !
+            _XEC-KEY _XEC-FIND IF 2DROP TRUE EXIT THEN
+        THEN
+    THEN
+    TRUE _XPV-SPENT !
+    X509-VERIFY-SIGNED-BY ?DUP IF _XPV-FAIL FALSE EXIT THEN
+    TRUE ;
 
-        \ Otherwise an unpresented provisioned anchor may issue this cert.
-        _XPV-CHILD @ _XPV-ISSUER-ANCHOR DUP IF
-            _XPV-ANCHOR !
-            _XPV-ANCHOR @ TTA-DESC + _XPV-CA-BELOW @
-            _X509-CA-CONSTRAINTS DUP IF UNLOOP EXIT THEN DROP
-            _XPV-ANCHOR @ TTA-DESC + _XPV-NOW @
-            X509-CHECK-VALIDITY DUP IF UNLOOP EXIT THEN DROP
-            _XPV-CHILD @ _XPV-ANCHOR @ TTA-DESC +
-            X509-VERIFY-SIGNED-BY UNLOOP EXIT
-        THEN DROP
+\ Candidate results: 0 a complete path, 1 pushed, 2 refused.
+: _XPV-TRY-ANCHOR ( anchor -- result )
+    _XPV-A !
+    _XPV-CHILD _XPV-A @ TTA-DESC + _X509-NAME-LINK? 0= IF 2 EXIT THEN
+    _XPV-A @ _XPV-ANCHOR-FOR-HOST? 0= IF 2 EXIT THEN
+    _XPV-A @ TTA-DISTRUST + @ ?DUP IF
+        0 _XPV-CERT@ XC.NOT-BEFORE + @ < IF
+            TLS-CERT-DISTRUSTED _XPV-FAIL 2 EXIT
+        THEN
+    THEN
+    _XPV-A @ TTA-DESC + _XPV-CA-BELOW _X509-CA-CONSTRAINTS
+    ?DUP IF _XPV-FAIL 2 EXIT THEN
+    _XPV-A @ TTA-DESC + _XPV-NOW @ X509-CHECK-VALIDITY
+    ?DUP IF _XPV-FAIL 2 EXIT THEN
+    _XPV-A @ TTA-DESC + _XPV-ISSUER-NC-OK? 0= IF
+        TLS-CERT-CONSTRAINT _XPV-FAIL 2 EXIT
+    THEN
+    _XPV-A @ TTA-DESC + _XPV-EDGE? IF 0 ELSE 2 THEN ;
 
-        \ Find one unused presented issuer that validates completely.
-        0 _XPV-NEXT ! TLS-CERT-NO-TRUST _XPV-STATUS !
-        _XPV-N @ 1 ?DO
-            _XPV-USED @ 1 I LSHIFT AND 0= IF
-                I _XPV-CERT@ _XPV-CANDIDATE !
-                _XPV-CHILD @ _XPV-CANDIDATE @ _X509-NAME-LINK? IF
-                    _XPV-CANDIDATE @ _XPV-CA-BELOW @
-                    _X509-CA-CONSTRAINTS DUP IF
-                        _XPV-STATUS !
-                    ELSE
-                        DROP _XPV-CANDIDATE @ _XPV-NOW @
-                        X509-CHECK-VALIDITY DUP IF
-                            _XPV-STATUS !
-                        ELSE
-                            DROP _XPV-CHILD @ _XPV-CANDIDATE @
-                            X509-VERIFY-SIGNED-BY DUP IF
-                                _XPV-STATUS !
-                            ELSE
-                                DROP I _XPV-NEXT ! LEAVE
-                            THEN
-                        THEN
-                    THEN
-                THEN
-            THEN
-        LOOP
-        _XPV-NEXT @ 0= IF _XPV-STATUS @ UNLOOP EXIT THEN
-        _XPV-USED @ 1 _XPV-NEXT @ LSHIFT OR _XPV-USED !
-        _XPV-NEXT @ _XPV-CURR !
-        1 _XPV-CA-BELOW +!
+: _XPV-PUSH ( index -- )
+    1 _XPV-DEPTH +!
+    DUP _XPV-DEPTH @ CELLS _XPV-NODE + !
+    0 _XPV-DEPTH @ CELLS _XPV-CAND + !
+    FALSE _XPV-DEPTH @ CELLS _XPV-KEYED + !
+    1 SWAP LSHIFT _XPV-USED @ OR _XPV-USED ! ;
+
+: _XPV-POP ( -- )
+    1 _XPV-DEPTH @ CELLS _XPV-NODE + @ LSHIFT INVERT _XPV-USED @ AND
+    _XPV-USED !
+    -1 _XPV-DEPTH +! ;
+
+: _XPV-TRY-PRESENTED ( index -- result )
+    DUP _XPV-I !
+    1 SWAP LSHIFT _XPV-USED @ AND IF 2 EXIT THEN
+    _XPV-I @ _XPV-CERT@ _XPV-C !
+    _XPV-CHILD _XPV-C @ _X509-NAME-LINK? 0= IF 2 EXIT THEN
+    _XPV-DEPTH @ 1+ X509-CHAIN-MAX >= IF 2 EXIT THEN
+    _XPV-C @ _XPV-CA-BELOW _X509-CA-CONSTRAINTS ?DUP IF _XPV-FAIL 2 EXIT THEN
+    _XPV-C @ _XPV-NOW @ X509-CHECK-VALIDITY ?DUP IF _XPV-FAIL 2 EXIT THEN
+    _XPV-C @ _XPV-ISSUER-NC-OK? 0= IF TLS-CERT-CONSTRAINT _XPV-FAIL 2 EXIT THEN
+    _XPV-C @ _XPV-EDGE? 0= IF 2 EXIT THEN
+    _XPV-I @ _XPV-PUSH 1 ;
+
+\ The next candidate issuer for the current child: anchors, then the
+\ presented certificates after the leaf; -1 when none remain.
+: _XPV-NEXT ( -- k | -1 )
+    _XPV-DEPTH @ CELLS _XPV-CAND + DUP @
+    DUP TLS-TRUST-COUNT @ _XPV-N @ + 1- >= IF 2DROP -1 EXIT THEN
+    SWAP 1 SWAP +! ;
+
+: _XPV-TRY ( k -- result )
+    DUP TLS-TRUST-COUNT @ < IF TLS-TRUST@ _XPV-TRY-ANCHOR EXIT THEN
+    TLS-TRUST-COUNT @ - 1+ _XPV-TRY-PRESENTED ;
+
+: _XPV-FINISH ( ior -- ior )  DUP _XPV-STATE ! ;
+
+\ The path is complete: cache its intermediates' edges.
+: _XPV-SUCCEED ( -- 0 )
+    _XPV-DEPTH @ 1+ 1 ?DO
+        I CELLS _XPV-KEYED + @ IF
+            I /XEC-KEY * _XPV-EKEYS + _XEC-ADD
+        THEN
     LOOP
-    TLS-CERT-CONSTRAINT ;
+    0 _XPV-FINISH ;
+
+: X509-PATH-STEP ( -- ior )
+    _XPV-STATE @ X509-PATH-PENDING <> IF _XPV-STATE @ EXIT THEN
+    FALSE _XPV-SPENT !
+    BEGIN
+        _XPV-DEPTH @ 0< IF _XPV-ERR @ _XPV-FINISH EXIT THEN
+        _XPV-SPENT @ IF X509-PATH-PENDING EXIT THEN
+        _XPV-NEXT DUP 0< IF
+            DROP _XPV-POP
+        ELSE
+            _XPV-TRY 0= IF _XPV-SUCCEED EXIT THEN
+        THEN
+    AGAIN ;
+
+: X509-PATH-BEGIN ( certs count hostname hlen now -- ior )
+    _XPV-NOW ! _XPV-HOST-U ! _XPV-HOST ! _XPV-N ! _XPV-CERTS !
+    _XPV-N @ 0= _XPV-N @ X509-CHAIN-MAX > OR IF
+        TLS-CERT-MALFORMED _XPV-FINISH EXIT
+    THEN
+    TLS-TRUST-COUNT @ 0= IF TLS-CERT-NO-TRUST _XPV-FINISH EXIT THEN
+    0 _XPV-CERT@ _XPV-LEAF-CHECK ?DUP IF _XPV-FINISH EXIT THEN
+    _XPV-BIND
+    0 _XPV-DEPTH ! 0 _XPV-NODE ! 0 _XPV-CAND ! FALSE _XPV-KEYED ! 1 _XPV-USED !
+    TLS-CERT-NO-TRUST _XPV-ERR !
+    X509-PATH-PENDING _XPV-FINISH ;
+
+: X509-VERIFY-CHAIN ( certs count hostname hlen now -- ior )
+    X509-PATH-BEGIN
+    BEGIN DUP X509-PATH-PENDING = WHILE DROP X509-PATH-STEP REPEAT ;
+
+\ Give up a pending search, so that nothing resumes it.  The search keeps
+\ its certificates in the caller's message, so a new handshake does this
+\ before its ClientHello: its own Certificate message starts a new search
+\ even when it lands where the old one was, at the same length.
+: X509-PATH-ABANDON ( -- )
+    _XPV-STATE @ X509-PATH-PENDING = IF TLS-CERT-NO-TRUST _XPV-STATE ! THEN ;
 
 \ --- SNI host buffer (used by §16.7d and §16.10 ClientHello) ---
 \ DNS names admit the RFC maximum of 253 bytes.  Keep the expanded byte arena
@@ -7153,8 +8216,6 @@ VARIABLE TLS-SNI-LEN
 11 CONSTANT TLSHT-CERTIFICATE
 15 CONSTANT TLSHT-CERT-VERIFY
 20 CONSTANT TLSHT-FINISHED
-1027 CONSTANT TLS-SIG-ECDSA-P256-SHA256
-2052 CONSTANT TLS-SIG-RSA-PSS-RSAE-SHA256
 1025 CONSTANT TLS-SIG-RSA-PKCS1-SHA256
 
 \ ALPN protocol identifiers are opaque caller-provided bytes.  These two
@@ -7178,15 +8239,26 @@ CREATE TLS-ALPN-HTTP11-NAME
 \  TLS-VERIFY-CERT-SIG    ( ctx msg mlen -- flag )
 
 \ --- Scratch buffers for server certificate data ---
-CREATE _TLS-SERVER-PUBKEY 256 ALLOT    \ server's public key (from cert)
+\ The authenticated leaf's key: an RSA modulus up to the profile's largest
+\ and its exponent, or an EC point.
+CREATE _TLS-SERVER-PUBKEY X509-RSA-MAX-BYTES ALLOT
 VARIABLE _TLS-SERVER-PUBKEY-LEN
-VARIABLE _TLS-SERVER-PUBKEY-ALGO       \ algo code (e.g. 0x0403)
+VARIABLE _TLS-SERVER-PUBKEY-ALGO       \ X509-KEY-*
+CREATE _TLS-SERVER-PUBKEY-E 8 ALLOT
+VARIABLE _TLS-SERVER-PUBKEY-E-U
 
 \ TLS-PARSE-CERTIFICATE ( msg mlen -- ior )
-\   Parse and authenticate a complete TLS 1.3 server Certificate message.
-\   The certificate descriptors borrow the message bytes and are valid until
-\   the receive buffer is reused.  Only the authenticated leaf key is copied.
-8 CONSTANT TLS-PEER-CERT-MAX
+\   Parse a complete TLS 1.3 server Certificate message and start the
+\   search for its path: X509-PATH-PENDING, then TLS-CERTIFICATE-STEP
+\   until it answers otherwise, or the failure.  The certificate
+\   descriptors borrow the message bytes, which must stay in place until
+\   the search ends.  Only the authenticated leaf key is copied.
+\
+\ TLS-CERTIFICATE-STEP ( -- ior )
+\   One step of that search, checking at most one signature: answers
+\   X509-PATH-PENDING while it continues, 0 once the leaf's key is kept,
+\   or the failure.
+X509-CHAIN-MAX CONSTANT TLS-PEER-CERT-MAX
 /X509-CERT TLS-PEER-CERT-MAX * XBUF TLS-PEER-CERTS
 VARIABLE TLS-PEER-CERT-COUNT
 
@@ -7206,7 +8278,9 @@ VARIABLE _TPC-KEEP
     0 TLS-PEER-CERT-COUNT !
     0 _TLS-SERVER-PUBKEY-LEN !
     0 _TLS-SERVER-PUBKEY-ALGO !
-    _TLS-SERVER-PUBKEY 256 0 FILL
+    _TLS-SERVER-PUBKEY X509-RSA-MAX-BYTES 0 FILL
+    _TLS-SERVER-PUBKEY-E 8 0 FILL 0 _TLS-SERVER-PUBKEY-E-U !
+    TLS-CERT-NO-TRUST _XPV-STATE !
     0 TLS-CERT-LAST-ERROR ! ;
 
 : TLS-PARSE-CERTIFICATE ( msg mlen -- ior )
@@ -7276,12 +8350,21 @@ VARIABLE _TPC-KEEP
     THEN
     TLS-PEER-CERTS TLS-PEER-CERT-COUNT @
     TLS-SNI-HOST TLS-SNI-LEN @ EPOCH@ 1000 /
-    X509-VERIFY-CHAIN DUP IF _TPC-RESULT EXIT THEN DROP
+    X509-PATH-BEGIN DUP X509-PATH-PENDING = IF EXIT THEN
+    _TPC-RESULT ;
 
+\ The path is complete: keep the leaf's key for CertificateVerify.
+: _TPC-KEEP-LEAF ( -- )
     TLS-PEER-CERTS XC.PUB-U + @ DUP _TLS-SERVER-PUBKEY-LEN !
     TLS-PEER-CERTS XC.PUB-A + @ _TLS-SERVER-PUBKEY ROT CMOVE
     TLS-PEER-CERTS XC.PUB-ALGO + @ _TLS-SERVER-PUBKEY-ALGO !
-    TLS-CERT-OK _TPC-RESULT ;
+    TLS-PEER-CERTS XC.PUB-E-U + @ DUP _TLS-SERVER-PUBKEY-E-U !
+    TLS-PEER-CERTS XC.PUB-E-A + @ _TLS-SERVER-PUBKEY-E ROT CMOVE ;
+
+: TLS-CERTIFICATE-STEP ( -- ior )
+    X509-PATH-STEP DUP X509-PATH-PENDING = IF EXIT THEN
+    DUP IF _TPC-RESULT EXIT THEN
+    DROP _TPC-KEEP-LEAF TLS-CERT-OK _TPC-RESULT ;
 
 \ =====================================================================
 \  §16.8  TLS 1.3 Record Layer
@@ -8799,7 +9882,7 @@ CREATE _TC-STATIC-END
                 THEN
                 DROP TLS-CREDENTIAL-E-CERT EXIT
             THEN DROP
-            _TC-LEAF XC.PUB-ALGO + @ X509-ALG-P256 <>
+            _TC-LEAF XC.PUB-ALGO + @ X509-KEY-P256 <>
             _TC-LEAF XC.PUB-U + @ 65 <> OR
             _TC-LEAF XC.PUB-A + @ C@ 4 <> OR IF
                 TLS-CREDENTIAL-E-PROFILE EXIT
@@ -10735,10 +11818,6 @@ CREATE OID-RSA-SHA1      42 C, 134 C, 72 C, 134 C, 247 C, 13 C, 1 C, 1 C, 5 C,
 9 CONSTANT /OID-RSA-SHA1
 CREATE OID-RSA-PSS       42 C, 134 C, 72 C, 134 C, 247 C, 13 C, 1 C, 1 C, 10 C,
 9 CONSTANT /OID-RSA-PSS
-CREATE OID-RSA-SHA384    42 C, 134 C, 72 C, 134 C, 247 C, 13 C, 1 C, 1 C, 12 C,
-9 CONSTANT /OID-RSA-SHA384
-CREATE OID-RSA-SHA512    42 C, 134 C, 72 C, 134 C, 247 C, 13 C, 1 C, 1 C, 13 C,
-9 CONSTANT /OID-RSA-SHA512
 CREATE OID-RSA-SHA224    42 C, 134 C, 72 C, 134 C, 247 C, 13 C, 1 C, 1 C, 14 C,
 9 CONSTANT /OID-RSA-SHA224
 CREATE OID-MGF1          42 C, 134 C, 72 C, 134 C, 247 C, 13 C, 1 C, 1 C, 8 C,
@@ -11634,10 +12713,10 @@ VARIABLE _TSHH-SH-U
 
 : TLS-PLAIN-WIPE  ( -- )
     TLS-PLAIN-BUF 16640 0 FILL ;
-\ The largest admitted hybrid ClientHello is 1525 bytes with maximum DNS SNI
+\ The largest admitted hybrid ClientHello is 1537 bytes with maximum DNS SNI
 \ and a maximum-width ALPN ProtocolName.  The builder measures the complete
 \ record against this arena before changing any handshake state.
-1536 CONSTANT TLS-CH-BUF-CAPACITY
+1537 CONSTANT TLS-CH-BUF-CAPACITY
 TLS-CH-BUF-CAPACITY XBUF TLS-CH-BUF
 CREATE TLS-HS-HASH 32 ALLOT
 CREATE TLS-TEMP-SECRET 32 ALLOT
@@ -11820,18 +12899,46 @@ VARIABLE _TEL-OUT
     ['] _TLS-EXPAND-LABEL-DISPATCH _TEL-GUARD ;
 
 \ TLS-VERIFY-CERT-SIG ( ctx msg mlen -- flag )
-\   Verify a TLS 1.3 CertificateVerify message.
+\   Verify a TLS 1.3 CertificateVerify message with the leaf's key.
 \   RFC 8446 §4.4.3:
 \     content = 0x20*64 || "TLS 1.3, server CertificateVerify" || 0x00 || H(transcript)
-\     Verify signature over SHA-256(content) using server's public key.
+\   The schemes are those ClientHello offers: ECDSA P-256 with SHA-256 and
+\   P-384 with SHA-384, and RSA-PSS for rsaEncryption keys with SHA-256,
+\   -384 or -512, whose hash also hashes the content.
 \   Returns 0 on valid, -1 on invalid/unsupported.
+1027 CONSTANT TLS-SIG-ECDSA-P256-SHA256
+1283 CONSTANT TLS-SIG-ECDSA-P384-SHA384
+2052 CONSTANT TLS-SIG-RSA-PSS-RSAE-SHA256
+2053 CONSTANT TLS-SIG-RSA-PSS-RSAE-SHA384
+2054 CONSTANT TLS-SIG-RSA-PSS-RSAE-SHA512
+
 VARIABLE _TCV-CTX
 VARIABLE _TCV-MSG
 VARIABLE _TCV-MLEN
 VARIABLE _TCV-ALGO
 VARIABLE _TCV-SIG-U
+VARIABLE _TCV-HU
+VARIABLE _TCV-KEY
 CREATE _TCV-CONTENT 130 ALLOT        \ 64 + 33 + 1 + 32 = 130 bytes
-CREATE _TCV-HASH    32 ALLOT         \ SHA-256 of content
+CREATE _TCV-HASH    64 ALLOT
+CREATE _TCV-RSA-KEY /RSA-KEY ALLOT    \ the leaf's RSA key, for RSA-PSS
+
+\ The scheme's digest length and the key type it needs; 0 0 when the
+\ scheme is not one ClientHello offered.
+: _TCV-SCHEME ( scheme -- hash-u key-type )
+    DUP TLS-SIG-ECDSA-P256-SHA256 = IF DROP 32 X509-KEY-P256 EXIT THEN
+    DUP TLS-SIG-ECDSA-P384-SHA384 = IF DROP 48 X509-KEY-P384 EXIT THEN
+    DUP TLS-SIG-RSA-PSS-RSAE-SHA256 = IF DROP 32 X509-KEY-RSA EXIT THEN
+    DUP TLS-SIG-RSA-PSS-RSAE-SHA384 = IF DROP 48 X509-KEY-RSA EXIT THEN
+    TLS-SIG-RSA-PSS-RSAE-SHA512 = IF 64 X509-KEY-RSA ELSE 0 0 THEN ;
+
+\ The signature's length suits the key.
+: _TCV-SIG-LENGTH? ( -- flag )
+    _TCV-KEY @ X509-KEY-RSA = IF
+        _TCV-SIG-U @ _TLS-SERVER-PUBKEY-LEN @ = EXIT
+    THEN
+    _TCV-SIG-U @ 8 <
+    _TCV-SIG-U @ _TCV-KEY @ X509-KEY-P256 = IF 72 ELSE 104 THEN > OR 0= ;
 
 : TLS-VERIFY-CERT-SIG ( ctx msg mlen -- flag )
     _TCV-MLEN !  _TCV-MSG !  _TCV-CTX !
@@ -11842,24 +12949,14 @@ CREATE _TCV-HASH    32 ALLOT         \ SHA-256 of content
     _TCV-MSG @ 4 + _BE16@ _TCV-ALGO !
     _TCV-MSG @ 6 + _BE16@ _TCV-SIG-U !
     _TCV-SIG-U @ 8 + _TCV-MLEN @ <> IF -1 EXIT THEN
-    _TCV-ALGO @ TLS-SIG-ECDSA-P256-SHA256 = IF
-        _TLS-SERVER-PUBKEY-ALGO @ X509-ALG-P256 <>
-        _TLS-SERVER-PUBKEY-LEN @ 65 <> OR IF -1 EXIT THEN
-        _TCV-SIG-U @ DUP 8 < SWAP 72 > OR IF -1 EXIT THEN
-    ELSE
-        _TCV-ALGO @ TLS-SIG-RSA-PSS-RSAE-SHA256 <> IF -1 EXIT THEN
-        _TLS-SERVER-PUBKEY-ALGO @ X509-ALG-RSA2048 <>
-        _TLS-SERVER-PUBKEY-LEN @ /RSA2048 <> OR
-        _TCV-SIG-U @ /RSA2048 <> OR IF -1 EXIT THEN
-    THEN
+    _TCV-ALGO @ _TCV-SCHEME _TCV-KEY ! _TCV-HU !
+    _TCV-HU @ 0= IF -1 EXIT THEN
+    _TLS-SERVER-PUBKEY-ALGO @ _TCV-KEY @ <> IF -1 EXIT THEN
+    _TCV-SIG-LENGTH? 0= IF -1 EXIT THEN
     \ Build verification content:
     \ 64 bytes of 0x20
     _TCV-CONTENT 64 32 FILL
     \ "TLS 1.3, server CertificateVerify" (33 bytes)
-    \ T=84 L=76 S=83 space=32 1=49 .=46 3=51 ,=44 sp=32
-    \ s=115 e=101 r=114 v=118 e=101 r=114 sp=32
-    \ C=67 e=101 r=114 t=116 i=105 f=102 i=105 c=99 a=97 t=116 e=101
-    \ V=86 e=101 r=114 i=105 f=102 y=121
     S" TLS 1.3, server CertificateVerify"
     _TCV-CONTENT 64 + SWAP CMOVE           \ copy context string
     0 _TCV-CONTENT 64 + 33 + C!            \ trailing 0x00 separator
@@ -11868,16 +12965,22 @@ CREATE _TCV-HASH    32 ALLOT         \ SHA-256 of content
     IF -1 EXIT THEN
     \ Append transcript hash
     _TCV-HASH _TCV-CONTENT 98 + 32 CMOVE   \ 64+33+1 = 98
-    \ Hash the entire content with SHA-256 (ECDSA uses SHA-256)
-    _TCV-CONTENT 130 _TCV-HASH SHA256 IF -1 EXIT THEN
-    _TCV-ALGO @ TLS-SIG-ECDSA-P256-SHA256 = IF
+    \ Hash the content with the scheme's hash
+    _TCV-CONTENT 130 0 0 _TCV-HASH _TCV-HU @ _RSA-HASH2 IF -1 EXIT THEN
+    _TCV-KEY @ X509-KEY-P256 = IF
         _TCV-HASH _TLS-SERVER-PUBKEY
-        _TCV-MSG @ 8 + _TCV-SIG-U @ ECDSA-P256-VERIFY
-    ELSE
-        _TCV-HASH _TLS-SERVER-PUBKEY
-        _TCV-MSG @ 8 + _TCV-SIG-U @ RSA2048-PSS-SHA256-VERIFY
+        _TCV-MSG @ 8 + _TCV-SIG-U @ ECDSA-P256-VERIFY EXIT
     THEN
-;
+    _TCV-KEY @ X509-KEY-P384 = IF
+        _TCV-HASH 48 _TLS-SERVER-PUBKEY
+        _TCV-MSG @ 8 + _TCV-SIG-U @ ECDSA-P384-VERIFY EXIT
+    THEN
+    _TLS-SERVER-PUBKEY _TCV-RSA-KEY RSAK.N + !
+    _TLS-SERVER-PUBKEY-LEN @ _TCV-RSA-KEY RSAK.N-U + !
+    _TLS-SERVER-PUBKEY-E _TCV-RSA-KEY RSAK.E + !
+    _TLS-SERVER-PUBKEY-E-U @ _TCV-RSA-KEY RSAK.E-U + !
+    _TCV-HASH _TCV-HU @ _TCV-MSG @ 8 + _TCV-SIG-U @ _TCV-RSA-KEY
+    RSA-PSS-VERIFY 0<> ;
 
 \ --- Transcript Management ---
 : TLS-TR-RESET ( -- )
@@ -12840,7 +13943,7 @@ VARIABLE _TBCH-FIXED
     _TBCH-CTX @ TLS-CTX.ALPN-NAME-LEN @
     DUP 0< SWAP TLS-ALPN-NAME-MAX > OR IF 0 0 EXIT THEN
     \ Compute and bound the complete record before changing any TLS state.
-    _TBCH-HYBRID @ IF 915 77 ELSE 77 75 THEN
+    _TBCH-HYBRID @ IF 927 77 ELSE 89 75 THEN
     _TBCH-FIXED !
     TLS-SNI-LEN @ 0> IF TLS-SNI-LEN @ 9 + + THEN
     _TBCH-CTX @ TLS-CTX.ALPN-NAME-LEN @ ?DUP IF 7 + + THEN
@@ -12934,18 +14037,24 @@ VARIABLE _TBCH-FIXED
     _TBCH-CTX @ TLS-CTX.MY-PUBKEY                  \ copy public key
     TLS-CH-BUF _TBCH-POS @ + 32 CMOVE
     32 _TBCH-POS +!
-    \ 4. signature_algorithms (0x000D): handshake signature verification
+    \ 4. signature_algorithms (0x000D): CertificateVerify schemes
     0 _TBCH-C!  13 _TBCH-C!                       \ type = 0x000D
-    0 _TBCH-C!  6  _TBCH-C!                       \ ext_len = 6
-    0 _TBCH-C!  4  _TBCH-C!                       \ list_len = 4 (2 algos)
+    0 _TBCH-C!  12 _TBCH-C!                       \ ext_len = 12
+    0 _TBCH-C!  10 _TBCH-C!                       \ list_len = 10 (5 algos)
     4 _TBCH-C!  3  _TBCH-C!                       \ ECDSA-P256-SHA256 (0x0403)
+    5 _TBCH-C!  3  _TBCH-C!                       \ ECDSA-P384-SHA384 (0x0503)
     8 _TBCH-C!  4  _TBCH-C!                       \ RSA-PSS-RSAE-SHA256 (0x0804)
+    8 _TBCH-C!  5  _TBCH-C!                       \ RSA-PSS-RSAE-SHA384 (0x0805)
+    8 _TBCH-C!  6  _TBCH-C!                       \ RSA-PSS-RSAE-SHA512 (0x0806)
     \ 5. signature_algorithms_cert (0x0032): certificate signatures
     0 _TBCH-C!  50 _TBCH-C!                       \ type = 0x0032
-    0 _TBCH-C!  6  _TBCH-C!                       \ ext_len = 6
-    0 _TBCH-C!  4  _TBCH-C!                       \ list_len = 4 (2 algos)
+    0 _TBCH-C!  12 _TBCH-C!                       \ ext_len = 12
+    0 _TBCH-C!  10 _TBCH-C!                       \ list_len = 10 (5 algos)
     4 _TBCH-C!  3  _TBCH-C!                       \ ECDSA-P256-SHA256 (0x0403)
+    5 _TBCH-C!  3  _TBCH-C!                       \ ECDSA-P384-SHA384 (0x0503)
     4 _TBCH-C!  1  _TBCH-C!                       \ RSA-PKCS1-SHA256 (0x0401)
+    5 _TBCH-C!  1  _TBCH-C!                       \ RSA-PKCS1-SHA384 (0x0501)
+    6 _TBCH-C!  1  _TBCH-C!                       \ RSA-PKCS1-SHA512 (0x0601)
     \ 6. supported_groups (0x000A)
     0 _TBCH-C!  10 _TBCH-C!                       \ type = 0x000A
     0 _TBCH-C!  _TBCH-HYBRID @ IF 6 ELSE 4 THEN _TBCH-C!
@@ -12959,7 +14068,8 @@ VARIABLE _TBCH-FIXED
     _TBCH-CTX @ TLS-CH-BUF _TBCH-POS @ +
     TLS-CH-BUF-CAPACITY _TBCH-POS @ - TLS-ALPN-BUILD-OFFER
     DUP IF 2DROP 0 0 EXIT THEN DROP _TBCH-POS +!
-    \ Set handshake state
+    \ Set handshake state; a search an earlier handshake left pending ends.
+    X509-PATH-ABANDON
     TLSS-HANDSHAKE _TBCH-CTX @ TLS-CTX.STATE !
     TLSH-CLIENT-HELLO-SENT _TBCH-CTX @ TLS-CTX.HS-STATE !
     \ Append handshake message to transcript (skip 5-byte record header)
@@ -13456,11 +14566,23 @@ VARIABLE _TBF-HASH
 \ TLS-PROCESS-HS-MSG ( ctx msg mlen -- flag )
 \   Process a received handshake message (decrypted, no record header).
 \   Dispatches on handshake type, updates transcript and state.
-\   Returns 0 for success, -1 for error.
+\   Returns 0 for success, X509-PATH-PENDING while a Certificate's path
+\   search continues, when the caller calls again with the same message,
+\   and another nonzero value for an error.
 VARIABLE _TPHM-CTX
 VARIABLE _TPHM-MSG
 VARIABLE _TPHM-MLEN
 VARIABLE _TPHM-TYPE
+VARIABLE _TPHM-JOB-CTX       \ the Certificate whose path search is pending
+VARIABLE _TPHM-JOB-MSG
+VARIABLE _TPHM-JOB-U
+0 _TPHM-JOB-CTX !
+
+: _TPHM-RESUMING? ( -- flag )
+    _TPHM-JOB-CTX @ _TPHM-CTX @ =
+    _TPHM-JOB-MSG @ _TPHM-MSG @ = AND
+    _TPHM-JOB-U @ _TPHM-MLEN @ = AND
+    _XPV-STATE @ X509-PATH-PENDING = AND ;
 
 : _TPHM-EXPECT? ( hs-state -- flag )
     _TPHM-CTX @ TLS-CTX.HS-STATE @ =
@@ -13513,10 +14635,22 @@ VARIABLE _TPHM-TYPE
     THEN
     _TPHM-TYPE @ TLSHT-CERTIFICATE = IF
         TLSH-EE-RCVD _TPHM-EXPECT? 0= IF -1 EXIT THEN
-        0 _TPHM-CTX @ TLS-CTX.PEER-AUTH !
-        \ Authenticate the complete path before retaining the leaf key.
-        _TPHM-MSG @ _TPHM-MLEN @ TLS-PARSE-CERTIFICATE
-        DUP 0<> IF EXIT THEN DROP         \ parse failed → abort
+        \ Authenticate the complete path before retaining the leaf key.  The
+        \ search checks one signature per call; the caller calls again with
+        \ the same message while it answers X509-PATH-PENDING.
+        _TPHM-RESUMING? IF
+            TLS-CERTIFICATE-STEP
+        ELSE
+            0 _TPHM-CTX @ TLS-CTX.PEER-AUTH !
+            _TPHM-MSG @ _TPHM-MLEN @ TLS-PARSE-CERTIFICATE
+            DUP X509-PATH-PENDING = IF DROP TLS-CERTIFICATE-STEP THEN
+        THEN
+        DUP X509-PATH-PENDING = IF
+            _TPHM-CTX @ _TPHM-JOB-CTX !  _TPHM-MSG @ _TPHM-JOB-MSG !
+            _TPHM-MLEN @ _TPHM-JOB-U ! EXIT
+        THEN
+        0 _TPHM-JOB-CTX !
+        DUP 0<> IF EXIT THEN DROP         \ path failed → abort
         _TPHM-MSG @ _TPHM-MLEN @ TLS-TR-APPEND
         TLS-HS-TR-ERROR @ IF -1 EXIT THEN
         TLSH-CERT-RCVD _TPHM-CTX @ TLS-CTX.HS-STATE !
@@ -17026,6 +18160,9 @@ VARIABLE _TPMS-TOTAL
         TLS-HS-RBUF-MAX > IF -1 TLS-HS-RBUF-ERROR ! -1 EXIT THEN
         TLS-HS-RBUF-LEN @ _TPMS-TOTAL @ < IF 0 EXIT THEN
         _TPMS-CTX @ TLS-HS-RBUF _TPMS-TOTAL @ TLS-PROCESS-HS-MSG
+        BEGIN DUP X509-PATH-PENDING = WHILE
+            DROP _TPMS-CTX @ TLS-HS-RBUF _TPMS-TOTAL @ TLS-PROCESS-HS-MSG
+        REPEAT
         0<> IF -1 TLS-HS-RBUF-ERROR ! -1 EXIT THEN
         TLS-HS-RBUF _TPMS-TOTAL @ + TLS-HS-RBUF
         TLS-HS-RBUF-LEN @ _TPMS-TOTAL @ - CMOVE
