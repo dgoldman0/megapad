@@ -135,6 +135,7 @@ def test_hybrid_server_registers_before_boot_and_preserves_shared_control(
     backend = prepared.machine.semantic_session.backend
     semantic = prepared.hybrid.semantic
     try:
+        assert not prepared.server.debug_access
         assert prepared.preparation.runtime is semantic
         assert prepared.machine.semantic_session.runtime is semantic
         assert prepared.server.machine is prepared.machine
@@ -262,6 +263,19 @@ def test_invalid_later_manifest_entry_prevents_all_runtime_publication(tmp_path,
     monkeypatch.setattr("hybrid.server.HybridRuntime.create", create)
     with pytest.raises(HybridManifestError):
         prepare_server(args)
+    assert not Path(args.socket).exists()
+
+
+def test_the_hybrid_server_attaches_no_network_card(tmp_path, monkeypatch):
+    def load(_path):
+        pytest.fail("the refusal must come before the manifest loads")
+
+    monkeypatch.setattr("hybrid.server.load_manifest", load)
+    for nic, local_access in (("slirp", False), (None, True)):
+        args = _server_args(tmp_path)
+        args.nic, args.local_access = nic, local_access
+        with pytest.raises(ValueError, match="attaches no network card"):
+            prepare_server(args)
     assert not Path(args.socket).exists()
 
 

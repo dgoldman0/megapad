@@ -6,16 +6,18 @@ from __future__ import annotations
 import argparse
 import os
 import signal
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from shared.session_options import (
+    add_debug_option,
+    add_network_options,
     add_storage_options,
     configured_production_executor,
     link_pace,
+    report_network,
     retained_policy,
     rich_terminal_policy,
 )
@@ -194,23 +196,8 @@ def build_argument_parser(
             "(0 for all)"
         ),
     )
-    parser.add_argument(
-        "--nic",
-        metavar="SPEC",
-        help=(
-            "attach a network card: slirp, the user-mode network, which needs "
-            "no administrator rights, or tap:IFNAME, a TAP device set up "
-            "beforehand"
-        ),
-    )
-    parser.add_argument(
-        "--local-access",
-        action="store_true",
-        help=(
-            "let the slirp network reach this computer and its local "
-            "network, which it refuses otherwise"
-        ),
-    )
+    add_network_options(parser)
+    add_debug_option(parser)
     parser.add_argument("--paused", action="store_true")
     return parser
 
@@ -321,23 +308,9 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
     return PreparedSimulatorServer(
         preparation=preparation,
         machine=machine,
-        server=SessionServer(machine, args.socket),
+        server=SessionServer(machine, args.socket, debug_access=args.debug_access),
         network=card,
     )
-
-
-def report_network(network) -> None:
-    """Say which network the machine has, and warn at every start when it
-    may reach this computer and its local network."""
-
-    print(
-        "[shared] network: " + ("none" if network is None else network.backend.name),
-        flush=True,
-    )
-    if network is not None and getattr(network.backend, "local_access", False):
-        from nic_backends import LOCAL_ACCESS_WARNING
-
-        print(f"[shared] warning: {LOCAL_ACCESS_WARNING}", file=sys.stderr, flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -406,7 +379,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
             flush=True,
         )
-        report_network(prepared.network)
+        report_network(None if prepared.network is None else prepared.network.backend)
         print("[shared] machine owner running; Ctrl+C stops it", flush=True)
         server.serve_forever()
     finally:
@@ -425,5 +398,4 @@ __all__ = [
     "build_argument_parser",
     "main",
     "prepare_server",
-    "report_network",
 ]

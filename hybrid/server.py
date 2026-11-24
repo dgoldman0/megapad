@@ -83,6 +83,8 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
         raise ValueError("--retained-terminal-policy requires --rich-terminal-policy")
     if args.terminal_link_pace is not None and args.rich_terminal_policy is None:
         raise ValueError("--terminal-link-pace requires --rich-terminal-policy")
+    if args.nic is not None or args.local_access:
+        raise ValueError("the hybrid backend attaches no network card")
     image_paths = storage_image_paths(args)
     quantum_steps = configured_semantic_quantum_steps(args.semantic_quantum_steps)
     executor = configured_production_executor(args.executor)
@@ -143,7 +145,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
             hybrid=hybrid,
             preparation=preparation,
             machine=machine,
-            server=SessionServer(machine, args.socket),
+            server=SessionServer(machine, args.socket, debug_access=args.debug_access),
         )
     except BaseException:
         if session is not None:

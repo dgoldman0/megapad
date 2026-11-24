@@ -3707,11 +3707,44 @@ class SharedSessionOwner(ABC):
             return {"revision": self.session.revision, "outputs": outputs}
 
 
-class SessionServer:
-    """Unix-domain JSON request server for one shared session owner."""
+# Requests that read or steer the machine itself rather than show and drive
+# its screen: its dictionary and memory, its execution, its profiles, its
+# network diagnostics, its raw output and text, and captures written to files.
+# A detailed status joins them, since it carries the registers and, on the
+# emulator, the cells of both stacks.  Over the socket they need a server
+# started with debugging access, since the machine's memory can hold a user's
+# keys and unsealed tokens.  The owner's own calls to dispatch() are not
+# affected.
+DEBUG_METHODS = frozenset({
+    "forth", "peek", "pause", "resume", "step", "reset",
+    "start_phase_profile", "phase_profile", "stop_phase_profile",
+    "network", "raw", "text", "capture",
+})
 
-    def __init__(self, machine: SharedSessionOwner, socket_path: str = DEFAULT_SOCKET):
+
+def needs_debug_access(method: object, params: Mapping[str, Any]) -> bool:
+    """Whether a socket request for METHOD with PARAMS needs debugging access."""
+
+    if method in DEBUG_METHODS:
+        return True
+    return method == "status" and params.get("detailed", True) is not False
+
+
+class SessionServer:
+    """Unix-domain JSON request server for one shared session owner.
+
+    DEBUG_ACCESS lets clients make the requests that needs_debug_access()
+    names over the socket."""
+
+    def __init__(
+        self,
+        machine: SharedSessionOwner,
+        socket_path: str = DEFAULT_SOCKET,
+        *,
+        debug_access: bool = False,
+    ):
         self.machine = machine
+        self.debug_access = bool(debug_access)
         self.socket_path = str(Path(socket_path).expanduser())
         self._socket: socket.socket | None = None
         self._stopping = threading.Event()
@@ -3897,11 +3930,15 @@ class SessionServer:
                 request = None
                 try:
                     request = json.loads(line)
-                    result = self.dispatch(
-                        request.get("method"),
-                        request.get("params") or {},
-                        connection_id=connection_id,
-                    )
+                    method = request.get("method")
+                    params = request.get("params") or {}
+                    if not self.debug_access and needs_debug_access(method, params):
+                        raise PermissionError(
+                            f"{'a detailed status' if method == 'status' else method} "
+                            "needs debugging access; start the server with "
+                            "--debug-access"
+                        )
+                    result = self.dispatch(method, params, connection_id=connection_id)
                     response = {"id": request.get("id"), "ok": True, "result": result}
                 except Exception as exc:
                     response = {

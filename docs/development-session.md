@@ -161,18 +161,10 @@ python3 megapad/megapad.py --mode emulator
 The shared server accepts the same policy as
 `--lanes {auto,1,2,4}` and prints the resolved width at startup.
 
-To attach the shared machine to an already configured Linux TAP interface:
-
-```bash
-python3 megapad/megapad.py --mode emulator --nic-tap mp64tap0
-```
-
-The server refuses startup if the TAP device is missing or inaccessible; it
-does not create interfaces or alter host routing on the user's behalf.
-
-The simulator's server takes a network card the same way, and offers a
-network that needs no administrator rights: libslirp's user-mode network,
-linked into MegaPad's `_mp64_slirp` module.
+`--nic` attaches a network card to the shared machine, on the emulator's
+server and the simulator's alike; the hybrid server attaches none.
+`--nic slirp` gives it a network that needs no administrator rights:
+libslirp's user-mode network, linked into MegaPad's `_mp64_slirp` module.
 
 ```bash
 python3 megapad/megapad.py --mode simulator --storage desktop.img --nic slirp
@@ -188,7 +180,11 @@ multicast and reserved ranges, and every address of this computer's own
 interfaces. `--local-access` lifts that refusal for testing against local
 services, and the server then warns at every start that any program on the
 machine can reach services that expect only local callers.
-`--nic tap:mp64tap0` attaches a TAP device instead.
+
+`--nic tap:mp64tap0` attaches an already configured Linux TAP interface
+instead. The server refuses startup if the TAP device is missing or
+inaccessible; it does not create interfaces or alter host routing on the
+user's behalf.
 
 Audible one-shot PCM playback is likewise explicit opt-in:
 
@@ -229,8 +225,8 @@ the complete caller-owned `--rich-terminal-policy` and
 link carry the guest's bytes no faster than that, as a slower wire would, and
 makes the terminal advertise resource chunks that link carries in one
 `FRAME_US` frame time, so a frame waits behind at most one chunk of a picture
-upload. Without it the link runs at host speed. It has no NIC or audible
-audio option.
+upload. Without it the link runs at host speed. It takes `--nic` as above,
+and has no audible audio option.
 `--executor python|native|auto` takes precedence over `MEGAFORTH_EXECUTOR`.
 With neither set, the production server requires native execution; only
 `auto` permits fallback to Python. Embedded `MegaForthRuntime` construction
@@ -264,9 +260,19 @@ frame that does change is repainted only where it changed, exactly as a
 full composition would paint it, and only those rectangles of the window
 are updated (`docs/viewer-partial-repaint.md`).
 
-Control or inspect that same machine from another process:
+Control or inspect that same machine from another process. Requests that
+read or steer the machine itself need a server started with `--debug-access`:
+a detailed `status`, which carries the registers and, on the emulator, the
+cells of both stacks; `network`, `forth`, `peek`, `text`, `raw` and `capture`;
+`pause`, `resume`, `step` and `reset`; and the phase-profile methods. Without
+the option the server refuses them, since the machine's memory can hold a
+user's keys and unsealed tokens, and serves only the display, input,
+`resize`, a light `status` and `shutdown`. The viewer's `Ctrl+F5`, `Ctrl+F10`
+and `Ctrl+R` controls need it as well. The owner's own calls in its process
+are not affected.
 
 ```bash
+python3 megapad/megapad.py --mode emulator --debug-access
 python3 megapad/session_ctl.py status
 python3 megapad/session_ctl.py network
 python3 megapad/session_ctl.py forth _ASHELL-LAST-TICK DESK-DESC

@@ -58,8 +58,10 @@ from shared.session import (
     TerminalSnapshot,
 )
 from shared_session import (
+    DEBUG_METHODS,
     SessionClient,
     SessionServer,
+    needs_debug_access,
     display_offer_from_wire,
     display_offer_to_wire,
     display_scope_from_wire,
@@ -2442,7 +2444,7 @@ def test_shared_server_clients_control_one_machine(tmp_path):
     socket_path = tmp_path / "shared.sock"
     session = MachineSession.from_bios(BIOS, cols=60, rows=20)
     machine = SharedMachine(session)
-    server = SessionServer(machine, str(socket_path))
+    server = SessionServer(machine, str(socket_path), debug_access=True)
     try:
         server.serve_in_thread()
     except PermissionError:
@@ -2544,6 +2546,77 @@ def test_shared_server_clients_control_one_machine(tmp_path):
         server.stop()
 
     assert not socket_path.exists()
+
+
+# Every request a server refuses without debugging access, with parameters
+# it would otherwise accept.
+DEBUG_REQUESTS = (
+    ("status", {}),
+    ("status", {"detailed": True}),
+    ("forth", {"names": ["STATE"]}),
+    ("peek", {"address": 0, "count": 1}),
+    ("pause", {}),
+    ("resume", {}),
+    ("step", {"count": 1}),
+    ("reset", {"paused": False}),
+    ("start_phase_profile", {}),
+    ("phase_profile", {}),
+    ("stop_phase_profile", {}),
+    ("network", {}),
+    ("raw", {"since": 0}),
+    ("text", {}),
+    ("capture", {"png": "refused.png"}),
+)
+
+
+def test_debugging_methods_need_a_server_with_debug_access(tmp_path):
+    assert {method for method, _ in DEBUG_REQUESTS} == DEBUG_METHODS | {"status"}
+    socket_path = tmp_path / "plain.sock"
+    session = MachineSession.from_bios(BIOS, cols=60, rows=20)
+    machine = SharedMachine(session)
+    server = SessionServer(machine, str(socket_path))
+    try:
+        server.serve_in_thread()
+    except PermissionError:
+        session.close()
+        pytest.skip("Unix sockets are unavailable in this sandbox")
+
+    try:
+        with SessionClient(str(socket_path)) as client:
+            status = wait_until(
+                lambda: (
+                    current
+                    if (current := client.request("status", detailed=False))["state"]
+                    == "idle"
+                    else None
+                )
+            )
+            assert "cpu" not in status and "forth" not in status
+            for method, params in DEBUG_REQUESTS:
+                if method == "capture":
+                    params = {"png": str(tmp_path / params["png"])}
+                with pytest.raises(RuntimeError) as refused:
+                    client.request(method, **params)
+                assert str(refused.value).startswith("PermissionError: ")
+                assert "needs debugging access" in str(refused.value)
+            assert not (tmp_path / "refused.png").exists()
+            # The refusals left the machine running and the screen served.
+            assert not client.request("status", detailed=False)["paused"]
+            assert client.request("screen", since=-1)["changed"]
+            # The owner's own calls are not gated.
+            assert server.dispatch("forth", {"names": ["STATE"]})["words"]["STATE"]
+    finally:
+        server.stop()
+
+    assert not socket_path.exists()
+
+
+def test_a_light_status_needs_no_debugging_access():
+    assert not needs_debug_access("status", {"detailed": False})
+    assert needs_debug_access("status", {})
+    assert not needs_debug_access("screen", {"since": -1})
+    assert not needs_debug_access("send_text", {"text": "x"})
+    assert not needs_debug_access("shutdown", {})
 
 
 def test_shared_machine_wakes_a_sleeping_guest_at_its_deadline():
