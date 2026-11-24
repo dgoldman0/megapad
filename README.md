@@ -277,13 +277,19 @@ boundaries are recorded in `docs/tls-hardening.md`.
 
 ### Prerequisites
 
-Use CPython 3.12 for the current build and test workflow. The hosted Python
-executor can run without compiling either native extension.
+Use CPython 3.13 to build and test. Where the system's Python is older,
+[uv](https://docs.astral.sh/uv/) installs 3.13 without administrator rights
+(`uv python install 3.13`). The hosted Python executor can run without
+compiling either native extension.
 
 Architectural emulation requires the C++ extension; hosted simulation also
-has a native executor. Build both with `make build` using CPython 3.12,
-pybind11, and a C++17 compiler. The focused `make accel` and
-`make simulator-accel` targets remain available.
+has a native executor. Build both with `make build` using CPython 3.13,
+pybind11, a C++17 compiler, and libslirp's development files for the
+simulator's network card. The focused `make accel` and
+`make simulator-accel` targets remain available. The emulator's extension is
+compiled for the host's own processor and the simulator's for the
+compiler's default target; `MP64_MARCH=x86-64-v2 make build` compiles both
+for the x86-64-v2 baseline that Fantasy Engine's release builds use.
 
 ```bash
 git clone <repository-url>
@@ -433,8 +439,8 @@ SCREENS                           \ Launch 9-screen TUI dashboard
 ### Run the Tests
 
 ```bash
-# Optional C++ accelerator
-python -m venv .venv && .venv/bin/pip install pybind11 pytest
+# Optional C++ accelerator, in a CPython 3.13 environment
+uv venv --python 3.13 .venv && uv pip install --python .venv/bin/python pybind11 pytest
 make accel
 
 # Focused foreground qualification

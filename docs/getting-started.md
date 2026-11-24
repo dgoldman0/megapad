@@ -8,13 +8,15 @@ take you from zero to running your first pipeline in about ten minutes.
 
 ## Prerequisites
 
-You need **Python 3.8+** (3.12 recommended).  The emulator and all tools
-run with no external dependencies — pure Python standard library.
+You need **Python 3.13**, which [uv](https://docs.astral.sh/uv/) installs
+where the system's Python is older (`uv python install 3.13`).  The emulator
+and all tools run with no external dependencies — pure Python standard
+library.
 
 For the optional **C++ accelerator** (63× speedup for tests):
 
 ```bash
-python -m venv .venv && .venv/bin/pip install pybind11 pytest pytest-xdist
+uv venv --python 3.13 .venv && uv pip install --python .venv/bin/python pybind11 pytest pytest-xdist
 make accel
 ```
 
@@ -380,7 +382,7 @@ The optional pybind11 accelerator is built automatically by test targets. For
 an explicit build or a focused foreground run:
 
 ```bash
-python -m venv .venv && .venv/bin/pip install pybind11 pytest
+uv venv --python 3.13 .venv && uv pip install --python .venv/bin/python pybind11 pytest
 make accel
 make test-sequential TEST_PATH=tests/test_system.py K=TestKDOSTLSServerClientHello
 make test-quick
