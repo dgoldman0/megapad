@@ -110,6 +110,8 @@ def terminal_status(session, *, pending: bool, failure: str | None) -> dict:
         # Requests for more retained space the terminal refused.
         "capacity_denials": 0 if core is None else core.capacity_denials,
         "last_capacity_denial": None if core is None else core.last_capacity_denial,
+        # The last PRESENT answered INVALID, with the check that refused it.
+        "last_present_invalid": None if core is None else core.last_present_invalid,
     }
 
 
