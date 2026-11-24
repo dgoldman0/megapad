@@ -1,6 +1,7 @@
 """KDOS TLS 1.3 client handshake: ClientHello construction and its exact
 wire layout, generic ALPN offers and selection, ServerHello parsing, the key
-schedule, Finished and the client handshake state machine.
+schedule, Finished, the client handshake state machine, and the exporter
+(RFC 8446 section 7.5) whose tests build on the key schedule's setup.
 
 These classes run on the KDOS + networking snapshot that tests/test_system.py
 builds, as their own unit, so a change to the client handshake can be
@@ -1181,6 +1182,362 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
         self.assertIn("G=29 ", text)       # TLS-GROUP-X25519 default
+
+
+# ---------------------------------------------------------------------------
+#  TLS 1.3 exporter tests — RFC 8446 §7.5
+# ---------------------------------------------------------------------------
+
+class TestKDOSTLSExporter(_KDOSNetworkTestBase):
+    """Exporter derivation is authenticated, context-bound, and atomic."""
+
+    @staticmethod
+    def _forth_bytes(name, value):
+        data = bytes.fromhex(value) if isinstance(value, str) else bytes(value)
+        lines = [f"CREATE {name} {max(len(data), 1)} ALLOT"]
+        lines.extend(f"{byte} {name} {offset} + C!"
+                     for offset, byte in enumerate(data))
+        return lines
+
+    @staticmethod
+    def _established_context():
+        return [
+            "VARIABLE exp-ctx 0 TLS-CTX@ exp-ctx !",
+            "exp-ctx @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
+            "TLS-ROLE-CLIENT exp-ctx @ TLS-CTX.ROLE !",
+            "TLS-HASH-SHA256 exp-ctx @ TLS-CTX.HASH-ID !",
+            "TLS-SUITE-AES128-SHA256 exp-ctx @ TLS-CTX.SUITE !",
+            "1 exp-ctx @ TLS-CTX.PEER-AUTH !",
+            "TLSH-CONNECTED exp-ctx @ TLS-CTX.HS-STATE !",
+            "TLSS-ESTABLISHED exp-ctx @ TLS-CTX.STATE !",
+        ]
+
+    def test_rfc8448_schedule_and_rfc9266_exporter_anchor(self):
+        """RFC 8448 schedule values reproduce the RFC 9266 exporter tuple."""
+        master = (
+            "18df06843d13a08bf2a449844c5f8a478001bc4d4c627984d5a41da8d0402919"
+        )
+        transcript_hash = (
+            "9608102a0f1ccc6db6250b7b7e417b1a000eaada3daae4777a7686c9ff83df13"
+        )
+        exporter_master = (
+            "fe22f881176eda18eb8f44529e6792c50c9a3f89452f68d8ae311b4309d3cf50"
+        )
+        channel_binding = (
+            "e3b0946bf2f4668144f22872e0afd51dc9608638c6f9b2584b98c6cd3a4affad"
+        )
+        lines = self._established_context()
+        lines += self._forth_bytes("rfc-master", master)
+        lines += self._forth_bytes("rfc-transcript", transcript_hash)
+        lines += self._forth_bytes("rfc-exp-master", exporter_master)
+        lines += self._forth_bytes("rfc-exported", channel_binding)
+        lines += self._forth_bytes(
+            "rfc-label", b"EXPORTER-Channel-Binding"
+        )
+        lines += [
+            "CREATE derived-exp 32 ALLOT derived-exp 32 165 FILL",
+            "exp-ctx @ rfc-master TLS-L-EXP-MASTER /TLS-L-EXP-MASTER",
+            "rfc-transcript 32 32 derived-exp TLS-EXPAND-LABEL",
+            '."  DERIVE=" .',
+            '."  EMS=" derived-exp rfc-exp-master 32 VERIFY .',
+            "rfc-exp-master exp-ctx @ TLS-CTX.EXPORTER-MS 32 MOVE",
+            "CREATE exported 32 ALLOT exported 32 165 FILL",
+            "exp-ctx @ rfc-label 24 0 0 exported 32 TLS-EXPORT",
+            '."  IOR=" .',
+            '."  OUT=" exported rfc-exported 32 VERIFY .',
+            ': exp-zero? 32 0 DO DUP I + C@ IF DROP 0 UNLOOP EXIT THEN LOOP '
+            'DROP -1 ;',
+            '."  INNER-WIPED=" TLS-EXPORT-INNER exp-zero? .',
+            '."  HASH-WIPED=" TLS-EXPORT-CONTEXT-HASH exp-zero? .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("DERIVE=0 ", text)
+        self.assertIn("EMS=0 ", text)
+        self.assertIn("IOR=0 ", text)
+        self.assertIn("OUT=0 ", text)
+        self.assertIn("INNER-WIPED=-1 ", text)
+        self.assertIn("HASH-WIPED=-1 ", text)
+
+    def test_exporter_state_parameters_aliases_and_context_binding(self):
+        """Misuse preserves output and raw context changes derived bytes."""
+        exporter_master = (
+            "fe22f881176eda18eb8f44529e6792c50c9a3f89452f68d8ae311b4309d3cf50"
+        )
+        lines = self._established_context()
+        lines += self._forth_bytes("exp-master", exporter_master)
+        lines += self._forth_bytes("test-label", b"test")
+        lines += [
+            "exp-master exp-ctx @ TLS-CTX.EXPORTER-MS 32 MOVE",
+            "CREATE sentinel 64 ALLOT sentinel 64 90 FILL",
+            "TLSS-HANDSHAKE exp-ctx @ TLS-CTX.STATE !",
+            "exp-ctx @ test-label 4 0 0 sentinel 32 TLS-EXPORT",
+            '."  EARLY=" .',
+            '."  EARLY-OUT=" sentinel C@ .',
+            "TLSS-ESTABLISHED exp-ctx @ TLS-CTX.STATE !",
+            "exp-ctx @ test-label 4 0 0 0 0 TLS-EXPORT",
+            '."  ZERO=" .',
+            "CREATE bad-label 1 ALLOT 0 bad-label C!",
+            "exp-ctx @ bad-label 1 0 0 sentinel 32 TLS-EXPORT",
+            '."  BAD-LABEL=" .',
+            "CREATE alias-label 64 ALLOT alias-label 64 97 FILL",
+            "exp-ctx @ alias-label 4 0 0 alias-label 32 TLS-EXPORT",
+            '."  ALIAS=" .',
+            '."  ALIAS-OUT=" alias-label C@ .',
+            "TLS-EXPORT-RESULT 32 90 FILL",
+            "exp-ctx @ test-label 4 0 0 TLS-EXPORT-RESULT 32 TLS-EXPORT",
+            '."  INTERNAL=" .',
+            '."  INTERNAL-OUT=" TLS-EXPORT-RESULT C@ .',
+            "exp-ctx @ TLS-RXW.RECORD 32 90 FILL",
+            "exp-ctx @ test-label 4 0 0 exp-ctx @ TLS-RXW.RECORD 32 "
+            "TLS-EXPORT",
+            '."  RX-INTERNAL=" .',
+            '."  RX-INTERNAL-OUT=" exp-ctx @ TLS-RXW.RECORD C@ .',
+            "exp-ctx @ test-label 4 0 0 sentinel 8161 TLS-EXPORT",
+            '."  TOO-LONG=" .',
+            "CREATE context-a 1 ALLOT 97 context-a C!",
+            "CREATE context-b 1 ALLOT 98 context-b C!",
+            "CREATE out-a 32 ALLOT CREATE out-b 32 ALLOT",
+            "exp-ctx @ test-label 4 context-a 1 out-a 32 TLS-EXPORT",
+            '."  A=" .',
+            "exp-ctx @ test-label 4 context-b 1 out-b 32 TLS-EXPORT",
+            '."  B=" .',
+            '."  BOUND=" out-a out-b 32 VERIFY .',
+            "CREATE fatal-alert 2 ALLOT 2 fatal-alert C! 40 fatal-alert 1+ C!",
+            "exp-ctx @ fatal-alert 2 TLS-PROCESS-ALERT DROP",
+            ': exp-ms-zero? 32 0 DO DUP I + C@ IF DROP 0 UNLOOP EXIT THEN '
+            'LOOP DROP -1 ;',
+            '."  FATAL-WIPE=" exp-ctx @ TLS-CTX.EXPORTER-MS exp-ms-zero? .',
+            "exp-ctx @ test-label 4 0 0 sentinel 32 TLS-EXPORT",
+            '."  CLOSED=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("EARLY=-4207 ", text)
+        self.assertIn("EARLY-OUT=90 ", text)
+        self.assertIn("ZERO=0 ", text)
+        self.assertIn("BAD-LABEL=-4208 ", text)
+        self.assertIn("ALIAS=-4210 ", text)
+        self.assertIn("ALIAS-OUT=97 ", text)
+        self.assertIn("INTERNAL=-4210 ", text)
+        self.assertIn("INTERNAL-OUT=90 ", text)
+        self.assertIn("RX-INTERNAL=-4210 ", text)
+        self.assertIn("RX-INTERNAL-OUT=90 ", text)
+        self.assertIn("TOO-LONG=-4208 ", text)
+        self.assertIn("A=0 ", text)
+        self.assertIn("B=0 ", text)
+        self.assertIn("BOUND=-1 ", text)
+        self.assertIn("FATAL-WIPE=-1 ", text)
+        self.assertIn("CLOSED=-4207 ", text)
+
+    def test_tls_owner_recurses_by_task_and_releases_lock(self):
+        """Nested TLS helpers retain lock 10 and reject another task."""
+        lines = [
+            '."  A=" TLS-OWNER-TRY .',
+            '."  D1=" TLS-OWNER-DEPTH @ .',
+            '."  B=" TLS-OWNER-TRY .',
+            '."  D2=" TLS-OWNER-DEPTH @ .',
+            "TLS-OWNER-RELEASE",
+            '."  D3=" TLS-OWNER-DEPTH @ .',
+            "111 _TLSCP-RIP !",
+            "TASK-ID 1+ TLS-OWNER-TASK !",
+            "TLS-OWNER-RELEASE",
+            '."  WRONG-RELEASE=" TLS-OWNER-DEPTH @ .',
+            '1 2 3 TLS-CONNECT ."  CONNECT=" .',
+            '."  RIP=" _TLSCP-RIP @ .',
+            '."  PHASE=" TLS-CONNECT-LAST-ERROR @ .',
+            '0 TLS-CTX@ 2 40 TLS-SEND-ALERT-TRY ."  ALERT=" .',
+            '."  OTHER=" TLS-OWNER-TRY .',
+            '."  HELD=" TLS-OWNER-DEPTH @ .',
+            "TASK-ID TLS-OWNER-TASK !",
+            "TLS-OWNER-RELEASE",
+            '."  D4=" TLS-OWNER-DEPTH @ .',
+            '."  RAW=" TLS-OWNER-LOCK SPIN@ .',
+            "TLS-OWNER-LOCK SPIN!",
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("A=0 ", text)
+        self.assertIn("D1=1 ", text)
+        self.assertIn("B=0 ", text)
+        self.assertIn("D2=2 ", text)
+        self.assertIn("D3=1 ", text)
+        self.assertIn("WRONG-RELEASE=1 ", text)
+        self.assertIn("CONNECT=0 ", text)
+        self.assertIn("RIP=111 ", text)
+        self.assertIn("PHASE=15 ", text)
+        self.assertIn("ALERT=-4206 ", text)
+        self.assertIn("OTHER=-4206 ", text)
+        self.assertIn("HELD=1 ", text)
+        self.assertIn("D4=0 ", text)
+        self.assertIn("RAW=0 ", text)
+
+    def test_application_schedule_requires_explicit_publication(self):
+        """Application secrets are staged before ESTABLISHED is observable."""
+        lines = TestKDOSTLSHandshake._TLS_KS_SETUP + [
+            "test-ctx @ TLS-KS-HANDSHAKE DROP",
+            "1 test-ctx @ TLS-CTX.PEER-AUTH !",
+            "TLSS-HANDSHAKE test-ctx @ TLS-CTX.STATE !",
+            "TLSH-SERVER-FINISHED test-ctx @ TLS-CTX.HS-STATE !",
+            "CREATE app-rec 128 ALLOT",
+            "test-ctx @ app-rec TLS-HANDSHAKE-COMPLETE",
+            '."  RECLEN=" .',
+            '."  PRE-STATE=" test-ctx @ TLS-CTX.STATE @ .',
+            '."  PRE-HS=" test-ctx @ TLS-CTX.HS-STATE @ .',
+            ': nonzero32? 32 0 DO DUP I + C@ IF DROP -1 UNLOOP EXIT THEN '
+            'LOOP DROP 0 ;',
+            '."  PRE-EXP=" test-ctx @ TLS-CTX.EXPORTER-MS nonzero32? .',
+            'test-ctx @ TLS-HANDSHAKE-PUBLISH ."  PUB=" .',
+            '."  POST-STATE=" test-ctx @ TLS-CTX.STATE @ .',
+            '."  POST-HS=" test-ctx @ TLS-CTX.HS-STATE @ .',
+            '."  POST-EXP=" test-ctx @ TLS-CTX.EXPORTER-MS nonzero32? .',
+            '."  HS-WIPE=" test-ctx @ TLS-CTX.HS-SECRET nonzero32? .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("RECLEN=58 ", text)
+        self.assertIn("PRE-STATE=1 ", text)
+        self.assertIn("PRE-HS=8 ", text)
+        self.assertIn("PRE-EXP=-1 ", text)
+        self.assertIn("PUB=0 ", text)
+        self.assertIn("POST-STATE=2 ", text)
+        self.assertIn("POST-HS=9 ", text)
+        self.assertIn("POST-EXP=-1 ", text)
+        self.assertIn("HS-WIPE=0 ", text)
+
+    def test_server_application_schedule_preserves_handshake_read_epoch(self):
+        """Server changes WR first, then RD only after authenticated Finished."""
+        lines = TestKDOSTLSHandshake._TLS_KS_SETUP + [
+            "TLS-ROLE-SERVER test-ctx @ TLS-CTX.ROLE !",
+            "test-ctx @ TLS-KS-HANDSHAKE DROP",
+            "CREATE saved-hs-rd 32 ALLOT",
+            "CREATE saved-hs-riv 16 ALLOT",
+            "CREATE expected-ap-wr 32 ALLOT",
+            "CREATE expected-ap-rd 32 ALLOT",
+            "test-ctx @ TLS-CTX.RD-KEY saved-hs-rd 32 MOVE",
+            "test-ctx @ TLS-CTX.RD-IV saved-hs-riv 16 MOVE",
+            "23 test-ctx @ TLS-CTX.RD-SEQ !",
+            "TLSS-HANDSHAKE test-ctx @ TLS-CTX.STATE !",
+            "TLSH-SERVER-FINISHED test-ctx @ TLS-CTX.HS-STATE !",
+            "0 test-ctx @ TLS-CTX.PEER-AUTH !",
+            'test-ctx @ TLS-KS-APPLICATION ." KS=" .',
+            "test-ctx @ test-ctx @ TLS-CTX.S-AP-TRAFFIC "
+            "TLS-L-KEY /TLS-L-KEY 0 0 test-ctx @ TLS-KEY-LEN "
+            "expected-ap-wr TLS-EXPAND-LABEL DROP",
+            "test-ctx @ test-ctx @ TLS-CTX.C-AP-TRAFFIC "
+            "TLS-L-KEY /TLS-L-KEY 0 0 test-ctx @ TLS-KEY-LEN "
+            "expected-ap-rd TLS-EXPAND-LABEL DROP",
+            '." WR-AP=" test-ctx @ TLS-CTX.WR-KEY '
+            "expected-ap-wr 32 _XC-BYTES= .",
+            '." RD-HS=" test-ctx @ TLS-CTX.RD-KEY '
+            "saved-hs-rd 32 _XC-BYTES= .",
+            '." RIV-HS=" test-ctx @ TLS-CTX.RD-IV '
+            "saved-hs-riv 16 _XC-BYTES= .",
+            '." RS-PENDING=" test-ctx @ TLS-CTX.RD-SEQ @ .',
+            '." HS-PENDING=" test-ctx @ TLS-CTX.HS-STATE @ .',
+            '." AUTH-PENDING=" test-ctx @ TLS-CTX.PEER-AUTH @ .',
+            'test-ctx @ TLS-HANDSHAKE-PUBLISH ." PUB-EARLY=" .',
+            'test-ctx @ (TLS-KS-SERVER-READ-APPLICATION) ." CUT=" .',
+            '." RD-AP=" test-ctx @ TLS-CTX.RD-KEY '
+            "expected-ap-rd 32 _XC-BYTES= .",
+            '." RS-READY=" test-ctx @ TLS-CTX.RD-SEQ @ .',
+            '." HS-READY=" test-ctx @ TLS-CTX.HS-STATE @ .',
+            '." AUTH-READY=" test-ctx @ TLS-CTX.PEER-AUTH @ .',
+            'test-ctx @ TLS-HANDSHAKE-PUBLISH ." PUB=" .',
+            '." STATE=" test-ctx @ TLS-CTX.STATE @ .',
+            '." HS-DONE=" test-ctx @ TLS-CTX.HS-STATE @ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("KS=0 ", text)
+        self.assertIn("WR-AP=-1 ", text)
+        self.assertIn("RD-HS=-1 ", text)
+        self.assertIn("RIV-HS=-1 ", text)
+        self.assertIn("RS-PENDING=23 ", text)
+        self.assertIn("HS-PENDING=7 ", text)
+        self.assertIn("AUTH-PENDING=0 ", text)
+        self.assertIn("PUB-EARLY=-4204 ", text)
+        self.assertIn("CUT=0 ", text)
+        self.assertIn("RD-AP=-1 ", text)
+        self.assertIn("RS-READY=0 ", text)
+        self.assertIn("HS-READY=8 ", text)
+        self.assertIn("AUTH-READY=1 ", text)
+        self.assertIn("PUB=0 ", text)
+        self.assertIn("STATE=2 ", text)
+        self.assertIn("HS-DONE=9 ", text)
+
+    def test_application_schedule_failure_wipes_partial_secrets(self):
+        """A failed admitted schedule cannot leave reusable partial keys."""
+        lines = TestKDOSTLSHandshake._TLS_KS_SETUP + [
+            "test-ctx @ _TKSA-CTX !",
+            "test-ctx @ TLS-CTX.WR-KEY 32 90 FILL",
+            "test-ctx @ TLS-CTX.RD-KEY 32 90 FILL",
+            "test-ctx @ TLS-CTX.EXPORTER-MS 32 90 FILL",
+            "test-ctx @ TLS-CTX.HS-SECRET 32 90 FILL",
+            "1234 test-ctx @ TLS-CTX.WR-SEQ !",
+            "5678 test-ctx @ TLS-CTX.RD-SEQ !",
+            "-777 _TKSA-FAIL",
+            '."  IOR=" .',
+            ': zero32? 32 0 DO DUP I + C@ IF DROP 0 UNLOOP EXIT THEN '
+            'LOOP DROP -1 ;',
+            '."  WR=" test-ctx @ TLS-CTX.WR-KEY zero32? .',
+            '."  RD=" test-ctx @ TLS-CTX.RD-KEY zero32? .',
+            '."  EXP=" test-ctx @ TLS-CTX.EXPORTER-MS zero32? .',
+            '."  HS=" test-ctx @ TLS-CTX.HS-SECRET zero32? .',
+            '."  WSEQ=" test-ctx @ TLS-CTX.WR-SEQ @ .',
+            '."  RSEQ=" test-ctx @ TLS-CTX.RD-SEQ @ .',
+            '."  ERROR=" test-ctx @ TLS-CTX.ERROR @ .',
+            "1 test-ctx @ TLS-CTX.PEER-AUTH !",
+            "TLSH-SERVER-FINISHED test-ctx @ TLS-CTX.HS-STATE !",
+            'test-ctx @ TLS-KS-APPLICATION ."  RETRY=" .',
+            "TLS-ROLE-SERVER test-ctx @ TLS-CTX.ROLE !",
+            "0 test-ctx @ TLS-CTX.PEER-AUTH !",
+            "TLSH-CLIENT-FINISHED-PENDING test-ctx @ TLS-CTX.HS-STATE !",
+            'test-ctx @ (TLS-KS-SERVER-READ-APPLICATION) ."  CUT=" .',
+            '."  AUTH2=" test-ctx @ TLS-CTX.PEER-AUTH @ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("IOR=-777 ", text)
+        self.assertIn("WR=-1 ", text)
+        self.assertIn("RD=-1 ", text)
+        self.assertIn("EXP=-1 ", text)
+        self.assertIn("HS=-1 ", text)
+        self.assertIn("WSEQ=0 ", text)
+        self.assertIn("RSEQ=0 ", text)
+        self.assertIn("ERROR=-777 ", text)
+        self.assertIn("RETRY=-4204 ", text)
+        self.assertIn("CUT=-4204 ", text)
+        self.assertIn("AUTH2=0 ", text)
+
+    def test_local_fatal_alert_revokes_exporter_without_wire(self):
+        """A local fatal decision revokes secrets even under backpressure."""
+        exporter_master = (
+            "fe22f881176eda18eb8f44529e6792c50c9a3f89452f68d8ae311b4309d3cf50"
+        )
+        lines = ["TCP-INIT-ALL"] + self._established_context()
+        lines += self._forth_bytes("local-exp-master", exporter_master)
+        lines += self._forth_bytes("local-label", b"test")
+        lines += [
+            "local-exp-master exp-ctx @ TLS-CTX.EXPORTER-MS 32 MOVE",
+            "0 TCB-N TCB-CLAIM TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "TLS-OWNER-TRY DROP",
+            "exp-ctx @ 0 TCB-N _TLS-ATTACH-TCB "
+            ">R TLS-OWNER-RELEASE R> ?DUP IF THROW THEN",
+            "1 0 TCB-N TCB.SND-NXT ! 0 0 TCB-N TCB.SND-UNA !",
+            "exp-ctx @ 2 40 TLS-SEND-ALERT",
+            ': local-zero? 32 0 DO DUP I + C@ IF DROP 0 UNLOOP EXIT THEN '
+            'LOOP DROP -1 ;',
+            '."  STATE=" exp-ctx @ TLS-CTX.STATE @ .',
+            '."  AUTH=" exp-ctx @ TLS-CTX.PEER-AUTH @ .',
+            '."  ERROR=" exp-ctx @ TLS-CTX.ERROR @ .',
+            '."  WIPED=" exp-ctx @ TLS-CTX.EXPORTER-MS local-zero? .',
+            "CREATE local-out 32 ALLOT local-out 32 90 FILL",
+            "exp-ctx @ local-label 4 0 0 local-out 32 TLS-EXPORT",
+            '."  EXPORT=" .',
+            '."  OUT=" local-out C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("STATE=3 ", text)
+        self.assertIn("AUTH=0 ", text)
+        self.assertIn("ERROR=-4212 ", text)
+        self.assertIn("WIPED=-1 ", text)
+        self.assertIn("EXPORT=-4207 ", text)
+        self.assertIn("OUT=90 ", text)
 
 
 if __name__ == "__main__":
