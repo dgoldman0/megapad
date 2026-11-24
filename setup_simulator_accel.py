@@ -5,6 +5,9 @@ machine's user-mode network beside it.
 
 The network, _mp64_slirp, links libslirp and GLib, which pkg-config finds.
 It is a module of its own, so only a machine with a network loads them.
+
+Both are compiled for the compiler's default target unless MP64_MARCH names
+one, as MP64_MARCH=x86-64-v2 does for the release's baseline.
 """
 import os
 import shlex
@@ -17,7 +20,9 @@ from setuptools.command.build_ext import build_ext
 sanitizer = os.environ.get("MEGAFORTH_NATIVE_SANITIZER", "none")
 if sanitizer not in ("none", "address-undefined"):
     raise SystemExit("MEGAFORTH_NATIVE_SANITIZER must be none or address-undefined")
-flags = ["-std=c++17", "-ffp-contract=off", "-frounding-math", "-Wall", "-Wextra", "-fvisibility=hidden"]
+target = [f"-march={os.environ['MP64_MARCH']}"] if os.environ.get("MP64_MARCH") else []
+flags = ["-std=c++17", *target, "-ffp-contract=off", "-frounding-math", "-Wall", "-Wextra",
+         "-fvisibility=hidden"]
 links = []
 if sanitizer == "none":
     flags += ["-O3"]
@@ -40,7 +45,7 @@ def _pkg_config(*arguments: str) -> list[str]:
 
 slirp_cflags = _pkg_config("--cflags")
 slirp_libs = _pkg_config("--libs")
-network_flags = ["-std=c++17", "-Wall", "-Wextra", "-fvisibility=hidden",
+network_flags = ["-std=c++17", *target, "-Wall", "-Wextra", "-fvisibility=hidden",
                  "-O2" if sanitizer == "none" else "-O1"]
 if sanitizer != "none":
     network_flags += ["-g", "-fno-omit-frame-pointer", *instrumentation]

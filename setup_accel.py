@@ -5,6 +5,10 @@ Usage:
     python setup_accel.py build_ext --inplace
     # or via Makefile:
     make accel
+
+The extension is compiled for the host's own processor (-march=native)
+unless MP64_MARCH names another target, as MP64_MARCH=x86-64-v2 does for
+the release's baseline; setup_simulator_accel.py reads it too.
 """
 
 import hashlib
@@ -36,7 +40,7 @@ if _SANITIZER not in _SANITIZER_FLAGS:
 
 _compile_args = [
     "-std=c++17",
-    "-march=native",
+    f"-march={os.environ.get('MP64_MARCH') or 'native'}",
     # Floating-point tile lanes depend on separately rounded binary64 steps.
     "-ffp-contract=off",
     "-frounding-math",
