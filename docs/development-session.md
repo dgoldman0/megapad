@@ -170,6 +170,26 @@ python3 megapad/megapad.py --mode emulator --nic-tap mp64tap0
 The server refuses startup if the TAP device is missing or inaccessible; it
 does not create interfaces or alter host routing on the user's behalf.
 
+The simulator's server takes a network card the same way, and offers a
+network that needs no administrator rights: libslirp's user-mode network,
+linked into MegaPad's `_mp64_slirp` module.
+
+```bash
+python3 megapad/megapad.py --mode simulator --storage desktop.img --nic slirp
+```
+
+Its DHCP server hands the guest 10.64.0.2, with the gateway at 10.64.0.1 and
+a DNS forwarder, which asks this computer's own resolver, at 10.64.0.3, the
+same layout a TAP device set up as above gives a guest that configures itself
+statically. The network carries the guest's connections to the internet as
+connections of the user's own account, and refuses its packets to this
+computer and to local addresses: loopback, the private, shared, link-local,
+multicast and reserved ranges, and every address of this computer's own
+interfaces. `--local-access` lifts that refusal for testing against local
+services, and the server then warns at every start that any program on the
+machine can reach services that expect only local callers.
+`--nic tap:mp64tap0` attaches a TAP device instead.
+
 Audible one-shot PCM playback is likewise explicit opt-in:
 
 ```bash

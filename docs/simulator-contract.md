@@ -1071,17 +1071,35 @@ These choices claim source-visible failure and classification behavior only,
 not cluster execution, scratchpad storage, barriers, privilege, or MPU
 enforcement.
 
-No local host-network port is configured in the current simulator profile.
-Pseudo-BIOS `NET-STATUS` therefore returns zero, so TX-busy, RX-available,
-link, error, DMA-busy, and present are all clear. `NET-SEND` consumes its
-address and length without inspecting or delivering bytes, while `NET-RECV`
-consumes its destination and returns zero. `NET-MAC@` returns one stable
-six-byte all-zero Bank-0 span so unchanged `MAC-INIT` can copy it without
-inventing an interface identity. These are the default unconfigured-port
-semantics needed for source loading, not a decision that the simulator cannot
-host a configured network later. The direct NIC MMIO window, frame queues,
-DMA, host networking, and interrupt delivery remain unadmitted and untested;
-a direct access to the architectural NIC aperture is still an MMIO fault.
+A machine has a network card only when its server attaches one
+(`--nic`, `simulator/network.py`). Without one, pseudo-BIOS `NET-STATUS`
+returns zero, so TX-busy, RX-available, link, error, DMA-busy, and present
+are all clear. `NET-SEND` consumes its address and length without inspecting
+or delivering bytes, while `NET-RECV` consumes its destination and returns
+zero. `NET-MAC@` returns one stable six-byte all-zero Bank-0 span so
+unchanged `MAC-INIT` can copy it without inventing an interface identity.
+
+With a card attached, the four words act on it with the emulator card's
+status bits: present (bit 7), a received frame waiting (bit 1), link up
+(bit 2), and an error that stays set (bit 3). `NET-SEND` sends the span's
+bytes as one frame through the card's host backend, `NET-RECV` places the
+oldest waiting frame at its destination and returns its length, and
+`NET-MAC@` reports the card's address in the same Bank-0 span, the
+emulator's default `02:4D:50:36:34:00`. The card holds at most 64 frames
+for the guest, as the emulator's does; a frame past that is lost and sets
+the error bit. Each frame's DMA completes at once, as the emulator's
+native card completes it, so bits 0 and 4 never show. A frame length of
+zero or above 1,514 bytes, a backend that refuses a frame, or a span outside
+the caller's ordinary memory sets the error bit and moves nothing, where the
+emulator's card would read zeros or drop bytes for an unmapped address.
+
+The host backends are `nic_backends.py`'s: `--nic slirp`, the user-mode
+network through libslirp (`shared/accel/slirp_network.cpp`), which needs no
+administrator rights and refuses the guest's packets to this computer and
+its local network unless `--local-access` is given, or `--nic tap:IFNAME`.
+The direct NIC MMIO window and interrupt delivery remain unadmitted; a direct
+access to the architectural NIC aperture is still an MMIO fault, and a
+waiting frame does not end an `IDLE-MS` wait early.
 
 The currently admitted UART surface is pseudo-BIOS byte I/O, not the physical
 UART window. Output bytes become observable synchronously, making the native
@@ -4318,8 +4336,8 @@ pseudo-BIOS: `UM*`, `WITHIN`, `MOVE`, `MS@`, and `TX-FLUSH`. Six public
 terminal-geometry words follow them: `COLS`, `ROWS`, `RESIZED?`, `TERMSIZE`,
 `RESIZE-DENIED?`, and `RESIZE-REQUEST`. Existing hosted execution tokens retain
 their addresses; absolute tokens remain nonportable between backends. Six
-more append-only closure prerequisites provide `BSWAP`, the default
-unconfigured-port `NET-SEND`/`NET-RECV`/`NET-MAC@` behavior, and deterministic
+more append-only closure prerequisites provide `BSWAP`, the network words
+`NET-SEND`/`NET-RECV`/`NET-MAC@`, unconfigured unless a card is attached, and deterministic
 checked `ENTROPY-FILL`/`ENTROPY-READY?`. Twenty-two following source words provide
 bytewise `CHAR`/`[CHAR]`, signed `/MOD`, dictionary predicates, persistent
 raw-token `[IF]`/`[ELSE]`/`[THEN]` skipping, structured CASE compilation,

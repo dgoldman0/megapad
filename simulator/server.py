@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import signal
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,11 +46,13 @@ _CANONICAL_HBW_MIB = 3
 
 @dataclass(frozen=True, slots=True)
 class PreparedSimulatorServer:
-    """One prepared image, semantic machine facade, and server authority."""
+    """One prepared image, semantic machine facade, and server authority,
+    with the machine's network card when it has one."""
 
     preparation: ImageBootstrapPreparation
     machine: SimulatorSharedMachine
     server: SessionServer
+    network: object | None = None
 
 
 def _positive_int(value: str) -> int:
@@ -191,6 +194,23 @@ def build_argument_parser(
             "(0 for all)"
         ),
     )
+    parser.add_argument(
+        "--nic",
+        metavar="SPEC",
+        help=(
+            "attach a network card: slirp, the user-mode network, which needs "
+            "no administrator rights, or tap:IFNAME, a TAP device set up "
+            "beforehand"
+        ),
+    )
+    parser.add_argument(
+        "--local-access",
+        action="store_true",
+        help=(
+            "let the slirp network reach this computer and its local "
+            "network, which it refuses otherwise"
+        ),
+    )
     parser.add_argument("--paused", action="store_true")
     return parser
 
@@ -248,14 +268,36 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
         initial_epoch_ms=time.time_ns() // 1_000_000,
     )
     memory.mmio.rtc.bind_monotonic_clock(time.monotonic_ns)
-    preparation = prepare_image_bootstrap(
-        memory=memory,
-        **storage_services(image_paths),
-        terminal_cols=args.cols,
-        terminal_rows=args.rows,
-        semantic_step_budget=args.semantic_step_budget,
-        execution_backend=executor,
-    )
+    services = storage_services(image_paths)
+    card = None
+    runtime = None
+    if args.nic is not None:
+        # The card is attached and running before the boot script, which may
+        # ask DHCP for the machine's address, runs.
+        from nic_backends import backend_from_spec
+        from simulator.network import NetworkCard
+        from simulator.runtime import MegaForthRuntime
+
+        card = NetworkCard(backend_from_spec(args.nic, local_access=args.local_access))
+        runtime = MegaForthRuntime(memory=memory, **services, execution_backend=executor)
+        runtime.attach_network(card)
+        card.start()
+    elif args.local_access:
+        raise ValueError("--local-access needs --nic slirp")
+    try:
+        preparation = prepare_image_bootstrap(
+            memory=memory,
+            **services,
+            terminal_cols=args.cols,
+            terminal_rows=args.rows,
+            semantic_step_budget=args.semantic_step_budget,
+            execution_backend=None if runtime is not None else executor,
+            runtime=runtime,
+        )
+    except BaseException:
+        if card is not None:
+            card.stop()
+        raise
     session = SimulatorMachineSession(
         preparation.runtime,
         preparation.root_xt,
@@ -280,7 +322,22 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
         preparation=preparation,
         machine=machine,
         server=SessionServer(machine, args.socket),
+        network=card,
     )
+
+
+def report_network(network) -> None:
+    """Say which network the machine has, and warn at every start when it
+    may reach this computer and its local network."""
+
+    print(
+        "[shared] network: " + ("none" if network is None else network.backend.name),
+        flush=True,
+    )
+    if network is not None and getattr(network.backend, "local_access", False):
+        from nic_backends import LOCAL_ACCESS_WARNING
+
+        print(f"[shared] warning: {LOCAL_ACCESS_WARNING}", file=sys.stderr, flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -349,10 +406,13 @@ def main(argv: list[str] | None = None) -> int:
             ),
             flush=True,
         )
+        report_network(prepared.network)
         print("[shared] machine owner running; Ctrl+C stops it", flush=True)
         server.serve_forever()
     finally:
         server.stop()
+        if prepared.network is not None:
+            prepared.network.stop()
     return 0
 
 
@@ -365,4 +425,5 @@ __all__ = [
     "build_argument_parser",
     "main",
     "prepare_server",
+    "report_network",
 ]
