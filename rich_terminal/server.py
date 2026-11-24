@@ -595,6 +595,9 @@ class RichTerminalCore:
         self._wire_transaction_snapshot = False
         self._wire_transaction_bytes = 0
         self._discard_transaction_status: int | None = None
+        # The first check the open PRESENT transaction failed, or the model
+        # error that refused it; later checks often fail only as its result.
+        self._discard_reason: str | None = None
         self._present_observer: Callable[[PresentBegin], None] | None = None
         self._present_wire_state: _PresentWireState | None = None
         self._most_recent_wire_aborted_id = 0
@@ -611,6 +614,9 @@ class RichTerminalCore:
         # ordinary frame goes out until CREDIT lets it go.
         self._owed_pixels: bytes | None = None
         self._last_capacity_denial: dict | None = None
+        # The last PRESENT transaction answered INVALID and why, for status
+        # and logs; the guest treats that answer as fatal.
+        self._last_present_invalid: dict | None = None
         self._frames_received = 0
         self._frame_bytes_received = 0
         self._frames_received_by_type: dict[int, int] = {}
@@ -737,6 +743,15 @@ class RichTerminalCore:
         and the quotas it still holds (None when it holds none)."""
 
         return self._last_capacity_denial
+
+    @property
+    def last_present_invalid(self) -> dict | None:
+        """The last PRESENT transaction this core answered INVALID: its ID,
+        the revision the answer carried, and the reason, which names the
+        first check it failed or the model error that refused it (None
+        before any)."""
+
+        return self._last_present_invalid
 
     @property
     def machine_publications_received(self) -> int:
@@ -2761,6 +2776,7 @@ class RichTerminalCore:
         self._wire_transaction_snapshot = False
         self._wire_transaction_bytes = frame.complete_bytes
         self._discard_transaction_status = None
+        self._discard_reason = None
         self._present_wire_state = wire
 
         clock = self._require_clock()
@@ -2778,18 +2794,19 @@ class RichTerminalCore:
                 or lease.transaction_id != transaction_id
             ):
                 self._fatal(str(exc), cause=exc)
-            self._discard_transaction_status = (
+            self._discard_present(
                 3
                 if lease.rejection is not None
                 and "base revision" in lease.rejection
-                else 2
+                else 2,
+                f"the transaction clock refused PRESENT_BEGIN: {exc}",
             )
             return ()
 
         try:
             begin = decode_present_begin(frame.payload)
-        except RetainedWireError:
-            self._discard_transaction_status = 2
+        except RetainedWireError as exc:
+            self._discard_present(2, f"PRESENT_BEGIN does not decode: {exc}")
             return ()
         wire.begin = begin
         if self._present_observer is not None:
@@ -2800,7 +2817,9 @@ class RichTerminalCore:
             and self._reset_requested_epoch is None
             and begin.cell_mode is not CellMode.REPLACE
         ):
-            self._discard_transaction_status = 2
+            self._discard_present(
+                2, f"a resyncing terminal needs REPLACE cells, not {begin.cell_mode.name}"
+            )
             return ()
 
         retained_state = self._require_retained_model().state
@@ -2815,18 +2834,47 @@ class RichTerminalCore:
             self._config.rows,
             self._geometry_generation,
         )
-        if (
-            begin.declared_transaction_bytes
-            > retained_policy.max_retained_transaction_bytes
-            or begin.declared_transaction_bytes > self._config.max_transaction_bytes
-            or begin.declared_transaction_bytes > available_before_begin
-            or begin.retained_operation_count
+        declared = begin.declared_transaction_bytes
+        refusal = None
+        if declared > retained_policy.max_retained_transaction_bytes:
+            refusal = (
+                f"PRESENT_BEGIN declares {declared} bytes, above the retained "
+                f"maximum of {retained_policy.max_retained_transaction_bytes}"
+            )
+        elif declared > self._config.max_transaction_bytes:
+            refusal = (
+                f"PRESENT_BEGIN declares {declared} bytes, above the maximum "
+                f"of {self._config.max_transaction_bytes}"
+            )
+        elif declared > available_before_begin:
+            refusal = (
+                f"PRESENT_BEGIN declares {declared} bytes with "
+                f"{available_before_begin} bytes of credit"
+            )
+        elif (
+            begin.retained_operation_count
             > retained_policy.max_operations_per_transaction
-            or (begin.cols, begin.rows, begin.geometry_generation)
-            != (geometry.cols, geometry.rows, geometry.generation)
-            or retained_state.geometry != geometry
         ):
-            self._discard_transaction_status = 2
+            refusal = (
+                f"PRESENT_BEGIN declares {begin.retained_operation_count} retained "
+                f"operations, above the maximum of "
+                f"{retained_policy.max_operations_per_transaction}"
+            )
+        elif (begin.cols, begin.rows, begin.geometry_generation) != (
+            geometry.cols, geometry.rows, geometry.generation
+        ):
+            refusal = (
+                f"PRESENT_BEGIN names {begin.cols}x{begin.rows} cells in geometry "
+                f"generation {begin.geometry_generation}; the terminal has "
+                f"{geometry.cols}x{geometry.rows} in generation {geometry.generation}"
+            )
+        elif retained_state.geometry != geometry:
+            refusal = (
+                f"the retained scene has geometry {retained_state.geometry}, "
+                f"the terminal {geometry}"
+            )
+        if refusal is not None:
+            self._discard_present(2, refusal)
             return ()
 
         model = self._require_model()
@@ -2845,7 +2893,10 @@ class RichTerminalCore:
                     lease=lease,
                 )
             except CellModelError as exc:
-                self._discard_transaction_status = self._result_status(exc)
+                self._discard_present(
+                    self._result_status(exc),
+                    f"the CELL model refused PRESENT_BEGIN: {exc}",
+                )
                 return ()
 
         if begin.retained_mode is not PresentRetainedMode.NONE:
@@ -2855,28 +2906,38 @@ class RichTerminalCore:
                     RetainedMode(begin.retained_mode),
                     geometry,
                 )
-            except SceneModelError:
-                self._discard_transaction_status = 2
+            except SceneModelError as exc:
+                self._discard_present(
+                    2, f"the retained scene refused PRESENT_BEGIN: {exc}"
+                )
         return ()
 
     def _accept_present_span(self, payload: bytes) -> None:
         wire = self._require_present_wire_state()
         wire.cell_spans_seen += 1
-        if (
-            wire.cell_mode == int(CellMode.NONE)
-            or wire.cursor_seen
-            or wire.retained_operations_seen
-            or wire.cell_spans_seen > wire.cell_span_count
-        ):
-            self._discard_transaction_status = 2
+        if wire.cell_mode == int(CellMode.NONE):
+            self._discard_present(2, "a CELL_SPAN arrived without a cell mode")
+        elif wire.cursor_seen or wire.retained_operations_seen:
+            self._discard_present(
+                2, "a CELL_SPAN arrived after the cursor or a retained operation"
+            )
+        elif wire.cell_spans_seen > wire.cell_span_count:
+            self._discard_present(
+                2,
+                f"CELL_SPAN {wire.cell_spans_seen} is beyond the "
+                f"{wire.cell_span_count} declared",
+            )
         try:
             span = decode_cell_span(payload)
-        except CellModelError:
-            self._discard_transaction_status = 2
+        except CellModelError as exc:
+            self._discard_present(2, f"a CELL_SPAN does not decode: {exc}")
             return
         wire.cells_seen += span.count
         if wire.cells_seen > wire.cell_count:
-            self._discard_transaction_status = 2
+            self._discard_present(
+                2,
+                f"{wire.cells_seen} cells are beyond the {wire.cell_count} declared",
+            )
         begin = wire.begin
         if begin is not None and begin.cell_mode is CellMode.REPLACE:
             expected_row = wire.cell_spans_seen - 1
@@ -2885,13 +2946,22 @@ class RichTerminalCore:
                 or span.column != 0
                 or span.count != begin.cols
             ):
-                self._discard_transaction_status = 2
+                self._discard_present(
+                    2,
+                    f"REPLACE span {wire.cell_spans_seen} covers row {span.row} "
+                    f"from column {span.column} for {span.count} cells, not all "
+                    f"of row {expected_row}",
+                )
         if self._discard_transaction_status is not None:
             return
         try:
             self._require_model().stage_span(span)
         except CellModelError as exc:
-            self._discard_transaction_status = self._result_status(exc)
+            self._discard_present(
+                self._result_status(exc),
+                f"the CELL model refused the span at row {span.row}, column "
+                f"{span.column}: {exc}",
+            )
 
     def _accept_present_cursor(self, payload: bytes) -> None:
         wire = self._require_present_wire_state()
@@ -2901,24 +2971,33 @@ class RichTerminalCore:
             or wire.retained_operations_seen
             or wire.cell_spans_seen != wire.cell_span_count
         ):
-            self._discard_transaction_status = 2
+            self._discard_present(
+                2,
+                f"CURSOR arrived out of place: cell mode {wire.cell_mode}, "
+                f"{wire.cell_spans_seen} of {wire.cell_span_count} spans, "
+                f"cursor seen {wire.cursor_seen}, "
+                f"{wire.retained_operations_seen} retained operations",
+            )
         wire.cursor_seen = True
         try:
             cursor = decode_cursor(payload)
-        except CellModelError:
-            self._discard_transaction_status = 2
+        except CellModelError as exc:
+            self._discard_present(2, f"CURSOR does not decode: {exc}")
             return
         if self._discard_transaction_status is not None:
             return
         try:
             self._require_model().stage_cursor(cursor)
         except CellModelError as exc:
-            self._discard_transaction_status = self._result_status(exc)
+            self._discard_present(
+                self._result_status(exc), f"the CELL model refused the cursor: {exc}"
+            )
 
     def _accept_retained_operation(self, frame: Frame) -> None:
         """Decode and stage one owner-bound non-image retained mutation."""
 
         wire = self._require_present_wire_state()
+        message_type = RetainedMessageType(frame.message_type)
         if (
             wire.cell_spans_seen != wire.cell_span_count
             or (
@@ -2926,12 +3005,20 @@ class RichTerminalCore:
                 and not wire.cursor_seen
             )
         ):
-            self._discard_transaction_status = 2
+            self._discard_present(
+                2,
+                f"{message_type.name} arrived before the cell spans and cursor "
+                f"were complete",
+            )
         wire.retained_operations_seen += 1
         if wire.retained_operations_seen > wire.retained_operation_count:
-            self._discard_transaction_status = 2
+            self._discard_present(
+                2,
+                f"retained operation {wire.retained_operations_seen} "
+                f"({message_type.name}) is beyond the "
+                f"{wire.retained_operation_count} declared",
+            )
 
-        message_type = RetainedMessageType(frame.message_type)
         try:
             if message_type is RetainedMessageType.REGION_DEFINE:
                 operation = decode_region_definition(frame.payload)
@@ -2965,13 +3052,15 @@ class RichTerminalCore:
                 operation = decode_control_drop(frame.payload)
             else:  # The caller admits only _RETAINED_PRESENT_OPERATION_TYPES.
                 self._fatal("retained mutation dispatch table is incomplete")
-        except RetainedWireError:
-            self._discard_transaction_status = 2
+        except RetainedWireError as exc:
+            self._discard_present(2, f"{message_type.name} does not decode: {exc}")
             return
 
         begin = wire.begin
         if begin is None or begin.retained_mode is PresentRetainedMode.NONE:
-            self._discard_transaction_status = 2
+            self._discard_present(
+                2, f"{message_type.name} arrived without a retained mode"
+            )
             return
         if self._discard_transaction_status is not None:
             return
@@ -3077,8 +3166,12 @@ class RichTerminalCore:
                     model.replace_control(definition)
             elif message_type is RetainedMessageType.CONTROL_DROP:
                 model.drop_control(owner, operation.item_id)
-        except (SceneModelError, TypeError, ValueError):
-            self._discard_transaction_status = 2
+        except (SceneModelError, TypeError, ValueError) as exc:
+            self._discard_present(
+                2,
+                f"the retained scene refused {message_type.name}: "
+                f"{type(exc).__name__}: {exc}",
+            )
 
     def _accept_present_commit(
         self,
@@ -3095,35 +3188,48 @@ class RichTerminalCore:
             self._fatal("PRESENT wire transaction has no matching clock lease")
 
         status = self._discard_transaction_status
+        reason = self._discard_reason
+
+        def refuse(why: str) -> None:
+            nonlocal status, reason
+            status = 2
+            if reason is None:
+                reason = why
+
         commit = None
         try:
             commit = decode_present_commit(frame.payload)
-        except RetainedWireError:
-            status = 2
+        except RetainedWireError as exc:
+            refuse(f"PRESENT_COMMIT does not decode: {exc}")
         if commit is not None and commit.transaction_id != wire.transaction_id:
-            status = 2
-        if (
-            wire.begin is None
-            or self._wire_transaction_bytes != wire.declared_transaction_bytes
-            or wire.cell_spans_seen != wire.cell_span_count
-            or wire.cells_seen != wire.cell_count
-            or wire.retained_operations_seen != wire.retained_operation_count
-            or (
-                wire.cell_mode == int(CellMode.NONE)
-                and wire.cursor_seen
+            refuse(
+                f"PRESENT_COMMIT names transaction {commit.transaction_id}, "
+                f"not {wire.transaction_id}"
             )
-            or (
-                wire.cell_mode != int(CellMode.NONE)
-                and not wire.cursor_seen
-            )
+        if wire.begin is None:
+            refuse("PRESENT_BEGIN was not accepted")
+        for name, seen, declared in (
+            ("bytes", self._wire_transaction_bytes, wire.declared_transaction_bytes),
+            ("cell spans", wire.cell_spans_seen, wire.cell_span_count),
+            ("cells", wire.cells_seen, wire.cell_count),
+            (
+                "retained operations",
+                wire.retained_operations_seen,
+                wire.retained_operation_count,
+            ),
         ):
-            status = 2
+            if seen != declared:
+                refuse(f"the transaction sent {seen} {name}, {declared} declared")
+        if wire.cell_mode == int(CellMode.NONE) and wire.cursor_seen:
+            refuse("a CURSOR arrived without a cell mode")
+        if wire.cell_mode != int(CellMode.NONE) and not wire.cursor_seen:
+            refuse("no CURSOR arrived for the cell mode")
         if (
             commit is not None
             and wire.retained_mode == int(PresentRetainedMode.NONE)
             and commit.disposition is PresentDisposition.COMMIT_AND_REVEAL
         ):
-            status = 2
+            refuse("COMMIT_AND_REVEAL without a retained mode")
 
         view: TerminalOutputView | None = None
         result_lease: ResultLease | None = None
@@ -3151,8 +3257,8 @@ class RichTerminalCore:
                     cell=cell_prepared,
                     retained=retained_prepared,
                 )
-            except (CellModelError, SceneModelError):
-                status = 2
+            except (CellModelError, SceneModelError) as exc:
+                refuse(f"preparing the commit: {type(exc).__name__}: {exc}")
             except (TerminalUpdateError, RuntimeError, TypeError, ValueError) as exc:
                 self._fatal(f"cannot prepare PRESENT publication: {exc}", cause=exc)
             else:
@@ -3177,6 +3283,12 @@ class RichTerminalCore:
             result_lease = self._reject_present_transaction(lease)
         if result_lease is None:
             self._fatal("PRESENT_COMMIT did not settle its clock lease")
+        if status == 2:
+            self._last_present_invalid = {
+                "transaction_id": wire.transaction_id,
+                "revision": result_lease.revision,
+                "reason": reason or "no check recorded a reason",
+            }
         result = self._encode_control(
             MessageType.TX_RESULT,
             _TX_RESULT.pack(
@@ -3565,7 +3677,18 @@ class RichTerminalCore:
         self._wire_transaction_snapshot = False
         self._wire_transaction_bytes = 0
         self._discard_transaction_status = None
+        self._discard_reason = None
         self._present_wire_state = None
+
+    def _discard_present(self, status: int, reason: str) -> None:
+        """Answer the open PRESENT transaction STATUS when it commits.
+
+        The first reason stays: a transaction that fails one check often
+        fails later ones only because of it."""
+
+        self._discard_transaction_status = status
+        if self._discard_reason is None:
+            self._discard_reason = reason
 
     @staticmethod
     def _result_status(error: CellModelError) -> int:

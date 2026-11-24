@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import struct
 
 import pytest
@@ -1383,6 +1384,7 @@ def test_present_region_hidden_replace_commits_then_reveals_atomically():
     assert state.retained_visible
     assert revealed.views[0].retained is state
     assert core.presents_committed == {"REPLACE_START": 1, "REPLACE_CONTINUE": 1}
+    assert core.last_present_invalid is None
     core.settle_result_delivery(3)
 
 
@@ -1422,6 +1424,12 @@ def test_present_declared_byte_mismatch_rejects_without_scene_or_id_publication(
     assert core.retained_state is scene_source
     assert core.owner_state is owner_source
     assert core.presents_committed == {}
+    # The status names the check that refused the transaction.
+    invalid = core.last_present_invalid
+    assert (invalid["transaction_id"], invalid["revision"]) == (2, 1)
+    counts = re.fullmatch(r"the transaction sent (\d+) bytes, (\d+) declared",
+                          invalid["reason"])
+    assert counts is not None and int(counts[2]) == int(counts[1]) + 1
     core.settle_result_delivery(2)
 
 
@@ -1951,6 +1959,9 @@ def test_unadvertised_image_rejection_stays_sticky_while_present_drains():
     assert core.retained_state is source
     assert core.owner_state is not None
     assert core.owner_state.records[7].high_water.region == 0
+    # The first refusal is the reason; the operations after it fail only
+    # because the transaction is already lost.
+    assert core.last_present_invalid["reason"].startswith("OBJECT_DEFINE")
 
 
 def test_resource_upload_chunk_commit_and_drop_publish_exact_bounded_state():
