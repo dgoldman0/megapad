@@ -402,8 +402,8 @@ CURRENT-SITUATION.
 |---|------|--------|-------|
 | 39g | `CSR_CORE_TYPE` per-core CSR | ~1 hour | Workaround via SysInfo `NUM_FULL` exists |
 | 46 | **USB controller** | ~2–6 weeks | 3-phase (emulator → RTL USB 2.0 → USB 3.0) |
-| §4e | **Bitfield ALU ops** (POPCNT, CLZ, CTZ, BITREV, BEXT, BDEP, RORI, BSWAP) | ~1–2 days | ~270 LUTs, pure ALU sub-ops, high bang-for-buck |
-| §4a–d,f | **Other SoC accelerators** (crypto pipeline, deflate, regex, DSP, trace unit) | ~1–4 weeks each | Speculative / wish-list |
+| §4d | **Bitfield ALU ops** (POPCNT, CLZ, CTZ, BITREV, BEXT, BDEP, RORI, BSWAP) | ~1–2 days | ~270 LUTs, pure ALU sub-ops, high bang-for-buck |
+| §4a–c,e | **Other SoC accelerators** (deflate, regex, DSP, trace unit) | ~1–4 weeks each | Speculative / wish-list |
 | §2/§3 | **C++ accel EXT.STRING/EXT.DICT** native | ~2 days | Performance only; correctness is fine via Python fallback |
 | 45b | **Emulator timing model** | ~1 day | Wall-clock `MS` word or IDL+timer hybrid for robust network polling |
 | — | **FPGA bitstream** | ~1 week | Requires Vivado; RTL is ready |

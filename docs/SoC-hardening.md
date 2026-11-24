@@ -69,7 +69,7 @@ SoC bus master count stays the same, nothing else changes.
 Once every core has a wrapper, it becomes the natural home for
 anything per-core that shouldn't traverse the main bus:
 
-- **Trace tap** — per-core ring buffer (see §4f)
+- **Trace tap** — per-core ring buffer (see §4e)
 - **Per-core timer / watchdog** — local tick counting without
   contending on the shared timer
 - **Local IPI slot** — fast-path inter-core signalling that skips
@@ -395,7 +395,7 @@ master port — no arbiter changes, no cluster wrapper ports.
 | Cluster wrapper | Arbiter + address decode | Nothing added |
 | Code density | Poor for short ops | Excellent |
 
-This follows the same principle as §4e (bitfield ops): operations that
+This follows the same principle as §4d (bitfield ops): operations that
 complete in fewer cycles than the MMIO setup would take belong in the
 ISA, not behind the bus.
 
@@ -503,7 +503,7 @@ counted-string address is already in a GPR; the XT result goes into
 another GPR.  The CPU stalls for 2 cycles (hash + compare) — less
 time than a single MMIO write would take through the bus.
 
-This follows the same principle as §4e and §2: if the operation is
+This follows the same principle as §4d and §2: if the operation is
 faster than the MMIO setup overhead, it belongs in the ISA.
 
 ### Why per-CPU BRAM (not shared)
@@ -630,22 +630,11 @@ entries and replacement cursors.
 
 ## 4. Other Accelerator Ideas & Committed ISA Extensions
 
-§4e (Bitfield ALU) is a **committed ISA extension** with full encoding
-in Appendix A.4 — it is not speculative.  The remaining items (4a–4d,
-4f) are lower-priority ideas worth keeping on the radar.
+§4d (Bitfield ALU) is a **committed ISA extension** with full encoding
+in Appendix A.4 — it is not speculative.  The remaining items (4a–4c,
+4e) are lower-priority ideas worth keeping on the radar.
 
-### 4a. Crypto Pipeline Orchestrator (~32 bytes MMIO, shared)
-
-A small config register that chains existing crypto blocks in hardware:
-data flows CRC → SHA → AES without the CPU touching each byte.  Turns
-three sequential MMIO-per-byte passes into one.
-
-**RTL:** Small state machine with mux between existing peripheral data
-ports.  Wire as an internal bus between SHA/AES/CRC rdata/wdata.
-**Emulator:** Python class that calls the existing device objects in
-sequence.
-
-### 4b. Hardware Compress/Decompress — Deflate (~128 bytes MMIO, shared)
+### 4a. Hardware Compress/Decompress — Deflate (~128 bytes MMIO, shared)
 
 Huffman + LZ77 in hardware for inflate/deflate.  Every filesystem,
 network protocol, and image format uses this.  Software zlib on any
@@ -659,7 +648,7 @@ exist (e.g., gzip-fpga).
 **Emulator:** `zlib.compress()` / `zlib.decompress()` behind MMIO.
 Trivial.
 
-### 4c. Pattern Matching / Regex NFA Engine (~64 bytes MMIO, shared)
+### 4b. Pattern Matching / Regex NFA Engine (~64 bytes MMIO, shared)
 
 A small NFA engine: feed a compiled pattern + stream bytes, get
 match/no-match.  Useful for parsing, protocol dispatch, search.
@@ -670,7 +659,7 @@ byte.  Compile regex → state vector offline.  ~200 LUTs for 64-state
 NFA.
 **Emulator:** `re.match()` behind MMIO.
 
-### 4d. Fixed-Point DSP / FIR Filter (~64–128 bytes MMIO, shared)
+### 4c. Fixed-Point DSP / FIR Filter (~64–128 bytes MMIO, shared)
 
 A multiply-accumulate array for audio/signal processing.  The ISA
 lacks SIMD, so a hardware MAC with coefficient table does FIR/IIR/FFT
@@ -680,7 +669,7 @@ butterflies at wire speed.  Useful if audio or radio becomes a target.
 accumulator + control FSM.
 **Emulator:** NumPy `convolve()` or manual MAC loop.
 
-### 4e. Bitfield ALU — DONE (Family 0xC, sub-ops C8–CF) (2026-03-09)
+### 4d. Bitfield ALU — DONE (Family 0xC, sub-ops C8–CF) (2026-03-09)
 
 **Status: DONE — C++ accelerator, Python emulator, RTL (`mp64_bitfield.v`), assembler, BIOS words, tests, micro-core tiering**  
 **Topology: per-core ISA (MULDIV family 0xC, 1-cycle combinational)**
@@ -879,7 +868,7 @@ TCP/UDP ports — all big-endian on wire), filesystem metadata
 interchange may need network order), SHA-256 hardware digest readback
 (32-byte big-endian output at MMIO DOUT+0x18).
 
-### 4f. Stack-Machine Debug / Trace Unit (~64 bytes MMIO, per-core)
+### 4e. Stack-Machine Debug / Trace Unit (~64 bytes MMIO, per-core)
 
 Always-on flight recorder that snapshots DSP/RSP/TOS on every SEP
 dispatch.  Zero performance overhead, invaluable for debugging.
@@ -2554,26 +2543,25 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 
 ### §4 — Other Accelerator Ideas
 
-**DONE (4e — Bitfield ALU, per-core ISA, C8–CF + RTL):** (2026-03-09)
+**DONE (4d — Bitfield ALU, per-core ISA, C8–CF + RTL):** (2026-03-09)
 
-- [x] 4e. Bitfield ALU — ISA encoding designed (Appendix A.4)
-- [x] 4e. Bitfield ALU — RTL implemented (`mp64_bitfield.v`, Tier 1/2 generate, 49/49 assertions)
-- [x] 4e. Bitfield ALU — emulator implementation (`emulator/megapad64.py _exec_muldiv` sub 0x8–0xF)
-- [x] 4e. Bitfield ALU — C++ accelerator (`mp64_accel.cpp` case 0x8–0xF with __builtin intrinsics)
-- [x] 4e. Bitfield ALU — tests (`test_bitfield_alu` — POPCNT/CLZ/CTZ/BITREV/BEXT/BDEP/RORI/BSWAP)
-- [x] 4e. Bitfield ALU — assembler (`asm.py` MULDIV_SUB extended, RORI 3-byte form)
-- [x] 4e. Bitfield ALU — BIOS words (POPCNT/CLZ/CTZ/BITREV/BSWAP/NTOH/HTON/NTOH32/HTON32/NTOH16/HTON16/POOL-ALLOC/POOL-FREE/POOL-COUNT)
-- [x] 4e. Bitfield ALU — ISA reference updated (isa-reference.md Family 0xC)
-- [x] 4e. Bitfield ALU — micro-core Tier 1/2 gating (Tier 1 local, Tier 2 traps)
-- [x] 4e. Bitfield ALU — CPU integration (`mp64_cpu.v` + `mp64_cpu_micro.v` bf_active path)
+- [x] 4d. Bitfield ALU — ISA encoding designed (Appendix A.4)
+- [x] 4d. Bitfield ALU — RTL implemented (`mp64_bitfield.v`, Tier 1/2 generate, 49/49 assertions)
+- [x] 4d. Bitfield ALU — emulator implementation (`emulator/megapad64.py _exec_muldiv` sub 0x8–0xF)
+- [x] 4d. Bitfield ALU — C++ accelerator (`mp64_accel.cpp` case 0x8–0xF with __builtin intrinsics)
+- [x] 4d. Bitfield ALU — tests (`test_bitfield_alu` — POPCNT/CLZ/CTZ/BITREV/BEXT/BDEP/RORI/BSWAP)
+- [x] 4d. Bitfield ALU — assembler (`asm.py` MULDIV_SUB extended, RORI 3-byte form)
+- [x] 4d. Bitfield ALU — BIOS words (POPCNT/CLZ/CTZ/BITREV/BSWAP/NTOH/HTON/NTOH32/HTON32/NTOH16/HTON16/POOL-ALLOC/POOL-FREE/POOL-COUNT)
+- [x] 4d. Bitfield ALU — ISA reference updated (isa-reference.md Family 0xC)
+- [x] 4d. Bitfield ALU — micro-core Tier 1/2 gating (Tier 1 local, Tier 2 traps)
+- [x] 4d. Bitfield ALU — CPU integration (`mp64_cpu.v` + `mp64_cpu_micro.v` bf_active path)
 
 **Ideas (not yet committed):**
 
-- [ ] 4a. Crypto Pipeline Orchestrator — idea only
-- [ ] 4b. Hardware Compress/Decompress (Deflate) — idea only
-- [ ] 4c. Pattern Matching / Regex NFA Engine — idea only
-- [ ] 4d. Fixed-Point DSP / FIR Filter — idea only
-- [ ] 4f. Stack-Machine Debug / Trace Unit — idea only
+- [ ] 4a. Hardware Compress/Decompress (Deflate) — idea only
+- [ ] 4b. Pattern Matching / Regex NFA Engine — idea only
+- [ ] 4c. Fixed-Point DSP / FIR Filter — idea only
+- [ ] 4e. Stack-Machine Debug / Trace Unit — idea only
 
 ### §5 — Port I/O Bridge (1802 OUT/INP → MMIO)
 
