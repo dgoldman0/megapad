@@ -17,6 +17,8 @@ from shared.session_options import (
     add_storage_options,
     configured_production_executor,
     link_pace,
+    protect_process_memory,
+    report_debugging,
     report_network,
     retained_policy,
     rich_terminal_policy,
@@ -239,6 +241,8 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
         )
     if args.terminal_link_pace is not None and args.rich_terminal_policy is None:
         raise ValueError("--terminal-link-pace requires --rich-terminal-policy")
+    if args.profile_dir is not None and not args.debug_access:
+        raise ValueError("a screen profile needs --debug-access")
     image_paths = storage_image_paths(args)
     executor = configured_production_executor(args.executor)
     # Resolve the environment before image preparation so a bad value fails
@@ -334,6 +338,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
 def main(argv: list[str] | None = None) -> int:
     parser = build_argument_parser()
     args = parser.parse_args(argv)
+    protected = False if args.debug_access else protect_process_memory()
     try:
         prepared = prepare_server(args)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
@@ -398,6 +403,7 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
         report_network(None if prepared.network is None else prepared.network.backend)
+        report_debugging(args.debug_access, protected)
         if args.chiplet is not None:
             print(f"[shared] chiplet: {args.chiplet.resolve()} on port 0", flush=True)
         print("[shared] machine owner running; Ctrl+C stops it", flush=True)

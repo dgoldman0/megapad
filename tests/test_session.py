@@ -1420,6 +1420,38 @@ def test_machine_session_close_releases_devices_when_save_fails(monkeypatch):
     assert not backend.link_up
 
 
+@pytest.fixture(autouse=True)
+def _keep_the_test_process_open(monkeypatch):
+    """The emulator server's main closes its process's memory to other
+    processes; these tests run it in pytest's own process."""
+
+    monkeypatch.setattr("emulator.server.protect_process_memory", lambda: False)
+
+
+def test_session_server_closes_its_memory_without_debugging_access(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(
+        "emulator.server.protect_process_memory", lambda: calls.append(1) or True
+    )
+    for argv, closed in (
+        (["megapad.py"], True),
+        (["megapad.py", "--debug-access"], False),
+    ):
+        calls.clear()
+        monkeypatch.setattr("sys.argv", argv)
+        with (
+            patch("emulator.session.MachineSession.from_bios"),
+            patch("emulator.shared_session.SharedMachine"),
+            patch("emulator.server.SessionServer"),
+            patch("emulator.server.signal.signal"),
+        ):
+            assert session_server_main() == 0
+        assert bool(calls) == closed
+        report = capsys.readouterr().out
+        assert ("memory closed to other processes" in report) == closed
+        assert ("[shared] debugging access: on" in report) == (not closed)
+
+
 def test_session_server_rejects_unavailable_tap(monkeypatch):
     monkeypatch.setattr(
         "sys.argv", ["megapad.py", "--nic", "tap:missing-tap"]

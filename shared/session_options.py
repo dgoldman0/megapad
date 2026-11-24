@@ -85,6 +85,37 @@ def report_network(backend) -> None:
         print(f"[shared] warning: {LOCAL_ACCESS_WARNING}", file=sys.stderr, flush=True)
 
 
+def protect_process_memory() -> bool:
+    """Turn off core dumps of this process and other processes' access to
+    its memory, as a server without debugging access does, since the
+    machine's memory can hold a user's keys and unsealed tokens (prctl
+    PR_SET_DUMPABLE 0).  Whether it took effect: only Linux has the call."""
+
+    if not sys.platform.startswith("linux"):
+        return False
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    pr_set_dumpable = 4
+    if libc.prctl(pr_set_dumpable, 0, 0, 0, 0) != 0:
+        number = ctypes.get_errno()
+        raise OSError(number, os.strerror(number))
+    return True
+
+
+def report_debugging(debug_access: bool, protected: bool) -> None:
+    """Say at start whether clients may read and steer the machine, and
+    whether its memory is closed to other processes."""
+
+    if debug_access:
+        state = "on"
+    elif protected:
+        state = "off; memory closed to other processes and core dumps"
+    else:
+        state = "off"
+    print(f"[shared] debugging access: {state}", flush=True)
+
+
 def add_debug_option(parser) -> None:
     """Add --debug-access, which opens shared_session.DEBUG_METHODS to the
     server's clients."""

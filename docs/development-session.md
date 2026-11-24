@@ -272,8 +272,16 @@ cells of both stacks; `network`, `forth`, `peek`, `text`, `raw` and `capture`;
 the option the server refuses them, since the machine's memory can hold a
 user's keys and unsealed tokens, and serves only the display, input,
 `resize`, a light `status` and `shutdown`. The viewer's `Ctrl+F5`, `Ctrl+F10`
-and `Ctrl+R` controls need it as well. The owner's own calls in its process
-are not affected.
+and `Ctrl+R` controls need it as well, and so does a screen profile
+(`--profile-dir`). The owner's own calls in its process are not affected.
+Without the option a server on Linux also turns off its core dumps and other
+processes' access to its memory (`prctl` with `PR_SET_DUMPABLE` 0), which
+keeps the machine's keys out of crash reports and away from other programs
+of the same account; the start-up report says which applies. The client in
+`shared_session.py`, which the viewer and `session_ctl.py` use, talks only
+to a server of its own account: it refuses a socket another account owns,
+and a server whose peer credentials (`SO_PEERCRED`) name another user,
+before it sends anything.
 
 ```bash
 python3 megapad/megapad.py --mode emulator --debug-access

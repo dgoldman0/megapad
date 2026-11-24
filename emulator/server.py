@@ -12,6 +12,8 @@ from shared.session_options import (
     add_network_options,
     add_storage_options,
     link_pace,
+    protect_process_memory,
+    report_debugging,
     report_network,
     retained_policy,
     rich_terminal_policy,
@@ -130,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(str(exc))
     elif args.local_access:
         parser.error("--local-access needs --nic slirp")
+    protected = False if args.debug_access else protect_process_memory()
 
     # The machine's modules load the native extension, so they are imported
     # only once the arguments are accepted: help and argument errors need
@@ -182,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[shared] socket: {server.socket_path}", flush=True)
         print(f"[shared] bios:   {args.bios.resolve()}", flush=True)
         report_network(nic_backend)
+        report_debugging(args.debug_access, protected)
         print(
             f"[shared] audio:  {'pygame PCM16' if audio_sink else 'capture only'}",
             flush=True,
