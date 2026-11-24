@@ -4645,7 +4645,10 @@ Certificate/CertificateVerify handler wiring.
 | `DER-SKIP` | `( addr -- next-addr )` | Skip one TLV element entirely. |
 | `DER-FIND-TAG` | `( addr limit tag -- val-addr val-len \| 0 0 )` | Find first element with matching tag. |
 | `X509-PARSE` | `( cert clen -- ior )` | Parse a DER X.509 certificate into compatibility buffers. Returns 0, -1 for malformed or oversized copied fields, or -2 for a well-formed unsupported key profile. |
-| `X509-DESC-PARSE` | `( cert clen desc -- ior )` | Parse one positive caller-bounded exact DER span into a borrowed-slice descriptor. Returns 0, -1 for malformed input, or -2 for a well-formed unsupported key profile. It has no generic 128..8192-byte policy bound; provisioning and wire consumers impose their own profile limits. |
+| `X509-DESC-PARSE` | `( cert clen desc -- ior )` | Parse one positive caller-bounded exact DER span into a 256-byte borrowed-slice descriptor: RSA keys of 2048 to 8192 bits with an exponent below 2^33, P-256 and P-384 keys, any well-formed signature algorithm (`X509-SIG-OTHER` for those the verifier does not check), and NameConstraints. Returns 0, -1 for malformed input, or -2 for a well-formed unsupported key. It has no generic 128..8192-byte policy bound; provisioning and wire consumers impose their own profile limits. |
+| `X509-NC-VALID?` | `( a u -- flag )` | A whole DER NameConstraints value: permitted and/or excluded nonempty subtree lists, bases only. |
+| `X509-NC-CERT-OK?` | `( nc-a nc-u cert -- flag )` | Every name of the certificate, its nonempty subject and each subjectAltName, lies within the constraints; DNS and IP names against both subtree lists, directory names against permitted subtrees by leading RDNs, other forms fail closed. |
+| `TLS-TRUST-LOAD` | `( bundle-a bundle-u -- ior )` | Replace the trust anchors with an MPTA version 2 bundle, copied into storage sized to it: global or scoped anchors, distrust-after dates and imposed name constraints. |
 | `X509-CHECK-HOST` | `( hostname hlen -- flag )` | Verify hostname against SAN dNSNames. Supports wildcards. 0=match, -1=no match. |
 | `EC-DOUBLE` | `( Px Py Pz Rx Ry Rz -- )` | P-256 Jacobian point doubling. |
 | `EC-ADD` | `( P1x P1y P1z P2x P2y P2z Rx Ry Rz -- )` | P-256 Jacobian point addition. |
@@ -4664,9 +4667,14 @@ Certificate/CertificateVerify handler wiring.
 | `RSA-PKCS1-VERIFY` | `( hash hash-u sig sig-u key -- flag )` | Verify exact PKCS#1 v1.5 for a 32-, 48- or 64-byte SHA-2 digest. 0=valid, -1=invalid, or an RSA error. |
 | `RSA-PSS-VERIFY` | `( hash hash-u sig sig-u key -- flag )` | Verify EMSA-PSS with MGF1 over the digest's hash and a salt as long as the hash. |
 | `ECDSA-P384-VERIFY` | `( hash hash-u pubkey sig slen -- flag )` | Verify an ECDSA P-384 signature over the digest's leftmost 384 bits; pubkey is 97 bytes, 04 || X || Y. 0=valid, -1=invalid. |
-| `X509-VERIFY-CHAIN` | `( certs count hostname hlen now -- ior )` | Validate a bounded mixed ECDSA/RSA certificate path to a provisioned scoped anchor. |
-| `TLS-PARSE-CERTIFICATE` | `( msg mlen -- ior )` | Parse the bounded client-side TLS Certificate message and authenticate its leaf through the configured path and hostname policy. This receive/path profile retains at most eight 128..8192-byte certificates. |
-| `TLS-VERIFY-CERT-SIG` | `( ctx msg mlen -- flag )` | Verify RFC 8446 CertificateVerify using ECDSA-P256-SHA256 or RSA-PSS-RSAE-SHA256 according to the authenticated leaf key. |
+| `X509-VERIFY-SIGNED-BY` | `( child issuer -- ior )` | Check child's signature with issuer's key: ECDSA P-256/SHA-256, P-384/SHA-384, or RSA PKCS#1 v1.5 with SHA-256, -384 or -512. |
+| `X509-PATH-BEGIN` | `( certs count hostname hlen now -- ior )` | Start the backtracking search for a path from leaf descriptor zero to an anchor that may vouch for the host. `X509-PATH-PENDING` once started, or the leaf's failure. |
+| `X509-PATH-STEP` | `( -- ior )` | Advance the search, checking at most one signature: `X509-PATH-PENDING`, 0 for a complete path, or the most recent specific failure. |
+| `X509-VERIFY-CHAIN` | `( certs count hostname hlen now -- ior )` | The whole path search at once. |
+| `X509-EDGE-CACHE-CLEAR` | `( -- )` | Forget the per-boot cache of verified intermediate edges. |
+| `TLS-PARSE-CERTIFICATE` | `( msg mlen -- ior )` | Parse the bounded client-side TLS Certificate message and start its path search: `X509-PATH-PENDING`, or the failure. This receive/path profile retains at most eight 128..8192-byte certificates. |
+| `TLS-CERTIFICATE-STEP` | `( -- ior )` | Advance that search one signature; on success keep the leaf's key for CertificateVerify. |
+| `TLS-VERIFY-CERT-SIG` | `( ctx msg mlen -- flag )` | Verify RFC 8446 CertificateVerify with the authenticated leaf key: ECDSA P-256/SHA-256, P-384/SHA-384, or RSA-PSS with SHA-256, -384 or -512. |
 | `TLS-CREDENTIAL-POOL-INIT` | `( count -- ior )` | Once on core 0, establish a caller-sized pool of exact 184-byte server-credential records. Capacity has no compile-time or connection-derived maximum. |
 | `TLS-CREDENTIAL-PROVISION` | `( der-chain-a der-chain-u private-le -- slot+1 generation ior )` | Copy a leaf-first concatenation of self-delimiting DER certificates, structurally validate every Certificate envelope, deeply validate only the leaf, import one 32-byte little-endian P-256 scalar, prove its complete public point matches the leaf, and return a two-cell opaque handle. |
 | `TLS-CREDENTIAL-PUBLIC` | `( slot+1 generation public-a scheme-a -- count ior )` | Resolve a live handle, optionally copy the 65-byte public point and `ecdsa_secp256r1_sha256` scheme cell, and return certificate count. Zero output addresses request only count/status. |
@@ -4966,6 +4974,10 @@ calls are reserved for sequential qualification fixtures; they are not
 independently concurrent public transport operations.  Those global raw-record
 helpers serve the owner-held blocking handshake path; application receive uses
 its context-owned RX workspace for all state retained across public calls.
+`TLS-PROCESS-HS-MSG` answers `X509-PATH-PENDING` (1) for a Certificate message
+while its path search runs, one signature per call; the caller calls it again
+with the same message, leaving it in place, until it answers 0 or fails.
+`TLS-PROCESS-HS-MSGS` makes those calls itself.
 
 **Variables:** `TLS-SNI-HOST` (256-byte storage for a DNS name of at most 253 bytes),
 `TLS-SNI-LEN` (current SNI length).

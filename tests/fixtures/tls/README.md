@@ -15,3 +15,13 @@ digests, and P-384 public keys with ECDSA signatures over SHA-384, SHA-256
 and SHA-512 digests. Python's `cryptography` 45.0.5 made them on 2026-11-24
 from freshly generated keys whose private halves were discarded, so the
 vectors come from an implementation independent of KDOS.
+
+`webpki_chains.json` holds real server certificate chains, exactly as twelve
+public hosts sent them to `openssl s_client -showcerts` on 2026-11-23 and
+2026-11-24, and the NSS root certificates their paths end at, from
+`lib/ckfw/builtins/certdata.txt` at tag `NSS_3_134_RTM`. Its `now`,
+2026-11-24T00:00:00Z, lies inside every certificate's validity. The chains
+cover P-256 and P-384 ECDSA, RSA signers of 2048, 3072 and 4096 bits with
+SHA-256 and SHA-384, and cross-signed certificates whose own issuer is not
+among the roots. They are public certificates, kept here to check path
+building without a network.

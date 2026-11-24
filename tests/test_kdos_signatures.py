@@ -24,6 +24,31 @@ from tests.test_system import (  # noqa: F401  (the harness the classes share)
 )
 
 
+def mpta_record(cert: bytes, scope: bytes = b"", *, flags: int = 0,
+                distrust_after: int = 0, constraints: bytes = b"") -> bytes:
+    """One MPTA version 2 trust record."""
+    return (
+        flags.to_bytes(2, "big") + len(scope).to_bytes(2, "big") +
+        len(constraints).to_bytes(2, "big") + len(cert).to_bytes(4, "big") +
+        distrust_after.to_bytes(8, "big") + scope + constraints + cert
+    )
+
+
+def mpta_bundle(*records: bytes, generation: int = 1) -> bytes:
+    """An MPTA version 2 bundle of the given records."""
+    return (
+        b"MPTA" + (2).to_bytes(2, "big") + len(records).to_bytes(2, "big") +
+        generation.to_bytes(8, "big") + b"".join(records)
+    )
+
+
+# Drive a certificate message's path search to its end, as a poller would.
+PARSE_CERT_WORD = (
+    ": tv-parse-cert ( msg len -- ior ) TLS-PARSE-CERTIFICATE "
+    "BEGIN DUP X509-PATH-PENDING = WHILE DROP TLS-CERTIFICATE-STEP REPEAT ;"
+)
+
+
 class TestKDOSASN1(_KDOSNetworkTestBase):
     """Tests for §16.7a ASN.1/DER minimal parser."""
 
@@ -171,7 +196,7 @@ class TestKDOSX509(_KDOSNetworkTestBase):
         ])
         text = self._run_kdos(lines, max_steps=2_000_000_000)
         self.assertIn("FLAG=0 ", text)         # success
-        self.assertIn("ALGO=1027 ", text)      # 0x0403 = ECDSA-P256
+        self.assertIn("ALGO=2 ", text)         # X509-KEY-P256
         self.assertIn("PKLEN=65 ", text)       # uncompressed point
 
     def test_x509_parse_pubkey_bytes(self):
@@ -1251,11 +1276,7 @@ class TestKDOSRSA(_KDOSNetworkTestBase):
 
     @staticmethod
     def _bundle(root: bytes, scope=b"rsa.test.example") -> bytes:
-        record = (
-            (0).to_bytes(2, "big") + len(scope).to_bytes(2, "big") +
-            len(root).to_bytes(4, "big") + scope + root
-        )
-        return b"MPTA" + b"\x00\x01\x00\x01" + (1).to_bytes(8, "big") + record
+        return mpta_bundle(mpta_record(root, scope))
 
     @staticmethod
     def _mgf1_sha256(seed: bytes, length: int) -> bytes:
@@ -1448,39 +1469,78 @@ class TestKDOSRSA(_KDOSNetworkTestBase):
         self.assertIn("FLAG=-1 ", text)
 
     def test_rsa_spki_and_signature_algorithm_are_strict(self):
+        """Invalid RSA keys are malformed (-1); valid keys outside the
+        profile, 2048 to 8192 bits in whole bytes with an exponent below
+        2^33, are unsupported (-2)."""
         modulus = ((1 << 2048) - 159).to_bytes(256, "big")
         valid = self._rsa_spki(modulus)
         bad_null = valid.replace(b"\x05\x00", b"\x04\x00", 1)
-        bad_lead = valid.replace(bytes.fromhex("0282010100"),
-                                 bytes.fromhex("0282010101"), 1)
-        bad_exp = valid[:-1] + bytes([valid[-1] ^ 2])
+        odd_width = valid.replace(bytes.fromhex("0282010100"),
+                                  bytes.fromhex("0282010101"), 1)
+        lead_zero = self._rsa_spki(modulus, b"\x00\x01\x00\x01")
         even = self._rsa_spki(modulus[:-1] + bytes([modulus[-1] & 0xFE]))
-        rsa4096 = self._rsa_spki(b"\x80" + b"\x00" * 510 + b"\x01")
+        cases = {
+            "v": valid,
+            "n": bad_null,
+            "w": odd_width,
+            "z": lead_zero,
+            "o": even,
+            "a": self._rsa_spki(modulus, b"\x03"),
+            "b": self._rsa_spki(modulus, b"\x01"),
+            "c": self._rsa_spki(modulus, b"\x01\x00\x00\x01"),
+            "d": self._rsa_spki(modulus, (2**33 - 1).to_bytes(5, "big")),
+            "f": self._rsa_spki(modulus, (2**33 + 1).to_bytes(5, "big")),
+            "g": self._rsa_spki(modulus, b"\x01\x00\x03"),
+            "h": self._rsa_spki(b"\x80" + b"\x00" * 510 + b"\x01"),
+            "i": self._rsa_spki(b"\x80" + b"\x00" * 1022 + b"\x01"),
+            "j": self._rsa_spki(b"\x80" + b"\x00" * 1023 + b"\x01"),
+            "k": self._rsa_spki(b"\x80" + b"\x00" * 253 + b"\x01"),
+        }
         lines = []
-        for name, data in (("v", valid), ("n", bad_null), ("l", bad_lead),
-                           ("e", bad_exp), ("o", even), ("u", rsa4096)):
+        for name, data in cases.items():
             lines += self._forth_bytes(f"tv-{name}", data)
             lines.append(f"CREATE tv-d{name} /X509-CERT ALLOT")
             lines.append(
                 f'." {name.upper()}=" tv-{name} tv-{name} {len(data)} + '
                 f"tv-d{name} X509-PARSE-SPKI-DESC . DROP"
             )
+        lines += [
+            '." VKEY=" tv-dv XC.PUB-ALGO + @ . tv-dv XC.PUB-U + @ .'
+            " tv-dv XC.PUB-E-U + @ .",
+            '." HKEY=" tv-dh XC.PUB-U + @ .',
+        ]
         alg = bytes.fromhex("300d06092a864886f70d01010b0500")
         alg_no_null = bytes.fromhex("300b06092a864886f70d01010b")
-        lines += self._forth_bytes("tv-alg", alg)
-        lines += self._forth_bytes("tv-alg-bad", alg_no_null)
+        sha1 = bytes.fromhex("300d06092a864886f70d0101050500")
+        ecdsa384 = bytes.fromhex("300a06082a8648ce3d040303")
+        ecdsa384_params = bytes.fromhex("300c06082a8648ce3d0403030500")
+        for name, data in (("alg", alg), ("alg-bad", alg_no_null),
+                           ("sha1", sha1), ("e384", ecdsa384),
+                           ("e384p", ecdsa384_params)):
+            lines += self._forth_bytes(f"tv-{name}", data)
         lines.extend([
             f'." AI=" tv-alg tv-alg {len(alg)} + X509-PARSE-ALG . .',
             f'." BI=" tv-alg-bad tv-alg-bad {len(alg_no_null)} + '
             "X509-PARSE-ALG . .",
+            f'." SI=" tv-sha1 tv-sha1 {len(sha1)} + X509-PARSE-ALG . .',
+            f'." EI=" tv-e384 tv-e384 {len(ecdsa384)} + X509-PARSE-ALG . .',
+            f'." PI=" tv-e384p tv-e384p {len(ecdsa384_params)} + '
+            "X509-PARSE-ALG . .",
         ])
         text = self._run_kdos(lines)
-        self.assertIn("V=0 ", text)
-        for label in ("N", "L", "E", "O"):
-            self.assertIn(f"{label}=-1 ", text)
-        self.assertIn("U=-2 ", text)
+        for label in ("V", "A", "C", "D", "G", "H", "I"):
+            self.assertIn(f"{label}=0 ", text, label)
+        for label in ("N", "Z", "O", "B"):
+            self.assertIn(f"{label}=-1 ", text, label)
+        for label in ("W", "F", "J", "K"):
+            self.assertIn(f"{label}=-2 ", text, label)
+        self.assertIn("VKEY=1 256 3 ", text)
+        self.assertIn("HKEY=512 ", text)
         self.assertIn("AI=0 1025 ", text)
         self.assertIn("BI=-1 0 ", text)
+        self.assertIn("SI=0 0 ", text)
+        self.assertIn("EI=0 1283 ", text)
+        self.assertIn("PI=-1 0 ", text)
 
     def test_4096_anchor_scope_and_512_byte_signature_are_bounded(self):
         """A 2048-bit key with a 4096-bit issuer signature is borrowed safely."""
@@ -1510,8 +1570,8 @@ class TestKDOSRSA(_KDOSNetworkTestBase):
         self.assertIn("PUB=256 ", text)
         self.assertIn("SIG=512 ", text)
         self.assertIn("LEGACY=-1 ", text)
-        self.assertIn("TRUST=-4108 ", text)
-        self.assertIn("COUNT=0 ", text)
+        self.assertIn("TRUST=0 ", text)
+        self.assertIn("COUNT=1 ", text)
         self.assertIn("PINNED=0 ", text)
         self.assertIn("PINCOUNT=1 ", text)
 
@@ -1649,7 +1709,9 @@ class TestKDOSRSA(_KDOSNetworkTestBase):
         lines.extend([
             "tv-mod _TLS-SERVER-PUBKEY 256 CMOVE",
             "256 _TLS-SERVER-PUBKEY-LEN !",
-            "X509-ALG-RSA2048 _TLS-SERVER-PUBKEY-ALGO !",
+            "X509-KEY-RSA _TLS-SERVER-PUBKEY-ALGO !",
+            "RSA-E-65537 _TLS-SERVER-PUBKEY-E 3 CMOVE",
+            "3 _TLS-SERVER-PUBKEY-E-U !",
             "VARIABLE tv-ctx 0 TLS-CTX@ tv-ctx !",
             "TLS-ROLE-CLIENT tv-ctx @ TLS-CTX.ROLE !",
             "TLS-HASH-SHA256 tv-ctx @ TLS-CTX.HASH-ID !",
@@ -1694,17 +1756,8 @@ class TestKDOSX509Chain(_KDOSNetworkTestBase):
     @staticmethod
     def _bundle(root: bytes, scope=b"test.example.com", flags=0,
                 generation=1) -> bytes:
-        record = (
-            flags.to_bytes(2, "big") +
-            len(scope).to_bytes(2, "big") +
-            len(root).to_bytes(4, "big") +
-            scope + root
-        )
-        return (
-            b"MPTA" + (1).to_bytes(2, "big") +
-            (1).to_bytes(2, "big") + generation.to_bytes(8, "big") +
-            record
-        )
+        return mpta_bundle(mpta_record(root, scope, flags=flags),
+                           generation=generation)
 
     def _chain_lines(self, *, order=("leaf", "intermediate"),
                      scope=b"test.example.com") -> list[str]:
@@ -1742,7 +1795,7 @@ class TestKDOSX509Chain(_KDOSNetworkTestBase):
         self.assertIn("PARSE1=0 ", text)
         self.assertIn("CHAIN=0 ", text)
         self.assertIn("COUNT=1 ", text)
-        self.assertIn("VERSION=1 ", text)
+        self.assertIn("VERSION=2 ", text)
         self.assertIn("GENERATION=1 ", text)
 
     def test_chain_rejects_hostname_time_signature_and_empty_trust(self):
@@ -1875,7 +1928,8 @@ class TestKDOSTLSCertVerify(_KDOSNetworkTestBase):
 
     def _trusted_lines(self, msg: bytes, host="test.example.com") -> list[str]:
         bundle = TestKDOSX509Chain._bundle(self._fixture("root"))
-        lines = self._store_bytes("tv-trust", bundle)
+        lines = [PARSE_CERT_WORD]
+        lines += self._store_bytes("tv-trust", bundle)
         lines += self._store_bytes("tv-msg", msg)
         lines += self._set_epoch_lines()
         lines.extend([
@@ -1897,7 +1951,7 @@ class TestKDOSTLSCertVerify(_KDOSNetworkTestBase):
         lines = self._trusted_lines(msg)
         lines.extend([
             "VARIABLE cert-depth  DEPTH cert-depth !",
-            f"tv-msg {len(msg)} TLS-PARSE-CERTIFICATE",
+            f"tv-msg {len(msg)} tv-parse-cert",
             '." FLAG=" .',
             'DEPTH cert-depth @ = ." CERT-BALANCED=" .',
             '." LAST=" TLS-CERT-LAST-ERROR @ .',
@@ -1911,7 +1965,7 @@ class TestKDOSTLSCertVerify(_KDOSNetworkTestBase):
         self.assertIn("CERT-BALANCED=-1 ", text)
         self.assertIn("LAST=0 ", text)
         self.assertIn("CERTS=2 ", text)
-        self.assertIn("ALGO=1027 ", text)   # 0x0403
+        self.assertIn("ALGO=2 ", text)      # X509-KEY-P256
         self.assertIn("PKLEN=65 ", text)
 
     def test_tls_parse_certificate_hostname_mismatch(self):
@@ -1919,7 +1973,7 @@ class TestKDOSTLSCertVerify(_KDOSNetworkTestBase):
         msg = self._build_cert_msg()
         lines = self._trusted_lines(msg, host="evil.attacker.com")
         lines.extend([
-            f"tv-msg {len(msg)} TLS-PARSE-CERTIFICATE",
+            f"tv-msg {len(msg)} tv-parse-cert",
             '." FLAG=" .',
             '." PKLEN=" _TLS-SERVER-PUBKEY-LEN @ .',
         ])
@@ -1932,7 +1986,7 @@ class TestKDOSTLSCertVerify(_KDOSNetworkTestBase):
         msg = self._build_cert_msg()
         lines = self._trusted_lines(msg, host=None)
         lines.extend([
-            f"tv-msg {len(msg)} TLS-PARSE-CERTIFICATE",
+            f"tv-msg {len(msg)} tv-parse-cert",
             '." FLAG=" .',
             '." PKLEN=" _TLS-SERVER-PUBKEY-LEN @ .',
         ])
@@ -1943,12 +1997,13 @@ class TestKDOSTLSCertVerify(_KDOSNetworkTestBase):
     def test_tls_parse_certificate_requires_trust(self):
         """A syntactically valid chain cannot publish a key without trust."""
         msg = self._build_cert_msg()
-        lines = self._store_bytes("tv-msg", msg) + self._set_epoch_lines()
+        lines = [PARSE_CERT_WORD]
+        lines += self._store_bytes("tv-msg", msg) + self._set_epoch_lines()
         lines.extend([
             "TLS-TRUST-RESET",
             'S" test.example.com" TLS-SNI-HOST SWAP CMOVE',
             "16 TLS-SNI-LEN !",
-            f"tv-msg {len(msg)} TLS-PARSE-CERTIFICATE",
+            f"tv-msg {len(msg)} tv-parse-cert",
             '." FLAG=" .',
             '." PKLEN=" _TLS-SERVER-PUBKEY-LEN @ .',
         ])
@@ -1962,7 +2017,7 @@ class TestKDOSTLSCertVerify(_KDOSNetworkTestBase):
         msg[3] ^= 1
         lines = self._trusted_lines(bytes(msg))
         lines.extend([
-            f"tv-msg {len(msg)} TLS-PARSE-CERTIFICATE",
+            f"tv-msg {len(msg)} tv-parse-cert",
             '." FLAG=" .',
         ])
         text = self._run_kdos(lines, max_steps=2_000_000_000)
@@ -1973,7 +2028,7 @@ class TestKDOSTLSCertVerify(_KDOSNetworkTestBase):
         msg = self._build_cert_msg(entry_extensions=b"\x00\x00\x00\x00")
         lines = self._trusted_lines(msg)
         lines.extend([
-            f"tv-msg {len(msg)} TLS-PARSE-CERTIFICATE",
+            f"tv-msg {len(msg)} tv-parse-cert",
             '." FLAG=" .',
         ])
         text = self._run_kdos(lines, max_steps=5_000_000_000)
@@ -1994,7 +2049,7 @@ class TestKDOSTLSCertVerify(_KDOSNetworkTestBase):
         ])
         lines = self._trusted_lines(msg)
         lines.extend([
-            f"tv-msg {len(msg)} TLS-PARSE-CERTIFICATE",
+            f"tv-msg {len(msg)} tv-parse-cert",
             '." FLAG=" .',
             '." CERTS=" TLS-PEER-CERT-COUNT @ .',
         ])
@@ -2011,7 +2066,7 @@ class TestKDOSTLSCertVerify(_KDOSNetworkTestBase):
         lines += self._store_bytes("tv-transcript", transcript)
         lines += self._store_bytes("tv-cv", cv_msg)
         lines.extend([
-            f"tv-msg {len(cert_msg)} TLS-PARSE-CERTIFICATE",
+            f"tv-msg {len(cert_msg)} tv-parse-cert",
             '." CERT=" .',
             "TLS-TR-RESET",
             f"tv-transcript {len(transcript)} TLS-TR-APPEND",

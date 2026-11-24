@@ -316,10 +316,13 @@ read cutover can be retried from cleared prerequisites.
 1. `ServerHello` and the handshake key schedule.
 2. `EncryptedExtensions` with exact handshake framing.
 3. A complete server `Certificate` message.
-4. A path from leaf to an explicitly provisioned and hostname-scoped anchor.
-5. Certificate validity, CA constraints, key usage, EKU, SAN, and hostname.
-6. Every required ECDSA-P256-SHA256 or RSA-2048/PKCS#1-SHA256 certificate
-   signature.
+4. A path from the leaf to a provisioned anchor that may vouch for the host:
+   a global anchor when no scoped anchor binds the host, otherwise a scoped
+   anchor that names it.
+5. Certificate validity, CA constraints, key usage, EKU, name constraints,
+   SAN, hostname, and the anchor's distrust-after date.
+6. Every certificate signature on that path: ECDSA P-256 with SHA-256, ECDSA
+   P-384 with SHA-384, or RSA PKCS#1 v1.5 with SHA-256, -384 or -512.
 7. `CertificateVerify`, proving possession of the authenticated leaf key.
 8. The server `Finished` MAC.
 9. Exact ALPN byte selection when the caller configures a required protocol.
@@ -343,7 +346,7 @@ state.
 `DER-READ` accepts definite, canonical DER lengths of at most four length
 octets and never reads beyond the caller's limit. `X509-DESC-PARSE` accepts a
 positive caller-bounded span whose canonical outer DER object consumes that
-span exactly, and records borrowed slices in a 208-byte `/X509-CERT`
+span exactly, and records borrowed slices in a 256-byte `/X509-CERT`
 descriptor. It has no private 128-through-8192-byte certificate limit. The
 trust-bundle and client Certificate-message surfaces impose that range as
 their own profile bound; the server credential surface instead uses the TLS
@@ -352,14 +355,25 @@ uint24 framing bound described below.
 The parser currently requires:
 
 - X.509 version 3.
-- A P-256 uncompressed SubjectPublicKeyInfo, or a canonical full-width
-  RSA-2048 `rsaEncryption` key with explicit NULL parameters and exponent
-  65537.
-- ECDSA with SHA-256, RSA PKCS#1 v1.5 with SHA-256, or ECDSA with SHA-384 on a
-  certificate used only as an explicitly trusted anchor.
-- Strict outer/TBS signature-algorithm agreement.
+- A key it can use: an uncompressed P-256 or P-384 point, or an
+  `rsaEncryption` key with explicit NULL parameters, a modulus of whole bytes
+  from 2048 to 8192 bits and an odd exponent from 3 to below 2^33, the
+  largest BoringSSL accepts. An even modulus or exponent, or an exponent
+  below 3, is malformed; another well-formed key, curve or size answers
+  `X509-PARSE-UNSUPPORTED`. `XC.PUB-ALGO` holds the key type
+  (`X509-KEY-RSA`, `-P256`, `-P384`), `XC.PUB-E-A`/`-U` the RSA exponent and
+  `XC.SPKI-A`/`-U` the whole SubjectPublicKeyInfo.
+- A well-formed signature AlgorithmIdentifier. ECDSA with SHA-256 or SHA-384
+  (no parameters) and RSA PKCS#1 v1.5 with SHA-256, -384 or -512 (exactly a
+  NULL parameter) are recognised by their TLS SignatureScheme values; any
+  other algorithm parses as `X509-SIG-OTHER`, which no verification accepts,
+  so a trust anchor's own signature may use any algorithm.
+- Byte-identical outer and TBS signature AlgorithmIdentifiers.
 - UTC or Generalized time with seconds and `Z`.
-- Bounded BasicConstraints, KeyUsage, EKU, SAN, SKI, and AKI parsing.
+- Bounded BasicConstraints, KeyUsage, EKU, SAN, SKI, AKI and NameConstraints
+  parsing. A NameConstraints value holds a permitted set, an excluded set or
+  both, each a nonempty list of subtrees with no minimum or maximum; an IP
+  base is an address and mask of 4 or 16 bytes each.
 - Rejection of duplicate recognized extensions and unknown critical
   extensions.
 
@@ -570,61 +584,105 @@ there is no stepped RSA interface.
 
 ### Trust Bundles
 
-The default trust store is empty. `TLS-TRUST-LOAD` copies and validates an
-in-memory bundle, allowing at most eight anchors and 32768 total bytes. An
-anchor must use a supported P-256 or RSA-2048 public key, be a CA, and, when
-KeyUsage is present, permit certificate signing. An RSA-2048 intermediate may
-be provisioned directly as the scoped anchor even when its own borrowed
-signature is 512 bytes from an unsupported RSA-4096 parent; anchor loading
-does not pretend to validate that parent. An RSA-4096 certificate itself is
-rejected as an unsupported anchor.
+The default trust store is empty. `TLS-TRUST-LOAD` copies an in-memory MPTA
+version 2 bundle into storage sized to it, and its anchor table to its record
+count; storage only grows, and is reused by the next load. A failed load
+leaves no anchors. An anchor must use a supported key, be a CA, and, when
+KeyUsage is present, permit certificate signing.
 
 Bundle format, all integer fields big-endian:
 
 ```text
-magic            4 bytes   "MPTA"
-format_version   u16       1
-anchor_count     u16       0..8
-generation       u64       provisioning metadata
+magic             4 bytes   "MPTA"
+format_version    u16       2
+record_count      u16
+generation        u64       provisioning metadata
 
-repeated anchor_count times:
-flags            u16       bit 0: include subdomains
-scope_length     u16       0..253
-cert_length      u32       128..8192
-scope            bytes     ASCII DNS name; empty means global
-certificate      bytes     DER X.509 CA certificate
+repeated record_count times:
+flags             u16       bit 0: the scope includes names below it
+scope_length      u16       0..253
+constraints_length u16
+cert_length       u32       1..8192
+distrust_after    u64       seconds since 1970; 0 for none
+scope             bytes     ASCII DNS name; empty for a global anchor
+constraints       bytes     a DER NameConstraints value, or none
+certificate       bytes     DER X.509 CA certificate
 ```
 
-An exact scope authorizes only that hostname. `TTAF-SUBDOMAINS` additionally
-authorizes names below it. Scope is checked whether the trusted certificate is
-presented in the chain or omitted.
+A record without a scope is a global anchor, which may end the path of any
+host that no scoped anchor binds. A scoped anchor, such as a private root,
+binds the host its scope names, and with `TTAF-SUBDOMAINS` every name below
+it: such a host's path may end only at scoped anchors that name it, so a
+public certificate cannot stand in for the private one. A nonzero
+distrust-after time refuses paths whose leaf's notBefore is later, as
+Mozilla's root program sets for some roots (`TLS-CERT-DISTRUSTED`). Imposed
+constraints hold every certificate whose subject is the anchor's, cross
+certificates included, as NSS holds TUBITAK's root to `.tr`; they apply
+beside the anchor certificate's own NameConstraints.
 
 The format itself is not signed and `generation` is not an anti-rollback
-counter. The caller must obtain the bundle through a trusted provisioning path.
-Signed updates and durable rollback protection remain release requirements.
+counter. The caller must obtain the bundle through a trusted provisioning path:
+Akashic composes it from reviewed contributors and a digest-pinned root set.
 
 ### Path Building
 
-`X509-VERIFY-CHAIN` accepts one through eight parsed certificates. Descriptor
-zero is always the server leaf; remaining certificates may be unordered and
-may contain irrelevant entries. TLS Certificate processing requires the leaf
-to parse, but ignores unusable non-leaf extras after validating their enclosing
-TLS lengths. They cannot enter path construction; a required unsupported
-intermediate therefore still leaves no path and fails closed. The bounded
-builder:
+`X509-PATH-BEGIN ( certs count hostname hlen now -- ior )` and
+`X509-PATH-STEP ( -- ior )` search for a path from the leaf, descriptor zero,
+through the presented CA certificates in any order, to an anchor. The search
+backtracks over every candidate issuer at each depth, anchors first, so a
+cross-signed copy of a root whose own issuer is gone, an extra certificate, or
+a presented issuer with the right name and the wrong key does not end it.
+Each `X509-PATH-STEP` checks at most one signature: a P-384 check, the
+costliest, takes 72.0M cycles, 0.72 s at 100 MHz, so a caller that steps once
+per poll keeps the machine responsive. `BEGIN` answers `X509-PATH-PENDING`
+once the search has started, or the leaf's failure; `STEP` answers
+`X509-PATH-PENDING` while work remains, 0 for a complete path, or the most
+recent specific failure of a candidate (`TLS-CERT-NO-TRUST` when none came
+close). `X509-VERIFY-CHAIN` runs the whole search at once. The search:
 
 - requires the leaf not to be a CA;
 - checks digitalSignature and serverAuth when those extensions are present;
 - checks SAN hostname and RTC validity;
 - links issuer/subject and AKI/SKI when both key identifiers are available;
-- checks CA BasicConstraints, keyCertSign, EKU restrictions, and pathLen;
-- verifies each child with either ECDSA-P256-SHA256 or exact
-  RSA-2048/PKCS#1-SHA256 according to its signature and issuer-key algorithms;
-- terminates only at a scoped provisioned anchor.
+- checks CA BasicConstraints, keyCertSign, EKU restrictions, and pathLen,
+  counting no self-issued certificate;
+- applies every CA's and anchor's name constraints, own and imposed, to the
+  certificates below it, except self-issued ones above the leaf: DNS names
+  and IP addresses against permitted and excluded subtrees, directory names
+  against permitted subtrees by their leading RDNs, and a wildcard name as
+  excluded when the excluded subtree lies below its base. A name of another
+  form under a subtree of that form, or a named subject under an excluded
+  directory subtree, fails closed;
+- allows an anchor only for hosts its scope permits and leaves issued
+  before its distrust-after date;
+- verifies each signature with the issuer's key: ECDSA P-256 with SHA-256,
+  ECDSA P-384 with SHA-384, the pairs Mozilla's root policy allows, or RSA
+  PKCS#1 v1.5 with SHA-256, -384 or -512.
 
-Failures return stable `TLS-CERT-*` statuses from `-4101` through `-4109`.
-`TLS-CERT-LAST-ERROR` retains the Certificate-message result. A clock earlier
-than 2020 is considered untrustworthy and fails closed.
+A successful path adds the edges of its intermediates to a per-boot cache,
+keyed by SHA-256 over the child certificate's bytes and the issuer's
+SubjectPublicKeyInfo. The same bytes under the same key verify the same way
+every time, so a later search over that edge skips only its signature
+arithmetic; every other check runs again. Leaf edges are not cached, and an
+edge enters the cache only from a complete path, so the cache grows with the
+intermediates the machine has trusted, by doubling from 16 entries of 32
+bytes. `X509-EDGE-CACHE-CLEAR` empties it.
+
+Failures return stable `TLS-CERT-*` statuses from `-4101` through `-4111`;
+`-4110` is `TLS-CERT-ALLOC`, storage that cannot grow, and `-4111`
+`TLS-CERT-DISTRUSTED`. `TLS-CERT-LAST-ERROR` retains the Certificate-message
+result. A clock earlier than 2020 is considered untrustworthy and fails
+closed.
+
+Measured on the emulator at 100 MHz against chains captured from public
+hosts on 2026-11-24 and the NSS roots they end at
+(`tests/fixtures/tls/webpki_chains.json`), the first search for a host costs
+one signature per edge: 216.8M cycles (2.2 s) for Let's Encrypt's three
+P-384 edges to ISRG Root X2, 74.1M for github.com's P-256 and P-384 edges,
+13.8M for hnrss.org's three RSA edges, two of them by RSA-4096 keys, and 3.6M
+for an RSA-2048 chain under DigiCert Global Root G2. A later host under a
+cached intermediate pays only its leaf's edge: 1.8M for an RSA-2048 leaf,
+71.1M for one issued by a P-384 intermediate.
 
 ### TLS Certificate Messages
 
@@ -632,8 +690,20 @@ than 2020 is considered untrustworthy and fails closed.
 requires the main-handshake empty request context, checks the exact
 certificate-list length, bounds every certificate and per-entry extension
 vector, and rejects more than eight entries. It requires SNI and a loaded
-trust store. The leaf public key is copied to CertificateVerify scratch only
-after the full path succeeds; every failure clears that scratch first.
+trust store, and starts the path search, answering `X509-PATH-PENDING`;
+`TLS-CERTIFICATE-STEP` then advances it one signature at a time. The leaf
+public key, with an RSA key's exponent, is copied to CertificateVerify scratch
+only after the full path succeeds; every failure clears that scratch first.
+`TLS-PROCESS-HS-MSG` answers `X509-PATH-PENDING` for a Certificate message
+while its search runs, leaving the message in place, the transcript untouched
+and the handshake state unchanged; the caller calls it again with the same
+message, once per poll, until it answers 0 or fails.
+
+CertificateVerify accepts the schemes ClientHello offers: ECDSA P-256 with
+SHA-256 (`0x0403`) and P-384 with SHA-384 (`0x0503`) for those leaf keys,
+and RSA-PSS with SHA-256, -384 or -512 (`0x0804`-`0x0806`) for an
+`rsaEncryption` leaf, whose signature must be as long as its modulus. The
+scheme's hash also hashes the signed content.
 
 Those are client receive/path-building bounds. In particular, this surface
 admits only 128-through-8192-byte entries and retains at most eight
@@ -1033,22 +1103,17 @@ ticket fragment fail closed with `TLS-E-POST-HANDSHAKE`.
 
 ## Deployment Reality
 
-The code does not validate arbitrary public certificate chains. The
-signature primitives now cover RSA of any width and P-384, but the
-certificate parser and path validator still admit only RSA-2048 and P-256
-keys with SHA-256 signatures, there is no Ed25519, and there is no curated
-root program. Public chains commonly cross those boundaries.
+The verifier checks public certificate chains against whatever anchors the
+caller provisions: RSA of 2048 to 8192 bits with SHA-256, -384 or -512, and
+ECDSA P-256 and P-384, with name constraints and distrust dates. Ed25519,
+P-521 and RSA-PSS certificate signatures are not supported, so a chain that
+needs them has no path and fails closed. Revocation is not checked.
 
-When an endpoint's representable leaf or intermediate is signed by an
-unsupported parent, that supported certificate may instead be provisioned as
-a narrowly hostname-scoped anchor. For example, pinning an RSA-2048
-intermediate is valid even if its own signature came from an RSA-4096 root.
-This is an explicit, updateable deployment profile, not equivalent to
-validating or trusting the unsupported parent. Intermediate rotation requires
-a trust-bundle update.
+A narrowly scoped anchor remains available for a private root, and binds its
+hosts so that no public chain can stand in for it.
 
 No remote API token or equivalent application secret should be provisioned
-until the intended endpoint's current chain is representable by the installed
+until the intended endpoint's current chain verifies against the installed
 bundle and a credential-free live handshake succeeds on the machine. That
 client-side application secret is unrelated to a local TLS server credential.
 
@@ -1251,7 +1316,8 @@ credential. None enters a product trust bundle or production credential slot.
 - Persist accepted trust-bundle generation state if rollback resistance is
   required. In-memory credential-handle generations are stale-authority
   protection, not durable rollback state.
-- Establish an explicit root/intermediate policy and expiry/rotation process.
+- Keep the root set's refresh process: Akashic pins the NSS release its
+  bundle comes from, and a regenerated bundle is a reviewed change.
 - Decide whether revocation is supported through stapled OCSP, short-lived
   scoped anchors, or another bounded policy.
 
@@ -1275,15 +1341,13 @@ credential. None enters a product trust bundle or production credential slot.
 
 ### Algorithm coverage
 
-- Admit ECDSA-SHA384, P-384 and wider RSA keys in certificate parsing and
-  path validation, now that the verification primitives exist.
 - Add Ed25519 only with native vectors and bounded key sizes. If RSA-PSS is
   later accepted as an X.509 certificate-signature AlgorithmIdentifier, give
   its parameters the same exact, bounded treatment as CertificateVerify.
 - Advertise only signature algorithms whose complete certificate and
-  CertificateVerify paths are implemented. The current ClientHello advertises
-  `0x0403,0x0804` in `signature_algorithms` and `0x0403,0x0401` in
-  `signature_algorithms_cert`.
+  CertificateVerify paths are implemented. The ClientHello advertises
+  `0x0403,0x0503,0x0804,0x0805,0x0806` in `signature_algorithms` and
+  `0x0403,0x0503,0x0401,0x0501,0x0601` in `signature_algorithms_cert`.
 
 ### Concurrency
 
@@ -1321,7 +1385,8 @@ and NIC descriptor ownership, not independently parallel receive/TLS progress.
 ## Acceptance Before Remote API Secrets
 
 1. All native TLS/X.509/ECDSA/RSA tests pass with no unresolved KDOS words.
-2. The installed trust bundle is reviewed and scoped to the target endpoint.
+2. The installed trust bundle is reviewed: the pinned root set, or a scoped
+   anchor for a private endpoint.
 3. The RTC is valid and survives the intended boot/power model.
 4. A credential-free live handshake authenticates the expected chain.
 5. HTTP response bytes can be streamed without overflowing TLS or transcript
