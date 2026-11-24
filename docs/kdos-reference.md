@@ -169,7 +169,9 @@ foreground's stack while `TASK-ID` still reports the task, also after
 
 KDOS installs `_KDOS-FAULT` with the BIOS `FAULT-XT!`, so machine faults are
 exceptions too. An illegal instruction throws -21, an alignment fault -23,
-and a divide by zero -10, to the innermost `CATCH` of the faulting context.
+and a divide by zero -10, to the innermost `CATCH` of the faulting context,
+and `'` or `[']` of a name the dictionary does not hold throws -13 after
+printing an undefined word's message.
 A checked load that hits one returns `EVAL-S-THROW` with the code in
 `EVAL-THROW`. Outside any `CATCH` the hook returns, and the BIOS prints its
 one-line fault report and recovers the prompt or the worker core

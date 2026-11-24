@@ -428,8 +428,8 @@ Four more words of this section have no number in the catalogue:
 | 125 | `POSTPONE` | `( "name" -- )` | ✓ | If IMMEDIATE: compile call. If not: compile literal(xt) + call(postpone_helper) for deferred compilation |
 | 126 | `RECURSE` | `( -- )` | ✓ | Compile call to current definition: the `:NONAME` body, or the entry `:` began, which `;` has not yet published |
 | 127 | `EXECUTE` | `( xt -- )` | | Call execution token (code field address) |
-| 128 | `'` | `( "name" -- xt )` | | Parse next word, find in dictionary, push its code field address (0 if not found) |
-| 129 | `[']` | `( "name" -- )` | ✓ | Compile-time: parse next word, compile its XT as a literal. Equivalent to `' name LITERAL` |
+| 128 | `'` | `( "name" -- xt )` | | Parse next word, find in dictionary, push its code field address. A name the dictionary does not hold, or no name at all, is refused as the simulator refuses it: the undefined-word message `NAME ? (not found)`, then the fault path with -13 (undefined word), so the `FAULT-XT!` callback can throw it to a `CATCH`, and otherwise the machine recovers with clean stacks and the prompt |
+| 129 | `[']` | `( "name" -- )` | ✓ | Compile-time: parse next word, compile its XT as a literal. Equivalent to `' name LITERAL`, and refuses a missing name as `'` does, which ends the definition unpublished |
 | 130 | `>BODY` | `( xt -- addr )` | | Data-field address of a CREATEd word. CREATE's trampoline is 30 bytes, so addr = xt + 30 |
 | 131 | `FIND` | `( c-addr -- c-addr 0 \| xt 1 \| xt -1 )` | | ANS FIND: search dictionary for counted string. Returns xt+1 if immediate, xt+-1 if normal, c-addr+0 if not found |
 | 132 | `:NONAME` | `( -- xt )` | | Begin anonymous (headerless) definition. Pushes HERE as the XT. Terminated by `;` which leaves XT on stack |
@@ -699,7 +699,7 @@ capabilities, and its transfers return `NO_MEDIA` (1).
 | 208 | `ISR!` | `( xt slot -- )` | | Install xt at IVT slot: writes to `ivt_table + slot*8` |
 | 542 | `IDLE-UNTIL` | `( deadline-ms -- )` | | Sleep this core until input, an interrupt, or `MS@` reaching the deadline; returns at once if it has passed and may return early |
 | 543 | `IDLE-MS` | `( ms -- )` | | `IDLE-UNTIL` at `MS@` + ms, saturating; 0 returns at once |
-| 541 | `FAULT-XT!` | `( xt -- )` | | Install the instruction-fault callback; it receives the throw code (-21 illegal instruction, -23 alignment, -10 divide by zero) before the BIOS reports; 0 removes it |
+| 541 | `FAULT-XT!` | `( xt -- )` | | Install the instruction-fault callback; it receives the throw code (-21 illegal instruction, -23 alignment, -10 divide by zero, and -13 when `'` or `[']` meets a name the dictionary does not hold) before the BIOS recovers; 0 removes it |
 
 ### RTC / System Clock (9 words)
 

@@ -4998,21 +4998,51 @@ w_tick:
     ldi64 r11, parse_word
     call.l r11
     cmpi r12, 0
-    breq tick_fail
+    breq tick_no_name
     ldi64 r11, find_word
     call.l r11
     cmpi r9, 0
-    breq tick_fail
+    breq tick_refuse
     ldi64 r11, entry_to_code
     call.l r11
     subi r14, 8
     str r14, r9
     ret.l
-tick_fail:
-    ldi r0, 0
+
+; ' and ['] refuse a name the dictionary does not hold, and a missing name,
+; as the simulator does: nothing goes on with a token that does not exist,
+; so IS of a misspelt name writes nothing and a misspelt ['] stops the
+; definition.  The message is an undefined word's, "NAME ? (not found)".
+; The error then takes the fault path with -13, the standard code for an
+; undefined word.  The FAULT-XT! callback runs first; KDOS's THROWs the code
+; to the innermost CATCH, where a checked EVALUATE reports it and its caller
+; rolls the source back.  With no callback, or when it returns, the machine
+; recovers as from a fault: interpret state, no definition pending, clean
+; stacks and the prompt.
+tick_no_name:
+    ldi64 r11, var_word_len
+    str r11, r12              ; R12 = 0: the message names nothing
+tick_refuse:
+    ldi64 r11, var_word_addr
+    ldn r9, r11
+    ldi64 r11, var_word_len
+    ldn r12, r11
+    ldi64 r11, print_counted
+    call.l r11
+    ldi64 r10, str_undefined
+    ldi64 r11, print_str
+    call.l r11
+    ldi64 r11, var_fault_xt
+    ldn r11, r11
+    cmpi r11, 0
+    breq tick_refuse_recover
+    ldi64 r1, 0xFFFFFFFFFFFFFFF3      ; -13 undefined word
     subi r14, 8
-    str r14, r0
-    ret.l
+    str r14, r1
+    call.l r11
+tick_refuse_recover:
+    ldi64 r11, fault_recover
+    call.l r11                ; never returns
 
 ; ['] ( "name" -- ) IMMEDIATE — compile-time: parse word, compile its XT as literal
 ;   Equivalent to: ' name LITERAL

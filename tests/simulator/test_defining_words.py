@@ -119,18 +119,34 @@ def test_tick_is_line_local_and_bracket_tick_compiles_the_found_xt() -> None:
     assert target is not None
 
     context = runtime.new_context()
-    runtime.evaluate(
-        b"' TARGET ' unknown '\nTARGET CAPTURE",
-        context=context,
-    )
+    runtime.evaluate(b"' TARGET\nTARGET CAPTURE", context=context)
+    assert context.data.snapshot() == (target.xt, 42, target.xt)
 
-    assert context.data.snapshot() == (
-        target.xt,
-        0,
-        0,
-        42,
-        target.xt,
-    )
+
+@pytest.mark.parametrize(
+    ("source", "name"),
+    [
+        (b"7 ' unknown", b"unknown"),
+        # Line-local: a tick at the end of a line names nothing and does
+        # not take the next line's first word.
+        (b"7 '\nTARGET", b""),
+        (b": TYPO 1 ['] unknown2 2 ;", b"unknown2"),
+    ],
+)
+def test_tick_and_bracket_tick_refuse_a_name_the_dictionary_does_not_hold(
+    source: bytes, name: bytes,
+) -> None:
+    # As the BIOS does: an undefined word's message, then the fault path
+    # with -13; with no FAULT-XT! callback the task aborts with clean
+    # stacks, and a definition a misspelt ['] stopped is never published.
+    runtime = MegaForthRuntime()
+    runtime.evaluate(b": TARGET 42 ;")
+    context = runtime.new_context()
+    with pytest.raises(ForthAbort, match="unknown word"):
+        runtime.evaluate(source, context=context)
+    assert runtime.drain_uart_output().endswith(name + b" ? (not found)\n")
+    assert context.data.depth() == 0
+    assert runtime.find("TYPO") is None
 
 
 def test_to_body_rejects_non_create_words_instead_of_fabricating_an_address() -> None:

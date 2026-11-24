@@ -921,7 +921,9 @@ def _sysinfo_fetch(
 def _tick(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     name = runtime.parse_input_word()
     word = runtime.find(name) if name else None
-    context.data.push(0 if word is None else word.xt)
+    if word is None:
+        runtime.refuse_undefined_name(name, context)
+    context.data.push(word.xt)
 
 
 def _to_body(runtime: MegaForthRuntime, context: ExecutionContext) -> None:

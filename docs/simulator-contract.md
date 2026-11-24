@@ -252,6 +252,11 @@ its `PC=` field, since the simulator has no machine PC (for example
 `*** DIVIDE BY ZERO CORE=00`, or `*** ALIGNMENT FAULT @ 0000000000040008
 CORE=00` with the misaligned address), and aborts with clean stacks.
 
+`'` and `[']` refuse a name the dictionary does not hold, or no name at all,
+as the BIOS does: they print its undefined-word message, `NAME ? (not
+found)`, and take the same path with -13, the standard code for an
+undefined word, with no further report.
+
 That abort, the `ABORT` word and both forms of `ABORT"` clear the task's
 stacks and then run the callback installed with `QUIT-XT!`, as BIOS `QUIT`
 does once it has reset the return stack. KDOS's callback clears its

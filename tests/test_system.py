@@ -5087,7 +5087,7 @@ class TestBIOS(unittest.TestCase):
             "60 EMIT FOO . BAR . 5 FACT . SEVEN . 4 SUMX EXECUTE . QQ . USE-IMM . 62 EMIT",
             ": SELF 1 SELF ;",
             ": BAD 1 NOSUCH ;",
-            "60 EMIT ' SELF . ' BAD . DEPTH . 62 EMIT",
+            "60 EMIT [DEFINED] SELF . [DEFINED] BAD . DEPTH . 62 EMIT",
             "RECURSE",
             ": AFTER 9 ;  60 EMIT AFTER . 62 EMIT",
         ])
@@ -5096,6 +5096,28 @@ class TestBIOS(unittest.TestCase):
         self.assertIn("<0 0 0 >", text)
         self.assertIn("RECURSE requires a colon definition", text)
         self.assertIn("<9 >", text)
+
+    def test_tick_refuses_a_name_the_dictionary_does_not_hold(self):
+        """' and ['] refuse a name the dictionary does not hold, and a
+        missing name, with an undefined word's message, as the simulator
+        does; with no FAULT-XT! callback the machine recovers with clean
+        stacks and the prompt.  A misspelt ['] stops the definition it is
+        in, which is never published, and the next line runs."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "11 ' TK-NOSUCH",
+            "60 EMIT DEPTH . 62 EMIT",
+            ": TK-TYPO 1 ['] TK-NOSUCH2 2 ;",
+            "60 EMIT 8 . [DEFINED] TK-TYPO . 62 EMIT",
+            "'",
+            "60 EMIT ' DUP 0<> . 62 EMIT",
+        ])
+        self.assertIn("TK-NOSUCH ? (not found)", text)
+        self.assertIn("<0 >", text)
+        self.assertIn("TK-NOSUCH2 ? (not found)", text)
+        self.assertIn("<8 0 >", text)
+        self.assertEqual(text.count("? (not found)"), 3)
+        self.assertIn("<-1 >", text)
 
     def test_postpone_immediate(self):
         """POSTPONE of an IMMEDIATE word compiles it instead of executing."""
@@ -14846,6 +14868,27 @@ class TestKDOSExceptions(_KDOSTestBase):
         self.assertRegex(text, r"\[FX-EVAL\s+5\s+-10\s+0\s+\]")
         self.assertRegex(text, r"\[FX-AFTER\s+0\s+0\s+\]")
         self.assertNotIn("*** ", text)
+
+    def test_tick_of_a_missing_name_throws_minus_13(self):
+        """' of a name the dictionary does not hold prints an undefined
+        word's message and throws -13 to the innermost CATCH, so a checked
+        load reports it as a caught exception; outside any CATCH the prompt
+        answers.  IS of a missing name writes nothing; it used to store its
+        token at address 30."""
+        text = self._run_kdos([
+            ": TK-TICK  ' ;",
+            '11 \' TK-TICK CATCH TK-NOSUCH CR ." [TK-CATCH " . . DEPTH . ." ]"',
+            'S" 12 \' TK-NOSUCH2" EVALUATE-CHECKED CR ." [TK-EVAL " . '
+            'EVAL-THROW @ . DEPTH . ." ]"',
+            "30 @ CONSTANT TK-30",
+            "' DUP IS TK-NOSUCH3",
+            'CR ." [TK-IS " 30 @ TK-30 = . HANDLER @ . DEPTH . ." ]"',
+        ])
+        self.assertRegex(text, r"\[TK-CATCH\s+-13\s+11\s+0\s+\]")
+        self.assertRegex(text, r"\[TK-EVAL\s+5\s+-13\s+0\s+\]")
+        self.assertRegex(text, r"\[TK-IS\s+-1\s+0\s+0\s+\]")
+        for name in ("TK-NOSUCH", "TK-NOSUCH2", "TK-NOSUCH3"):
+            self.assertIn(f"{name} ? (not found)", text)
 
     def test_uncaught_instruction_fault_still_reports(self):
         """Outside CATCH the KDOS hook returns and BIOS reports."""

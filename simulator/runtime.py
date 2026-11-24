@@ -2767,6 +2767,30 @@ class MegaForthRuntime:
             _DICTIONARY_FAULT_ABORT,
         )
 
+    def refuse_undefined_name(
+        self,
+        name: bytes,
+        context: ExecutionContext,
+    ) -> NoReturn:
+        """Refuse a name ``'`` or ``[']`` met that the dictionary does not
+        hold, or no name at all, as the BIOS does.
+
+        The undefined-word message comes first; the error then takes the
+        fault path with -13, the standard code for an undefined word: the
+        ``FAULT-XT!`` callback receives it, and with none, or when it
+        returns, the task aborts with clean stacks.
+        """
+
+        self.write_uart_bytes(bytes(name) + b" ? (not found)\n")
+        reason = f"unknown word {bytes(name)!r}"
+        raise _GuestFaultRequest(
+            self._fault_xt,
+            context,
+            reason,
+            FaultAbort(b"", reason),
+            -13,
+        )
+
     def _invoke_primitive(
         self,
         implementation: PrimitiveDefinition,
@@ -4476,7 +4500,9 @@ class MegaForthRuntime:
         elif kind is DirectiveKind.BRACKET_TICK:
             name = self.parse_input_word()
             word = self.dictionary.find(name) if name else None
-            compiler.operations.append(Literal(0 if word is None else word.xt))
+            if word is None:
+                self.refuse_undefined_name(name, state.context)
+            compiler.operations.append(Literal(word.xt))
         elif kind is DirectiveKind.DOES:
             entry_ip = len(compiler.operations) + 2
             compiler.operations.append(InstallDoes(entry_ip))

@@ -37,15 +37,16 @@ class TestUrokoModule(_KDOSTestBase):
     def test_kdos_loads_uroko_and_finds_every_word_it_declares(self):
         names = re.findall(r"^EFFECT\s+(\S+)", UROKO.decode("utf-8"), re.MULTILINE)
         # Each result is printed plus a constant, so the numbers below
-        # appear in no echoed input line.  A word ' cannot find leaves 0,
-        # and the count of words found then falls short of the declarations.
+        # appear in no echoed input line.  [DEFINED] answers 0 for a word
+        # the system lacks, and the count of words found then falls short
+        # of the declarations.
         lines = [
             "7",
             "REQUIRE uroko.f",
             "MODULE? uroko.f 1000 + .",
             "DEPTH 2000 + .",
             "0",
-            *(f"' {name} 0<> -" for name in names),
+            *(f"[DEFINED] {name} -" for name in names),
             "3000 + .",
             "2000 + .",
         ]

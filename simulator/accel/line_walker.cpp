@@ -1567,14 +1567,14 @@ private:
             return true;
         }
         case D_BRACKET_TICK: {
+            // A missing name, or one the dictionary does not hold, is
+            // refused; Python takes the line and reports it.
             if (!compiling()) return false;
-            Cell xt = 0;
-            if (cursor.parse_word(start, length)) {
-                if (!valid_name(cursor.data + start, length)) return false;
-                const long index = lookup(cursor.data + start, length);
-                if (index >= 0) xt = dictionary_.record(index).xt;
-            }
-            append(IR_LITERAL, xt);
+            if (!cursor.parse_word(start, length)) return false;
+            if (!valid_name(cursor.data + start, length)) return false;
+            const long index = lookup(cursor.data + start, length);
+            if (index < 0) return false;
+            append(IR_LITERAL, dictionary_.record(index).xt);
             return true;
         }
         case D_BRACKET_CHAR: {

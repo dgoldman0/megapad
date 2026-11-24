@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from shared.cells import CELL_BYTES, MASK64, TRUE
-from simulator.errors import ExecutionError, SourceError, StepBudgetExceeded
+from simulator.errors import ExecutionError, ForthAbort, SourceError, StepBudgetExceeded
 from simulator.ir import (
     Branch,
     BranchZero,
@@ -280,16 +280,26 @@ def test_created_xt_and_does_action_survive_binding_shadowing() -> None:
     assert context.returns.snapshot() == ()
 
 
-def test_bracket_tick_compiles_exact_or_zero_xt_without_crossing_lines() -> None:
+def test_bracket_tick_compiles_exact_xt_and_refuses_without_crossing_lines() -> None:
     runtime = MegaForthRuntime()
     drop = runtime.find("DROP")
     assert drop is not None
 
-    runtime.evaluate(b": TOKENS ['] DROP ['] MISSING [']\n;")
+    runtime.evaluate(b": TOKENS ['] DROP ;")
     context = runtime.new_context()
     runtime.execute("TOKENS", context=context)
+    assert context.data.snapshot() == (drop.xt,)
 
-    assert context.data.snapshot() == (drop.xt, 0, 0)
+    # A name the dictionary does not hold, and a ['] at the end of a line,
+    # which does not take the next line's word, are refused as the BIOS
+    # refuses them, and the definition is never published.
+    for source, name in ((b": MISSES ['] MISSING ;", b"MISSING"),
+                         (b": ENDS [']\nDROP ;", b"")):
+        with pytest.raises(ForthAbort, match="unknown word"):
+            runtime.evaluate(source)
+        assert runtime.drain_uart_output().endswith(name + b" ? (not found)\n")
+    assert runtime.find("MISSES") is None
+    assert runtime.find("ENDS") is None
 
 
 def test_created_action_budget_failure_restores_the_callers_return_stack() -> None:

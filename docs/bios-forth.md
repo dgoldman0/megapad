@@ -698,6 +698,12 @@ stack:
 | Illegal instruction | -21 (unsupported operation) |
 | Alignment fault | -23 (address alignment exception) |
 | Divide by zero, or signed division overflow | -10 (division by zero) |
+| `'` or `[']` of a name the dictionary does not hold, or of no name | -13 (undefined word) |
+
+The last is not a machine trap. `'` and `[']` print an undefined word's
+message, `NAME ? (not found)`, and then take this path, so a misspelt name
+never yields a token: `IS` of one writes nothing, and a misspelt `[']`
+ends the definition it was in, unpublished.
 
 The callback runs on the faulting core with the BIOS registers restored,
 interrupts enabled as they were, and the trap frame still on the return
