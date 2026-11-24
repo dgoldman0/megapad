@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import sys
 
 from rich_terminal import LinkPace
 from rich_terminal.retained_model import RetainedPolicy
@@ -48,6 +49,55 @@ def add_storage_options(parser, *, path_type, boot_required: bool = False) -> No
             help=f"{unit.disk} disk image, attached {protection}"
                  f"to storage unit {unit.number}",
         )
+
+
+def add_network_options(parser) -> None:
+    """Add --nic, which attaches a network card, and --local-access."""
+
+    parser.add_argument(
+        "--nic",
+        metavar="SPEC",
+        help=(
+            "attach a network card: slirp, the user-mode network, which needs "
+            "no administrator rights, or tap:IFNAME, a TAP device set up "
+            "beforehand"
+        ),
+    )
+    parser.add_argument(
+        "--local-access",
+        action="store_true",
+        help=(
+            "let the slirp network reach this computer and its local "
+            "network, which it refuses otherwise"
+        ),
+    )
+
+
+def report_network(backend) -> None:
+    """Say which network a server's machine has (a nic_backends backend, or
+    None), and warn at every start when it may reach this computer and its
+    local network."""
+
+    print("[shared] network: " + ("none" if backend is None else backend.name), flush=True)
+    if getattr(backend, "local_access", False):
+        from nic_backends import LOCAL_ACCESS_WARNING
+
+        print(f"[shared] warning: {LOCAL_ACCESS_WARNING}", file=sys.stderr, flush=True)
+
+
+def add_debug_option(parser) -> None:
+    """Add --debug-access, which opens shared_session.DEBUG_METHODS to the
+    server's clients."""
+
+    parser.add_argument(
+        "--debug-access",
+        action="store_true",
+        help=(
+            "let clients read the machine's memory and dictionary, control "
+            "its execution, run profiles and write captures over the socket; "
+            "off by default, since memory can hold keys and tokens"
+        ),
+    )
 
 
 def storage_image_arguments(args) -> dict:

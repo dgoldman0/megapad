@@ -8,8 +8,11 @@ import signal
 from pathlib import Path
 
 from shared.session_options import (
+    add_debug_option,
+    add_network_options,
     add_storage_options,
     link_pace,
+    report_network,
     retained_policy,
     rich_terminal_policy,
     storage_image_arguments,
@@ -67,12 +70,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "time; requires --rich-terminal-policy"
         ),
     )
-    parser.add_argument(
-        "--nic-tap",
-        nargs="?",
-        const="mp64tap0",
-        help="attach the machine NIC to a preconfigured Linux TAP device",
-    )
+    add_network_options(parser)
+    add_debug_option(parser)
     parser.add_argument(
         "--virtual-clock",
         action="store_true",
@@ -122,14 +121,15 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"invalid selected terminal geometry: {exc}")
 
     nic_backend = None
-    if args.nic_tap:
-        from nic_backends import TAPBackend, tap_available
+    if args.nic is not None:
+        from nic_backends import backend_from_spec
 
-        if not tap_available(args.nic_tap):
-            parser.error(
-                f"TAP device {args.nic_tap!r} does not exist or is not accessible"
-            )
-        nic_backend = TAPBackend(tap_name=args.nic_tap)
+        try:
+            nic_backend = backend_from_spec(args.nic, local_access=args.local_access)
+        except ValueError as exc:
+            parser.error(str(exc))
+    elif args.local_access:
+        parser.error("--local-access needs --nic slirp")
 
     # The machine's modules load the native extension, so they are imported
     # only once the arguments are accepted: help and argument errors need
@@ -170,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
         host_profile=args.host_profile,
     )
     machine.paused = args.paused
-    server = SessionServer(machine, args.socket)
+    server = SessionServer(machine, args.socket, debug_access=args.debug_access)
 
     def stop(_signum=None, _frame=None):
         server.stop()
@@ -181,8 +181,7 @@ def main(argv: list[str] | None = None) -> int:
         server.start()
         print(f"[shared] socket: {server.socket_path}", flush=True)
         print(f"[shared] bios:   {args.bios.resolve()}", flush=True)
-        if args.nic_tap:
-            print(f"[shared] nic:    tap:{args.nic_tap}", flush=True)
+        report_network(nic_backend)
         print(
             f"[shared] audio:  {'pygame PCM16' if audio_sink else 'capture only'}",
             flush=True,

@@ -27,6 +27,7 @@ from nic_backends import (
     SlirpBackend,
     backend_from_spec,
 )
+from shared.session_options import report_network
 from simulator.image_bootstrap import prepare_image_bootstrap
 from simulator.network import NetworkCard
 from simulator.platform import Topology, create_address_space
@@ -265,10 +266,13 @@ def test_settings_outside_the_network_are_refused():
                                  SLIRP_NAMESERVER, False)
 
 
-def test_a_server_names_its_network():
+def test_a_server_names_its_network(monkeypatch):
     assert backend_from_spec("slirp").name == "slirp"
     assert backend_from_spec("slirp", local_access=True).name == "slirp, local access"
+    monkeypatch.setattr("nic_backends.tap_available", lambda name: name == "mp64tap0")
     assert backend_from_spec("tap:mp64tap0").name == "tap:mp64tap0"
+    with pytest.raises(ValueError, match="'missing-tap' does not exist"):
+        backend_from_spec("tap:missing-tap")
     with pytest.raises(ValueError, match="slirp network alone"):
         backend_from_spec("tap:mp64tap0", local_access=True)
     with pytest.raises(ValueError, match="unknown network"):
@@ -405,14 +409,14 @@ def _server_args(tmp_path: Path, *options: str):
 
 def test_the_server_attaches_a_slirp_card_before_the_boot(tmp_path, capsys):
     from simulator.network import STATUS_LINK, STATUS_PRESENT
-    from simulator.server import prepare_server, report_network
+    from simulator.server import prepare_server
 
     prepared = prepare_server(_server_args(tmp_path, "--nic", "slirp"))
     try:
         runtime = prepared.preparation.runtime
         assert runtime.network is prepared.network
         assert prepared.network.status() == STATUS_PRESENT | STATUS_LINK
-        report_network(prepared.network)
+        report_network(prepared.network.backend)
         captured = capsys.readouterr()
         assert "[shared] network: slirp" in captured.out
         assert captured.err == ""
@@ -421,11 +425,11 @@ def test_the_server_attaches_a_slirp_card_before_the_boot(tmp_path, capsys):
 
 
 def test_the_server_warns_at_every_start_with_local_access(tmp_path, capsys):
-    from simulator.server import prepare_server, report_network
+    from simulator.server import prepare_server
 
     prepared = prepare_server(_server_args(tmp_path, "--nic", "slirp", "--local-access"))
     try:
-        report_network(prepared.network)
+        report_network(prepared.network.backend)
         captured = capsys.readouterr()
         assert "[shared] network: slirp, local access" in captured.out
         assert LOCAL_ACCESS_WARNING in captured.err
@@ -443,7 +447,7 @@ def test_the_server_refuses_local_access_without_slirp(tmp_path):
 
 
 def test_a_server_without_a_card_has_no_network(tmp_path, capsys):
-    from simulator.server import prepare_server, report_network
+    from simulator.server import prepare_server
 
     prepared = prepare_server(_server_args(tmp_path))
     assert prepared.network is None

@@ -140,7 +140,7 @@ def test_python_session_runs_and_releases_ownership_without_emulator(transport):
 
         with tempfile.TemporaryDirectory(prefix="mp64-boundary-") as directory:
             socket_path = Path(directory) / "session.sock"
-            server = SessionServer(machine, str(socket_path))
+            server = SessionServer(machine, str(socket_path), debug_access=True)
             try:
                 start(server)
                 with connect(server) as client:
@@ -202,7 +202,7 @@ def test_python_session_runs_and_releases_ownership_without_emulator(transport):
             replacement = SimulatorMachineSession(runtime, "NEXT-ROOT", cols=20, rows=3)
             successor = SimulatorSharedMachine(replacement)
             successor.paused = True
-            second_server = SessionServer(successor, str(socket_path))
+            second_server = SessionServer(successor, str(socket_path), debug_access=True)
             try:
                 start(second_server)
                 with connect(second_server) as client:

@@ -520,15 +520,19 @@ class SlirpBackend(NICBackend):
 
 def backend_from_spec(spec: str, *, local_access: bool = False) -> NICBackend:
     """The backend a server's --nic SPEC names: "slirp", or "tap:IFNAME" for
-    a TAP device set up beforehand.  LOCAL_ACCESS applies to slirp alone,
-    since a TAP device's reach is the host's own routing."""
+    a TAP device set up beforehand, which must exist and be open to this
+    account.  LOCAL_ACCESS applies to slirp alone, since a TAP device's reach
+    is the host's own routing."""
 
     if spec == "slirp":
         return SlirpBackend(local_access=local_access)
     if local_access:
         raise ValueError("local access applies to the slirp network alone")
     if spec.startswith("tap:") and len(spec) > 4:
-        return TAPBackend(tap_name=spec[4:])
+        name = spec[4:]
+        if not tap_available(name):
+            raise ValueError(f"TAP device {name!r} does not exist or is not accessible")
+        return TAPBackend(tap_name=name)
     raise ValueError(f"unknown network {spec!r}: use slirp or tap:IFNAME")
 
 

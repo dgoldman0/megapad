@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Control a running shared MegaPad session."""
+"""Control a running shared MegaPad session.
+
+Most commands read or steer the machine itself, its memory, dictionary,
+execution, output and captures, so they need a server started with
+--debug-access; without it the server refuses them.  send, key, resize and
+shutdown work with any server."""
 
 from __future__ import annotations
 
@@ -18,7 +23,13 @@ def print_json(value):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Control a shared MegaPad session")
+    parser = argparse.ArgumentParser(
+        description="Control a shared MegaPad session",
+        epilog=(
+            "Commands other than send, key, resize and shutdown need a server "
+            "started with --debug-access."
+        ),
+    )
     parser.add_argument("--socket", default=DEFAULT_SOCKET)
     commands = parser.add_subparsers(dest="command", required=True)
 

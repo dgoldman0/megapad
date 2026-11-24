@@ -122,6 +122,22 @@ def test_server_cli_runs_the_cores_it_is_given(tmp_path) -> None:
         prepared.machine.stop()
 
 
+def test_server_cli_grants_debugging_access_only_when_asked(tmp_path) -> None:
+    image = tmp_path / "desktop-simulator.img"
+    image.write_bytes(_boot_image())
+    parser = build_argument_parser()
+    for options, granted in (((), False), (("--debug-access",), True)):
+        args = parser.parse_args(
+            ["--storage", str(image), "--socket", str(tmp_path / "s.sock"),
+             "--paused", *options]
+        )
+        prepared = prepare_server(args)
+        try:
+            assert prepared.server.debug_access is granted
+        finally:
+            prepared.machine.stop()
+
+
 def test_server_cli_rejects_unbound_entry_before_exposing_socket(tmp_path) -> None:
     image = tmp_path / "unbound-simulator.img"
     image.write_bytes(_boot_image(autoexec_body=b"1 AUTO-RUNS +!\n"))
@@ -139,7 +155,7 @@ def test_server_cli_rejects_emulator_only_arguments_and_missing_images(
     tmp_path,
 ) -> None:
     parser = build_argument_parser()
-    for option in ("--bios", "--nic-tap", "--audio", "--host-profile"):
+    for option in ("--bios", "--audio", "--host-profile"):
         with pytest.raises(SystemExit):
             parser.parse_args(
                 ["--storage", str(tmp_path / "missing.img"), option]

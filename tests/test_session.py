@@ -1422,7 +1422,7 @@ def test_machine_session_close_releases_devices_when_save_fails(monkeypatch):
 
 def test_session_server_rejects_unavailable_tap(monkeypatch):
     monkeypatch.setattr(
-        "sys.argv", ["megapad.py", "--nic-tap", "missing-tap"]
+        "sys.argv", ["megapad.py", "--nic", "tap:missing-tap"]
     )
     with patch("nic_backends.tap_available", return_value=False):
         try:
@@ -1431,6 +1431,49 @@ def test_session_server_rejects_unavailable_tap(monkeypatch):
             assert exc.code == 2
         else:
             raise AssertionError("unavailable TAP should stop session startup")
+
+
+def test_session_server_grants_debugging_access_only_when_asked(monkeypatch):
+    for argv, granted in (
+        (["megapad.py"], False),
+        (["megapad.py", "--debug-access"], True),
+    ):
+        monkeypatch.setattr("sys.argv", argv)
+        with (
+            patch("emulator.session.MachineSession.from_bios"),
+            patch("emulator.shared_session.SharedMachine"),
+            patch("emulator.server.SessionServer") as server,
+            patch("emulator.server.signal.signal"),
+        ):
+            assert session_server_main() == 0
+        assert server.call_args.kwargs["debug_access"] is granted
+
+
+def test_session_server_attaches_the_network_it_names(monkeypatch, capsys):
+    from nic_backends import LOCAL_ACCESS_WARNING
+
+    monkeypatch.setattr(
+        "sys.argv", ["megapad.py", "--nic", "slirp", "--local-access"]
+    )
+    with (
+        patch("emulator.session.MachineSession.from_bios") as from_bios,
+        patch("emulator.shared_session.SharedMachine"),
+        patch("emulator.server.SessionServer"),
+        patch("emulator.server.signal.signal"),
+    ):
+        assert session_server_main() == 0
+    assert from_bios.call_args.kwargs["nic_backend"].name == "slirp, local access"
+    captured = capsys.readouterr()
+    assert "[shared] network: slirp, local access" in captured.out
+    assert LOCAL_ACCESS_WARNING in captured.err
+
+    monkeypatch.setattr("sys.argv", ["megapad.py", "--local-access"])
+    try:
+        session_server_main()
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("local access without slirp should stop startup")
 
 
 def test_cli_uses_128_mib_external_memory_by_default(monkeypatch):
