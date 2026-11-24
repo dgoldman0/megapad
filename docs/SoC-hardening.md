@@ -10,8 +10,10 @@ skips. The old WOTS sequencer and diagnostic words recorded in §7 and §10
 remain retired historical prototypes; the exact
 `+0x8A0..+0x8BF` aperture now implements the qualified byte-only context/DMA
 controller. The authoritative contract is
-[`crypto-interface-contract.md`](crypto-interface-contract.md).
-Last updated: 2026-08-11
+[`crypto-interface-contract.md`](crypto-interface-contract.md). The topology
+rule below follows the crypto engines plan of 2026-11-24,
+[`crypto-engines-plan.md`](crypto-engines-plan.md).
+Last updated: 2026-11-24
 
 ---
 
@@ -35,14 +37,15 @@ Chip configurations vary (core count, cluster count, micro-cores per
 cluster are all parameters).  The topology rules below apply regardless
 of the specific config.
 
-**Rule of thumb — updated:** Crypto primitives that map naturally to the
-core's existing register model (CRC, SHA-2, field arithmetic) belong
-**in the core as ISA instructions** (see Appendix B, EXT.CRYPTO prefix FB).
-The bus round-trip and serialisation cost of sharing is unacceptable when
-multiple cores run parallel TLS or signature verification.  Accelerators
-with large private state that doesn't fit core registers (SHA-3/Keccak
-1600-bit state, AES key schedule, NTT polynomial arrays) or multi-phase
-protocols (KEM) stay **shared MMIO** — software mutex via mailbox.
+**Rule of thumb:** Crypto engines belong **beside the core as ISA
+instructions** (see Appendix B, EXT.CRYPTO prefix FB), each engine holding
+its working state while a caller owns it, with a private copy for each full
+core and a shared copy for each cluster.  CRC, SHA-2 and field arithmetic
+already take this form, and Keccak with its chain controller and AES follow
+under [`crypto-engines-plan.md`](crypto-engines-plan.md), which also proposes
+building the NTT's butterfly into the tile engines and composes ML-KEM in
+software.  The bus round-trip and serialisation cost of sharing is
+unacceptable when multiple cores run parallel TLS or signature verification.
 High-frequency per-word operations (string ops, dictionary search) are
 ISA extensions in the core (see §2, §3).  Compression/decompression
 and pattern matching are shared — long-running, one owner at a time.
@@ -87,7 +90,9 @@ Not a resource concern on any target.
 | CRC (32/64-bit modes) | **Per-core ISA + cluster-shared (hw lock)** | 1-cycle combinational; MMIO removed, cluster arbiter for micro-cores |
 | SHA-256/384/512    | **Per-core ISA (EXT.CRYPTO FB)** | 64–80 round compute; parallel TLS needs per-core |
 | Field ALU (multi-prime) | **Per-core ISA (EXT.CRYPTO FB)** | Inner-loop field ops; 3-cycle bus overhead per op is 4× compute |
-| AES-256-GCM, SHA-3/SHAKE, NTT, KEM, WOTS+ | Shared (1 instance) | Large state / multi-phase protocols |
+| AES-GCM, Keccak (SHA-3/SHAKE) + WOTS chain controller | **Per-core ISA + cluster-shared** (planned; one shared MMIO device each today) | Engine holds its state beside the core ([crypto-engines-plan.md](crypto-engines-plan.md)) |
+| NTT                | Tile engines (proposed; one shared MMIO device today) | Polynomial math on the high-bandwidth bank |
+| ML-KEM             | Software (planned; MMIO value device and RTL stub today) | Composed from Keccak and the NTT |
 | TRNG, RTC          | Shared                 | Singular noise source / global clock |
 | String engine       | **Per-core ISA (EXT.STRING F9)** | 2–3 byte instruction; bus setup ≫ transfer |
 | Dictionary search   | **Per-core ISA (EXT.DICT FA)** | 2–4 cycle FIND; bus latency kills it |
@@ -1351,22 +1356,6 @@ the C++ accelerator is not available.
 - `emulator/system.py`: create `WotsChainAccel`, register on bus.
 - `emulator/accel_wrapper.py`: sync `WotsChain` state (seed/adrs/input
   pointers only — result is read from C++ state).
-
-### 7.11  Future: Parallel SHAKE Engines
-
-The 34 chains within a single WOTS-PK-GEN are independent.  A future
-enhancement instantiates 2–4 SHAKE-256 engines behind the same
-sequencer FSM, computing 2–4 chains simultaneously:
-
-| Engines | WOTS-PK-GEN | SPX-SIGN @ 200 MHz | Extra LUTs |
-|---------|-------------|---------------------|------------|
-| 1       | ~358K       | 7.3s                | ~80        |
-| 2       | ~190K       | ~3.9s               | ~2,100     |
-| 4       | ~105K       | ~2.1s               | ~6,200     |
-
-This is outside the current hardware work, but the single-engine design is
-structured to allow it: the DMA read port, MMIO registers, and FSM
-all generalise to N engines with a round-robin scheduler.
 
 ---
 
