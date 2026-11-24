@@ -8193,6 +8193,13 @@ CREATE _XPV-EKEYS X509-CHAIN-MAX /XEC-KEY * ALLOT
     X509-PATH-BEGIN
     BEGIN DUP X509-PATH-PENDING = WHILE DROP X509-PATH-STEP REPEAT ;
 
+\ Give up a pending search, so that nothing resumes it.  The search keeps
+\ its certificates in the caller's message, so a new handshake does this
+\ before its ClientHello: its own Certificate message starts a new search
+\ even when it lands where the old one was, at the same length.
+: X509-PATH-ABANDON ( -- )
+    _XPV-STATE @ X509-PATH-PENDING = IF TLS-CERT-NO-TRUST _XPV-STATE ! THEN ;
+
 \ --- SNI host buffer (used by §16.7d and §16.10 ClientHello) ---
 \ DNS names admit the RFC maximum of 253 bytes.  Keep the expanded byte arena
 \ out of the system dictionary when external memory is available.
@@ -14061,7 +14068,8 @@ VARIABLE _TBCH-FIXED
     _TBCH-CTX @ TLS-CH-BUF _TBCH-POS @ +
     TLS-CH-BUF-CAPACITY _TBCH-POS @ - TLS-ALPN-BUILD-OFFER
     DUP IF 2DROP 0 0 EXIT THEN DROP _TBCH-POS +!
-    \ Set handshake state
+    \ Set handshake state; a search an earlier handshake left pending ends.
+    X509-PATH-ABANDON
     TLSS-HANDSHAKE _TBCH-CTX @ TLS-CTX.STATE !
     TLSH-CLIENT-HELLO-SENT _TBCH-CTX @ TLS-CTX.HS-STATE !
     \ Append handshake message to transcript (skip 5-byte record header)

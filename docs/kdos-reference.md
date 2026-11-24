@@ -4671,6 +4671,7 @@ Certificate/CertificateVerify handler wiring.
 | `X509-PATH-BEGIN` | `( certs count hostname hlen now -- ior )` | Start the backtracking search for a path from leaf descriptor zero to an anchor that may vouch for the host. `X509-PATH-PENDING` once started, or the leaf's failure. |
 | `X509-PATH-STEP` | `( -- ior )` | Advance the search, checking at most one signature: `X509-PATH-PENDING`, 0 for a complete path, or the most recent specific failure. |
 | `X509-VERIFY-CHAIN` | `( certs count hostname hlen now -- ior )` | The whole path search at once. |
+| `X509-PATH-ABANDON` | `( -- )` | Give up a pending search, so that nothing resumes it; `TLS-BUILD-CLIENT-HELLO` does this as each handshake starts. |
 | `X509-EDGE-CACHE-CLEAR` | `( -- )` | Forget the per-boot cache of verified intermediate edges. |
 | `TLS-PARSE-CERTIFICATE` | `( msg mlen -- ior )` | Parse the bounded client-side TLS Certificate message and start its path search: `X509-PATH-PENDING`, or the failure. This receive/path profile retains at most eight 128..8192-byte certificates. |
 | `TLS-CERTIFICATE-STEP` | `( -- ior )` | Advance that search one signature; on success keep the leaf's key for CertificateVerify. |
@@ -4977,7 +4978,9 @@ its context-owned RX workspace for all state retained across public calls.
 `TLS-PROCESS-HS-MSG` answers `X509-PATH-PENDING` (1) for a Certificate message
 while its path search runs, one signature per call; the caller calls it again
 with the same message, leaving it in place, until it answers 0 or fails.
-`TLS-PROCESS-HS-MSGS` makes those calls itself.
+`TLS-PROCESS-HS-MSGS` makes those calls itself. A new handshake's ClientHello
+abandons a search an earlier handshake left pending, so its own Certificate
+message always starts a new one.
 
 **Variables:** `TLS-SNI-HOST` (256-byte storage for a DNS name of at most 253 bytes),
 `TLS-SNI-LEN` (current SNI length).

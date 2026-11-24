@@ -697,7 +697,11 @@ only after the full path succeeds; every failure clears that scratch first.
 `TLS-PROCESS-HS-MSG` answers `X509-PATH-PENDING` for a Certificate message
 while its search runs, leaving the message in place, the transcript untouched
 and the handshake state unchanged; the caller calls it again with the same
-message, once per poll, until it answers 0 or fails.
+message, once per poll, until it answers 0 or fails. The search keeps its
+certificates in that message, so `TLS-BUILD-CLIENT-HELLO` abandons a search
+an earlier handshake left pending (`X509-PATH-ABANDON`): a later Certificate
+message that lands at the same address with the same length starts a new
+search instead of finishing the old one over different bytes.
 
 CertificateVerify accepts the schemes ClientHello offers: ECDSA P-256 with
 SHA-256 (`0x0403`) and P-384 with SHA-384 (`0x0503`) for those leaf keys,

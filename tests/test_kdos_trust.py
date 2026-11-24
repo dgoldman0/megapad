@@ -510,6 +510,70 @@ class TestKDOSPathSearch(_TrustBase):
         self.assertIn("ST2=4 ", text)       # TLSH-CERT-RCVD
         self.assertIn("KEY=2 ", text)
 
+    def test_new_client_hello_abandons_a_pending_search(self):
+        """A search left pending by an abandoned handshake never finishes
+        over the next handshake's Certificate message, even one of the
+        same length in the same place: that message starts a new search,
+        which checks its own leaf."""
+        root_key, ca_key = _key("p256"), _key("p256")
+        root = make_cert(_name("HS Root"), root_key, ca=True)
+        ca = make_cert(_name("HS CA"), ca_key, root, root_key, ca=True)
+        first = make_cert(_name("hs.example"), _key("p256"), ca, ca_key,
+                          dns=["hs.example"])
+        # A leaf for another host, of the same length, so that the second
+        # message lands exactly over the first.
+        for _ in range(64):
+            other = make_cert(_name("hx.example"), _key("p256"), ca, ca_key,
+                              dns=["hx.example"])
+            if len(der(other)) == len(der(first)):
+                break
+        self.assertEqual(len(der(other)), len(der(first)))
+
+        def message(leaf) -> bytes:
+            entries = b"".join(len(c).to_bytes(3, "big") + c + b"\x00\x00"
+                               for c in (der(leaf), der(ca)))
+            body = b"\x00" + len(entries).to_bytes(3, "big") + entries
+            return b"\x0b" + len(body).to_bytes(3, "big") + body
+
+        msg, msg2 = message(first), message(other)
+        epoch_ms = NOW * 1000
+        rtc = 0xFFFF_FF00_0000_0B08
+        lines = self._load(mpta_bundle(mpta_record(der(root))))
+        lines += self._bytes("tv-msg", msg)
+        lines += self._bytes("tv-msg2", msg2)
+        lines += [f"{(epoch_ms >> (8 * i)) & 0xFF} 0x{rtc + i:016X} C!"
+                  for i in range(8)]
+        lines += [
+            'S" hs.example" TLS-SNI-HOST SWAP CMOVE',
+            "10 TLS-SNI-LEN !",
+            "VARIABLE tv-ctx 0 TLS-CTX@ tv-ctx !",
+            "TLS-ROLE-CLIENT tv-ctx @ TLS-CTX.ROLE !",
+            "TLSS-HANDSHAKE tv-ctx @ TLS-CTX.STATE !",
+            "TLSH-EE-RCVD tv-ctx @ TLS-CTX.HS-STATE !",
+            "X509-EDGE-CACHE-CLEAR",
+            "TLS-TR-RESET",
+            f"tv-ctx @ tv-msg {len(msg)} TLS-PROCESS-HS-MSG",
+            '." R1=" .',
+            # The handshake is abandoned; the next one starts on the same
+            # context, and its Certificate message lands where the first
+            # one was.
+            "TLSS-NONE tv-ctx @ TLS-CTX.STATE !",
+            'tv-ctx @ TLS-BUILD-CLIENT-HELLO NIP 0<> ." CH=" .',
+            "TLSH-EE-RCVD tv-ctx @ TLS-CTX.HS-STATE !",
+            "TLS-TR-RESET",
+            f"tv-msg2 tv-msg {len(msg)} CMOVE",
+            f"tv-ctx @ tv-msg {len(msg)} TLS-PROCESS-HS-MSG",
+            '." R2=" . ." HOST=" TLS-CERT-HOSTNAME .',
+            '." ST2=" tv-ctx @ TLS-CTX.HS-STATE @ .',
+        ]
+        text = self._run_kdos(lines, max_steps=3_000_000_000)
+        self.assertIn("TRUST=0 ", text)
+        self.assertIn("R1=1 ", text)        # the first search is pending
+        self.assertIn("CH=-1 ", text)
+        host = int(re.search(r"HOST=(-?\d+)", text).group(1))
+        self.assertIn(f"R2={host} ", text)  # the new leaf names another host
+        self.assertIn("ST2=3 ", text)       # TLSH-EE-RCVD, not accepted
+
 
 class TestKDOSCertificateVerifySchemes(_TrustBase):
     """CertificateVerify with P-384/SHA-384 and RSA-PSS with SHA-384."""
