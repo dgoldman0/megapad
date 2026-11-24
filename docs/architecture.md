@@ -629,6 +629,11 @@ zeroizes the bank before another TACC operation is admitted.
 
 ### Crypto Accelerators
 
+The table describes the chip as built. Under
+[`crypto-engines-plan.md`](crypto-engines-plan.md), software reaches these
+engines through EXT.CRYPTO instructions, each full core and each cluster gets
+its own copy of Keccak and of AES, and the KEM device is removed.
+
 | Block | Performance | Use Case |
 |-------|-------------|----------|
 | AES-256/128-GCM | 16 bytes / 12 cycles | Authenticated encryption for storage and network |

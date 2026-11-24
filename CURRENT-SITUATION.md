@@ -166,6 +166,17 @@
 > the bus arbiter's response; the core's trap on that response was read in
 > `rtl/core/mp64_cpu.v`.
 
+> **Crypto engines — 2026-11-24:** The plan for MegaPad's crypto engines is
+> decided, with implementation still to begin. Software is to drive the
+> engines through EXT.CRYPTO instructions, and an engine keeps its working
+> state while a caller holds it, with the hardware recording the owner. Each
+> full core and each cluster gets its own copy of Keccak, with its chain
+> controller, and of AES. The NTT's butterfly is proposed for the tile
+> engines, and software composes ML-KEM, so the ML-KEM device is removed. The
+> plan, with its order of work and the candidate operations from the
+> release's security work, is
+> [`docs/crypto-engines-plan.md`](docs/crypto-engines-plan.md).
+
 **Date:** 2026-03-07  
 **Branch:** `main`  
 **Status:** 1,797 tests passing, 35 skipped.
