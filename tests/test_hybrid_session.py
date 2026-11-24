@@ -276,6 +276,10 @@ def test_the_hybrid_server_attaches_no_network_card(tmp_path, monkeypatch):
         args.nic, args.local_access = nic, local_access
         with pytest.raises(ValueError, match="attaches no network card"):
             prepare_server(args)
+    args = _server_args(tmp_path)
+    args.chiplet = tmp_path / "chiplet.so"
+    with pytest.raises(ValueError, match="attaches no chiplet"):
+        prepare_server(args)
     assert not Path(args.socket).exists()
 
 

@@ -198,6 +198,16 @@ def build_argument_parser(
     )
     add_network_options(parser)
     add_debug_option(parser)
+    parser.add_argument(
+        "--chiplet",
+        metavar="MODULE",
+        type=Path,
+        help=(
+            "attach a chiplet's model, a library built against "
+            "shared/accel/chiplet_module.h such as LM1's, to the first "
+            "chiplet port before the boot script runs"
+        ),
+    )
     parser.add_argument("--paused", action="store_true")
     return parser
 
@@ -246,6 +256,8 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
             link_pace=args.terminal_link_pace,
         )
 
+    if args.chiplet is not None and not args.chiplet.is_file():
+        raise ValueError(f"--chiplet names no file: {args.chiplet}")
     memory = create_address_space(
         topology=Topology(full_cores=args.cores),
         bank0_size=args.ram_kib << 10,
@@ -253,24 +265,30 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
         vram_size=args.vram_mib << 20,
         hbw_size=_CANONICAL_HBW_MIB << 20,
         initial_epoch_ms=time.time_ns() // 1_000_000,
+        chiplet_ports=0 if args.chiplet is None else 1,
     )
     memory.mmio.rtc.bind_monotonic_clock(time.monotonic_ns)
     services = storage_services(image_paths)
     card = None
     runtime = None
-    if args.nic is not None:
-        # The card is attached and running before the boot script, which may
-        # ask DHCP for the machine's address, runs.
-        from nic_backends import backend_from_spec
-        from simulator.network import NetworkCard
+    if args.nic is None and args.local_access:
+        raise ValueError("--local-access needs --nic slirp")
+    if args.nic is not None or args.chiplet is not None:
+        # A network card and a chiplet are attached before the boot script
+        # runs: it may ask DHCP for the machine's address, and it reads the
+        # chiplet ports' identity records.
         from simulator.runtime import MegaForthRuntime
 
-        card = NetworkCard(backend_from_spec(args.nic, local_access=args.local_access))
         runtime = MegaForthRuntime(memory=memory, **services, execution_backend=executor)
+    if args.chiplet is not None:
+        runtime.chiplet_ports.attach_module(0, args.chiplet.resolve())
+    if args.nic is not None:
+        from nic_backends import backend_from_spec
+        from simulator.network import NetworkCard
+
+        card = NetworkCard(backend_from_spec(args.nic, local_access=args.local_access))
         runtime.attach_network(card)
         card.start()
-    elif args.local_access:
-        raise ValueError("--local-access needs --nic slirp")
     try:
         preparation = prepare_image_bootstrap(
             memory=memory,
@@ -380,6 +398,8 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
         report_network(None if prepared.network is None else prepared.network.backend)
+        if args.chiplet is not None:
+            print(f"[shared] chiplet: {args.chiplet.resolve()} on port 0", flush=True)
         print("[shared] machine owner running; Ctrl+C stops it", flush=True)
         server.serve_forever()
     finally:

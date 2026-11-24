@@ -85,6 +85,8 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
         raise ValueError("--terminal-link-pace requires --rich-terminal-policy")
     if args.nic is not None or args.local_access:
         raise ValueError("the hybrid backend attaches no network card")
+    if args.chiplet is not None:
+        raise ValueError("the hybrid backend attaches no chiplet")
     image_paths = storage_image_paths(args)
     quantum_steps = configured_semantic_quantum_steps(args.semantic_quantum_steps)
     executor = configured_production_executor(args.executor)

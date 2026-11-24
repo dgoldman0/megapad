@@ -226,7 +226,11 @@ link carry the guest's bytes no faster than that, as a slower wire would, and
 makes the terminal advertise resource chunks that link carries in one
 `FRAME_US` frame time, so a frame waits behind at most one chunk of a picture
 upload. Without it the link runs at host speed. It takes `--nic` as above,
-and has no audible audio option.
+and has no audible audio option. `--chiplet MODULE` attaches a chiplet's
+model, a library built against `shared/accel/chiplet_module.h` such as
+LM-1's `chiplet/build/lm1_chiplet.so`, to the first chiplet port before the
+boot script runs, with the module's default settings; the hybrid server
+attaches none.
 `--executor python|native|auto` takes precedence over `MEGAFORTH_EXECUTOR`.
 With neither set, the production server requires native execution; only
 `auto` permits fallback to Python. Embedded `MegaForthRuntime` construction

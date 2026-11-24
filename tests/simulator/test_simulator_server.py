@@ -138,6 +138,41 @@ def test_server_cli_grants_debugging_access_only_when_asked(tmp_path) -> None:
             prepared.machine.stop()
 
 
+def _lm1_library() -> Path:
+    """LM-1's chiplet module as LM-1's own build leaves it, beside this
+    checkout or where LM1_ROOT says.  The test builds nothing."""
+
+    root = Path(__file__).resolve().parents[2]
+    lm1 = Path(os.environ["LM1_ROOT"]) if os.environ.get("LM1_ROOT") else root.parent / "lm1"
+    library = lm1 / "chiplet" / "build" / "lm1_chiplet.so"
+    if not library.is_file():
+        pytest.skip(f"no built LM-1 chiplet module at {library}")
+    return library
+
+
+def test_server_cli_attaches_a_chiplet_before_the_boot(tmp_path) -> None:
+    library = _lm1_library()
+    image = tmp_path / "desktop-simulator.img"
+    image.write_bytes(_boot_image())
+    parser = build_argument_parser()
+    arguments = ["--storage", str(image), "--socket", str(tmp_path / "s.sock"), "--paused"]
+    prepared = prepare_server(parser.parse_args([*arguments, "--chiplet", str(library)]))
+    try:
+        # The port's STATUS register says a chiplet is present.
+        assert prepared.preparation.runtime.chiplet_ports.link.read64(0x88) & 1
+    finally:
+        prepared.machine.stop()
+    plain = prepare_server(parser.parse_args(arguments))
+    try:
+        assert plain.preparation.runtime.chiplet_ports is None
+    finally:
+        plain.machine.stop()
+    with pytest.raises(ValueError, match="--chiplet names no file"):
+        prepare_server(
+            parser.parse_args([*arguments, "--chiplet", str(tmp_path / "absent.so")])
+        )
+
+
 def test_server_cli_rejects_unbound_entry_before_exposing_socket(tmp_path) -> None:
     image = tmp_path / "unbound-simulator.img"
     image.write_bytes(_boot_image(autoexec_body=b"1 AUTO-RUNS +!\n"))
