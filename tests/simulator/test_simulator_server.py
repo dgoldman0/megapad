@@ -173,6 +173,52 @@ def test_server_cli_attaches_a_chiplet_before_the_boot(tmp_path) -> None:
         )
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="prctl is Linux's")
+def test_a_server_can_close_its_memory_to_other_processes() -> None:
+    import ctypes
+
+    from shared.session_options import protect_process_memory
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    pr_get_dumpable, pr_set_dumpable = 3, 4
+    try:
+        assert protect_process_memory()
+        assert libc.prctl(pr_get_dumpable, 0, 0, 0, 0) == 0
+    finally:
+        # pytest's process was dumpable, as an ordinary process is.
+        libc.prctl(pr_set_dumpable, 1, 0, 0, 0)
+
+
+def test_server_cli_closes_its_memory_without_debugging_access(tmp_path, monkeypatch) -> None:
+    from simulator import server as simulator_server
+
+    class _Stop(Exception):
+        pass
+
+    def stop(args):
+        raise _Stop
+
+    calls = []
+    monkeypatch.setattr(simulator_server, "protect_process_memory",
+                        lambda: calls.append(1) or True)
+    monkeypatch.setattr(simulator_server, "prepare_server", stop)
+    for options, closed in (((), True), (("--debug-access",), False)):
+        calls.clear()
+        with pytest.raises(_Stop):
+            simulator_server.main(["--storage", str(tmp_path / "missing.img"), *options])
+        assert bool(calls) == closed
+
+
+def test_a_screen_profile_needs_debugging_access(tmp_path) -> None:
+    image = tmp_path / "desktop-simulator.img"
+    image.write_bytes(_boot_image())
+    parser = build_argument_parser()
+    arguments = ["--storage", str(image), "--socket", str(tmp_path / "s.sock"),
+                 "--paused", "--profile-dir", str(tmp_path / "profile")]
+    with pytest.raises(ValueError, match="a screen profile needs --debug-access"):
+        prepare_server(parser.parse_args(arguments))
+
+
 def test_server_cli_rejects_unbound_entry_before_exposing_socket(tmp_path) -> None:
     image = tmp_path / "unbound-simulator.img"
     image.write_bytes(_boot_image(autoexec_body=b"1 AUTO-RUNS +!\n"))

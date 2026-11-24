@@ -11,7 +11,11 @@ from pathlib import Path
 from hybrid.manifest import load_manifest
 from hybrid.runtime import HybridRuntime
 from hybrid.session import HybridSession, HybridSharedMachine
-from shared.session_options import configured_production_executor
+from shared.session_options import (
+    configured_production_executor,
+    protect_process_memory,
+    report_debugging,
+)
 from shared_session import SessionServer
 from simulator.image_bootstrap import ImageBootstrapPreparation, prepare_image_bootstrap
 from simulator.platform import create_address_space
@@ -160,6 +164,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
 def main(argv: list[str] | None = None) -> int:
     parser = build_argument_parser()
     args = parser.parse_args(argv)
+    protected = False if args.debug_access else protect_process_memory()
     try:
         prepared = prepare_server(args)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
@@ -195,6 +200,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{args.machine_quantum_instructions} machine instructions",
             flush=True,
         )
+        report_debugging(args.debug_access, protected)
         print("[shared] machine owner running; Ctrl+C stops it", flush=True)
         server.serve_forever()
     finally:

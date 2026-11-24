@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import os
 import re
 import threading
 import time
@@ -2609,6 +2610,41 @@ def test_debugging_methods_need_a_server_with_debug_access(tmp_path):
         server.stop()
 
     assert not socket_path.exists()
+
+
+def test_a_client_talks_only_to_a_server_of_this_account(tmp_path, monkeypatch):
+    import shared_session
+
+    socket_path = tmp_path / "own.sock"
+    session = MachineSession.from_bios(BIOS, cols=60, rows=20)
+    server = SessionServer(SharedMachine(session), str(socket_path))
+    try:
+        server.serve_in_thread()
+    except PermissionError:
+        session.close()
+        pytest.skip("Unix sockets are unavailable in this sandbox")
+    try:
+        with SessionClient(str(socket_path)) as client:
+            assert "time" in client.request("ping")
+        me = os.getuid()
+        # A socket another account owns is refused before connecting.
+        monkeypatch.setattr(shared_session.os, "getuid", lambda: me + 1)
+        with pytest.raises(PermissionError, match="belongs to another account"):
+            SessionClient(str(socket_path)).connect()
+        monkeypatch.setattr(shared_session.os, "getuid", lambda: me)
+        # A server whose peer credentials name another user is refused
+        # before anything is sent.
+        monkeypatch.setattr(shared_session, "_peer_uid", lambda connection: me + 1)
+        client = SessionClient(str(socket_path))
+        with pytest.raises(PermissionError, match="runs under another account"):
+            client.connect()
+        assert client._socket is None
+        plain = tmp_path / "plain"
+        plain.write_text("")
+        with pytest.raises(PermissionError, match="is not a socket"):
+            SessionClient(str(plain)).connect()
+    finally:
+        server.stop()
 
 
 def test_a_light_status_needs_no_debugging_access():

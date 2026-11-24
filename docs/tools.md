@@ -454,6 +454,9 @@ and live/TAP runs remain approval-gated by `AGENTS.md`.
 |------|----------------|
 | `test_megapad64.py` | CPU instruction set and integration programs |
 | `test_system.py` | Devices, BIOS/KDOS, filesystem, multicore, crypto, networking, privilege, framebuffer, external memory, and userland |
+| `test_kdos_signatures.py` | KDOS's ASN.1/DER and X.509 parsers, RSA and ECDSA signatures, and TLS certificate checks, on the system test's networking snapshot |
+| `test_kdos_trust.py` | MPTA trust bundles, global and scoped anchors, path building, and captured public chains |
+| `test_kdos_tls_client.py` | The TLS 1.3 client: ALPN offers and selection, ClientHello and ServerHello, key schedule, Finished, handshake states, and the exporter |
 | `test_networking.py` | NIC backends and deterministic network integration |
 | `test_live_net.py` | Approval-gated TAP/internet journeys |
 | `test_tacc_isa.py` | Locked encodings, ownership, formats, arithmetic, image, and fault oracle |
@@ -497,9 +500,6 @@ and live/TAP runs remain approval-gated by `AGENTS.md`.
 | `TestKDOSTRNG` | RANDOM, RANDOM8, SEED-RNG, RANDOM32, RANDOM16, RAND-RANGE |
 | `TestKDOSHKDF` | HKDF-Extract, HKDF-Expand, SHA-3 HMAC key derivation |
 | `TestKDOSTLSRecord` | TLS 1.3 record layer: content type, length, AES-GCM encrypt/decrypt |
-| `TestKDOSTLSGenericALPN` | Generic caller-provided ALPN configuration, encoding, selection, and refusal |
-| `TestKDOSTLSHandshake` | TLS 1.3 handshake: ClientHello, ServerHello, key schedule, Finished |
-| `TestKDOSTLSExporter` | TLS 1.3 exporter schedule/publication, RFC 9266 tuple, bounds, and wipe |
 | `TestKDOSTLSCredentials` | Lower-owned server credentials, opaque handles, signer lifecycle, cancellation, and cleanup |
 | `TestKDOSTLSServerClientHello` | Full-width raw and exact-child ClientHello admission, real TCP/TLSPlaintext reassembly, complete ACK-paced attached server-flight emission, exact-child protected ingress/EOF cleanup, bounded rejected 0-RTT, client-Finished authentication/publication, independent-oracle composition, and rollback |
 | `TestKDOSTLSAppData` | TLS 1.3 application data: TLS-SEND, TLS-RECV, TLS-CLOSE |

@@ -11,6 +11,7 @@ import operator
 import os
 import socket
 import stat
+import struct
 import threading
 import time
 from collections.abc import Mapping
@@ -4388,8 +4389,25 @@ class SessionServer:
             self.machine.stop()
 
 
+def _peer_uid(connection: socket.socket) -> int | None:
+    """The user the process at the other end of CONNECTION runs as, where
+    the system says (SO_PEERCRED), or None."""
+
+    if not hasattr(socket, "SO_PEERCRED"):
+        return None
+    credentials = connection.getsockopt(
+        socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
+    )
+    return struct.unpack("3i", credentials)[1]
+
+
 class SessionClient:
-    """Thread-safe request client for the local shared-session socket."""
+    """Thread-safe request client for the local shared-session socket.
+
+    It talks only to a server of this account: a socket another account
+    owns, or a server whose peer credentials name another user, is refused
+    before anything is sent, so a socket planted by someone else learns
+    nothing, keystrokes least of all."""
 
     def __init__(self, socket_path: str = DEFAULT_SOCKET, timeout: float = 5.0):
         self.socket_path = str(Path(socket_path).expanduser())
@@ -4402,9 +4420,23 @@ class SessionClient:
     def connect(self):
         if self._socket is not None:
             return
+        info = os.lstat(self.socket_path)
+        if not stat.S_ISSOCK(info.st_mode):
+            raise PermissionError(f"{self.socket_path} is not a socket")
+        if info.st_uid != os.getuid():
+            raise PermissionError(f"{self.socket_path} belongs to another account")
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         client.settimeout(self.timeout)
-        client.connect(self.socket_path)
+        try:
+            client.connect(self.socket_path)
+            peer = _peer_uid(client)
+            if peer is not None and peer != os.getuid():
+                raise PermissionError(
+                    f"the server on {self.socket_path} runs under another account"
+                )
+        except BaseException:
+            client.close()
+            raise
         self._socket = client
         self._reader = client.makefile("rb")
 
