@@ -33,11 +33,11 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-dictionary-index-2419-2507.f"
+    / "kdos-dictionary-index-2435-2523.f"
 )
 
-FIRST_LINE = 2419
-LAST_LINE = 2507
+FIRST_LINE = 2435
+LAST_LINE = 2523
 SLICE_SHA256 = (
     "c0a96826bdf91ede3a101e5c0ff32e97cd1a7074d99812c38e0dc2b66a84e054"
 )
@@ -65,7 +65,7 @@ CANONICAL_INDEX_SLOTS = 65_536
 CANONICAL_INDEX_BYTES = CANONICAL_INDEX_SLOTS * 16
 # The unique names in the dictionary once this slice has loaded: the hosted
 # core words and KDOS's definitions through the slice's last line.
-BOOT_NAMES = 797
+BOOT_NAMES = 800
 # A 4 MiB XMEM gives the boot table 2,048 slots, which hold the boot's names
 # below the three quarters at which the table doubles.
 GROWTH_EXTERNAL_SIZE = 4 << 20

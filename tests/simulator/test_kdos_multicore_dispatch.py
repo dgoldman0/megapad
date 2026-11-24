@@ -30,11 +30,11 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-multicore-dispatch-7302-7465.f"
+    / "kdos-multicore-dispatch-7318-7481.f"
 )
 
-FIRST_LINE = 7302
-LAST_LINE = 7465
+FIRST_LINE = 7318
+LAST_LINE = 7481
 SLICE_BYTES = 5_711
 SLICE_SHA256 = (
     "b4056181eb22d8881956282cbf4c9d06e778e2a4ed42eb29a952e86bc69f75f6"

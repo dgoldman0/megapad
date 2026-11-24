@@ -3,12 +3,15 @@
 Status: decided on 2026-11-20. MegaPad's side is built in its chiplet
 system module, `chiplet.f`, and LM1's side in the stand-in for LM1's runtime
 in LM1's chiplet module (`chiplet/` in the lm1 repository); together they
-pass the 27 conformance tests of §15 in the emulator, and in the simulator
-all but the six that need a second MegaPad core (2026-11-22). What managed
-data keeps when LM1 fails is built in stages, and each part of it names its
-stage, or marks itself as one of three fixes (§11). The fixes and stage 0
-are built, so every failure loses the heap; stage 1 and later are not
-built. `chiplet.f` is not yet loaded when the system boots. This is the specification of
+pass the 27 conformance tests of §15 in the emulator and in the simulator,
+the six that need a second MegaPad core on two full cores of each. What
+managed data keeps when LM1 fails is built in stages, and each part of it
+names its stage, or marks itself as one of three fixes (§11). The fixes and
+stages 0 and 1 are built (2026-11-23): when LM1 fails, the module stops it,
+and where the records show the shared heap sound, MegaPad's never-free
+engine adopts the heap and serves it with the same words; stage 2 and
+later are not built, and §15 lists which recovery tests run.
+`chiplet.f` is not yet loaded when the system boots. This is the specification of
 managed data on MegaPad, and of the link's LM1 layer for it: how MegaPad
 code holds, reads, writes, creates and releases objects that LM1's collector
 manages, the windows in which it uses them, the handles it keeps past a
@@ -260,7 +263,12 @@ When a side breaks its bound:
   The collector waits on, because the window's references depend on it, and
   reports the core in a `NOTICE` (§10). A core that waits on that hold finds
   `HELD` without `ACTIVE` while a window word reads `OPEN`, knows the delay
-  is MegaPad's own, and waits on as well.
+  is MegaPad's own, and waits on as well. So does a core whose `COLLECT`
+  waits for the hold: whenever its request's deadline
+  ([chiplet-link.md](chiplet-link.md) §8) passes while the hold reads so
+  and another core's window reads `OPEN`, the deadline starts again. A
+  collection's deadline thus counts only LM1's own delay, and a long window
+  never ends LM1's service.
 - A hold that stays `ACTIVE`, at one epoch, for more than twice
   `HOLD_LIMIT` is overdue. A core that finds it so fails the function, and
   the module stops LM1 (§11).
@@ -584,10 +592,11 @@ Lisp by them.
 ## 9. Records in lent memory
 
 The chiplet module keeps its records in lendable memory, lent to LM1 with
-the rights below. As with the link's queues, each record lies in memory that
-only its writer can write ([chiplet-link.md](chiplet-link.md) §8), except
-the handle table and the shared heap, which both chips write under the
-window protocol.
+the rights below; those lent for reading and writing lie in the port's
+growing region (§10). As with the link's queues, each record lies in memory
+that only its writer can write ([chiplet-link.md](chiplet-link.md) §8),
+except the handle table and the shared heap, which both chips write under
+the window protocol.
 
 | Record | Written by | Lent to LM1 for |
 |--------|------------|-----------------|
@@ -818,9 +827,37 @@ other, so a core sends it outside a window.
 
 The shared heap grows in the blocks that `GROW` obtains. LM1 asks for blocks
 that each at least double the heap so far, so a handful of blocks covers any
-size, and KDOS's allocator for lendable memory
-([chiplet-interconnect-plan.md](chiplet-interconnect-plan.md) §9) keeps
-them within the port's lent ranges.
+size, and the port's growing region holds them, so only memory bounds the
+heap.
+
+### Lendable memory
+
+`chiplet.f` lends what MegaPad alone writes from chunks of external memory,
+each lent as one of the port's ranges, an owner's records carved from its
+chunks and each new chunk twice the size of the owner's before it. What LM1
+writes lies in the port's **growing region** instead: LM1's block, the
+handle table's segments, the parts of the pairs that LM1 writes, and the
+shared heap's blocks, the stand-in's among them. The region sits at the top
+of external memory and grows down. A new piece takes a gap that a returned
+one left, or lowers KDOS's `XMEM-LIMIT` by its size, and the region's one
+range is installed again with its new base, which the port's models and RTL
+do in one step ([chiplet-link.md](chiplet-link.md) §3). A block that goes
+back leaves a gap for the next piece that fits, and the region shrinks to
+its lowest piece, giving the memory below it back to KDOS. The region's
+range spans its gaps, so a returned block stays open to LM1 until a piece of
+the same port takes it, zeroed, or the region shrinks past it.
+
+Decided 2026-11-23. Before, each heap block took a range of its own, and
+with eight ranges, of which the control queues and the function's records
+held four, a heap that grows by doubling stopped at about sixteen times its
+first block. Only one port can have a growing region: KDOS's allocator for
+external memory grows up from below, so a region can grow in place only at
+the top of external memory, and only one fits there. Managed data's port
+takes it when LM1 offers the function, and the read-write memory a function
+of another port uses keeps its chunks, bounded by that port's ranges.
+MegaPad's read-only records keep their chunks too: they grow slowly, each
+chunk twice the last, so the ranges left beside the control queues and the
+region give them ample room, and read-only and read-write memory stay apart.
 
 A doorbell keeps its meaning, "look at your queues", and the hold word is
 one more place to look:
@@ -836,16 +873,23 @@ one more place to look:
 
 While the stand-in serves the heap in LM1's place (§13), it answers each
 core's requests itself, those a core sent LM1 before the failure and still
-waits on included (stage 1):
+waits on included (stage 1). The stand-in runs on the core that needs it,
+so a core's request is answered on that core, with no queue between:
 
-- `REGION`: a region in a new block, written into the core's `NEXT` fields
-  with `NEXT_SERIAL` raised, as LM1 writes one;
+- `REGION`: a region in a new block, of at least the bytes asked and the
+  size of the core's last region, or 4 KiB for a core that held none,
+  written into the core's `NEXT` fields with `NEXT_SERIAL` raised, as LM1
+  writes one;
 - `SHAPE`: the ID the registry already holds for the same description, or
-  else a new ID from the upper part of `SHAPE_RANGE`, which it enters in the
-  registry before it replies;
+  else a new ID from the upper part of `SHAPE_RANGE`, above every ID the
+  registry holds there, which it enters in the registry before it replies;
+  `BAD_RECORD` for a description LM1 would refuse, by the same checks;
 - `COLLECT`: `OK` at once, with every byte of the heap counted live and the
   epoch unchanged;
 - a full log: it moves the core's `LOG_HEAD` to `TAIL` and rings the core.
+  A core makes no log entries while the stand-in serves, since a heap that
+  is never collected needs none, and its `LOG_HEAD` follows its `TAIL` at
+  each outermost close.
 
 ## 11. Errors and failure
 
@@ -868,7 +912,8 @@ The words return these statuses:
 The function **fails** when LM1 sets `FAILED`; when a hold is overdue or
 stalls before `ACTIVE`, or a core's full log outlives its deadline (§3);
 when one of the port's queues breaks or a request misses its deadline
-([chiplet-link.md](chiplet-link.md) §8); when, from stage 1, the module
+([chiplet-link.md](chiplet-link.md) §8), which for a collection counts only
+LM1's own delay (§3); when, from stage 1, the module
 sets its evidence latch (below); or when the chiplet is reset for any other
 reason, another function's missed deadline among them. The module then
 decides from the state recorded at the failure what the shared heap keeps.
@@ -904,8 +949,8 @@ heap is adopted or lost. In the last column, sections are those of LM1's
 | 3 | Recovery from a failure while a hold flips | The stand-in's resolving traversal, if MegaPad resolves (§16) | The resolving traversal (§12.11) |
 
 The release builds the fixes and stages 0 and 1, and stage 2 joins it if
-release plan Part 8d's collector lands early (Part 9d). Until stage 1 is
-built, every failure loses the heap.
+release plan Part 8d's collector lands early (Part 9d). The fixes and
+stages 0 and 1 are built (2026-11-23).
 
 ### Stopping LM1
 
@@ -928,9 +973,16 @@ it (LM1's `spec/05-memory-gc.md` §12.3). From then until a resume `ATTACH`
 has restarted, and the stand-in, where the rule adopts the heap, is the
 only writer of LM1's block.
 
-The module handles one failure at a time: a core that finds a hold overdue
-while the module is already stopping LM1 waits for the decision. After
-`FAILED`, LM1's private work goes on.
+A reset for any other reason takes the same path: `CHIP-RESET`, and
+`CHIP-BOOT` of a chiplet that runs, let the port's functions act before the
+chiplet is held in reset, so the module stops LM1 and the rule decides
+first. A port that fails, by a broken queue or a cancel left unanswered, is
+held in reset once its functions have heard of the failure.
+
+The module handles one failure at a time. The core that finds the failure
+stops LM1, applies the rule and, where the rule adopts the heap, adopts it;
+a core that finds a hold overdue while the module is already stopping LM1
+waits for the decision. After `FAILED`, LM1's private work goes on.
 
 ### The rule
 
@@ -938,16 +990,20 @@ The rule decides between adopting and losing the heap (stage 1). Beside
 the hold word, it reads the **evidence latch**, a record in MegaPad's own
 memory of evidence that LM1 wrote wrong words: a failed check of LM1's
 words (§9), an `OBJ>REF` that refuses a word with a reference tag, or a
-broken queue. It also reads `MOVE`, `LOG_HEAD` and the `NEXT` fields in
+broken queue. A word MegaPad's code hands in, such as the value `OBJ!`
+stores or the reference `OBJ-SET` names, is checked the same way but sets
+no latch, since a bad one says nothing of LM1. It also reads `MOVE`,
+`LOG_HEAD` and the `NEXT` fields in
 LM1's block; `WINDOW`, `REGION`, `FILL` and `TAIL` in the core records; the
 block list; and the epoch each core last saw, which the module keeps in its
-own memory. It applies top down, and the first row that matches decides:
+own memory. It applies top down, and the first row that matches decides,
+and `chiplet.f` keeps the deciding row in `OBJ-ROW`:
 
 | # | Recorded state | Decision |
 |---|----------------|----------|
 | 0 | LM1 could still write: it is not held in reset, or `BUSY` is set | Decide nothing yet |
 | 1 | `FAILED` is set, or the evidence latch is | Lose |
-| 2 | The records contradict each other: `ACTIVE` without `HELD`; `EPOCH` below some core's last-seen epoch; `MOVE` naming a later epoch than `HOLD`, or still `FLIPPING` for a hold that has ended; an undefined phase; `LOG_HEAD` above `TAIL`; a `NEXT` region outside the blocks | Lose |
+| 2 | The records contradict each other: `ACTIVE` without `HELD`; `EPOCH` below some core's last-seen epoch; `MOVE` naming a later epoch than `HOLD`, or still `FLIPPING` for a hold that has ended, or reading `NONE` with an epoch, or this epoch's phase while the hold is not `ACTIVE`; an undefined phase; `LOG_HEAD` above `TAIL`; a `NEXT_BASE`, or a `NEXT_LIMIT`, outside the blocks, each word judged alone, since a cut may fall between the two words of a grant LM1 is writing before it raises `NEXT_SERIAL` | Lose |
 | 3 | `HELD` clear | Adopt |
 | 4 | `HELD` without `ACTIVE` | Adopt, and end the hold |
 | 5 | `ACTIVE`, and `MOVE` reads `NONE` or names an earlier epoch | Adopt, and end the hold |
@@ -957,8 +1013,10 @@ own memory. It applies top down, and the first row that matches decides:
 
 Row 1 applies at once, whether or not LM1 can still write, since losing
 needs nothing from LM1: a core that finds `FAILED` loses the heap as it
-opens a window (§3), and the module loses it as it sets the latch. Each
-adopt row rests on one rule of LM1's write order (LM1's
+opens a window (§3), and the module loses it as it sets the latch. Row 8
+applies while the stand-in serves: a reference `OBJ>REF` refuses, or a
+header that fails §6's check where a reference points, loses the heap
+then. Each adopt row rests on one rule of LM1's write order (LM1's
 `spec/05-memory-gc.md` §12.3):
 
 - row 3: every hold ends with no forwarding pointer reachable;
@@ -1047,13 +1105,15 @@ shared heap after LM1 fails, the engine serves that heap in LM1's place
 change: `OBJ-ENGINE` (§14) reports that collection has paused. Once the
 module has stopped LM1 (§11), the stand-in:
 
-1. **Trusts none of LM1's last decisions.** It replaces every core's `NEXT`
-   grant with a region in a new block, which it adds to the block list
+1. **Trusts none of LM1's last decisions.** It replaces the `NEXT` grant
+   of every core LM1 has granted a region, one whose `NEXT_SERIAL` is not
+   zero, with a region in a new block, which it adds to the block list
    first, and never grants free space in the blocks LM1 managed; a core
    keeps the region it already holds until it next takes one. It takes
-   each new block from KDOS's allocator for lendable memory, and keeps the
-   blocks few, as LM1 does with `GROW` (§10), since a restarted LM1
-   installs each block as a range (LM1's `spec/05-memory-gc.md` §12.1).
+   each new block from the port's growing region (§10), and keeps the
+   blocks few, as LM1 does with `GROW`, each at least as large as
+   the heap so far, since a restarted LM1 installs each block as a range
+   (LM1's `spec/05-memory-gc.md` §12.1).
 2. **Ends an interrupted hold.** Where the rule says so, it stores `HOLD`
    with `HELD` and `ACTIVE` clear and `EPOCH` one higher, and rings every
    core whose window word reads `WAITING`. It does so after step 1, so a
@@ -1074,13 +1134,17 @@ module has stopped LM1 (§11), the stand-in:
 
 Until stage 2 is built, the stand-in serves an adopted heap only while
 something can reach it (decided 2026-11-21). Once no handle is live and no
-window is open, nothing can reach the heap, so the module loses it by
-§11's loss path, returns its memory, and starts the function afresh on a
-restarted LM1. Restarting Desk, which releases every owner's handles,
-therefore brings collection back. Meanwhile, if memory runs out, KDOS
-refuses a block and constructors fail with `OBJ-E-NOMEM`, while reads,
-stores and saves still work. While the stand-in serves, MegaPad refuses a
-restarted LM1's offer of the function.
+window is open or waiting to open, nothing can reach the heap, so the
+module loses it by §11's loss path, returns its memory, and starts the
+function afresh on a restarted LM1's offer. A core that waits to open a
+window counts, because it reaches the heap as soon as its window opens: a
+core that finds a hold overdue, with no handle made yet, opens its window
+once the stand-in has adopted the heap. Restarting Desk, which releases
+every owner's handles, therefore brings collection back. Meanwhile, if
+memory runs out, KDOS refuses a block and constructors fail with
+`OBJ-E-NOMEM`, while reads, stores and saves still work. While the
+stand-in serves, MegaPad refuses a restarted LM1's offer of the function.
+Restarting LM1 is left to whatever boots it, as booting it is today.
 
 ### Handing the heap back
 
@@ -1185,7 +1249,11 @@ of the core's last reply, such as `BAD_RECORD` when `OBJ-SHAPE` returns
 `OBJ-E-KIND` for a description LM1 refused. `OBJ-MEMORY` ( -- u ) gives the
 bytes of lendable memory the function holds, and the variables
 `OBJ-NOTICES`, `OBJ-NOTICE-KIND`, `OBJ-NOTICE-ARG` and `OBJ-NOTICE-ADDR`
-count LM1's `NOTICE`s and keep the last one. Two variables, read when they
+count LM1's `NOTICE`s and keep the last one. Two more keep the last
+failure's decision: `OBJ-ROW` the row of §11's rule that made it, and
+`OBJ-STOPPED` how the stop before it went, 0 when LM1 was held in reset
+already, 1 when it answered `STOPPED`, and 2 when the request's deadline
+passed first. Two variables, read when they
 are first needed, size the records: `OBJ-HANDLE-FIRST` the handle table's
 first segment, 64 slots by default, and `OBJ-LOG-ENTRIES` each core's first
 store log, 256 entries.
@@ -1289,10 +1357,11 @@ chosen point of its work.
     core 0's `TAIL` reached 32, and never ran more than 8 ahead of
     `LOG_HEAD`; after `COLLECT` 0, all 32 records are live through V.
 14. **Several cores.** Sets up cores 0 and 1 each making records and handles
-    in windows of their own at once, with core 1's window still open after
-    core 0's closes. Does: `COLLECT` 2. Checks: nothing moves until core 1
-    closes; both logs are drained; every handle of both cores gives its
-    object.
+    in windows of their own at once, with core 1's window open first and
+    still open after core 0's closes. Does: core 0 sends `COLLECT` 2, and
+    core 1 closes two milliseconds after `HELD` is set, inside a request's
+    deadline. Checks: nothing moves until core 1 closes; both logs are
+    drained; every handle of both cores gives its object; LM1 still serves.
 15. **Nested windows.** Sets up core 0 with a window, a nested one, and the
     nested one closed again. Does: core 1 sends `COLLECT` 2. Checks: core
     0's window word reads `OPEN` after the inner close; nothing moves until
@@ -1338,18 +1407,20 @@ chosen point of its work.
     address. From stage 1 the refusal also sets the evidence latch, and the
     heap is lost (§11).
 23. **A reset outside a hold.** Sets up handles held by two owners, with no
-    window open. Does: resets the chiplet. Checks, until stage 1:
-    `OBJ-OPEN` and `OBJ-GET` return `OBJ-E-FAILED`; releasing each owner
-    returns 0; the module returns the function's memory to KDOS; MegaPad
-    memory outside the function's is untouched. From stage 1 the reset
-    keeps the heap, and A1 below checks that, with L1 checking a loss.
+    window open. Does: resets the chiplet. Checks: the stand-in adopts the
+    heap (§11, row 3), and every handle gives its object; once both owners
+    are released, nothing reaches the heap, so the module loses it and
+    returns the function's memory to KDOS; MegaPad memory outside the
+    function's is untouched. Until stage 1 the reset lost the heap. A1 below
+    checks a reset with windows open, and L1 a loss.
 24. **An overdue hold.** Sets up a hold that the test hook keeps `ACTIVE`
     for more than twice `HOLD_LIMIT`. Does: core 0 calls `OBJ-OPEN`.
-    Checks: core 0 finds the hold overdue, and the port is cancelled and
-    reset by the link's rule, from stage 1 after a stop request. Until stage
-    1, `OBJ-OPEN` returns `OBJ-E-FAILED`. From stage 1 the rule decides by
-    `MOVE`: a hold that has moved nothing is adopted, as A3 checks, and one
-    cut while it flips is lost, as L5 checks.
+    Checks: core 0 finds the hold overdue, LM1 answers a stop request, and
+    the port is cancelled and reset by the link's rule. The rule decides by
+    `MOVE`: this hold has moved nothing, so the stand-in adopts the heap
+    and ends the hold one epoch on, and `OBJ-OPEN` returns 0, as A3 checks;
+    a hold cut while it flips is lost, as L5 checks. Until stage 1,
+    `OBJ-OPEN` returned `OBJ-E-FAILED`.
 25. **An overdue window is reported.** Sets up core 0 keeping a window open
     past `WINDOW_LIMIT` after `HELD` is set. Checks: LM1 sends a `NOTICE`
     of kind 1 naming core 0; nothing moves until core 0 closes; the hold
@@ -1363,18 +1434,30 @@ chosen point of its work.
 27. **Shapes.** Does: registers one description twice, then one with a field
     kind of 15. Checks: the two registrations return the same shape ID, and
     the third fails with `BAD_RECORD`.
+28. **A long window is MegaPad's own delay.** Sets up a request deadline of
+    10 ms, and core 1 keeping a window open 50 ms after `HELD` is set and on
+    until LM1's `NOTICE` has come. Does: core 0 sends `COLLECT` 2 while that
+    window is open. Checks: LM1 reports the window in a `NOTICE`; nothing
+    moves while it is open; the collection ends once core 1 closes, one
+    epoch on; LM1 still serves, and the module records no failure.
 
 ### Recovery
 
 These tests run LM1's failures through MegaPad's chiplet module and LM1's
-chiplet module together, on the simulator. Each names the stage it comes
-with, and runs from that stage on. A branch's letter says which way the
-rule of §11 decides: A for adopt, L for lose.
+chiplet module together. Each names the stage it comes with, and runs from
+that stage on. A branch's letter says which way the rule of §11 decides: A
+for adopt, L for lose. Those of stage 1 and the fixes are built in
+`tests/test_lm1_managed_data.py` (2026-11-23) and run on the emulator and
+the simulator alike, A1 and A2's first run on two full cores of each: the
+killed hold, for a moving hold and for one that moves nothing; A1, A2, A8,
+A9 and L1 to L4; and A3, A4 and L5 through the killed hold. A5 waits for
+the link's layer for jobs (§16).
 
 - **The killed hold** (stage 1; stage 3 for its flipping cuts). Sets up a
-  hold on the simulator, and a hook on the module's `mem` callback
-  (`shared/accel/chiplet_module.h`) that records every word LM1 writes,
-  each word of a burst included. Does: for each cut between two recorded
+  hold, and a record of every word LM1 writes, each word of a burst
+  included: the stand-in's own record of what it writes through the
+  module's `mem` callback (`shared/accel/chiplet_module.h`), which every
+  write of a hold goes through. Does: for each cut between two recorded
   words, builds the hold's starting memory plus LM1's writes up to the cut,
   and has MegaPad's module apply the rule to it. Checks: the rule adopts in
   exactly the states its stage qualifies and loses in the rest; after an
@@ -1420,9 +1503,10 @@ Adopt branches:
   with a hook that stops LM1 inside its first hold. Checks: the module stops
   LM1, the rule adopts the heap again, and every handle stays valid.
 - **A8, a stop while a hold flips** (stage 1). Sets up a moving `COLLECT`
-  and a hook that sets `STOP_REQ` once `MOVE` reads `FLIPPING`. Checks: LM1
-  sets `STOPPED` only after `MOVE` reads `FIXED`, the rule adopts the heap,
-  and each handle gives the contents its object had before the hold.
+  and a hook that makes the stop request reach LM1 as `MOVE` comes to read
+  `FLIPPING`. Checks: LM1 sets `STOPPED` only after `MOVE` reads `FIXED`,
+  the rule adopts the heap, and each handle gives the contents its object
+  had before the hold.
 - **A9, the stand-in's heap dropped** (stage 1). Sets up the stand-in
   serving after A1, then every owner released with no window open. Checks:
   the module loses the heap, returns its memory to KDOS, accepts a
@@ -1467,18 +1551,6 @@ Lose branches:
   which §4 fixes only how they name objects, belong to the link's layer for
   jobs, which is still to specify. That layer also says how a task that
   LM1's failure ends is reported (§13).
-- **Lendable memory.** `chiplet.f` lends each owner's records from chunks
-  of external memory, each chunk lent as one of the port's ranges and each
-  new one twice the size of the owner's before it, and gives every heap
-  block a chunk of its own, so that `RETURN` gives one back alone. The
-  port's lent ranges, eight by default, therefore bound the chunks: after
-  boot the control queues hold two and the function's records two, and the
-  first heap block lies in the function's chunk, which leaves four for heap
-  blocks and growing records. A heap that grows by doubling reaches about
-  sixteen times its first block before `GROW` is refused. Whether KDOS's
-  allocator for lendable memory should place blocks inside fewer, larger
-  ranges, or a port should hold more ranges, is still to decide
-  ([chiplet-interconnect-plan.md](chiplet-interconnect-plan.md) §10).
 - **Re-binding word values** (stage 2). Word values that carry LM1's
   compiled entry depend on LM1's private state, like closures and symbols,
   so their kinds are entered as ones a restarted LM1 cannot adopt (§9). A

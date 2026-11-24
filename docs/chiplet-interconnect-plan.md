@@ -19,7 +19,8 @@ second use, was decided the same day as [managed-data.md](managed-data.md)
 specifies it, recovery after an LM1 failure included. MegaPad's side of it
 is built in the chiplet system module, `chiplet.f`, beside the general
 words of §9, and LM1's side in the stand-in for LM1's runtime in LM1's
-chiplet module; recovery is built as far as its stage 0. This note records how chiplets attach to MegaPad in
+chiplet module; recovery is built as far as its stage 1, in which MegaPad's
+never-free engine adopts a sound heap when LM1 fails. This note records how chiplets attach to MegaPad in
 Leviathan: the contract every chiplet meets, how the chips share memory, how
 they signal and exchange work, and how LM1, the first chiplet, runs sandbox
 jobs, managed data and borrowed tile work over the link. It schedules no
@@ -527,9 +528,18 @@ and the queues and offers are specified.
 - **Lendable memory in Akashic.** Zero-copy depends on the data handed to a
   job being created in lendable memory, and the job service's allocation has
   yet to be read with that in mind. Managed data adds the shared heap's
-  blocks, which grow as LM1 asks, and a handle table that grows by segments;
-  the allocator keeps them within the port's lent ranges
-  ([managed-data.md](managed-data.md) §16).
+  blocks, which grow as LM1 asks, and a handle table that grows by segments.
+  Decided and built 2026-11-23: what the chiplet writes lies in one region
+  whose range is installed again with new limits as it grows, so that the
+  shared heap is bounded by memory rather than by the port's ranges, while
+  what MegaPad alone writes keeps its chunks, one range each. Two other
+  ways were not chosen, sizing the heap's first block from the machine's
+  memory and giving a port more ranges in the chip. The region sits at the
+  top of external memory and grows down by lowering KDOS's `XMEM-LIMIT`.
+  KDOS's allocator grows up from below, so only one region can grow in
+  place, and only one port can have one; managed data's port takes it, and
+  another port's read-write memory stays bounded by its ranges
+  ([managed-data.md](managed-data.md) §10).
 - **A data cache on a production core.** Reads of lent memory would have to
   go around it.
 - **How often each chip touches shared data.** The sizing study for D8

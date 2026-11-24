@@ -34,6 +34,20 @@ VARIABLE FL-PREV                     \ search scratch
 VARIABLE FL-CURR                     \ search scratch
 VARIABLE FL-NEED                     \ requested bytes during first-fit
 
+\ The allocator's state, XMEM-HERE with the free list and its search
+\ scratch, is shared by every core that allocates: KDOS's own words on core
+\ 0, and system modules whose words run on any core, such as chiplet.f.
+\ Each word that changes it holds HEAP-LOCK, hardware spinlock 3 (section
+\ 8.7), for the few accesses the change makes and never across a wait.  It
+\ takes the lock with SPIN@ and SPIN!, since LOCK and UNLOCK come later in
+\ this file, and tries a busy lock again at once: the holder runs only a
+\ short walk of the free list, and the simulator ends a core's turn when it
+\ finds a lock busy.  SPIN@ grants a lock its own core holds already, with
+\ no depth count, so no caller holds HEAP-LOCK around an allocator word.
+3 CONSTANT HEAP-LOCK
+: _XMEM-ACQUIRE  ( -- )   BEGIN HEAP-LOCK SPIN@ 0= UNTIL ;
+: _XMEM-RELEASE  ( -- )   HEAP-LOCK SPIN! ;
+
 \ USERLAND-INIT installs an interval-aware validator later in this file.  The
 \ indirection is required because XMEM-FREE-BLOCK is defined before the
 \ userland partition state.  Prior to initialization every returned block is
@@ -48,7 +62,9 @@ DEFER _XMEM-FREE-SPAN-CHECK
 \ XMEM-FREE-BLOCK ( addr size -- )  return a block to the XMEM free-list
 \   Validates that addr falls within [EXT-MEM-BASE, XMEM-LIMIT),
 \   the positive original request fits, and its 16-byte-normalized span
-\   does not exceed XMEM-LIMIT.
+\   does not exceed XMEM-LIMIT.  The checks run before the lock, so that an
+\   ABORT" leaves it free; XMEM-HERE only rises between resets, so a check
+\   against a value another core has just raised stays sound.
 : XMEM-FREE-BLOCK  ( addr size -- )
     DUP 1 < ABORT" XMEM-FREE: block too small"
     OVER EXT-MEM-BASE < ABORT" XMEM-FREE: addr below base"
@@ -68,9 +84,11 @@ DEFER _XMEM-FREE-SPAN-CHECK
     2DUP SWAP XMEM-HERE @ SWAP - >
     ABORT" XMEM-FREE: above high water"
     2DUP _XMEM-FREE-SPAN-CHECK
+    _XMEM-ACQUIRE
     OVER !                            \ addr+0 = size
     XMEM-FL @ OVER 8 + !             \ addr+8 = old head
-    XMEM-FL ! ;                       \ head = addr
+    XMEM-FL !                         \ head = addr
+    _XMEM-RELEASE ;
 
 \ _XMEM-FL-REPLACE ( replacement -- )
 \   Replace FL-CURR in the free-list with replacement (or unlink it when 0).
@@ -83,7 +101,8 @@ DEFER _XMEM-FREE-SPAN-CHECK
 
 \ (XMEM-FL-FIND) ( u -- addr true | false )
 \   First-fit search of the XMEM free-list.  A larger reclaimed block is
-\   split so a small allocation cannot strand the unused tail.
+\   split so a small allocation cannot strand the unused tail.  The caller
+\   holds HEAP-LOCK.
 : (XMEM-FL-FIND)  ( u -- addr true | false )
     FL-NEED !
     0 FL-PREV !   XMEM-FL @ FL-CURR !
@@ -123,37 +142,32 @@ DEFER _XMEM-FREE-SPAN-CHECK
     THEN
     1 XMEM-INIT-DONE ! ;
 
-\ XMEM-ALLOT ( u -- addr )  allocate u bytes from ext mem
+\ XMEM-ALLOT? ( u -- addr ior )  allocate u bytes from ext mem, or fail
 \   Rounds positive requests to 16 bytes, tries the free-list first
-\   (first-fit), then falls back to bump allocation.
-: XMEM-ALLOT  ( u -- addr )
-    XMEM? 0= ABORT" No external memory"
-    DUP 0< OVER 0= OR ABORT" Invalid ext mem size"
-    DUP XMEM-LIMIT @ EXT-MEM-BASE - > ABORT" Ext mem overflow"
-    _XMEM-NORMALIZE-SIZE
-    DUP (XMEM-FL-FIND) IF              \ found a recycled block
-        NIP EXIT
-    THEN
-    \ Prove the request fits in the remaining span before adding it to the
-    \ bump pointer; base+size must never be used as the bounds check.
-    DUP XMEM-LIMIT @ XMEM-HERE @ - > ABORT" Ext mem overflow"
-    XMEM-HERE @ SWAP
-    OVER +
-    XMEM-HERE ! ;
-
-\ XMEM-ALLOT? ( u -- addr ior )  like XMEM-ALLOT but returns ior
+\   (first-fit), then falls back to bump allocation, holding HEAP-LOCK for
+\   both.
 : XMEM-ALLOT?  ( u -- addr ior )
     XMEM? 0= IF DROP 0 -1 EXIT THEN
     DUP 0< OVER 0= OR IF DROP 0 -1 EXIT THEN
     DUP XMEM-LIMIT @ EXT-MEM-BASE - > IF DROP 0 -1 EXIT THEN
     _XMEM-NORMALIZE-SIZE
-    DUP (XMEM-FL-FIND) IF NIP 0 EXIT THEN
+    _XMEM-ACQUIRE
+    DUP (XMEM-FL-FIND) IF NIP 0 _XMEM-RELEASE EXIT THEN
+    \ Prove the request fits in the remaining span before adding it to the
+    \ bump pointer; base+size must never be used as the bounds check.
     DUP XMEM-LIMIT @ XMEM-HERE @ - > IF
-        DROP 0 -1 EXIT
+        DROP 0 -1 _XMEM-RELEASE EXIT
     THEN
     XMEM-HERE @ SWAP
     OVER +
-    XMEM-HERE ! 0 ;
+    XMEM-HERE ! 0
+    _XMEM-RELEASE ;
+
+\ XMEM-ALLOT ( u -- addr )  allocate u bytes from ext mem, or abort
+: XMEM-ALLOT  ( u -- addr )
+    XMEM? 0= ABORT" No external memory"
+    DUP 0< OVER 0= OR ABORT" Invalid ext mem size"
+    XMEM-ALLOT? ABORT" Ext mem overflow" ;
 
 \ =====================================================================
 \  §1.0b  Xmem-aware allocation dispatch
@@ -229,7 +243,7 @@ VARIABLE _RS-OLD   \ saved old-addr for xmem resize
 
 \ XMEM-TALIGN ( -- )  align XMEM-HERE up to 64-byte boundary
 : XMEM-TALIGN  ( -- )
-    XMEM-HERE @  63 + -64 AND  XMEM-HERE ! ;
+    _XMEM-ACQUIRE  XMEM-HERE @  63 + -64 AND  XMEM-HERE !  _XMEM-RELEASE ;
 
 VARIABLE XMEM-FLOOR  0 XMEM-FLOOR !
 
@@ -238,8 +252,10 @@ VARIABLE XMEM-FLOOR  0 XMEM-FLOOR !
 \   Also clears the free-list (all blocks return to the bump region).
 : (XMEM-RESET)  ( -- )
     XMEM? IF
+        _XMEM-ACQUIRE
         XMEM-FLOOR @ ?DUP IF XMEM-HERE ! ELSE EXT-MEM-BASE XMEM-HERE ! THEN
         0 XMEM-FL !
+        _XMEM-RELEASE
     THEN ;
 
 \ The public action is deferred so later lower subsystems with persistent

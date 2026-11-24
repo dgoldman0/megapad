@@ -559,26 +559,34 @@ memory.
 
 The Megapad-64 has 4 full cores and up to 12 micro-cores (3 clusters
 of 4).  There is no hardware cache coherency protocol.  All cores
-share the same physical address space but there is no shared-state
-locking on any allocator.
+share the same physical address space.  Of the allocators, only the
+external-memory allocator locks its shared state.
 
 ### 5.1 The Concurrency Contract
 
-The allocators use shared scratch `VARIABLE`s (`A-PREV`, `A-CURR`,
-`A-SIZE`, `AR-SZ`, `AR-SRC`, `AR-BLK`, `FL-PREV`, `FL-CURR`).  Two
-cores calling `ALLOCATE` concurrently would corrupt these variables
-and silently destroy the free list.
+The Bank 0 heap and the arena constructors use shared scratch
+`VARIABLE`s (`A-PREV`, `A-CURR`, `A-SIZE`, `AR-SZ`, `AR-SRC`, `AR-BLK`).
+Two cores running them at once would corrupt these variables and
+silently destroy the free list, so their words are core-0 only.
 
-The intended rule is: **all allocator words that touch shared state are
-serialized and core-0 only.** The current enforcement is incomplete.
+The external-memory allocator serializes its state instead. `XMEM-HERE`,
+the XMEM free list and the list's search scratch (`FL-PREV`, `FL-CURR`,
+`FL-NEED`) change only while a core holds `HEAP-LOCK`, hardware spinlock
+3: `XMEM-ALLOT?` holds it across its free-list search and its bump, and
+`XMEM-FREE-BLOCK`, `XMEM-TALIGN` and `(XMEM-RESET)` across their writes.
+`XMEM-ALLOT` allocates through `XMEM-ALLOT?`. Any core may allocate and
+free through these words; system modules whose words run on any core, such
+as `chiplet.f`, take their memory this way. A caller must not hold
+`HEAP-LOCK` around one of them: the spinlock grants a lock its own core
+holds already without counting depth, so the inner release would end the
+outer critical section.
+
 Bank-0 allocation paths enforce `?CORE0`, as does the XMEM branch of public
-`ALLOCATE`. Raw `XMEM-ALLOT`, `XMEM-ALLOT?`, `XMEM-FREE-BLOCK`,
-`XMEM-TALIGN`, and `(XMEM-RESET)` do not. Public XMEM `FREE` reaches the
-unguarded raw free, and XMEM `RESIZE` writes shared `_RS-OLD` before its
-nested `ALLOCATE` performs the guard. Thus the table below states the caller
-contract, not a claim that every entry currently self-enforces it. This
-documentation/source discrepancy remains open rather than being hidden by a
-simulator-only lock.
+`ALLOCATE`. Public XMEM `FREE` reaches the locked raw free, while XMEM
+`RESIZE` writes shared `_RS-OLD` before its nested `ALLOCATE` performs the
+guard. Thus the table below states the caller contract, not a claim that
+every entry currently self-enforces it; the `RESIZE` discrepancy remains
+open.
 
 | Core-0 only | Why |
 |---|---|

@@ -27,14 +27,14 @@ from tests.simulator.test_kdos_x25519 import _execute
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
-FIXTURE = Path(__file__).with_name("fixtures") / "kdos-xmem-2139-2417.f"
+FIXTURE = Path(__file__).with_name("fixtures") / "kdos-xmem-2139-2433.f"
 
 FIRST_LINE = 2139
-LAST_LINE = 2417
+LAST_LINE = 2433
 SLICE_SHA256 = (
-    "d1afea7d6dba6c5d6e7d40d78812454e9b246b3c74929e0be9bba79342e15900"
+    "25e0678d6388e4045dcd796c75dd454fd3c8950637a4af7dd05a040b89d7d428"
 )
-SLICE_GIT_BLOB = "ffe1a68cbd1a02bf35978b46ab584627ce237fa1"
+SLICE_GIT_BLOB = "0f7c2c25d08b5321b88ab07fd3ab101ed7e5317d"
 DEFINITIONS = (
     b"XMEM-HERE",
     b"XMEM-LIMIT",
@@ -43,6 +43,9 @@ DEFINITIONS = (
     b"FL-PREV",
     b"FL-CURR",
     b"FL-NEED",
+    b"HEAP-LOCK",
+    b"_XMEM-ACQUIRE",
+    b"_XMEM-RELEASE",
     b"(_XMEM-FREE-SPAN-CHECK)",
     b"_XMEM-FREE-SPAN-CHECK",
     b"_XMEM-NORMALIZE-SIZE",
@@ -51,8 +54,8 @@ DEFINITIONS = (
     b"(XMEM-FL-FIND)",
     b"XMEM?",
     b"XMEM-INIT",
-    b"XMEM-ALLOT",
     b"XMEM-ALLOT?",
+    b"XMEM-ALLOT",
     b"ALLOCATE",
     b"FREE",
     b"_RS-OLD",
@@ -68,14 +71,14 @@ DEFINITIONS = (
     b".XMEM",
     b"XBUF",
 )
-BIOS_WORDS = (b"EXT-MEM-BASE", b"EXT-MEM-SIZE", b"NIP", b"TUCK")
+BIOS_WORDS = (b"EXT-MEM-BASE", b"EXT-MEM-SIZE", b"NIP", b"TUCK", b"SPIN@", b"SPIN!")
 
 CANONICAL_EXTERNAL_SIZE = 128 * (1 << 20)
 
 
 def _verified_slice() -> bytes:
     source = FIXTURE.read_bytes()
-    assert len(source) == 10_924
+    assert len(source) == 11_979
     assert source.count(b"\n") == LAST_LINE - FIRST_LINE + 1
     assert hashlib.sha256(source).hexdigest() == SLICE_SHA256
     assert _git_blob_id(source) == SLICE_GIT_BLOB
@@ -151,7 +154,7 @@ def _expect_abort(
 def test_xmem_slice_is_exact_and_initializes_complete_ledger(
     loaded_xmem: MegaForthRuntime,
 ) -> None:
-    assert len(DEFINITIONS) == 31
+    assert len(DEFINITIONS) == 34
     for name in DEFINITIONS + BIOS_WORDS:
         assert loaded_xmem.find(name) is not None
 
