@@ -231,8 +231,8 @@ continue to bound an authenticated server role:
 - P-256 `EC-MUL` branches on scalar bits and remains qualified only for public
   verification data. Private signing now uses the separate fixed-schedule
   operation documented below; the two paths are not interchangeable.
-- The fixed RSA-2048 path implements the public exponent only.  There is no
-  private RSA operation, PSS signing path, or blinding contract.
+- RSA implements the public operation only.  There is no private RSA
+  operation, PSS signing path, or blinding contract.
 - KDOS now has a lower-owned private-key and TLS credential-handle lifecycle.
   Its two-cell opaque handle prevents accidental raw-pointer exposure to
   higher layers, but the storage remains ordinary KDOS memory and cannot claim
@@ -533,25 +533,40 @@ capacity, stale handle, malformed DER chain, unsupported leaf profile,
 invalid key, key mismatch, busy, alias, lower crypto failure, cancelled, no
 active signing operation, and retired generation respectively.
 
-### Fixed RSA-2048
+### RSA and P-384 on the Montgomery module
 
-The RSA verifier accepts only a 2048-bit odd modulus and public exponent
-65537. Its 32-limb CIOS Montgomery multiplication uses the BIOS `UM*` word,
-which executes the existing `UMUL`/`UMULH` instructions; it does not replace
-the native multiplication path with a software fallback. Certificate
-signatures must have exact PKCS#1 v1.5 SHA-256 encoding. TLS
-CertificateVerify must use `rsa_pss_rsae_sha256` with `emBits=2047`, SHA-256,
-MGF1-SHA256, and an exact 32-byte salt.
+RSA of any width and P-384 share one multi-precision Montgomery module
+(`MPM-*`, §16.7c.1 of `networking.f`). Numbers are strings of 256-bit
+digits, and each product step runs on the Field ALU's raw multiply:
+one `FMUL-RAW` and two `FMUL-ADD-RAW` per digit, whose 512-bit sum cannot
+wrap. The RSA words take an `RSA-KEY` record of a big-endian modulus and
+exponent of any length, so the arithmetic has no fixed width; the
+certificate key profile still admits only 2048-bit moduli and exponent
+65537. `RSA-PKCS1-VERIFY` checks exact PKCS#1 v1.5 encodings for SHA-256,
+SHA-384 and SHA-512 digests, and `RSA-PSS-VERIFY` checks EMSA-PSS with MGF1
+over the digest's hash and a salt as long as the hash, as TLS 1.3 requires.
+`ECDSA-P384-VERIFY` verifies P-384 signatures over two-digit contexts for
+the field prime and the group order.
 
-RSA scratch is restricted to core 0 and serialized by an owner/phase gate.
-Cooperative code uses `RSA2048-PUBLIC-BEGIN`, pumps one bounded unit per
-`RSA2048-PUBLIC-STEP`, and then calls `RSA2048-PUBLIC-FINAL` or
-`RSA2048-PUBLIC-CANCEL`. The operation is bound to the initiating
-`(COREID,TASK-ID)`; another execution context cannot step, finalize, cancel,
-or wipe it. Physical worker cores are rejected. `RSA-E-BUSY` (`-2`) reports
-contention or off-core entry. The synchronous public and padding-verification
-words remain compatibility primitives and are not suitable for a responsive
-live owner loop.
+Measured on the emulator on 2026-11-24, at the documented 100 MHz clock, one
+signature check costs:
+
+| Check | Cycles | Time |
+|---|---:|---:|
+| RSA-2048 PKCS#1 v1.5 | 1.68M | 17 ms |
+| RSA-2048 PSS | 1.73M | 17 ms |
+| RSA-3072 PKCS#1 v1.5 | 3.50M | 35 ms |
+| RSA-4096 PKCS#1 v1.5 | 5.93M | 59 ms |
+| ECDSA P-384 | 72.0M | 0.72 s |
+| ECDSA P-256 (Field ALU prime) | 1.82M | 18 ms |
+
+The earlier fixed RSA-2048 code took 36.5M cycles per check on `UM*`.
+
+RSA's workspace is shared and grows to the widest modulus seen, so the RSA
+words run on core 0 and one at a time. Physical worker cores and a second
+caller receive `RSA-E-BUSY` (`-2`); a workspace that cannot grow returns
+`RSA-E-ALLOC` (`-3`). A check is short enough to run within one poll, so
+there is no stepped RSA interface.
 
 ### Trust Bundles
 
@@ -1018,9 +1033,11 @@ ticket fragment fail closed with `TLS-E-POST-HANDSHAKE`.
 
 ## Deployment Reality
 
-The code does not validate arbitrary public certificate chains. It lacks P-384,
-Ed25519, ECDSA-SHA384 child-signature verification, variable-width RSA, and a
-curated root program. Public chains commonly cross those boundaries.
+The code does not validate arbitrary public certificate chains. The
+signature primitives now cover RSA of any width and P-384, but the
+certificate parser and path validator still admit only RSA-2048 and P-256
+keys with SHA-256 signatures, there is no Ed25519, and there is no curated
+root program. Public chains commonly cross those boundaries.
 
 When an endpoint's representable leaf or intermediate is signed by an
 unsupported parent, that supported certificate may instead be provisioned as
@@ -1050,14 +1067,17 @@ Native guest tests cover:
 - signer invalid-key, exact-capacity, alias, busy, recursive-owner, and caught
   exception atomicity, including complete private/HMAC workspace and touched
   Field-state cleanup;
-- differential RSA Montgomery/public-operation vectors, widened multiply
-  boundaries, and representative-range rejection;
-- exact PKCS#1 v1.5 and PSS padding failure axes, plus fixed real RSA
-  certificate and CertificateVerify signatures;
+- differential Montgomery products at one to sixteen digits, modular
+  addition, subtraction and exponentiation, the raw multiply-accumulate's
+  carry into the high half, RSA public operations at 2048, 3072 and 4096
+  bits, malformed keys, and representative-range rejection;
+- exact PKCS#1 v1.5 (SHA-256, SHA-384, SHA-512) and PSS padding failure
+  axes, signatures from an independent implementation at three RSA widths,
+  P-384 signatures with off-curve, out-of-range and malformed inputs, and
+  fixed real RSA certificate and CertificateVerify signatures;
 - RSA-only and mixed RSA/ECDSA paths, unsupported RSA-4096 anchors, and a
   directly pinned RSA-2048 intermediate carrying a 512-byte parent signature;
-- owner-bound incremental RSA stepping, contention, cancellation, and
-  synchronous-phase cancellation rejection;
+- RSA contention and off-core rejection;
 - deterministic root/intermediate/leaf fixtures with CA, KU, EKU, SAN,
   SKI/AKI, pathLen, and validity constraints;
 - hostname, wildcard, clock, signature, scope, empty-store, and truncation
@@ -1255,7 +1275,8 @@ credential. None enters a product trust bundle or production credential slot.
 
 ### Algorithm coverage
 
-- Add ECDSA-SHA384 and P-384 verification for common GTS chains.
+- Admit ECDSA-SHA384, P-384 and wider RSA keys in certificate parsing and
+  path validation, now that the verification primitives exist.
 - Add Ed25519 only with native vectors and bounded key sizes. If RSA-PSS is
   later accepted as an X.509 certificate-signature AlgorithmIdentifier, give
   its parameters the same exact, bounded treatment as CertificateVerify.
@@ -1283,7 +1304,7 @@ lower crypto, preserving the order 10, 11 (released), then KDOS HMAC/HKDF lock
 exception: it takes only lock 11 so cancellation metadata can be published
 while a signer owns lock 10; it performs no cryptography while holding 11.
 
-RSA's core-0 phase gate remains an additional protection for RSA scratch. The
+RSA's core-0 busy gate remains an additional protection for RSA scratch. The
 BIOS SHA-256 transaction uses a complete private context per core, validates
 all caller spans, and wipes on every terminal path; it is isolated from
 SHA-256 work on other cores. It is not per task, so a cooperative task must

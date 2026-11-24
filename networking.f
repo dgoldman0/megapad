@@ -6429,34 +6429,42 @@ VARIABLE _B2L-SRC
 VARIABLE _B2L-LEN
 VARIABLE _B2L-DST
 
-: _BE>LE32 ( src len dst -- )
+\ Copy len big-endian bytes into w little-endian bytes, zero-padded.
+: _BE>LE-W ( src len dst w -- )
+    OVER SWAP 0 FILL
     _B2L-DST ! _B2L-LEN ! _B2L-SRC !
-    _B2L-DST @ 32 0 FILL
-    _B2L-LEN @ 0 DO
+    _B2L-LEN @ 0 ?DO
         _B2L-SRC @ I + C@
         _B2L-DST @ _B2L-LEN @ 1- I - + C!
     LOOP ;
+
+: _BE>LE32 ( src len dst -- )  32 _BE>LE-W ;
 
 VARIABLE _EDS-POS
 VARIABLE _EDS-END
 VARIABLE _EDS-LEN
 VARIABLE _EDS-DST
+VARIABLE _EDS-W
+VARIABLE _EDS-R
+VARIABLE _EDS-S
 
+\ Read one positive, minimally encoded DER INTEGER of at most _EDS-W
+\ bytes into dst, little-endian and zero-padded to that width.
 : _ECDSA-DECODE-INT ( pos end dst -- next flag )
     _EDS-DST ! _EDS-END ! _EDS-POS !
     _EDS-POS @ 2 + _EDS-END @ > IF _EDS-POS @ -1 EXIT THEN
     _EDS-POS @ C@ 2 <> IF _EDS-POS @ -1 EXIT THEN
     _EDS-POS @ 1+ C@ DUP _EDS-LEN !
-    DUP 0= OVER 33 > OR IF DROP _EDS-POS @ -1 EXIT THEN
+    DUP 0= OVER _EDS-W @ 1+ > OR IF DROP _EDS-POS @ -1 EXIT THEN
     _EDS-POS @ 2 + OVER + DUP _EDS-END @ > IF
         DROP DROP _EDS-POS @ -1 EXIT
     THEN
     SWAP DROP                         \ next
     _EDS-POS @ 2 +                   \ next value
-    _EDS-LEN @ 33 = IF
+    _EDS-LEN @ _EDS-W @ 1+ = IF
         DUP C@ 0<> IF 2DROP _EDS-POS @ -1 EXIT THEN
         DUP 1+ C@ 128 AND 0= IF 2DROP _EDS-POS @ -1 EXIT THEN
-        1+ 32
+        1+ _EDS-W @
     ELSE
         DUP C@ 128 AND IF 2DROP _EDS-POS @ -1 EXIT THEN
         _EDS-LEN @ 1 > IF
@@ -6468,23 +6476,30 @@ VARIABLE _EDS-DST
         THEN
         _EDS-LEN @
     THEN
-    _EDS-DST @ _BE>LE32 0 ;
+    _EDS-DST @ _EDS-W @ _BE>LE-W 0 ;
 
-\ ECDSA-DECODE-SIG ( sig slen -- flag )
-\   Decode DER-encoded ECDSA signature into _ECDSA-R and _ECDSA-S.
-\   Returns 0 on success, -1 on error.
-: ECDSA-DECODE-SIG ( sig slen -- flag )
+\ _ECDSA-DECODE ( sig slen r s w -- flag )
+\   Decode a DER ECDSA-Sig-Value, a SEQUENCE of two INTEGERs of at most w
+\   bytes, into little-endian r and s of w bytes.  0 on success, -1 on
+\   error.  The short-form SEQUENCE length covers curves up to P-384.
+: _ECDSA-DECODE ( sig slen r s w -- flag )
+    _EDS-W ! _EDS-S ! _EDS-R !
     2DUP + _EDS-END !
-    DUP 8 < OVER 72 > OR IF 2DROP -1 EXIT THEN
+    DUP 8 < OVER _EDS-W @ 2* 8 + > OR IF 2DROP -1 EXIT THEN
     OVER C@ 48 <> IF 2DROP -1 EXIT THEN
     OVER 1+ C@ OVER 2 - <> IF 2DROP -1 EXIT THEN
-    DROP 2 + _EDS-END @ _ECDSA-R _ECDSA-DECODE-INT
+    DROP 2 + _EDS-END @ _EDS-R @ _ECDSA-DECODE-INT
     IF DROP -1 EXIT THEN
-    _EDS-END @ _ECDSA-S _ECDSA-DECODE-INT
+    _EDS-END @ _EDS-S @ _ECDSA-DECODE-INT
     IF DROP -1 EXIT THEN
     _EDS-END @ <> IF -1 EXIT THEN
-    0
-;
+    0 ;
+
+\ ECDSA-DECODE-SIG ( sig slen -- flag )
+\   Decode a DER-encoded P-256 signature into _ECDSA-R and _ECDSA-S.
+\   Returns 0 on success, -1 on error.
+: ECDSA-DECODE-SIG ( sig slen -- flag )
+    _ECDSA-R _ECDSA-S 32 _ECDSA-DECODE ;
 
 \ --- Modular arithmetic over the curve order n ---
 \ We need s⁻¹ mod n and multiplications mod n for ECDSA verify.
@@ -6580,426 +6595,879 @@ CREATE _EPV-V 32 ALLOT
 ;
 
 \ =====================================================================
-\  §16.7c.1  Bounded RSA-2048 verification
+\  §16.7c.1  Multi-precision Montgomery arithmetic and RSA verification
 \ =====================================================================
 \
-\  RSA values use 32 little-endian 64-bit limbs internally.  Montgomery
-\  products are computed with CIOS reduction and BIOS UM*, which maps to the
-\  existing UMUL/UMULH instructions.  The fixed public exponent is 65537;
-\  there is no private-key operation and no variable-width RSA profile.
+\  Numbers are little-endian strings of 256-bit digits, the Field ALU's
+\  operand width; a number of D digits occupies 32*D bytes.  A Montgomery
+\  context holds one odd modulus n of D digits with R = 2^(256*D): the
+\  digit inverse n' = -n^-1 mod 2^256, R^2 mod n, the number one, and the
+\  product scratch.
+\
+\  MPM-MUL is coarsely integrated operand scanning (CIOS) with 256-bit
+\  words.  Each step T[j] + a[j]*b[i] + C runs as one FMUL-RAW and two
+\  FMUL-ADD-RAW on the Field ALU.  The 512-bit sum cannot wrap, because
+\  (2^256-1) + (2^256-1)^2 + (2^256-1) = 2^512-1, so the carry digit C
+\  comes back exact in the high half.  RSA of every width and the P-384
+\  field and scalar arithmetic share this one definition; a hardware
+\  Montgomery unit would replace MPM-MUL behind the same words.
+\
+\  The scratch below is shared, so these words run on core 0 under their
+\  caller's serialization, as the other certificate primitives do.
 
-32  CONSTANT RSA2048-LIMBS
-256 CONSTANT /RSA2048
--2  CONSTANT RSA-E-BUSY
-CREATE _RSA-N       /RSA2048 ALLOT
-CREATE _RSA-BASE    /RSA2048 ALLOT
-CREATE _RSA-ACC     /RSA2048 ALLOT
-CREATE _RSA-TMP     /RSA2048 ALLOT
-CREATE _RSA-DEC     /RSA2048 ALLOT
-CREATE _RSA-ONE     /RSA2048 ALLOT
-CREATE _RSA-CIOS-T  272 ALLOT             \ 34 limbs
-CREATE _RSA-EM      /RSA2048 ALLOT
+CREATE _MPM-ONE 32 ALLOT
+_MPM-ONE 32 0 FILL  1 _MPM-ONE C!
+CREATE _MPM-ZERO 32 ALLOT
+_MPM-ZERO 32 0 FILL
+CREATE _MPM-TWO 32 ALLOT
+_MPM-TWO 32 0 FILL  2 _MPM-TWO C!
+CREATE _MPM-LO 32 ALLOT
+CREATE _MPM-HI 32 ALLOT
+CREATE _MPM-C 32 ALLOT
+CREATE _MPM-M 32 ALLOT
+CREATE _MPM-X0 32 ALLOT
+CREATE _MPM-X1 32 ALLOT
 
-: _RSA-CELL@ ( addr index -- x )  8 * + @ ;
-: _RSA-CELL! ( x addr index -- )  8 * + ! ;
+\ (C, dst) <- t + a*b + C, with the carry digit C in _MPM-C.
+: _MPM-STEP ( t a b dst -- )
+    >R _MPM-LO _MPM-HI FMUL-RAW
+    _MPM-ONE _MPM-LO _MPM-HI FMUL-ADD-RAW
+    _MPM-C _MPM-ONE R> _MPM-C FMUL-ADD-RAW ;
 
-VARIABLE _RM-X
-VARIABLE _RM-Y
-VARIABLE _RM-ADD
-VARIABLE _RM-CARRY
-VARIABLE _RM-LO
-VARIABLE _RM-HI
-VARIABLE _RM-SUM
-VARIABLE _RM-OUT
-VARIABLE _RM-C1
-VARIABLE _RM-C2
+\ (hi, lo) <- t + C.
+: _MPM-ADD-C ( t lo hi -- )
+    >R >R _MPM-ONE _MPM-LO _MPM-HI FMUL-RAW
+    _MPM-C _MPM-ONE R> R> FMUL-ADD-RAW ;
 
-\ Add a 64x64 product, one limb, and an incoming carry without losing either
-\ carry bit.  Bounds on the inputs guarantee the returned carry fits a cell.
-: _RSA-MAC ( x y add carry -- lo carry' )
-    _RM-CARRY ! _RM-ADD ! _RM-Y ! _RM-X !
-    _RM-X @ _RM-Y @ UM* _RM-HI ! _RM-LO !
-    _RM-LO @ _RM-ADD @ + DUP _RM-SUM !
-    _RM-LO @ U< IF 1 ELSE 0 THEN _RM-C1 !
-    _RM-SUM @ _RM-CARRY @ + DUP _RM-OUT !
-    _RM-SUM @ U< IF 1 ELSE 0 THEN _RM-C2 !
-    _RM-OUT @ _RM-HI @ _RM-C1 @ + _RM-C2 @ + ;
+\ --- Limb arithmetic on 64-bit cells ---
 
-VARIABLE _RU-A
-VARIABLE _RU-B
+VARIABLE _MPA-A
+VARIABLE _MPA-B
+VARIABLE _MPA-D
+VARIABLE _MPC-N
 
-: _RSA-U< ( a b -- flag )
-    _RU-B ! _RU-A !
-    RSA2048-LIMBS 0 DO
-        _RU-A @ 31 I - _RSA-CELL@
-        _RU-B @ 31 I - _RSA-CELL@
-        2DUP <> IF U< UNLOOP EXIT THEN 2DROP
-    LOOP
-    FALSE ;
-
-VARIABLE _RS-A
-VARIABLE _RS-B
-VARIABLE _RS-OUT
-VARIABLE _RS-X
-VARIABLE _RS-Y
-VARIABLE _RS-D1
-VARIABLE _RS-BORROW
-VARIABLE _RS-B1
-
-: _RSA-SUB ( a b out -- )
-    _RS-OUT ! _RS-B ! _RS-A ! 0 _RS-BORROW !
-    RSA2048-LIMBS 0 DO
-        _RS-A @ I _RSA-CELL@ DUP _RS-X !
-        _RS-B @ I _RSA-CELL@ DUP _RS-Y !
-        - DUP _RS-D1 ! DROP
-        _RS-X @ _RS-Y @ U< IF 1 ELSE 0 THEN _RS-B1 !
-        _RS-D1 @ _RS-BORROW @ - _RS-OUT @ I _RSA-CELL!
-        _RS-D1 @ _RS-BORROW @ U< IF 1 ELSE 0 THEN
-        _RS-B1 @ OR _RS-BORROW !
+\ dst <- a + b over limbs cells, answering the carry, 0 or 1.  dst may be
+\ a or b.
+: _MP-ADD ( a b dst limbs -- carry )
+    >R _MPA-D ! _MPA-B ! _MPA-A !
+    0 R> 0 ?DO
+        _MPA-A @ I CELLS + @
+        _MPA-B @ I CELLS + @ OVER +
+        TUCK U> 1 AND
+        -ROT OVER +
+        DUP _MPA-D @ I CELLS + !
+        0= AND OR
     LOOP ;
 
-VARIABLE _RD-IN
-VARIABLE _RD-N
-VARIABLE _RD-OUT
-VARIABLE _RD-CARRY
-VARIABLE _RD-X
+\ dst <- a - b over limbs cells, answering the borrow, 0 or 1.  dst may
+\ be a or b.
+: _MP-SUB ( a b dst limbs -- borrow )
+    >R _MPA-D ! _MPA-B ! _MPA-A !
+    0 R> 0 ?DO
+        _MPA-A @ I CELLS + @
+        _MPA-B @ I CELLS + @
+        2DUP U< 1 AND -ROT -
+        ROT OVER 0= OVER AND -ROT -
+        _MPA-D @ I CELLS + !
+        OR
+    LOOP ;
 
-: _RSA-DOUBLE-MOD ( in n out -- )
-    _RD-OUT ! _RD-N ! _RD-IN ! 0 _RD-CARRY !
-    RSA2048-LIMBS 0 DO
-        _RD-IN @ I _RSA-CELL@ DUP _RD-X !
-        1 LSHIFT _RD-CARRY @ OR _RD-OUT @ I _RSA-CELL!
-        _RD-X @ 63 RSHIFT _RD-CARRY !
+: _MP-U< ( a b limbs -- flag )
+    DUP _MPC-N ! 0 ?DO
+        OVER _MPC-N @ 1- I - CELLS + @
+        OVER _MPC-N @ 1- I - CELLS + @
+        2DUP <> IF U< NIP NIP UNLOOP EXIT THEN
+        2DROP
     LOOP
-    _RD-CARRY @ IF TRUE ELSE
-        _RD-OUT @ _RD-N @ _RSA-U< 0=
-    THEN IF
-        _RD-OUT @ _RD-N @ _RD-OUT @ _RSA-SUB
-    THEN ;
+    2DROP FALSE ;
 
-VARIABLE _RN0-N
-VARIABLE _RN0-X
-
-: _RSA-N0' ( n0 -- n0-prime )
-    _RN0-N ! 1 _RN0-X !
-    6 0 DO
-        _RN0-X @ 2 _RN0-N @ _RN0-X @ * - * _RN0-X !
+: _MP-ZERO? ( a limbs -- flag )
+    0 ?DO
+        DUP I CELLS + @ IF DROP FALSE UNLOOP EXIT THEN
     LOOP
-    0 _RN0-X @ - ;
+    DROP TRUE ;
 
-VARIABLE _RC-A
-VARIABLE _RC-B
-VARIABLE _RC-N
-VARIABLE _RC-N0
-VARIABLE _RC-OUT
-VARIABLE _RC-I
-VARIABLE _RC-CARRY
-VARIABLE _RC-M
-VARIABLE _RC-OLD
-VARIABLE _RC-SUM
+\ The bit length of one cell, and of a number, zero for zero.
+: _MP-CELL-BITS ( x -- n )
+    0 SWAP BEGIN ?DUP WHILE 1 RSHIFT SWAP 1+ SWAP REPEAT ;
 
-\ _RSA2048-MONT-MUL ( a b n n0-prime out -- )
-\   CIOS Montgomery multiplication.  Inputs must be reduced modulo n.
-: _RSA2048-MONT-MUL ( a b n n0-prime out -- )
-    _RC-OUT ! _RC-N0 ! _RC-N ! _RC-B ! _RC-A !
-    _RSA-CIOS-T 272 0 FILL
-    RSA2048-LIMBS 0 DO
-        I _RC-I ! 0 _RC-CARRY !
-        RSA2048-LIMBS 0 DO
-            _RC-A @ I _RSA-CELL@
-            _RC-B @ _RC-I @ _RSA-CELL@
-            _RSA-CIOS-T I _RSA-CELL@
-            _RC-CARRY @ _RSA-MAC
-            _RC-CARRY ! _RSA-CIOS-T I _RSA-CELL!
+: _MP-BITS ( a limbs -- bits )
+    DUP 0 ?DO
+        2DUP 1- I - CELLS + @ ?DUP IF
+            _MP-CELL-BITS SWAP 1- I - 6 LSHIFT + NIP UNLOOP EXIT
+        THEN
+    LOOP
+    2DROP 0 ;
+
+\ Copy u big-endian bytes into a number of digits digits, zero-padded.
+: _MP-BE> ( src u dst digits -- )  5 LSHIFT _BE>LE-W ;
+
+\ Copy a number's low u bytes out big-endian.
+: _MP>BE ( src dst u -- )
+    DUP 0 ?DO
+        2 PICK OVER 1- I - + C@
+        2 PICK I + C!
+    LOOP
+    DROP 2DROP ;
+
+\ --- Contexts ---
+
+\ A context is a header, then the modulus, n', R^2 and one, then the
+\ product scratch of D+2 digits.
+ 0 CONSTANT MPM.DIGITS
+ 8 CONSTANT MPM.BITS
+16 CONSTANT MPM.N
+24 CONSTANT MPM.NINV
+32 CONSTANT MPM.R2
+40 CONSTANT MPM.UNIT
+48 CONSTANT MPM.T
+
+: MPM-CONTEXT-SIZE ( digits -- u )  7 LSHIFT 160 + ;
+
+: _MPM-LIMBS ( ctx -- limbs )  MPM.DIGITS + @ 2 LSHIFT ;
+
+VARIABLE _MPM-X
+
+\ out <- a + b mod n, for a, b < n.
+: MPM-ADD ( a b out ctx -- )
+    _MPM-X ! DUP >R _MPM-X @ _MPM-LIMBS _MP-ADD
+    R@ _MPM-X @ MPM.N + @ _MPM-X @ _MPM-LIMBS _MP-U< 0= OR IF
+        R@ _MPM-X @ MPM.N + @ R@ _MPM-X @ _MPM-LIMBS _MP-SUB DROP
+    THEN
+    R> DROP ;
+
+\ out <- a - b mod n, for a, b < n.
+: MPM-SUB ( a b out ctx -- )
+    _MPM-X ! DUP >R _MPM-X @ _MPM-LIMBS _MP-SUB IF
+        R@ _MPM-X @ MPM.N + @ R@ _MPM-X @ _MPM-LIMBS _MP-ADD DROP
+    THEN
+    R> DROP ;
+
+VARIABLE _MPM-CTX
+VARIABLE _MPM-DG
+VARIABLE _MPM-TA
+VARIABLE _MPM-NA
+VARIABLE _MPM-A
+VARIABLE _MPM-B
+VARIABLE _MPM-BI
+
+: _MPM-T@ ( j -- addr )  5 LSHIFT _MPM-TA @ + ;
+
+\ out <- a*b*R^-1 mod n, for a, b < n.  out may be a or b.
+: MPM-MUL ( a b out ctx -- )
+    DUP _MPM-CTX !
+    DUP MPM.DIGITS + @ _MPM-DG !
+    DUP MPM.N + @ _MPM-NA !
+    MPM.T + @ _MPM-TA !
+    >R _MPM-B ! _MPM-A !
+    _MPM-TA @ _MPM-DG @ 2 + 5 LSHIFT 0 FILL
+    _MPM-DG @ 0 DO
+        I 5 LSHIFT _MPM-B @ + _MPM-BI !
+        \ T <- T + a*b[i]
+        _MPM-C 32 0 FILL
+        _MPM-DG @ 0 DO
+            I _MPM-T@  I 5 LSHIFT _MPM-A @ +  _MPM-BI @  I _MPM-T@
+            _MPM-STEP
         LOOP
-        \ Preserve the prior high limb while appending the multiplication
-        \ carry; the 34th cell catches the single overflow bit.
-        _RSA-CIOS-T 32 _RSA-CELL@ DUP _RC-OLD !
-        _RC-CARRY @ + DUP _RSA-CIOS-T 32 _RSA-CELL!
-        _RC-OLD @ U< IF 1 ELSE 0 THEN _RSA-CIOS-T 33 _RSA-CELL!
-
-        _RSA-CIOS-T 0 _RSA-CELL@ _RC-N0 @ * _RC-M !
-        0 _RC-CARRY !
-        RSA2048-LIMBS 0 DO
-            _RC-M @ _RC-N @ I _RSA-CELL@
-            _RSA-CIOS-T I _RSA-CELL@
-            _RC-CARRY @ _RSA-MAC
-            _RC-CARRY !
-            I IF _RSA-CIOS-T I 1- _RSA-CELL! ELSE DROP THEN
+        _MPM-DG @ _MPM-T@ DUP _MPM-DG @ 1+ _MPM-T@ _MPM-ADD-C
+        \ m <- T[0]*n' mod 2^256, then T <- (T + m*n) / 2^256
+        0 _MPM-T@ _MPM-CTX @ MPM.NINV + @ _MPM-M _MPM-HI FMUL-RAW
+        _MPM-C 32 0 FILL
+        0 _MPM-T@ _MPM-M _MPM-NA @ _MPM-LO _MPM-STEP
+        _MPM-DG @ 1 ?DO
+            I _MPM-T@  _MPM-M  I 5 LSHIFT _MPM-NA @ +  I 1- _MPM-T@
+            _MPM-STEP
         LOOP
-        _RSA-CIOS-T 32 _RSA-CELL@ DUP _RC-OLD !
-        _RC-CARRY @ + DUP _RC-SUM ! _RSA-CIOS-T 31 _RSA-CELL!
-        _RC-SUM @ _RC-OLD @ U< IF 1 ELSE 0 THEN
-        _RSA-CIOS-T 33 _RSA-CELL@ + _RSA-CIOS-T 32 _RSA-CELL!
-        0 _RSA-CIOS-T 33 _RSA-CELL!
+        _MPM-DG @ _MPM-T@  _MPM-DG @ 1- _MPM-T@  _MPM-C _MPM-ADD-C
+        _MPM-DG @ 1+ _MPM-T@  _MPM-DG @ _MPM-T@  _MPM-HI _MPM-ADD-C
     LOOP
-    _RSA-CIOS-T 32 _RSA-CELL@ 0<> IF TRUE ELSE
-        _RSA-CIOS-T _RC-N @ _RSA-U< 0=
-    THEN IF
-        _RSA-CIOS-T _RC-N @ _RC-OUT @ _RSA-SUB
-    ELSE
-        _RSA-CIOS-T _RC-OUT @ /RSA2048 CMOVE
-    THEN ;
+    \ T < 2n, so one subtraction reduces it.
+    _MPM-DG @ _MPM-T@ 4 _MP-ZERO? 0=
+    0 _MPM-T@ _MPM-NA @ _MPM-DG @ 2 LSHIFT _MP-U< 0= OR IF
+        0 _MPM-T@ _MPM-NA @ 0 _MPM-T@ _MPM-DG @ 2 LSHIFT _MP-SUB DROP
+    THEN
+    0 _MPM-T@ R> _MPM-DG @ 5 LSHIFT MOVE ;
 
-VARIABLE _RB2L-SRC
-VARIABLE _RB2L-DST
+\ x <- 2x mod n, for x < n.
+: _MPM-DOUBLE ( x ctx -- )
+    >R DUP DUP DUP R@ _MPM-LIMBS _MP-ADD
+    OVER R@ MPM.N + @ R@ _MPM-LIMBS _MP-U< 0= OR IF
+        DUP R@ MPM.N + @ OVER R@ _MPM-LIMBS _MP-SUB DROP
+    THEN
+    DROP R> DROP ;
 
-: _RSA-BE>LE ( src dst -- )
-    _RB2L-DST ! _RB2L-SRC !
-    RSA2048-LIMBS 0 DO
-        _RB2L-SRC @ 31 I - 8 * + _BE64@
-        _RB2L-DST @ I _RSA-CELL!
+\ n' = -n^-1 mod 2^256 by Newton's iteration x <- x*(2 - n*x), which
+\ doubles the correct low bits each round: odd n is its own inverse mod 8,
+\ and seven rounds reach 384 bits.
+: _MPM-NINV ( ctx -- )
+    DUP MPM.N + @ _MPM-X0 32 MOVE
+    7 0 DO
+        DUP MPM.N + @ _MPM-X0 _MPM-X1 _MPM-HI FMUL-RAW
+        _MPM-TWO _MPM-X1 _MPM-X1 4 _MP-SUB DROP
+        _MPM-X0 _MPM-X1 _MPM-X0 _MPM-HI FMUL-RAW
+    LOOP
+    _MPM-ZERO _MPM-X0 ROT MPM.NINV + @ 4 _MP-SUB DROP ;
+
+VARIABLE _MPM-I
+
+\ R^2 mod n: from 2^(bits-1), which is below n, double to R mod n and on to
+\ 2^D * R, the Montgomery form of 2^D; eight Montgomery squarings then give
+\ the form of (2^D)^256 = R, which is R^2.
+: _MPM-R2 ( ctx -- )
+    _MPM-I !
+    _MPM-I @ MPM.R2 + @ _MPM-I @ MPM.DIGITS + @ 5 LSHIFT 0 FILL
+    _MPM-I @ MPM.BITS + @ 1-
+    DUP 3 RSHIFT _MPM-I @ MPM.R2 + @ +
+    1 ROT 7 AND LSHIFT SWAP C!
+    _MPM-I @ MPM.DIGITS + @ 8 LSHIFT _MPM-I @ MPM.BITS + @ - 1+
+    _MPM-I @ MPM.DIGITS + @ +
+    0 ?DO _MPM-I @ MPM.R2 + @ _MPM-I @ _MPM-DOUBLE LOOP
+    8 0 DO
+        _MPM-I @ MPM.R2 + @ DUP DUP _MPM-I @ MPM-MUL
     LOOP ;
 
-VARIABLE _RL2B-SRC
-VARIABLE _RL2B-DST
-
-: _RSA-LE>BE ( src dst -- )
-    _RL2B-DST ! _RL2B-SRC !
-    RSA2048-LIMBS 0 DO
-        _RL2B-SRC @ I _RSA-CELL@ BSWAP
-        _RL2B-DST @ 31 I - 8 * + !
-    LOOP ;
-
-VARIABLE _RP-SIG
-VARIABLE _RP-MOD
-VARIABLE _RP-OUT
-VARIABLE _RP-N0
-VARIABLE _RP-AP
-VARIABLE _RP-TP
-
-\ RSA2048-PUBLIC ( signature-be modulus-be encoded-message -- flag )
-\   Perform the fixed e=65537 public operation.  Returns 0 on success and -1
-\   for a non-full-width/even modulus or an out-of-range representative.
-: _RSA2048-PUBLIC-BODY ( sig modulus em -- flag )
-    _RP-OUT ! _RP-MOD ! _RP-SIG !
-    _RP-MOD @ C@ 128 AND 0= _RP-MOD @ 255 + C@ 1 AND 0= OR IF -1 EXIT THEN
-    _RP-MOD @ _RSA-N _RSA-BE>LE
-    _RP-SIG @ _RSA-BASE _RSA-BE>LE
-    _RSA-BASE _RSA-N _RSA-U< 0= IF -1 EXIT THEN
-    _RSA-N @ _RSA-N0' _RP-N0 !
-
-    \ Convert the representative to Montgomery form by 2048 reduced
-    \ doublings.  This avoids storing modulus-specific R^2 tables.
-    2048 0 DO _RSA-BASE _RSA-N _RSA-BASE _RSA-DOUBLE-MOD LOOP
-    _RSA-BASE _RSA-ACC /RSA2048 CMOVE
-    _RSA-ACC _RP-AP ! _RSA-TMP _RP-TP !
-    16 0 DO
-        _RP-AP @ _RP-AP @ _RSA-N _RP-N0 @ _RP-TP @ _RSA2048-MONT-MUL
-        _RP-AP @ _RP-TP @ _RP-AP ! _RP-TP !
-    LOOP
-    _RP-AP @ _RSA-BASE _RSA-N _RP-N0 @ _RP-TP @ _RSA2048-MONT-MUL
-    _RP-TP @ _RP-AP !
-    _RSA-ONE /RSA2048 0 FILL 1 _RSA-ONE !
-    _RP-AP @ _RSA-ONE _RSA-N _RP-N0 @ _RSA-DEC _RSA2048-MONT-MUL
-    _RSA-DEC _RP-OUT @ _RSA-LE>BE
+\ Set up a context for an odd modulus of digits little-endian digits whose
+\ top digit is not zero.  The modulus is copied in.  ior is 0 or -1.
+: MPM-INIT ( modulus digits ctx -- ior )
+    OVER 1 < IF DROP 2DROP -1 EXIT THEN
+    _MPM-I !
+    DUP _MPM-I @ MPM.DIGITS + !
+    5 LSHIFT
+    _MPM-I @ 64 + _MPM-I @ MPM.N + !
+    DUP _MPM-I @ 64 + + _MPM-I @ MPM.NINV + !
+    DUP _MPM-I @ 96 + + _MPM-I @ MPM.R2 + !
+    DUP 2* _MPM-I @ 96 + + _MPM-I @ MPM.UNIT + !
+    DUP 3 * _MPM-I @ 96 + + _MPM-I @ MPM.T + !
+    _MPM-I @ MPM.N + @ SWAP MOVE
+    _MPM-I @ MPM.N + @ C@ 1 AND 0= IF -1 EXIT THEN
+    _MPM-I @ MPM.N + @ _MPM-I @ MPM.DIGITS + @ 1- 5 LSHIFT +
+        4 _MP-ZERO? IF -1 EXIT THEN
+    _MPM-I @ MPM.N + @ _MPM-I @ _MPM-LIMBS _MP-BITS
+    DUP 2 < IF DROP -1 EXIT THEN
+    _MPM-I @ MPM.BITS + !
+    _MPM-I @ MPM.UNIT + @ _MPM-I @ MPM.DIGITS + @ 5 LSHIFT 0 FILL
+    1 _MPM-I @ MPM.UNIT + @ C!
+    _MPM-I @ DUP _MPM-NINV _MPM-R2
     0 ;
 
-VARIABLE _RSA2048-PUBLIC-PHASE
-VARIABLE _RSAI-OWNER-CORE
-VARIABLE _RSAI-OWNER-TASK
+\ a -> a*R mod n, and back.
+: MPM-TO ( a out ctx -- )  >R SWAP R@ MPM.R2 + @ ROT R> MPM-MUL ;
+: MPM-FROM ( a out ctx -- )  >R SWAP R@ MPM.UNIT + @ ROT R> MPM-MUL ;
 
-: RSA2048-PUBLIC-STATUS ( -- phase )
-    _RSA2048-PUBLIC-PHASE @ ;
+VARIABLE _MPE-BASE
+VARIABLE _MPE-EXP
+VARIABLE _MPE-EXP-U
+VARIABLE _MPE-OUT
+VARIABLE _MPE-CTX
+VARIABLE _MPE-STARTED
 
-: _RSAI-OWNER! ( -- )
-    COREID _RSAI-OWNER-CORE !
-    TASK-ID _RSAI-OWNER-TASK ! ;
+\ out <- base^exp, both in Montgomery form; exp is exp-u big-endian bytes.
+\ out must not be base.
+: MPM-EXP ( base exp exp-u out ctx -- )
+    _MPE-CTX ! _MPE-OUT ! _MPE-EXP-U ! _MPE-EXP ! _MPE-BASE !
+    0 _MPE-STARTED !
+    _MPE-EXP-U @ 0 ?DO
+        _MPE-EXP @ I + C@
+        8 0 DO
+            _MPE-STARTED @ IF
+                _MPE-OUT @ DUP DUP _MPE-CTX @ MPM-MUL
+            THEN
+            DUP 128 AND IF
+                _MPE-STARTED @ IF
+                    _MPE-OUT @ _MPE-BASE @ _MPE-OUT @ _MPE-CTX @ MPM-MUL
+                ELSE
+                    _MPE-BASE @ _MPE-OUT @
+                    _MPE-CTX @ MPM.DIGITS + @ 5 LSHIFT MOVE
+                    -1 _MPE-STARTED !
+                THEN
+            THEN
+            2*
+        LOOP
+        DROP
+    LOOP
+    _MPE-STARTED @ 0= IF
+        _MPE-CTX @ MPM.UNIT + @ _MPE-OUT @ _MPE-CTX @ MPM-TO
+    THEN ;
 
-: _RSAI-OWNER? ( -- flag )
-    COREID _RSAI-OWNER-CORE @ =
-    TASK-ID _RSAI-OWNER-TASK @ = AND ;
+\ --- RSA public keys and signature verification ---
+\
+\ An RSA public key is four cells: the big-endian modulus and its length
+\ in bytes, then the big-endian public exponent and its length.  The
+\ verification words take a digest of 32, 48 or 64 bytes, which selects
+\ SHA-256, SHA-384 or SHA-512, and answer 0 for a valid signature, -1 for
+\ an invalid one, RSA-E-BUSY when RSA runs elsewhere or off core 0, and
+\ RSA-E-ALLOC when its workspace cannot grow.
 
-: _RSAI-OWNER-CLEAR ( -- )
-    -1 _RSAI-OWNER-CORE !
-    -1 _RSAI-OWNER-TASK ! ;
+ 0 CONSTANT RSAK.N
+ 8 CONSTANT RSAK.N-U
+16 CONSTANT RSAK.E
+24 CONSTANT RSAK.E-U
+32 CONSTANT /RSA-KEY
 
-_RSAI-OWNER-CLEAR
+-2 CONSTANT RSA-E-BUSY
+-3 CONSTANT RSA-E-ALLOC
 
-: RSA2048-PUBLIC ( sig modulus em -- flag )
-    COREID IF 2DROP DROP RSA-E-BUSY EXIT THEN
-    _RSA2048-PUBLIC-PHASE @ IF 2DROP DROP RSA-E-BUSY EXIT THEN
-    -1 _RSA2048-PUBLIC-PHASE !
-    _RSA2048-PUBLIC-BODY
-    0 _RSA2048-PUBLIC-PHASE ! ;
+\ One workspace, grown to the widest modulus seen: a context and three
+\ numbers, the signature, the accumulator and the encoded message.
+VARIABLE _RSA-WS
+VARIABLE _RSA-WS-U
+VARIABLE _RSA-DG
+VARIABLE _RSA-KEY
+VARIABLE _RSA-BUSY
+0 _RSA-WS !  0 _RSA-WS-U !  0 _RSA-BUSY !
 
-0 CONSTANT RSAI-IDLE
-1 CONSTANT RSAI-CONVERT
-2 CONSTANT RSAI-SQUARE
-3 CONSTANT RSAI-MULTIPLY
-4 CONSTANT RSAI-DECODE
-5 CONSTANT RSAI-READY
+: _RSA-CTX ( -- ctx )  _RSA-WS @ ;
+: _RSA-S ( -- a )  _RSA-WS @ _RSA-DG @ MPM-CONTEXT-SIZE + ;
+: _RSA-ACC ( -- a )  _RSA-S _RSA-DG @ 5 LSHIFT + ;
+: _RSA-EM ( -- a )  _RSA-ACC _RSA-DG @ 5 LSHIFT + ;
 
-VARIABLE _RPI-COUNT
+: _RSA-WORKSPACE ( digits -- ior )
+    DUP MPM-CONTEXT-SIZE SWAP 96 * +
+    DUP _RSA-WS-U @ <= IF DROP 0 EXIT THEN
+    _RSA-WS @ ?DUP IF FREE 0 _RSA-WS ! 0 _RSA-WS-U ! THEN
+    DUP ALLOCATE IF 2DROP RSA-E-ALLOC EXIT THEN
+    _RSA-WS ! _RSA-WS-U ! 0 ;
 
-\ Incremental fixed-exponent public operation for cooperative owner loops.
-\ BEGIN copies the signature and modulus into owner-gated scratch.  Each STEP does
-\ one modular doubling or one Montgomery multiplication; FINAL releases the
-\ owner only after the encoded message has been committed to the caller buffer.
-: RSA2048-PUBLIC-BEGIN ( sig modulus em -- ior )
-    COREID IF 2DROP DROP RSA-E-BUSY EXIT THEN
-    _RSA2048-PUBLIC-PHASE @ IF 2DROP DROP RSA-E-BUSY EXIT THEN
-    _RP-OUT ! _RP-MOD ! _RP-SIG !
-    _RP-MOD @ C@ 128 AND 0= _RP-MOD @ 255 + C@ 1 AND 0= OR IF
-        -1 EXIT
+\ Admit the key and set up its context: a canonical modulus (nonzero top
+\ byte, odd) and an exponent of at most the modulus' length.
+: _RSA-PREPARE ( key -- ior )
+    DUP _RSA-KEY !
+    DUP RSAK.N-U + @ 1 < IF DROP -1 EXIT THEN
+    DUP RSAK.E-U + @ 1 < IF DROP -1 EXIT THEN
+    DUP RSAK.E-U + @ OVER RSAK.N-U + @ > IF DROP -1 EXIT THEN
+    DUP RSAK.N + @ C@ 0= IF DROP -1 EXIT THEN
+    DUP RSAK.N + @ OVER RSAK.N-U + @ + 1- C@ 1 AND 0= IF DROP -1 EXIT THEN
+    RSAK.N-U + @ 31 + 5 RSHIFT _RSA-DG !
+    _RSA-DG @ _RSA-WORKSPACE ?DUP IF EXIT THEN
+    _RSA-KEY @ RSAK.N + @ _RSA-KEY @ RSAK.N-U + @ _RSA-S _RSA-DG @ _MP-BE>
+    _RSA-S _RSA-DG @ _RSA-CTX MPM-INIT ;
+
+\ em <- sig^e mod n, big-endian at the modulus' length, for the prepared key.
+: _RSA-APPLY ( sig sig-u em -- ior )
+    >R
+    DUP _RSA-KEY @ RSAK.N-U + @ <> IF 2DROP R> DROP -1 EXIT THEN
+    _RSA-S _RSA-DG @ _MP-BE>
+    _RSA-S _RSA-CTX MPM.N + @ _RSA-DG @ 2 LSHIFT _MP-U< 0= IF
+        R> DROP -1 EXIT
     THEN
-    _RP-MOD @ _RSA-N _RSA-BE>LE
-    _RP-SIG @ _RSA-BASE _RSA-BE>LE
-    _RSA-BASE _RSA-N _RSA-U< 0= IF -1 EXIT THEN
-    _RSA-N @ _RSA-N0' _RP-N0 !
-    _RSAI-OWNER!
-    0 _RPI-COUNT ! RSAI-CONVERT _RSA2048-PUBLIC-PHASE ! 0 ;
+    _RSA-S _RSA-S _RSA-CTX MPM-TO
+    _RSA-S _RSA-KEY @ RSAK.E + @ _RSA-KEY @ RSAK.E-U + @
+        _RSA-ACC _RSA-CTX MPM-EXP
+    _RSA-ACC _RSA-ACC _RSA-CTX MPM-FROM
+    _RSA-ACC R> _RSA-KEY @ RSAK.N-U + @ _MP>BE
+    0 ;
 
-: RSA2048-PUBLIC-STEP ( -- status )
-    COREID IF -1 EXIT THEN
-    _RSA2048-PUBLIC-PHASE @ RSAI-IDLE =
-    _RSA2048-PUBLIC-PHASE @ -1 = OR IF -1 EXIT THEN
-    _RSAI-OWNER? 0= IF -1 EXIT THEN
-    _RSA2048-PUBLIC-PHASE @ RSAI-CONVERT = IF
-        _RSA-BASE _RSA-N _RSA-BASE _RSA-DOUBLE-MOD
-        1 _RPI-COUNT +!
-        _RPI-COUNT @ 2048 = IF
-            _RSA-BASE _RSA-ACC /RSA2048 CMOVE
-            _RSA-ACC _RP-AP ! _RSA-TMP _RP-TP !
-            0 _RPI-COUNT ! RSAI-SQUARE _RSA2048-PUBLIC-PHASE !
-        THEN 0 EXIT
-    THEN
-    _RSA2048-PUBLIC-PHASE @ RSAI-SQUARE = IF
-        _RP-AP @ _RP-AP @ _RSA-N _RP-N0 @ _RP-TP @ _RSA2048-MONT-MUL
-        _RP-AP @ _RP-TP @ _RP-AP ! _RP-TP !
-        1 _RPI-COUNT +!
-        _RPI-COUNT @ 16 = IF RSAI-MULTIPLY _RSA2048-PUBLIC-PHASE ! THEN
-        0 EXIT
-    THEN
-    _RSA2048-PUBLIC-PHASE @ RSAI-MULTIPLY = IF
-        _RP-AP @ _RSA-BASE _RSA-N _RP-N0 @ _RP-TP @ _RSA2048-MONT-MUL
-        _RP-TP @ _RP-AP ! RSAI-DECODE _RSA2048-PUBLIC-PHASE ! 0 EXIT
-    THEN
-    _RSA2048-PUBLIC-PHASE @ RSAI-DECODE = IF
-        _RSA-ONE /RSA2048 0 FILL 1 _RSA-ONE !
-        _RP-AP @ _RSA-ONE _RSA-N _RP-N0 @ _RSA-DEC _RSA2048-MONT-MUL
-        _RSA-DEC _RP-OUT @ _RSA-LE>BE
-        RSAI-READY _RSA2048-PUBLIC-PHASE ! 1 EXIT
-    THEN
-    _RSA2048-PUBLIC-PHASE @ RSAI-READY = IF 1 ELSE -1 THEN ;
+: _RSA-ENTER ( -- flag )
+    COREID IF FALSE EXIT THEN
+    _RSA-BUSY @ IF FALSE EXIT THEN
+    -1 _RSA-BUSY ! TRUE ;
 
-: RSA2048-PUBLIC-FINAL ( -- ior )
-    COREID IF -1 EXIT THEN
-    _RSA2048-PUBLIC-PHASE @ RSAI-READY <> IF -1 EXIT THEN
-    _RSAI-OWNER? 0= IF -1 EXIT THEN
-    RSAI-IDLE _RSA2048-PUBLIC-PHASE !
-    _RSAI-OWNER-CLEAR 0 ;
+: _RSA-PUBLIC-BODY ( sig sig-u key em -- ior )
+    >R _RSA-PREPARE ?DUP IF NIP NIP R> DROP EXIT THEN
+    R> _RSA-APPLY ;
 
-: RSA2048-PUBLIC-CANCEL ( -- ior )
-    COREID IF -1 EXIT THEN
-    _RSA2048-PUBLIC-PHASE @ RSAI-IDLE =
-    _RSA2048-PUBLIC-PHASE @ -1 = OR IF -1 EXIT THEN
-    _RSAI-OWNER? 0= IF -1 EXIT THEN
-    _RSA-N /RSA2048 0 FILL
-    _RSA-BASE /RSA2048 0 FILL
-    _RSA-ACC /RSA2048 0 FILL
-    _RSA-TMP /RSA2048 0 FILL
-    _RSA-DEC /RSA2048 0 FILL
-    _RSA-CIOS-T 272 0 FILL
-    RSAI-IDLE _RSA2048-PUBLIC-PHASE !
-    _RSAI-OWNER-CLEAR 0 ;
+\ em <- sig^e mod n at the modulus' length.  ior is 0, -1 for an invalid
+\ key or a signature that is not below the modulus, RSA-E-BUSY or
+\ RSA-E-ALLOC.
+: RSA-PUBLIC ( sig sig-u key em -- ior )
+    _RSA-ENTER 0= IF 2DROP 2DROP RSA-E-BUSY EXIT THEN
+    ['] _RSA-PUBLIC-BODY CATCH
+    0 _RSA-BUSY !
+    ?DUP IF >R 2DROP 2DROP R> THROW THEN ;
 
-CREATE RSA-SHA256-DIGESTINFO
+\ DigestInfo prefixes, RFC 8017 section 9.2, note 1.
+CREATE _RSA-DI-SHA256
     48 C, 49 C, 48 C, 13 C, 6 C, 9 C, 96 C, 134 C, 72 C, 1 C,
     101 C, 3 C, 4 C, 2 C, 1 C, 5 C, 0 C, 4 C, 32 C,
-19 CONSTANT /RSA-SHA256-DIGESTINFO
+CREATE _RSA-DI-SHA384
+    48 C, 65 C, 48 C, 13 C, 6 C, 9 C, 96 C, 134 C, 72 C, 1 C,
+    101 C, 3 C, 4 C, 2 C, 2 C, 5 C, 0 C, 4 C, 48 C,
+CREATE _RSA-DI-SHA512
+    48 C, 81 C, 48 C, 13 C, 6 C, 9 C, 96 C, 134 C, 72 C, 1 C,
+    101 C, 3 C, 4 C, 2 C, 3 C, 5 C, 0 C, 4 C, 64 C,
+19 CONSTANT /RSA-DIGESTINFO
 
-VARIABLE _RPK-HASH
-VARIABLE _RPK-MOD
-VARIABLE _RPK-SIG
-VARIABLE _RPK-SIG-U
+: _RSA-DIGESTINFO ( hash-u -- prefix | 0 )
+    DUP 32 = IF DROP _RSA-DI-SHA256 EXIT THEN
+    DUP 48 = IF DROP _RSA-DI-SHA384 EXIT THEN
+    64 = IF _RSA-DI-SHA512 ELSE 0 THEN ;
+
+VARIABLE _RPK-H
+VARIABLE _RPK-HU
 VARIABLE _RPK-EM
+VARIABLE _RPK-K
+VARIABLE _RPK-DI
 
-: _RSA-PKCS1-SHA256-EM-CHECK ( hash em -- flag )
-    _RPK-EM ! _RPK-HASH !
-    _RPK-EM @ C@ 0<> _RPK-EM @ 1+ C@ 1 <> OR IF -1 EXIT THEN
-    202 0 DO _RPK-EM @ 2 + I + C@ 255 <> IF -1 UNLOOP EXIT THEN LOOP
-    _RPK-EM @ 204 + C@ 0<> IF -1 EXIT THEN
-    _RPK-EM @ 205 + RSA-SHA256-DIGESTINFO /RSA-SHA256-DIGESTINFO
-    _XC-BYTES= 0= IF -1 EXIT THEN
-    _RPK-EM @ 224 + _RPK-HASH @ 32 _XC-BYTES= IF 0 ELSE -1 THEN ;
-
-\ Exact EMSA-PKCS1-v1_5 SHA-256 verification for certificate signatures.
-: _RSA2048-PKCS1-SHA256-BODY ( hash modulus sig sig-u -- flag )
-    _RPK-SIG-U ! _RPK-SIG ! _RPK-MOD ! _RPK-HASH !
-    _RPK-SIG-U @ /RSA2048 <> IF -1 EXIT THEN
-    _RPK-SIG @ _RPK-MOD @ _RSA-EM _RSA2048-PUBLIC-BODY IF -1 EXIT THEN
-    _RPK-HASH @ _RSA-EM _RSA-PKCS1-SHA256-EM-CHECK ;
-
-: RSA2048-PKCS1-SHA256-VERIFY ( hash modulus sig sig-u -- flag )
-    COREID IF 2DROP 2DROP RSA-E-BUSY EXIT THEN
-    _RSA2048-PUBLIC-PHASE @ IF 2DROP 2DROP RSA-E-BUSY EXIT THEN
-    -1 _RSA2048-PUBLIC-PHASE !
-    _RSA2048-PKCS1-SHA256-BODY
-    0 _RSA2048-PUBLIC-PHASE ! ;
-
-CREATE _RSA-PSS-MASK 223 ALLOT
-CREATE _RSA-PSS-DB   223 ALLOT
-CREATE _RSA-PSS-H     32 ALLOT
-CREATE _RSA-PSS-H2    32 ALLOT
-CREATE _RSA-PSS-MGF   32 ALLOT
-CREATE _RSA-PSS-CTR    4 ALLOT
-CREATE _RSA-PSS-MPRIME 72 ALLOT
-VARIABLE _RMG-H
-VARIABLE _RMG-OFF
-VARIABLE _RMG-N
-
-: _RSA-MGF1-SHA256-223 ( h -- status )
-    _RMG-H ! 0 _RMG-OFF !
-    7 0 DO
-        _RSA-PSS-CTR 4 0 FILL I _RSA-PSS-CTR 3 + C!
-        SHA256-INIT DUP IF UNLOOP EXIT THEN DROP
-        _RMG-H @ 32 SHA256-UPDATE DUP IF UNLOOP EXIT THEN DROP
-        _RSA-PSS-CTR 4 SHA256-UPDATE DUP IF UNLOOP EXIT THEN DROP
-        _RSA-PSS-MGF SHA256-FINAL DUP IF UNLOOP EXIT THEN DROP
-        223 _RMG-OFF @ - 32 MIN _RMG-N !
-        _RSA-PSS-MGF _RSA-PSS-MASK _RMG-OFF @ + _RMG-N @ CMOVE
-        _RMG-N @ _RMG-OFF +!
-    LOOP 0 ;
-
-VARIABLE _RPS-HASH
-VARIABLE _RPS-MOD
-VARIABLE _RPS-SIG
-VARIABLE _RPS-SIG-U
-VARIABLE _RPS-EM
-
-: _RSA-PSS-SHA256-EM-CHECK ( message-hash em -- flag )
-    _RPS-EM ! _RPS-HASH !
-    _RPS-EM @ 255 + C@ 188 <> IF -1 EXIT THEN
-    _RPS-EM @ C@ 128 AND IF -1 EXIT THEN
-    _RPS-EM @ 223 + _RSA-PSS-H 32 CMOVE
-    _RSA-PSS-H _RSA-MGF1-SHA256-223 IF -1 EXIT THEN
-    223 0 DO
-        _RPS-EM @ I + C@ _RSA-PSS-MASK I + C@ XOR _RSA-PSS-DB I + C!
+\ EMSA-PKCS1-v1_5: em is 00 01 FF..FF 00 DigestInfo H, k bytes long, with
+\ at least eight FF bytes.
+: _RSA-PKCS1-EM? ( hash hash-u em k -- flag )
+    _RPK-K ! _RPK-EM ! _RPK-HU ! _RPK-H !
+    _RPK-HU @ _RSA-DIGESTINFO DUP _RPK-DI ! 0= IF -1 EXIT THEN
+    _RPK-K @ 3 - /RSA-DIGESTINFO - _RPK-HU @ -
+    DUP 8 < IF DROP -1 EXIT THEN
+    _RPK-EM @ C@ 0<> _RPK-EM @ 1+ C@ 1 <> OR IF DROP -1 EXIT THEN
+    DUP 0 ?DO
+        _RPK-EM @ 2 + I + C@ 255 <> IF DROP -1 UNLOOP EXIT THEN
     LOOP
-    _RSA-PSS-DB C@ 127 AND _RSA-PSS-DB C!
-    190 0 DO _RSA-PSS-DB I + C@ IF -1 UNLOOP EXIT THEN LOOP
-    _RSA-PSS-DB 190 + C@ 1 <> IF -1 EXIT THEN
-    _RSA-PSS-MPRIME 72 0 FILL
-    _RPS-HASH @ _RSA-PSS-MPRIME 8 + 32 CMOVE
-    _RSA-PSS-DB 191 + _RSA-PSS-MPRIME 40 + 32 CMOVE
-    _RSA-PSS-MPRIME 72 _RSA-PSS-H2 SHA256 IF -1 EXIT THEN
-    _RSA-PSS-H _RSA-PSS-H2 32 _XC-BYTES= IF 0 ELSE -1 THEN ;
+    _RPK-EM @ 2 + +
+    DUP C@ IF DROP -1 EXIT THEN
+    1+ DUP _RPK-DI @ /RSA-DIGESTINFO _XC-BYTES= 0= IF DROP -1 EXIT THEN
+    /RSA-DIGESTINFO + _RPK-H @ _RPK-HU @ _XC-BYTES= IF 0 ELSE -1 THEN ;
 
-\ RFC 8017 EMSA-PSS verification with emBits=2047, SHA-256, MGF1-SHA256,
-\ and an exact 32-byte salt, as required by rsa_pss_rsae_sha256.
-: _RSA2048-PSS-SHA256-BODY ( message-hash modulus sig sig-u -- flag )
-    _RPS-SIG-U ! _RPS-SIG ! _RPS-MOD ! _RPS-HASH !
-    _RPS-SIG-U @ /RSA2048 <> IF -1 EXIT THEN
-    _RPS-SIG @ _RPS-MOD @ _RSA-EM _RSA2048-PUBLIC-BODY IF -1 EXIT THEN
-    _RPS-HASH @ _RSA-EM _RSA-PSS-SHA256-EM-CHECK ;
+VARIABLE _RH-A1
+VARIABLE _RH-U1
+VARIABLE _RH-A2
+VARIABLE _RH-U2
+VARIABLE _RH-DST
+VARIABLE _RH-U
 
-: RSA2048-PSS-SHA256-VERIFY ( message-hash modulus sig sig-u -- flag )
-    COREID IF 2DROP 2DROP RSA-E-BUSY EXIT THEN
-    _RSA2048-PUBLIC-PHASE @ IF 2DROP 2DROP RSA-E-BUSY EXIT THEN
-    -1 _RSA2048-PUBLIC-PHASE !
-    _RSA2048-PSS-SHA256-BODY
-    0 _RSA2048-PUBLIC-PHASE ! ;
+\ dst <- Hash(a1 || a2) for the hash whose digest is hash-u bytes: 32, 48
+\ or 64.  Answers the BIOS status.
+: _RSA-HASH2 ( a1 u1 a2 u2 dst hash-u -- status )
+    _RH-U ! _RH-DST ! _RH-U2 ! _RH-A2 ! _RH-U1 ! _RH-A1 !
+    _RH-U @ 32 = IF
+        SHA256-INIT ?DUP IF EXIT THEN
+        _RH-A1 @ _RH-U1 @ SHA256-UPDATE ?DUP IF SHA256-CLEAR DROP EXIT THEN
+        _RH-A2 @ _RH-U2 @ SHA256-UPDATE ?DUP IF SHA256-CLEAR DROP EXIT THEN
+        _RH-DST @ SHA256-FINAL EXIT
+    THEN
+    _RH-U @ 48 = IF SHA384-INIT ELSE SHA512-INIT THEN
+    ?DUP IF EXIT THEN
+    _RH-A1 @ _RH-U1 @ SHA512-UPDATE ?DUP IF SHA512-CLEAR DROP EXIT THEN
+    _RH-A2 @ _RH-U2 @ SHA512-UPDATE ?DUP IF SHA512-CLEAR DROP EXIT THEN
+    _RH-DST @ _RH-U @ 48 = IF SHA384-FINAL ELSE SHA512-FINAL THEN ;
+
+: _RSA-BE32! ( u addr -- )
+    OVER 24 RSHIFT 255 AND OVER C!
+    OVER 16 RSHIFT 255 AND OVER 1+ C!
+    OVER 8 RSHIFT 255 AND OVER 2 + C!
+    SWAP 255 AND SWAP 3 + C! ;
+
+CREATE _RSA-MGF-OUT 64 ALLOT
+CREATE _RSA-MGF-CTR 4 ALLOT
+VARIABLE _RMG-SEED
+VARIABLE _RMG-HU
+VARIABLE _RMG-DST
+VARIABLE _RMG-LEN
+VARIABLE _RMG-OFF
+VARIABLE _RMG-I
+
+\ dst[0..len) ^= MGF1(seed, len), seed and hash both hash-u bytes.
+: _RSA-MGF1-XOR ( seed hash-u dst len -- status )
+    _RMG-LEN ! _RMG-DST ! _RMG-HU ! _RMG-SEED !
+    0 _RMG-OFF ! 0 _RMG-I !
+    BEGIN _RMG-OFF @ _RMG-LEN @ < WHILE
+        _RMG-I @ _RSA-MGF-CTR _RSA-BE32!
+        _RMG-SEED @ _RMG-HU @ _RSA-MGF-CTR 4 _RSA-MGF-OUT _RMG-HU @
+        _RSA-HASH2 ?DUP IF EXIT THEN
+        _RMG-LEN @ _RMG-OFF @ - _RMG-HU @ MIN 0 ?DO
+            _RSA-MGF-OUT I + C@
+            _RMG-DST @ _RMG-OFF @ + I + DUP C@ ROT XOR SWAP C!
+        LOOP
+        _RMG-HU @ _RMG-OFF +!
+        1 _RMG-I +!
+    REPEAT
+    0 ;
+
+CREATE _RSA-PSS-MP 72 ALLOT       \ 8 zero bytes || mHash
+CREATE _RSA-PSS-H2 64 ALLOT
+VARIABLE _RPS-H
+VARIABLE _RPS-HU
+VARIABLE _RPS-EM
+VARIABLE _RPS-EMLEN
+VARIABLE _RPS-ZB
+VARIABLE _RPS-DBLEN
+
+\ EMSA-PSS verification, RFC 8017 section 9.1.2, with MGF1 over the same
+\ hash and a salt as long as the hash, as TLS 1.3 requires.  em is the
+\ k-byte RSA output and bits the modulus' bit length, so emBits = bits-1.
+\ The check unmasks em in place.
+: _RSA-PSS-EM? ( hash hash-u em k bits -- flag )
+    1- DUP 7 + 3 RSHIFT DUP _RPS-EMLEN !
+    3 LSHIFT SWAP - _RPS-ZB !
+    \ Output bytes above emLen are zero.
+    _RPS-EMLEN @ - DUP 0 ?DO
+        OVER I + C@ IF 2DROP 2DROP -1 UNLOOP EXIT THEN
+    LOOP
+    + _RPS-EM !
+    _RPS-HU ! _RPS-H !
+    _RPS-HU @ _RSA-DIGESTINFO 0= IF -1 EXIT THEN
+    _RPS-EMLEN @ _RPS-HU @ 2* 2 + < IF -1 EXIT THEN
+    _RPS-EM @ _RPS-EMLEN @ + 1- C@ 188 <> IF -1 EXIT THEN
+    _RPS-EMLEN @ _RPS-HU @ - 1- _RPS-DBLEN !
+    \ The leftmost 8*emLen-emBits bits are zero before and after unmasking.
+    _RPS-EM @ C@ 255 _RPS-ZB @ RSHIFT INVERT AND 255 AND IF -1 EXIT THEN
+    _RPS-EM @ _RPS-DBLEN @ + _RPS-HU @ _RPS-EM @ _RPS-DBLEN @
+        _RSA-MGF1-XOR IF -1 EXIT THEN
+    _RPS-EM @ C@ 255 _RPS-ZB @ RSHIFT AND _RPS-EM @ C!
+    \ DB = zeros || 01 || salt
+    _RPS-DBLEN @ _RPS-HU @ - 1- 0 ?DO
+        _RPS-EM @ I + C@ IF -1 UNLOOP EXIT THEN
+    LOOP
+    _RPS-EM @ _RPS-DBLEN @ _RPS-HU @ - 1- + C@ 1 <> IF -1 EXIT THEN
+    \ H = Hash(8 zero bytes || mHash || salt)
+    _RSA-PSS-MP 8 0 FILL
+    _RPS-H @ _RSA-PSS-MP 8 + _RPS-HU @ MOVE
+    _RSA-PSS-MP 8 _RPS-HU @ +
+    _RPS-EM @ _RPS-DBLEN @ + _RPS-HU @ - _RPS-HU @
+    _RSA-PSS-H2 _RPS-HU @ _RSA-HASH2 IF -1 EXIT THEN
+    _RSA-PSS-H2 _RPS-EM @ _RPS-DBLEN @ + _RPS-HU @ _XC-BYTES=
+    IF 0 ELSE -1 THEN ;
+
+VARIABLE _RV-H
+VARIABLE _RV-HU
+
+: _RSA-VERIFY-PREFIX ( hash hash-u sig sig-u key -- ior )
+    >R 2SWAP _RV-HU ! _RV-H ! R>
+    _RSA-PREPARE ?DUP IF NIP NIP EXIT THEN
+    _RSA-EM _RSA-APPLY ;
+
+: _RSA-PKCS1-BODY ( hash hash-u sig sig-u key -- flag )
+    _RSA-VERIFY-PREFIX ?DUP IF EXIT THEN
+    _RV-H @ _RV-HU @ _RSA-EM _RSA-KEY @ RSAK.N-U + @ _RSA-PKCS1-EM? ;
+
+: _RSA-PSS-BODY ( hash hash-u sig sig-u key -- flag )
+    _RSA-VERIFY-PREFIX ?DUP IF EXIT THEN
+    _RV-H @ _RV-HU @ _RSA-EM _RSA-KEY @ RSAK.N-U + @
+    _RSA-CTX MPM.BITS + @ _RSA-PSS-EM? ;
+
+: _RSA-GATED ( hash hash-u sig sig-u key xt -- flag )
+    _RSA-ENTER 0= IF DROP 2DROP 2DROP DROP RSA-E-BUSY EXIT THEN
+    CATCH
+    0 _RSA-BUSY !
+    ?DUP IF >R 2DROP 2DROP DROP R> THROW THEN ;
+
+: RSA-PKCS1-VERIFY ( hash hash-u sig sig-u key -- flag )
+    ['] _RSA-PKCS1-BODY _RSA-GATED ;
+
+: RSA-PSS-VERIFY ( hash hash-u sig sig-u key -- flag )
+    ['] _RSA-PSS-BODY _RSA-GATED ;
+
+\ The public exponent every certificate key in the current profile uses.
+CREATE RSA-E-65537  1 C, 0 C, 1 C,
+
+\ =====================================================================
+\  §16.7c.3  P-384 ECDSA verification
+\ =====================================================================
+\
+\  NIST P-384 over the Montgomery module: two-digit contexts for the field
+\  prime p and the group order n, Jacobian points with a = -3, and
+\  Shamir's joint double-and-add for u1*G + u2*Q.  Field values stay in
+\  Montgomery form; every number is 64 bytes, two little-endian digits
+\  whose top 128 bits are zero.  The P-256 path above runs on the Field
+\  ALU's built-in prime; P-384 has no such prime, so this software path
+\  is the one definition until a wider field unit replaces MPM-MUL.
+
+CREATE P384-P
+    255 C, 255 C, 255 C, 255 C, 0 C, 0 C, 0 C, 0 C,
+    0 C, 0 C, 0 C, 0 C, 255 C, 255 C, 255 C, 255 C,
+    254 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C,
+    255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C,
+    255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C,
+    255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+\ = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE
+\     FFFFFFFF0000000000000000FFFFFFFF
+
+CREATE P384-N
+    115 C, 41 C, 197 C, 204 C, 106 C, 25 C, 236 C, 236 C,
+    122 C, 167 C, 176 C, 72 C, 178 C, 13 C, 26 C, 88 C,
+    223 C, 45 C, 55 C, 244 C, 129 C, 77 C, 99 C, 199 C,
+    255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C,
+    255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C,
+    255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+\ = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFC7634D81F4372DDF
+\     581A0DB248B0A77AECEC196ACCC52973
+
+CREATE P384-B
+    239 C, 42 C, 236 C, 211 C, 237 C, 200 C, 133 C, 42 C,
+    157 C, 209 C, 46 C, 138 C, 141 C, 57 C, 86 C, 198 C,
+    90 C, 135 C, 19 C, 80 C, 143 C, 8 C, 20 C, 3 C,
+    18 C, 65 C, 129 C, 254 C, 110 C, 156 C, 29 C, 24 C,
+    25 C, 45 C, 248 C, 227 C, 107 C, 5 C, 142 C, 152 C,
+    228 C, 231 C, 62 C, 226 C, 167 C, 47 C, 49 C, 179 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+\ = 0xB3312FA7E23EE7E4988E056BE3F82D19181D9C6EFE8141120314088F5013875A
+\     C656398D8A2ED19D2A85C8EDD3EC2AEF
+
+CREATE P384-GX
+    183 C, 10 C, 118 C, 114 C, 56 C, 94 C, 84 C, 58 C,
+    108 C, 41 C, 85 C, 191 C, 93 C, 242 C, 2 C, 85 C,
+    56 C, 42 C, 84 C, 130 C, 224 C, 65 C, 247 C, 89 C,
+    152 C, 155 C, 167 C, 139 C, 98 C, 59 C, 29 C, 110 C,
+    116 C, 173 C, 32 C, 243 C, 30 C, 199 C, 177 C, 142 C,
+    55 C, 5 C, 139 C, 190 C, 34 C, 202 C, 135 C, 170 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+
+CREATE P384-GY
+    95 C, 14 C, 234 C, 144 C, 124 C, 29 C, 67 C, 122 C,
+    157 C, 129 C, 126 C, 29 C, 206 C, 177 C, 96 C, 10 C,
+    192 C, 184 C, 240 C, 181 C, 19 C, 49 C, 218 C, 233 C,
+    124 C, 20 C, 154 C, 40 C, 189 C, 29 C, 244 C, 248 C,
+    41 C, 220 C, 146 C, 146 C, 191 C, 152 C, 158 C, 93 C,
+    111 C, 44 C, 38 C, 150 C, 74 C, 222 C, 23 C, 54 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+
+2 MPM-CONTEXT-SIZE CONSTANT /P384-CTX
+CREATE _P384-FP /P384-CTX ALLOT      \ arithmetic modulo p
+CREATE _P384-FN /P384-CTX ALLOT      \ arithmetic modulo n
+CREATE _P384-N-2 48 ALLOT            \ n-2, big-endian: the inverse's exponent
+
+\ Montgomery forms of b, the generator and one, modulo p.
+CREATE _P384-MB 64 ALLOT
+CREATE _P384-MGX 64 ALLOT
+CREATE _P384-MGY 64 ALLOT
+CREATE _P384-MONE 64 ALLOT
+
+P384-P 2 _P384-FP MPM-INIT DROP
+P384-N 2 _P384-FN MPM-INIT DROP
+P384-N _P384-N-2 48 _MP>BE
+_P384-N-2 47 + DUP C@ 2 - SWAP C!
+P384-B _P384-MB _P384-FP MPM-TO
+P384-GX _P384-MGX _P384-FP MPM-TO
+P384-GY _P384-MGY _P384-FP MPM-TO
+_P384-FP MPM.UNIT + @ _P384-MONE _P384-FP MPM-TO
+
+: _F* ( a b out -- )  _P384-FP MPM-MUL ;
+: _F+ ( a b out -- )  _P384-FP MPM-ADD ;
+: _F- ( a b out -- )  _P384-FP MPM-SUB ;
+: _F0? ( a -- flag )  8 _MP-ZERO? ;
+: _F= ( a b -- flag )  64 _XC-BYTES= ;
+
+\ Field temporaries.
+CREATE _PT1 64 ALLOT
+CREATE _PT2 64 ALLOT
+CREATE _PT3 64 ALLOT
+CREATE _PT4 64 ALLOT
+CREATE _PT5 64 ALLOT
+CREATE _PT6 64 ALLOT
+CREATE _PT7 64 ALLOT
+CREATE _PT8 64 ALLOT
+CREATE _PT9 64 ALLOT
+CREATE _PT10 64 ALLOT
+
+\ The accumulator point, Jacobian; Z = 0 is the point at infinity.
+CREATE _PAX 64 ALLOT
+CREATE _PAY 64 ALLOT
+CREATE _PAZ 64 ALLOT
+
+\ The table: G and Q affine, G+Q Jacobian.
+CREATE _PQX 64 ALLOT
+CREATE _PQY 64 ALLOT
+CREATE _PSX 64 ALLOT
+CREATE _PSY 64 ALLOT
+CREATE _PSZ 64 ALLOT
+
+\ Doubling with a = -3 (dbl-2001-b), in place on the accumulator.
+: _P384-DOUBLE ( -- )
+    _PAZ _PAZ _PT1 _F*                 \ delta = Z^2
+    _PAY _PAY _PT2 _F*                 \ gamma = Y^2
+    _PAX _PT2 _PT3 _F*                 \ beta = X*gamma
+    _PAX _PT1 _PT4 _F-
+    _PAX _PT1 _PT5 _F+
+    _PT4 _PT5 _PT4 _F*
+    _PT4 _PT4 _PT5 _F+
+    _PT5 _PT4 _PT4 _F+                 \ alpha = 3*(X-delta)*(X+delta)
+    _PAY _PAZ _PT5 _F+
+    _PT5 _PT5 _PT5 _F*
+    _PT5 _PT2 _PT5 _F-
+    _PT5 _PT1 _PAZ _F-                 \ Z3 = (Y+Z)^2-gamma-delta
+    _PT4 _PT4 _PT5 _F*
+    _PT3 _PT3 _PT6 _F+
+    _PT6 _PT6 _PT6 _F+                 \ 4*beta
+    _PT6 _PT6 _PT7 _F+                 \ 8*beta
+    _PT5 _PT7 _PAX _F-                 \ X3 = alpha^2-8*beta
+    _PT6 _PAX _PT6 _F-
+    _PT4 _PT6 _PT6 _F*
+    _PT2 _PT2 _PT2 _F*
+    _PT2 _PT2 _PT2 _F+
+    _PT2 _PT2 _PT2 _F+
+    _PT2 _PT2 _PT2 _F+                 \ 8*gamma^2
+    _PT6 _PT2 _PAY _F- ;               \ Y3 = alpha*(4*beta-X3)-8*gamma^2
+
+: _P384-INFINITY ( -- )  _PAZ 64 0 FILL ;
+
+\ Add the affine point (x, y) to the accumulator (madd-2007-bl).
+: _P384-ADD-AFFINE ( x y -- )
+    _PAZ _F0? IF
+        _PAY 64 MOVE _PAX 64 MOVE _P384-MONE _PAZ 64 MOVE EXIT
+    THEN
+    _PAZ _PAZ _PT1 _F*                 \ Z1Z1
+    OVER _PT1 _PT2 _F*                 \ U2 = x*Z1Z1
+    DUP _PAZ _PT3 _F*
+    _PT3 _PT1 _PT3 _F*                 \ S2 = y*Z1*Z1Z1
+    _PT2 _PAX _PT2 _F-                 \ H = U2-X1
+    _PT3 _PAY _PT3 _F-                 \ S2-Y1
+    _PT2 _F0? IF
+        2DROP
+        _PT3 _F0? IF _P384-DOUBLE ELSE _P384-INFINITY THEN EXIT
+    THEN
+    2DROP
+    _PT3 _PT3 _PT3 _F+                 \ r = 2*(S2-Y1)
+    _PT2 _PT2 _PT4 _F*                 \ HH
+    _PT4 _PT4 _PT5 _F+
+    _PT5 _PT5 _PT5 _F+                 \ I = 4*HH
+    _PT2 _PT5 _PT6 _F*                 \ J = H*I
+    _PAX _PT5 _PT7 _F*                 \ V = X1*I
+    _PAY _PT6 _PT9 _F*
+    _PT9 _PT9 _PT9 _F+                 \ 2*Y1*J
+    _PAZ _PT2 _PT8 _F+
+    _PT8 _PT8 _PT8 _F*
+    _PT8 _PT1 _PT8 _F-
+    _PT8 _PT4 _PAZ _F-                 \ Z3 = (Z1+H)^2-Z1Z1-HH
+    _PT3 _PT3 _PT8 _F*
+    _PT8 _PT6 _PT8 _F-
+    _PT7 _PT7 _PT10 _F+
+    _PT8 _PT10 _PAX _F-                \ X3 = r^2-J-2*V
+    _PT7 _PAX _PT7 _F-
+    _PT3 _PT7 _PT7 _F*
+    _PT7 _PT9 _PAY _F- ;               \ Y3 = r*(V-X3)-2*Y1*J
+
+\ Add the Jacobian table point G+Q to the accumulator (add-2007-bl).
+: _P384-ADD-SUM ( -- )
+    _PSZ _F0? IF EXIT THEN
+    _PAZ _F0? IF
+        _PSX _PAX 64 MOVE _PSY _PAY 64 MOVE _PSZ _PAZ 64 MOVE EXIT
+    THEN
+    _PAZ _PAZ _PT1 _F*                 \ Z1Z1
+    _PSZ _PSZ _PT2 _F*                 \ Z2Z2
+    _PAX _PT2 _PT3 _F*                 \ U1
+    _PSX _PT1 _PT4 _F*                 \ U2
+    _PAY _PSZ _PT5 _F*
+    _PT5 _PT2 _PT5 _F*                 \ S1
+    _PSY _PAZ _PT6 _F*
+    _PT6 _PT1 _PT6 _F*                 \ S2
+    _PT4 _PT3 _PT4 _F-                 \ H = U2-U1
+    _PT6 _PT5 _PT6 _F-                 \ S2-S1
+    _PT4 _F0? IF
+        _PT6 _F0? IF _P384-DOUBLE ELSE _P384-INFINITY THEN EXIT
+    THEN
+    _PT6 _PT6 _PT6 _F+                 \ r = 2*(S2-S1)
+    _PT4 _PT4 _PT7 _F+
+    _PT7 _PT7 _PT7 _F*                 \ I = (2*H)^2
+    _PT4 _PT7 _PT8 _F*                 \ J = H*I
+    _PT3 _PT7 _PT3 _F*                 \ V = U1*I
+    _PAZ _PSZ _PT9 _F+
+    _PT9 _PT9 _PT9 _F*
+    _PT9 _PT1 _PT9 _F-
+    _PT9 _PT2 _PT9 _F-
+    _PT9 _PT4 _PAZ _F*                 \ Z3 = ((Z1+Z2)^2-Z1Z1-Z2Z2)*H
+    _PT6 _PT6 _PT9 _F*
+    _PT9 _PT8 _PT9 _F-
+    _PT3 _PT3 _PT10 _F+
+    _PT9 _PT10 _PAX _F-                \ X3 = r^2-J-2*V
+    _PT3 _PAX _PT3 _F-
+    _PT6 _PT3 _PT3 _F*
+    _PT5 _PT8 _PT5 _F*
+    _PT5 _PT5 _PT5 _F+
+    _PT3 _PT5 _PAY _F- ;               \ Y3 = r*(V-X3)-2*S1*J
+
+\ Scalars, regular (not Montgomery) numbers modulo n.
+CREATE _P384-R 64 ALLOT
+CREATE _P384-S 64 ALLOT
+CREATE _P384-E 64 ALLOT
+CREATE _P384-W 64 ALLOT
+CREATE _P384-U1 64 ALLOT
+CREATE _P384-U2 64 ALLOT
+CREATE _P384-T 64 ALLOT
+
+: _P384-BIT ( scalar bit -- 0|1 )
+    DUP 6 RSHIFT CELLS ROT + @ SWAP 63 AND RSHIFT 1 AND ;
+
+\ The accumulator <- u1*G + u2*Q.
+: _P384-JOINT ( -- )
+    _P384-INFINITY
+    \ G+Q, starting from G with Z = one.
+    _P384-MGX _PAX 64 MOVE _P384-MGY _PAY 64 MOVE _P384-MONE _PAZ 64 MOVE
+    _PQX _PQY _P384-ADD-AFFINE
+    _PAX _PSX 64 MOVE _PAY _PSY 64 MOVE _PAZ _PSZ 64 MOVE
+    _P384-INFINITY
+    384 0 DO
+        _PAZ _F0? 0= IF _P384-DOUBLE THEN
+        _P384-U1 383 I - _P384-BIT
+        _P384-U2 383 I - _P384-BIT
+        2DUP AND IF
+            2DROP _P384-ADD-SUM
+        ELSE
+            IF DROP _PQX _PQY _P384-ADD-AFFINE
+            ELSE IF _P384-MGX _P384-MGY _P384-ADD-AFFINE THEN
+            THEN
+        THEN
+    LOOP ;
+
+\ a*b mod n for regular a and b: the Montgomery product of a with b's
+\ Montgomery form is the regular product.
+: _P384-NMUL ( a b out -- )
+    >R _P384-T _P384-FN MPM-TO
+    _P384-T R> _P384-FN MPM-MUL ;
+
+\ The public point: 04 || X || Y, coordinates below p, on the curve.  Its
+\ Montgomery coordinates land in _PQX and _PQY.
+: _P384-PUBKEY ( pubkey -- flag )
+    DUP C@ 4 <> IF DROP FALSE EXIT THEN
+    DUP 1+ 48 _PQX 2 _MP-BE>
+    49 + 48 _PQY 2 _MP-BE>
+    _PQX P384-P 8 _MP-U< 0= IF FALSE EXIT THEN
+    _PQY P384-P 8 _MP-U< 0= IF FALSE EXIT THEN
+    _PQX _PQX _P384-FP MPM-TO
+    _PQY _PQY _P384-FP MPM-TO
+    \ y^2 = x^3 - 3x + b
+    _PQY _PQY _PT1 _F*
+    _PQX _PQX _PT2 _F*
+    _PT2 _PQX _PT2 _F*
+    _PQX _PQX _PT3 _F+
+    _PT3 _PQX _PT3 _F+
+    _PT2 _PT3 _PT2 _F-
+    _PT2 _P384-MB _PT2 _F+
+    _PT1 _PT2 _F= ;
+
+\ ECDSA-P384-VERIFY ( hash hash-u pubkey sig slen -- flag )
+\   Verify an ECDSA P-384 signature over a digest.  The leftmost 384 bits
+\   of the digest are used, as FIPS 186-5 specifies, so SHA-384 is the
+\   natural hash.  pubkey is 97 bytes, 04 || X || Y; sig is the DER
+\   ECDSA-Sig-Value.  Answers 0 for valid and -1 for invalid.
+VARIABLE _E3-HASH
+VARIABLE _E3-HU
+
+: ECDSA-P384-VERIFY ( hash hash-u pubkey sig slen -- flag )
+    _P384-R 64 0 FILL _P384-S 64 0 FILL
+    _P384-R _P384-S 48 _ECDSA-DECODE IF 2DROP DROP -1 EXIT THEN
+    _P384-PUBKEY 0= IF 2DROP -1 EXIT THEN
+    _E3-HU ! _E3-HASH !
+    \ 1 <= r, s < n
+    _P384-R 8 _MP-ZERO? IF -1 EXIT THEN
+    _P384-S 8 _MP-ZERO? IF -1 EXIT THEN
+    _P384-R P384-N 8 _MP-U< 0= IF -1 EXIT THEN
+    _P384-S P384-N 8 _MP-U< 0= IF -1 EXIT THEN
+    \ e: the digest's leftmost 384 bits, reduced once modulo n
+    _E3-HASH @ _E3-HU @ 48 MIN _P384-E 2 _MP-BE>
+    _P384-E P384-N 8 _MP-U< 0= IF
+        _P384-E P384-N _P384-E 8 _MP-SUB DROP
+    THEN
+    \ w = s^(n-2) mod n; u1 = e*w, u2 = r*w
+    _P384-S _P384-T _P384-FN MPM-TO
+    _P384-T _P384-N-2 48 _P384-W _P384-FN MPM-EXP
+    _P384-W _P384-W _P384-FN MPM-FROM
+    _P384-E _P384-W _P384-U1 _P384-NMUL
+    _P384-R _P384-W _P384-U2 _P384-NMUL
+    _P384-JOINT
+    _PAZ _F0? IF -1 EXIT THEN
+    \ r = X/Z^2 mod n, checked as X == r*Z^2 for r and, below p, r+n.
+    _PAZ _PAZ _PT1 _F*
+    _P384-R _PT2 _P384-FP MPM-TO
+    _PT2 _PT1 _PT2 _F*
+    _PT2 _PAX _F= IF 0 EXIT THEN
+    _P384-R P384-N _PT3 8 _MP-ADD DROP
+    _PT3 P384-P 8 _MP-U< 0= IF -1 EXIT THEN
+    _PT3 _PT2 _P384-FP MPM-TO
+    _PT2 _PT1 _PT2 _F*
+    _PT2 _PAX _F= IF 0 ELSE -1 THEN ;
 
 \ =====================================================================
 \  §16.7c.2  Bounded X.509 path validation
@@ -7008,6 +7476,16 @@ VARIABLE _RPS-EM
 \  This layer follows the ECDSA primitive so every compiled call has a
 \  concrete native target.  Presented certificates may be unordered, but
 \  the authenticated leaf is always descriptor zero.
+
+\ The issuer's RSA key as an RSA-KEY record.  The key profile admits only
+\ the exponent 65537.
+CREATE _XVS-RSA-KEY /RSA-KEY ALLOT
+
+: _XVS-RSA-KEY! ( issuer -- )
+    DUP XC.PUB-A + @ _XVS-RSA-KEY RSAK.N + !
+    XC.PUB-U + @ _XVS-RSA-KEY RSAK.N-U + !
+    RSA-E-65537 _XVS-RSA-KEY RSAK.E + !
+    3 _XVS-RSA-KEY RSAK.E-U + ! ;
 
 : X509-VERIFY-SIGNED-BY ( child issuer -- ior )
     2DUP _X509-NAME-LINK? 0= IF 2DROP TLS-CERT-CONSTRAINT EXIT THEN
@@ -7024,12 +7502,10 @@ VARIABLE _RPS-EM
     THEN
     _XVS-CHILD @ XC.SIG-ALGO + @ X509-ALG-RSA2048 = IF
         _XVS-ISSUER @ XC.PUB-ALGO + @ X509-ALG-RSA2048 <>
-        _XVS-ISSUER @ XC.PUB-U + @ /RSA2048 <> OR
-        _XVS-CHILD @ XC.SIG-U + @ /RSA2048 <> OR
         IF TLS-CERT-UNSUPPORTED EXIT THEN
-        _XVS-HASH _XVS-ISSUER @ XC.PUB-A + @
-        _XVS-CHILD @ XC.SIG-A + @ _XVS-CHILD @ XC.SIG-U + @
-        RSA2048-PKCS1-SHA256-VERIFY
+        _XVS-ISSUER @ _XVS-RSA-KEY!
+        _XVS-HASH 32 _XVS-CHILD @ XC.SIG-A + @ _XVS-CHILD @ XC.SIG-U + @
+        _XVS-RSA-KEY RSA-PKCS1-VERIFY
         IF TLS-CERT-BAD-SIGNATURE ELSE TLS-CERT-OK THEN EXIT
     THEN
     TLS-CERT-UNSUPPORTED ;
@@ -11832,6 +12308,7 @@ VARIABLE _TCV-ALGO
 VARIABLE _TCV-SIG-U
 CREATE _TCV-CONTENT 130 ALLOT        \ 64 + 33 + 1 + 32 = 130 bytes
 CREATE _TCV-HASH    32 ALLOT         \ SHA-256 of content
+CREATE _TCV-RSA-KEY /RSA-KEY ALLOT    \ the leaf's RSA key, for RSA-PSS
 
 : TLS-VERIFY-CERT-SIG ( ctx msg mlen -- flag )
     _TCV-MLEN !  _TCV-MSG !  _TCV-CTX !
@@ -11849,8 +12326,7 @@ CREATE _TCV-HASH    32 ALLOT         \ SHA-256 of content
     ELSE
         _TCV-ALGO @ TLS-SIG-RSA-PSS-RSAE-SHA256 <> IF -1 EXIT THEN
         _TLS-SERVER-PUBKEY-ALGO @ X509-ALG-RSA2048 <>
-        _TLS-SERVER-PUBKEY-LEN @ /RSA2048 <> OR
-        _TCV-SIG-U @ /RSA2048 <> OR IF -1 EXIT THEN
+        _TCV-SIG-U @ _TLS-SERVER-PUBKEY-LEN @ <> OR IF -1 EXIT THEN
     THEN
     \ Build verification content:
     \ 64 bytes of 0x20
@@ -11874,8 +12350,12 @@ CREATE _TCV-HASH    32 ALLOT         \ SHA-256 of content
         _TCV-HASH _TLS-SERVER-PUBKEY
         _TCV-MSG @ 8 + _TCV-SIG-U @ ECDSA-P256-VERIFY
     ELSE
-        _TCV-HASH _TLS-SERVER-PUBKEY
-        _TCV-MSG @ 8 + _TCV-SIG-U @ RSA2048-PSS-SHA256-VERIFY
+        _TLS-SERVER-PUBKEY _TCV-RSA-KEY RSAK.N + !
+        _TLS-SERVER-PUBKEY-LEN @ _TCV-RSA-KEY RSAK.N-U + !
+        RSA-E-65537 _TCV-RSA-KEY RSAK.E + !
+        3 _TCV-RSA-KEY RSAK.E-U + !
+        _TCV-HASH 32 _TCV-MSG @ 8 + _TCV-SIG-U @ _TCV-RSA-KEY
+        RSA-PSS-VERIFY
     THEN
 ;
 

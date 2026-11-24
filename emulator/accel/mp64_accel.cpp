@@ -12375,16 +12375,30 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
             s.gf_prev_lo = r;
             return gf_is_mont(s) ? 4 : 1;
         }
-        case 0x8: { // GF.MACR — raw: prev_512 + ACC * B
+        case 0x8: { // GF.MACR — raw: prev_512 + ACC * B, wrapped at 512
             BigNum a = gf_acc_to_bignum(s);
             BigNum b = gf_read_tile_b(s, cb);
             BigNum mul_lo, mul_hi;
             BigNum::mul_wide(a, b, mul_lo, mul_hi);
-            BigNum sum_lo = s.gf_prev_lo.add(mul_lo);
-            BigNum sum_hi = s.gf_prev_hi.add(mul_hi);
-            if (sum_lo < s.gf_prev_lo) {
+            // The architectural previous result is the low four limbs of
+            // each half.  BigNum keeps a fifth limb, so the low half's
+            // carry out of bit 255 lands in w[4]; move it into the high
+            // half and drop everything above bit 511.
+            BigNum prev_lo = s.gf_prev_lo;
+            BigNum prev_hi = s.gf_prev_hi;
+            for (int i = 4; i < 8; i++) {
+                prev_lo.w[i] = 0;
+                prev_hi.w[i] = 0;
+            }
+            BigNum sum_lo = prev_lo.add(mul_lo);
+            BigNum sum_hi = prev_hi.add(mul_hi);
+            if (sum_lo.w[4]) {
                 BigNum one; one.w[0] = 1;
                 sum_hi = sum_hi.add(one);
+            }
+            for (int i = 4; i < 8; i++) {
+                sum_lo.w[i] = 0;
+                sum_hi.w[i] = 0;
             }
             gf_bignum_to_acc(s, sum_lo);
             gf_write_tile_dst(s, cb, sum_hi);

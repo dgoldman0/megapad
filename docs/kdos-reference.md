@@ -4632,9 +4632,9 @@ TIME-WAIT re-ACKs an exact duplicate FIN and restarts its 2MSL quarantine.
 
 ### §16.7a–§16.7d Certificate Verification
 
-ASN.1/DER parsing, bounded X.509 path validation, P-256 ECDSA and fixed
-RSA-2048 signature verification, and TLS Certificate/CertificateVerify
-handler wiring.
+ASN.1/DER parsing, bounded X.509 path validation, P-256 and P-384 ECDSA,
+RSA of any width on the multi-precision Montgomery module, and TLS
+Certificate/CertificateVerify handler wiring.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -4652,13 +4652,18 @@ handler wiring.
 | `EC-AFFINE` | `( Jx Jy Jz Ax Ay -- )` | Convert Jacobian → affine coordinates. |
 | `EC-MUL` | `( k Px Py Rx Ry -- )` | Scalar multiplication k*P (double-and-add, 256-bit). |
 | `ECDSA-P256-VERIFY` | `( hash pubkey sig slen -- flag )` | Verify ECDSA-P256-SHA256 signature. 0=valid, -1=invalid. |
-| `RSA-E-BUSY` | `( -- -2 )` | RSA scratch is owned by another operation or the caller is off core 0; owner-pumped code should retry later. |
-| `RSA2048-PUBLIC-BEGIN` | `( sig modulus em -- ior )` | Begin a core-0-only, owner-bound, fixed-exponent RSA-2048 public operation. Inputs are 256-byte big-endian values. |
-| `RSA2048-PUBLIC-STEP` | `( -- status )` | Perform one bounded RSA unit. Returns 0 while pending, 1 when the encoded message is ready, or -1 outside the owning execution context/state. |
-| `RSA2048-PUBLIC-FINAL` | `( -- ior )` | Finalize a ready operation and release its owner gate. Only the `(COREID,TASK-ID)` owner may call it. |
-| `RSA2048-PUBLIC-CANCEL` | `( -- ior )` | Wipe incremental RSA scratch and release its owner gate. Only the owner may call it. |
-| `RSA2048-PKCS1-SHA256-VERIFY` | `( hash modulus sig siglen -- flag )` | Verify exact RSA-2048 PKCS#1 v1.5 SHA-256 certificate padding. Blocking compatibility primitive. |
-| `RSA2048-PSS-SHA256-VERIFY` | `( hash modulus sig siglen -- flag )` | Verify exact RSA-PSS/SHA-256 with MGF1-SHA256 and 32-byte salt. Blocking compatibility primitive. |
+| `MPM-CONTEXT-SIZE` | `( digits -- u )` | Bytes of a Montgomery context for a modulus of the given number of 256-bit digits. |
+| `MPM-INIT` | `( modulus digits ctx -- ior )` | Set up a context for an odd little-endian modulus whose top digit is nonzero; computes n' and R^2 mod n. 0 or -1. |
+| `MPM-MUL` | `( a b out ctx -- )` | Montgomery product a*b*R^-1 mod n on the Field ALU's raw multiply; out may be a or b. |
+| `MPM-ADD` / `MPM-SUB` | `( a b out ctx -- )` | Modular sum and difference for operands below n. |
+| `MPM-TO` / `MPM-FROM` | `( a out ctx -- )` | Convert into and out of Montgomery form. |
+| `MPM-EXP` | `( base exp exp-u out ctx -- )` | Montgomery-form power with a big-endian exponent; out must not be base. |
+| `RSA-E-BUSY` | `( -- -2 )` | RSA's shared workspace is in use, or the caller is off core 0. |
+| `RSA-E-ALLOC` | `( -- -3 )` | RSA's workspace could not grow to the modulus. |
+| `RSA-PUBLIC` | `( sig sig-u key em -- ior )` | em <- sig^e mod n at the modulus' length for an `RSA-KEY` record (big-endian modulus and exponent, any width). |
+| `RSA-PKCS1-VERIFY` | `( hash hash-u sig sig-u key -- flag )` | Verify exact PKCS#1 v1.5 for a 32-, 48- or 64-byte SHA-2 digest. 0=valid, -1=invalid, or an RSA error. |
+| `RSA-PSS-VERIFY` | `( hash hash-u sig sig-u key -- flag )` | Verify EMSA-PSS with MGF1 over the digest's hash and a salt as long as the hash. |
+| `ECDSA-P384-VERIFY` | `( hash hash-u pubkey sig slen -- flag )` | Verify an ECDSA P-384 signature over the digest's leftmost 384 bits; pubkey is 97 bytes, 04 || X || Y. 0=valid, -1=invalid. |
 | `X509-VERIFY-CHAIN` | `( certs count hostname hlen now -- ior )` | Validate a bounded mixed ECDSA/RSA certificate path to a provisioned scoped anchor. |
 | `TLS-PARSE-CERTIFICATE` | `( msg mlen -- ior )` | Parse the bounded client-side TLS Certificate message and authenticate its leaf through the configured path and hostname policy. This receive/path profile retains at most eight 128..8192-byte certificates. |
 | `TLS-VERIFY-CERT-SIG` | `( ctx msg mlen -- flag )` | Verify RFC 8446 CertificateVerify using ECDSA-P256-SHA256 or RSA-PSS-RSAE-SHA256 according to the authenticated leaf key. |
